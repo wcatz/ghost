@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/wcatz/ghost/internal/memory"
 	"github.com/wcatz/ghost/internal/reflection"
@@ -216,12 +215,10 @@ func TestRunReflectReportsASameSecondSaveAsHeldBack(t *testing.T) {
 		t.Fatalf("mkdir data dir: %v", err)
 	}
 
-	// The window's own stamp and a row's created_at have one-second
-	// resolution, so the case under test needs the pass to start in the second
-	// the row was written: a row written earlier is older than the window, and
-	// its proposal applies instead. The row is written just after a second
-	// turns over, which leaves that whole second for the pass to start in.
-	waitForSecondTick(t)
+	// The window's stamp and a row's created_at are both second-precision,
+	// so the case under test pins the window to the row's own second; a row
+	// written in an earlier second would be older than the window and its
+	// proposal would apply instead.
 	s := openReflectStore(t, dataHome, project)
 	rowID, err := s.Create(ctx, project, memory.Memory{
 		Category: "fact", Content: "the relay is reached over the vpn bastion",
@@ -230,9 +227,19 @@ func TestRunReflectReportsASameSecondSaveAsHeldBack(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create the row: %v", err)
 	}
+	// Pin the consolidation window's stamp to the row's own second so the
+	// pass cannot land in a later one on a slow runner: both are
+	// second-precision, and equality is the case under test. The override
+	// is restored on cleanup. This test must not call t.Parallel.
+	seeded := mustMemory(t, s, rowID)
 	if err := s.Close(); err != nil {
 		t.Fatalf("close seed store: %v", err)
 	}
+	orig := reflectWindowStamp
+	reflectWindowStamp = func(context.Context, *memory.Store) (string, error) {
+		return seeded.CreatedAt, nil
+	}
+	t.Cleanup(func() { reflectWindowStamp = orig })
 
 	report := captureStderr(t, func() {
 		runReflectArgs(t, "reflect", project, "--tier", "sqlite", "--apply")
@@ -240,7 +247,7 @@ func TestRunReflectReportsASameSecondSaveAsHeldBack(t *testing.T) {
 	t.Logf("report:\n%s", report)
 
 	if strings.Contains(report, "memories consolidated") {
-		t.Skipf("known: #1752: the pass started in a later second than the row, so the case was not exercised:\n%s", report)
+		t.Fatalf("the pass started in a later second than the row, so the case was not exercised:\n%s", report)
 	}
 	if !strings.Contains(report, "were held back because their memories were written in the same second this pass started") {
 		t.Errorf("the round does not report the same-second refusal:\n%s", report)
@@ -268,15 +275,6 @@ func TestRunReflectReportsASameSecondSaveAsHeldBack(t *testing.T) {
 	if err := after.Close(); err != nil {
 		t.Fatalf("close store: %v", err)
 	}
-}
-
-// waitForSecondTick sleeps until the wall clock has just turned a second over.
-// The row written after it carries that second's stamp, and the pass that
-// follows has the rest of the second to start in.
-func waitForSecondTick(t *testing.T) {
-	t.Helper()
-	next := time.Now().Truncate(time.Second).Add(time.Second)
-	time.Sleep(time.Until(next) + 5*time.Millisecond)
 }
 
 // TestAppliedNothingNamesTheSameSecondRefusalApartFromAConcurrentChange is the
