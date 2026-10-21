@@ -1443,7 +1443,13 @@ table a later migration has not created yet — answers an `as_of` read in full
 The term extraction is the **same** one the FTS leg uses (`ftsQueryTerms`, so the
 10-term budget, the identifier ranking and the stopword rule are one rule), and a
 term is matched as the PHRASE FTS5 would make it — `ghost_windows_arm64` is three
-adjacent tokens — with a trailing `*` still meaning a prefix match.
+adjacent tokens — with a trailing `*` still meaning a prefix match. A query that
+yields no term matches nothing: punctuation only, or a word whose letters the
+ASCII edge trim does not keep (a purely non-ASCII query included), leaves an
+empty term list, and an empty list is not a filter that passes every version. The
+same query over the present returns no rows, so the historical leg reports itself
+applicable, attempted and available with zero eligible rows rather than calling
+the whole in-scope set a keyword hit.
 
 The **status demotion is part of that ranking**, on the same factor and at the
 same point as the current path's: `statusDemotionFactor` scales the base score of

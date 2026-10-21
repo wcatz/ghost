@@ -24,6 +24,55 @@ func at(sec int) time.Time {
 	return time.Date(2027, 2, 1, 12, 0, sec, 0, time.UTC)
 }
 
+// TestAsOfWithNoExtractableTermAnswersNothing: a historical keyword search whose
+// query yields no term used to match every in-scope memory, because the empty
+// term list read as "no keyword filter". The same request over the present
+// returns nothing, and a caller cannot tell the two apart from the rows alone:
+// both are lists of memories, and only the outcome says one was a search and the
+// other was the whole project.
+func TestAsOfWithNoExtractableTermAnswersNothing(t *testing.T) {
+	ctx := context.Background()
+	db, err := memory.OpenDB(":memory:")
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	s := memory.NewStore(db, nil)
+	if err := s.EnsureProject(ctx, "proj", "/src/proj", "proj"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	for _, content := range []string{
+		"the deploy key rotation runbook lives in the ops wiki",
+		"the retention window is seven days for session rows",
+	} {
+		if _, err := s.Create(ctx, "proj", memory.Memory{
+			Category: "fact", Content: content, Source: "manual", Importance: 0.7,
+		}); err != nil {
+			t.Fatalf("Create(%q): %v", content, err)
+		}
+	}
+
+	now := time.Now().UTC()
+	asOf := now.Add(time.Minute)
+	for _, query := range []string{"!!!", "日本語"} {
+		req := baseRequest()
+		req.Query = query
+		req.Now = now
+
+		current := run(t, s, req)
+		if current.Outcome != OutcomeEmpty || len(current.Items) != 0 {
+			t.Errorf("current query %q = outcome %q with %d items, want empty with none: this is the answer the historical read has to match", query, current.Outcome, len(current.Items))
+		}
+
+		historical := req
+		historical.AsOf = &asOf
+		res := run(t, s, historical)
+		if res.Outcome != OutcomeEmpty || len(res.Items) != 0 {
+			t.Errorf("as_of query %q = outcome %q with %d items (%v), want empty with none: no term was extracted, so nothing matched", query, res.Outcome, len(res.Items), itemIDs(res.Items))
+		}
+	}
+}
+
 // TestAsOfBindsNowToTheInstant: the binding is the whole contract. A row's age,
 // its validity window and the trace that describes the block must all be decided
 // against T, and the only way to guarantee that is to move the request's clock
