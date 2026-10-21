@@ -203,7 +203,7 @@ func renderProjectContextTool(t *testing.T, srv *Server) string {
 // the resource carries the two sections the tool does not.
 func renderProjectContextResource(t *testing.T, srv *Server) string {
 	t.Helper()
-	text, err := srv.buildProjectContext(context.Background(), "pcgold")
+	text, err := srv.buildProjectContext(context.Background(), "pcgold", "", searchResponseMaxBytes)
 	if err != nil {
 		t.Fatalf("buildProjectContext: %v", err)
 	}

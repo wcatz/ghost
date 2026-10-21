@@ -120,7 +120,7 @@ func TestProjectContextShowsRevisitDecisions(t *testing.T) {
 	stampDecisionCreatedAt(t, db, "A1", "-1 day")
 	stampDecisionCreatedAt(t, db, "R1", "-1 minute")
 
-	text, err := srv.buildProjectContext(context.Background(), "abc123")
+	text, err := srv.buildProjectContext(context.Background(), "abc123", "", searchResponseMaxBytes)
 	if err != nil {
 		t.Fatalf("buildProjectContext: %v", err)
 	}
@@ -150,7 +150,7 @@ func TestProjectContextCapKeepsActiveAheadOfRevisit(t *testing.T) {
 	plantDecision(t, db, "abc123", "R1", "revisit beyond the cap", "body R1", "why", "revisit")
 	stampDecisionCreatedAt(t, db, "R1", "-1 minute")
 
-	text, err := srv.buildProjectContext(context.Background(), "abc123")
+	text, err := srv.buildProjectContext(context.Background(), "abc123", "", searchResponseMaxBytes)
 	if err != nil {
 		t.Fatalf("buildProjectContext: %v", err)
 	}

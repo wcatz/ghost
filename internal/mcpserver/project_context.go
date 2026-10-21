@@ -28,6 +28,13 @@ import (
 // comparing the two paths needs to see that they are different numbers rather
 // than infer it from a literal.
 const (
+	// recallProjectPrefaceMaxBytes is how much of a project id the recall_project
+	// prompt echoes whole in its preface and Description. Beyond it the id is
+	// withheld in the refusal form, so a long id cannot push the message past the
+	// response budget. A few KB keeps TestPromptsRenderALongProjectPathWholeAndRefusalsDoNot's
+	// ~300-byte id whole.
+	recallProjectPrefaceMaxBytes = 512
+
 	// projectContextMemoriesCap bounds the `## Memories` section of the
 	// ghost://project/{id}/context resource and the recall_project prompt.
 	projectContextMemoriesCap = 20
@@ -218,25 +225,22 @@ func assembleProjectContext(ctx context.Context, s *Server, req assemble.Request
 	return assemble.Run(ctx, candidates, req)
 }
 
-// projectContextItems renders the admitted rows as this surface's memory lines:
-// `Item.Line()` and a newline each, which is what `formatMemories` emitted for
-// every row it printed.
-//
-// The renderer is the assembler's, and the two agree field for field — that is
-// not luck. `formatMemories` already called assemble.ScopeLabel,
-// ValidityLabel, ConfidenceLabel, AgentLabel and SourceRefLabel in the order
-// `Line()` prints them, so this surface was already converged on the LABELS and
-// had only not been converged on the selection and the stages. What the stages
-// add is the only behavioural difference between the two renderers, and it is the
-// point: a row this one reached is a row stage 2 judged current.
-func projectContextItems(items []assemble.Item) string {
-	return strings.Join(itemLines(items), "")
+// recallProjectPrefaceName renders a project id for the recall_project prompt's
+// preface and Description. Short ids come back whole (quoted), so an agent can
+// copy them; a long id is withheld in the refusal form so it cannot push the
+// message past the response budget.
+func recallProjectPrefaceName(rawID string) string {
+	if len(rawID) <= recallProjectPrefaceMaxBytes {
+		return memory.ProjectArg("project_id", rawID)
+	}
+	return memory.RefusalArg("project_id", rawID)
 }
 
-// itemLines is projectContextItems as one string per row, so a caller fitting the
-// surface to a response byte budget (#1039) can drop whole rows rather than
-// re-render the section with a shorter slice. The join of these is byte-identical
-// to the render projectContextItems has always produced.
+// itemLines renders the admitted rows as this surface's memory lines, one string
+// per row, so a caller fitting the surface to a response byte budget (#1039) can
+// drop whole rows rather than re-render the section with a shorter slice. Each
+// line is `Item.Line()` followed by a newline, which is what `formatMemories`
+// emitted for every row it printed.
 func itemLines(items []assemble.Item) []string {
 	lines := make([]string, 0, len(items))
 	for _, it := range items {
@@ -355,9 +359,9 @@ func splitMemoriesByProject(rows []memory.AsOfRow) (own, globals []memory.Memory
 // is a separator that will be spelled four ways. `sb.Len() > 0` is what makes the
 // first section unseparated on both.
 //
-// A body that already ends in a newline is not a special case: `projectContextItems`
-// ends every row with one, and that is what produces the two blank lines the block
-// has always had between sections.
+// A body that already ends in a newline is not a special case: each memory row
+// ends in one, and that is what produces the two blank lines the block has
+// always had between sections.
 func projectContextSection(sb *strings.Builder, heading, body string) {
 	if body == "" {
 		return
@@ -397,9 +401,9 @@ func projectContextSection(sb *strings.Builder, heading, body string) {
 // would make the rule "a refusal never quotes a credential-shaped project
 // argument" true of every site except the one that fires most often for a project
 // Ghost has simply never heard of.
-func projectNotRegistered(asked string) string {
+func projectNotRegistered(rendered string) string {
 	return fmt.Sprintf("Project %s is not registered with Ghost yet — nothing has ever been saved for it. "+
-		"Call ghost_memory_save to create it.", memory.ProjectArg("project_id", asked))
+		"Call ghost_memory_save to create it.", rendered)
 }
 
 // projectNotRegisteredAsOf is the `as_of` sibling of projectNotRegistered, and it
@@ -424,77 +428,9 @@ func projectNotRegisteredAsOf(asked string, asOf time.Time) string {
 		memory.RefusalArg("project_id", asked), asOf.Format(time.RFC3339))
 }
 
-// projectContextWithNotRegistered appends the not-registered sentence to whatever
-// the surface could still render for an unresolved project, which is the
-// `_global` section and nothing else.
-//
-// It is an APPEND rather than a replacement because those rows do not depend on
-// the project. The base ref delivered them for an unknown name — under
-// `## Memories`, which is the mislabelling this migration removes — and a first
-// session in a project Ghost has never seen is exactly when the cross-project
-// preferences and conventions matter. The server's own SessionStart instructions
-// tell the agent to call these surfaces when the directory matched nothing, and to
-// look for a Global section, so returning the sentence ALONE would leave the
-// answer contradicting the instructions shipped with it.
-func projectContextWithNotRegistered(text, asked string) string {
-	note := projectNotRegistered(asked)
-	if strings.TrimSpace(text) == "" {
-		return note
-	}
-	return strings.TrimRight(text, "\n") + "\n\n" + note
-}
-
-// projectContextGlobalSection renders the `## Global (applies to all projects)`
-// block onto the block being built, or writes nothing when there is nothing to
-// show under it.
-//
-// It writes into the caller's builder rather than returning a string, because the
-// heading and the blank-line separation around it are part of the section and
-// `projectContextSection` is the one place either is spelled. Returning a string
-// would put that decision back at two call sites with different section orders.
-//
-// It is the ONE render of that section's read, shared by the tool and by
-// buildProjectContext, so the two cannot disagree about which rows the second read
-// contributes — and after #809 the heading is load-bearing rather than cosmetic,
-// because the server's own instructions key their trust guidance on it.
-//
-// `alreadyShown` is every row the block has rendered, and `carried` is the
-// `_global` half of the mixed window (#809): the rows the first read delivered under
-// `## Memories` and that now belong under this heading. They are rendered HERE,
-// inside the one Global section, rather than under a second copy of the heading
-// beside the memories — a block with two `## Global` headings reads as a duplicate,
-// and the second one's rows look like more than the cap allows.
-//
-// That is also why `carried` is a parameter rather than something this function
-// reads: the resource's Global section comes after `## Recent Decisions` and
-// `## Learned Context`, and the tool's comes straight after the memories, so the
-// rows have to be handed over rather than fetched again.
-//
-// The `alreadyShown` filter is applied AFTER the cap, and that is the whole reason
-// the section is a second REQUEST rather than a second slice: it is a section
-// boundary, not a selection rule. Filtering it into the store's read would run
-// before the cap and admit up to 15 NEW rows where the shipped code admitted 15
-// rows of which some were repeats. `SlicePolicy.ExcludeSeen` stays unread for that
-// reason.
-//
-// A failed global read is silence about the EXTRA rows and nothing more: the rows
-// the window already carried are in hand, and dropping them because a second read
-// failed would trade a section that is true for one that is missing. The block is
-// the answer, and a block with fewer globals beats an error here.
-//
-// `limit` is the cap the CALLER asked for, and the two call sites pass different
-// ones on purpose — see projectContextGlobalBudget.
-func (s *Server) projectContextGlobalSection(ctx context.Context, sb *strings.Builder, limit int, alreadyShown, carried []assemble.Item, foldedOwn, carriedLine string) {
-	rows, line := s.projectContextGlobalRows(ctx, limit, alreadyShown, carried, carriedLine)
-	projectContextSection(sb, globalSectionHeading, projectContextItems(rows)+foldedOwn+line)
-}
-
-// projectContextGlobalRows is the selection half of projectContextGlobalSection:
-// the rows the `## Global` section will show and its trailing pinned-cut line,
-// without rendering either. It is split out for the TOOL's unresolved-name path,
-// which must fit those rows to a response byte budget (#1039) before the section
-// is rendered — and the shared renderer above keeps the resource and the tool's
-// section byte-identical.
+// projectContextGlobalRows is the selection half of the Global section: the rows
+// the `## Global` section will show and its trailing pinned-cut line, without
+// rendering either.
 func (s *Server) projectContextGlobalRows(ctx context.Context, limit int, alreadyShown, carried []assemble.Item, carriedLine string) (rows []assemble.Item, line string) {
 	rows = carried
 	line = carriedLine
@@ -953,7 +889,7 @@ func (s *Server) projectContextBlock(ctx context.Context, projectID, asked strin
 		case exists:
 			text = "Project is registered but has no memories or learned context yet — nothing has been saved for it."
 		default:
-			text = projectNotRegistered(asked)
+			text = projectNotRegistered(memory.ProjectArg("project_id", asked))
 		}
 		// A sentence about the store is not a large answer and has no rows to cut,
 		// so it is not fitted to the budget.
@@ -1013,7 +949,8 @@ func ProjectContextAt(ctx context.Context, store provider.MemoryStore, projectID
 // resource, which the recall_project prompt shares: the same memory read at the
 // resource's fixed cap, and a second request for the Global section.
 func ProjectResourceAt(ctx context.Context, store provider.MemoryStore, projectID string, now time.Time) (string, error) {
-	return newMeasuredServer(store, now).buildProjectContext(ctx, projectID)
+	s := newMeasuredServer(store, now)
+	return s.buildProjectContext(ctx, projectID, "", s.searchResponseCap())
 }
 
 // newMeasuredServer is the Server the two exported readers above run on: the

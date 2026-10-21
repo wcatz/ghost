@@ -153,7 +153,7 @@ func TestTheProjectContextResourceRecordsBothOfItsReads(t *testing.T) {
 	srv, session := validityServerFor(t, st)
 	id := saveValidityRow(t, session, projectContextSentinel, nil)
 
-	text, err := srv.buildProjectContext(t.Context(), "vproj")
+	text, err := srv.buildProjectContext(t.Context(), "vproj", "", searchResponseMaxBytes)
 	if err != nil {
 		t.Fatalf("buildProjectContext: %v", err)
 	}

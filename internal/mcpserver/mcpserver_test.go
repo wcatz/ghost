@@ -288,7 +288,7 @@ func TestBuildProjectContext_WithMemories(t *testing.T) {
 		t.Fatalf("Upsert: %v", err)
 	}
 
-	text, err := srv.buildProjectContext(ctx, "abc123")
+	text, err := srv.buildProjectContext(ctx, "abc123", "", searchResponseMaxBytes)
 	if err != nil {
 		t.Fatalf("buildProjectContext: %v", err)
 	}
@@ -306,7 +306,7 @@ func TestBuildProjectContext_Empty(t *testing.T) {
 	srv := New(store, logger, "test")
 
 	ctx := context.Background()
-	text, err := srv.buildProjectContext(ctx, "abc123")
+	text, err := srv.buildProjectContext(ctx, "abc123", "", searchResponseMaxBytes)
 	if err != nil {
 		t.Fatalf("buildProjectContext: %v", err)
 	}
@@ -330,7 +330,7 @@ func TestBuildProjectContext_IncludesGlobal(t *testing.T) {
 	}
 
 	// buildProjectContext for abc123 should pull in _global memories too.
-	text, err := srv.buildProjectContext(ctx, "abc123")
+	text, err := srv.buildProjectContext(ctx, "abc123", "", searchResponseMaxBytes)
 	if err != nil {
 		t.Fatalf("buildProjectContext: %v", err)
 	}
@@ -352,7 +352,7 @@ func TestBuildProjectContext_IncludesLearnedContext(t *testing.T) {
 		t.Fatalf("Upsert: %v", err)
 	}
 
-	text, err := srv.buildProjectContext(ctx, "abc123")
+	text, err := srv.buildProjectContext(ctx, "abc123", "", searchResponseMaxBytes)
 	if err != nil {
 		t.Fatalf("buildProjectContext: %v", err)
 	}
@@ -378,7 +378,7 @@ func TestBuildProjectContext_IncludesDecisionID(t *testing.T) {
 		t.Fatalf("RecordDecision: %v", err)
 	}
 
-	text, err := srv.buildProjectContext(ctx, "abc123")
+	text, err := srv.buildProjectContext(ctx, "abc123", "", searchResponseMaxBytes)
 	if err != nil {
 		t.Fatalf("buildProjectContext: %v", err)
 	}
@@ -400,7 +400,7 @@ func TestNew_RegistersResources(t *testing.T) {
 	// Verify ghost://project/{project_id}/context is registered by reading it.
 	// A real resource read would go through the MCP transport; here we exercise
 	// the underlying helper directly to confirm the handler logic is wired up.
-	text, err := srv.buildProjectContext(ctx, "abc123")
+	text, err := srv.buildProjectContext(ctx, "abc123", "", searchResponseMaxBytes)
 	if err != nil {
 		t.Errorf("project context resource handler returned error: %v", err)
 	}
