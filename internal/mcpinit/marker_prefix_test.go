@@ -53,7 +53,7 @@ func TestMarkerPrefixWithinFindsTheLongestFit(t *testing.T) {
 		{"an accented project", "café-projet-é", 12},
 		{"invalid bytes", "a\xffb\xffc", 3},
 		{"a control rune", "pro\x1b`name`", 8},
-		{"a bidi control", "pro‮name", 10},
+		{"a bidi control", "pro\u202ename", 10},
 		{"a lone quote", `pro"ject`, 6},
 		{"plain ascii", "my-project", 5},
 		{"a value that fits whole", "short", 40},
@@ -83,7 +83,7 @@ func TestMarkerPrefixWithinMatchesTheLongestFitOverRandomValues(t *testing.T) {
 	pieces := []string{
 		"a", "Z", "9", "-", "_", ".", "/",
 		"é", "ü", "ß", "中", "文", "\U0001f600", "\U0001f680",
-		"\x1b", "\x00", "`", `"`, "‮", "‭", "\xff", "\xc3",
+		"\x1b", "\x00", "`", `"`, "\u202e", "\u202d", "\xff", "\xc3",
 	}
 	measures := map[string]func(string) int{
 		"label":  labelLength,

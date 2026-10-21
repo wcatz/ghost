@@ -432,14 +432,14 @@ func wholeEscape(s string) bool {
 		if i >= len(s) {
 			return false
 		}
-		switch c := s[i]; {
-		case c == '`' || c == '\\' || c == '"' || c == '\'':
-		case c == 'x':
+		switch s[i] {
+		case '`', '\\', '"', '\'':
+		case 'x':
 			if i+2 >= len(s) || !isHexDigit(s[i+1]) || !isHexDigit(s[i+2]) {
 				return false
 			}
 			i += 2
-		case c == 'u':
+		case 'u':
 			if i+4 >= len(s) {
 				return false
 			}
@@ -449,7 +449,7 @@ func wholeEscape(s string) bool {
 				}
 			}
 			i += 4
-		case c == 'U':
+		case 'U':
 			if i+8 >= len(s) {
 				return false
 			}
@@ -459,7 +459,7 @@ func wholeEscape(s string) bool {
 				}
 			}
 			i += 8
-		case c == 'a' || c == 'b' || c == 'f' || c == 'n' || c == 'r' || c == 't' || c == 'v':
+		case 'a', 'b', 'f', 'n', 'r', 't', 'v':
 		default:
 			return false
 		}
