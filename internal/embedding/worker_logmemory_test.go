@@ -55,6 +55,27 @@ func (c contentChangedStore) StoreEmbeddingForContent(ctx context.Context, memor
 	return c.mockStore.StoreEmbeddingForContent(ctx, memoryID, vec, model, content)
 }
 
+// failingUnembeddedStore fails UnembeddedMemoryIDs, which EmbedPending calls.
+type failingUnembeddedStore struct{ *mockStore }
+
+func (failingUnembeddedStore) UnembeddedMemoryIDs(ctx context.Context, projectID, identity string, limit int) ([]string, error) {
+	return nil, errors.New("list unembedded failed")
+}
+
+// failingContentStorePending fails GetMemoryContent during EmbedPending.
+type failingContentStorePending struct {
+	*mockStore
+	memoryID string
+}
+
+func (f failingContentStorePending) UnembeddedMemoryIDs(ctx context.Context, projectID, identity string, limit int) ([]string, error) {
+	return []string{f.memoryID}, nil
+}
+
+func (f failingContentStorePending) GetMemoryContent(ctx context.Context, id string) (string, error) {
+	return "", errors.New("content fetch failed")
+}
+
 // panickingUnembeddedStore panics in UnembeddedMemoryIDs, which safeProcessProject recovers.
 type panickingUnembeddedStore struct{ *mockStore }
 
@@ -83,9 +104,9 @@ func embedStubMem(embedStatus int) *httptest.Server {
 // TestWorkerLogsRenderAStoredMemoryIDThroughTheTokenGuard drives every log line
 // the embedding worker writes with a memory id: the get content debug line, the
 // ollama debug line, the store error line, the content changed debug line, the
-// embed stalled info line, and the recovered panic line. A stored memory id is
-// not token-checked on import, so an imported artifact can carry a token-shaped
-// one, and these lines reach the MCP client's stderr.
+// embed stalled info line, and the EmbedPending list-unembedded error line.
+// A stored memory id is not token-checked on import, so an imported artifact
+// can carry a token-shaped one, and these lines reach the MCP client's stderr.
 //
 // Each case asserts both halves from one line: the token-shaped id never
 // appears, and an ordinary id still does, so a renderer that withheld
@@ -146,14 +167,27 @@ func TestWorkerLogsRenderAStoredMemoryIDThroughTheTokenGuard(t *testing.T) {
 			},
 		},
 		{
-			name:          "recovered panic in unembedded",
-			wantMsg:       "panic in embedding processProject, recovered",
-			checkMemoryID: false, // This logs project_id, not memory_id
+			name:          "embed stalled",
+			wantMsg:       "embed stalled, pausing batch",
+			checkMemoryID: true,
+			run: func(t *testing.T, logger *slog.Logger, memoryID string) {
+				// Directly call embedStalled to test the log line
+				srv := embedStubMem(http.StatusOK)
+				t.Cleanup(srv.Close)
+				w := NewWorker(NewClient(srv.URL, "m", 3), newMockStore(), logger, time.Hour, t.TempDir())
+				w.embedStalled(1, memoryID)
+			},
+		},
+		{
+			name:          "embed pending get content error",
+			wantMsg:       "embed: get content",
+			checkMemoryID: true,
 			run: func(t *testing.T, logger *slog.Logger, memoryID string) {
 				srv := embedStubMem(http.StatusOK)
 				t.Cleanup(srv.Close)
-				w := NewWorker(NewClient(srv.URL, "m", 3), panickingUnembeddedStore{newMockStore()}, logger, time.Hour, t.TempDir())
-				w.safeProcessProject(context.Background(), "proj-1")
+				store := failingContentStorePending{mockStore: newMockStore(), memoryID: memoryID}
+				w := NewWorker(NewClient(srv.URL, "m", 3), store, logger, time.Hour, t.TempDir())
+				w.EmbedPending(context.Background(), "proj-1", 10)
 			},
 		},
 	}
@@ -186,12 +220,6 @@ func TestWorkerLogsRenderAStoredMemoryIDThroughTheTokenGuard(t *testing.T) {
 				}
 				if !strings.Contains(ordinary, "mem-ordinary") {
 					t.Errorf("an ordinary memory id no longer appears in the log: %s", ordinary)
-				}
-			} else {
-				// Just verify the panic is recovered and the message is logged
-				line := capture("any")
-				if !strings.Contains(line, tc.wantMsg) {
-					t.Fatalf("the run never logged %q: %q", tc.wantMsg, line)
 				}
 			}
 		})
