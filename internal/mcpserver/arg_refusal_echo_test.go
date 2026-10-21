@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"sort"
 	"strings"
 	"testing"
 
@@ -438,6 +439,149 @@ func TestSchemaRefusalWithManyUnexpectedPropertiesIsBounded(t *testing.T) {
 	if !strings.Contains(out, "unexpected additional properties") {
 		t.Errorf("the refusal no longer names the shape it wanted: %.300s", out)
 	}
+}
+
+// sdkSchemaRefusalPrefix is the SDK's own marker on the refusal it produces
+// before any handler runs. It is written out here rather than read from the
+// implementation, so that a change in EITHER one is caught: the middleware
+// keys on this wording, and a wording the SDK no longer uses would switch the
+// guard off for every tool without anything noticing.
+const sdkSchemaRefusalPrefix = `validating "arguments": `
+
+// The guard keys on the SDK's wording, so this is the test that notices the
+// SDK changing it. Every other test here would still pass with the guard off:
+// the refusal would reach the caller holding the caller's value whole, and a
+// test that only checked "the call was refused" would read that as a refusal
+// like any other.
+func TestTheSDKSchemaRefusalStillStartsWithThePrefixTheGuardKeysOn(t *testing.T) {
+	_, session, _ := echoLogSession(t)
+	out := callToolErr(t, session, "ghost_memory_save", schemaRefusalArgs(map[string]any{"pin": "not a boolean"}))
+	if !strings.HasPrefix(out, sdkSchemaRefusalPrefix) {
+		t.Errorf("the SDK's schema refusal no longer starts with %q, so the guard is keyed on a wording the SDK "+
+			"no longer uses and it withholds nothing: %.300s", sdkSchemaRefusalPrefix, out)
+	}
+}
+
+// Every tool, walked: the SDK's schema refusal is the same shape for all of
+// them, so the guard has to hold for all of them. The list is read at run time
+// through a client session, so a tool added later is walked with the rest.
+func TestEveryToolRefusesAnUnexpectedTokenPropertyWithoutEchoingIt(t *testing.T) {
+	_, session, _ := echoLogSession(t)
+	tools := listToolSchemas(t, session)
+	for _, tool := range tools {
+		t.Run(tool.name, func(t *testing.T) {
+			if !tool.refusesExtra {
+				// The walk is only valid for a tool whose schema refuses an
+				// undeclared property: otherwise the call would not be refused
+				// at all and the handler would run with it.
+				t.Errorf("%s: the input schema does not refuse an undeclared property, so this walk cannot use it", tool.name)
+				return
+			}
+			out := callToolErr(t, session, tool.name, map[string]any{echoToken: "x"})
+			assertNoRefusalEcho(t, out, echoToken)
+			if !strings.Contains(out, "unexpected additional properties") {
+				t.Errorf("the refusal no longer says what was wrong: %.300s", out)
+			}
+		})
+	}
+}
+
+// The other shape the SDK prints, walked over every property of every tool
+// that a token-shaped string is WRONG for.
+//
+// A string-typed property is left out on purpose: the token would be a valid
+// value there, the call would not be refused, and the handler would run with
+// it. A tool whose properties are all strings (or untyped, which accepts
+// anything) therefore has no wrong-typed case to walk, and the refusal it
+// produces is the undeclared-property one above.
+func TestEveryToolRefusesAWrongTypedTokenWithoutEchoingIt(t *testing.T) {
+	_, session, _ := echoLogSession(t)
+	tools := listToolSchemas(t, session)
+	walked := 0
+	for _, tool := range tools {
+		for _, property := range tool.wrongTyped {
+			walked++
+			t.Run(tool.name+"/"+property, func(t *testing.T) {
+				out := callToolErr(t, session, tool.name, map[string]any{property: echoToken})
+				assertNoRefusalEcho(t, out, echoToken)
+				if !strings.Contains(out, "has type") {
+					t.Errorf("the refusal no longer says what was wrong: %.300s", out)
+				}
+				if !strings.Contains(out, "/properties/"+property) {
+					t.Errorf("the refusal no longer names the argument: %.300s", out)
+				}
+			})
+		}
+	}
+	if walked == 0 {
+		t.Fatal("no tool offered a property a token-shaped string is wrong for")
+	}
+}
+
+// toolSchema is one registered tool's input schema, read from the list a
+// client session gets.
+type toolSchema struct {
+	name string
+	// refusesExtra says whether the schema refuses a property it does not
+	// declare. The walk is only valid for a tool that does: otherwise the call
+	// it makes would be accepted and the handler would run with it.
+	refusesExtra bool
+	// wrongTyped names the properties a token-shaped string cannot satisfy.
+	wrongTyped []string
+}
+
+// listToolSchemas reads every registered tool's input schema through a client
+// session, so a tool added later is walked with the rest.
+func listToolSchemas(t *testing.T, session *mcp.ClientSession) []toolSchema {
+	t.Helper()
+	res, err := session.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("ListTools: %v", err)
+	}
+	if len(res.Tools) == 0 {
+		t.Fatal("the server listed no tools")
+	}
+	out := make([]toolSchema, 0, len(res.Tools))
+	for _, tool := range res.Tools {
+		schema, ok := tool.InputSchema.(map[string]any)
+		if !ok {
+			t.Fatalf("tool %s has an input schema of an unreadable shape: %T", tool.Name, tool.InputSchema)
+		}
+		listed := toolSchema{name: tool.Name}
+		if extra, ok := schema["additionalProperties"].(bool); ok && !extra {
+			listed.refusesExtra = true
+		}
+		properties, _ := schema["properties"].(map[string]any)
+		for name, raw := range properties {
+			property, _ := raw.(map[string]any)
+			if !acceptsString(property) {
+				listed.wrongTyped = append(listed.wrongTyped, name)
+			}
+		}
+		sort.Strings(listed.wrongTyped)
+		out = append(out, listed)
+	}
+	return out
+}
+
+// acceptsString reports whether a property's schema accepts a string. The
+// schema's "type" is one name or a list of them (a slice property is
+// "null" or "array"), an untyped property accepts anything, and a
+// string-typed one accepts the token; only the others are wrong-typed for a
+// token-shaped string.
+func acceptsString(property map[string]any) bool {
+	switch declared := property["type"].(type) {
+	case string:
+		return declared == "" || declared == "string"
+	case []any:
+		for _, t := range declared {
+			if name, ok := t.(string); ok && name == "string" {
+				return true
+			}
+		}
+		return len(declared) == 0
+	}
+	return true
 }
 
 func TestArgumentRefusalsStillNameTheArgumentAndTheShape(t *testing.T) {
