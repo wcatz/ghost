@@ -1166,6 +1166,17 @@ func liveRowCount(t *testing.T, s *Store) int {
 	return n
 }
 
+// projectRowCount counts every row the project holds, resolved ones included: a
+// resolved row is still a row, and the retained count is about rows.
+func projectRowCount(t *testing.T, s *Store) int {
+	t.Helper()
+	var n int
+	if err := s.db.QueryRow(`SELECT count(*) FROM memories WHERE project_id = ?`, testProject).Scan(&n); err != nil {
+		t.Fatalf("count project rows: %v", err)
+	}
+	return n
+}
+
 // TestReplaceNonManualReportsTheRowsItLeavesLive: the count a caller needs
 // after an apply is the rows the project still holds, not the proposals that
 // survived a filter. Every refusal the store makes — a scope that disagrees, a
@@ -1314,6 +1325,101 @@ func TestReplaceNonManualReportsTheRowsItLeavesLive(t *testing.T) {
 		}
 		if got := liveRowCount(t, s); got != 2 {
 			t.Errorf("the project holds %d live rows, want the 2 the count names", got)
+		}
+	})
+
+	t.Run("a corpus row pinned mid-round is still a row the project holds", func(t *testing.T) {
+		s := testStore(t)
+		aID, err := s.Create(ctx, testProject, Memory{
+			Category: "fact", Content: "the deploy host is alpha", Source: "mcp", Importance: 0.6, Tags: []string{},
+		})
+		if err != nil {
+			t.Fatalf("Create A: %v", err)
+		}
+		bID, err := s.Create(ctx, testProject, Memory{
+			Category: "fact", Content: "the deploy host is bravo", Source: "mcp", Importance: 0.6, Tags: []string{},
+		})
+		if err != nil {
+			t.Fatalf("Create B: %v", err)
+		}
+		cID, err := s.Create(ctx, testProject, Memory{
+			Category: "fact", Content: "the deploy host is charlie", Source: "mcp", Importance: 0.6, Tags: []string{},
+		})
+		if err != nil {
+			t.Fatalf("Create C: %v", err)
+		}
+		fed := corpusRows(t, s, aID, bID, cID)
+		// The pin lands while the harness is answering. A is no longer a
+		// replaceable candidate, so the replace never reaches it: it is in
+		// neither the delete set nor the set of candidates the pass keeps live.
+		// It is still a row the project holds.
+		if err := s.TogglePin(ctx, aID, true); err != nil {
+			t.Fatalf("TogglePin A: %v", err)
+		}
+
+		_, dropped, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
+			Category: "fact", Content: "the deploy hosts are one fact", Importance: 0.7,
+			Tags: []string{}, ReplacesIDs: []string{bID, cID},
+		}}, "", fed)
+		if err != nil {
+			t.Fatalf("ReplaceNonManual: %v", err)
+		}
+		if dropped.Total() != 0 {
+			t.Fatalf("dropped.Total() = %d, want 0: the merge named two rows that were there", dropped.Total())
+		}
+		if dropped.Retained != 2 {
+			t.Errorf("dropped.Retained = %d, want 2: the pinned row is still there beside the row the merge wrote",
+				dropped.Retained)
+		}
+		if got := liveRowCount(t, s); got != 2 {
+			t.Errorf("the project holds %d live rows, want the 2 the count names", got)
+		}
+	})
+
+	t.Run("a corpus row resolved mid-round is still a row the project holds", func(t *testing.T) {
+		s := testStore(t)
+		aID, err := s.Create(ctx, testProject, Memory{
+			Category: "fact", Content: "the deploy host is alpha", Source: "mcp", Importance: 0.6, Tags: []string{},
+		})
+		if err != nil {
+			t.Fatalf("Create A: %v", err)
+		}
+		bID, err := s.Create(ctx, testProject, Memory{
+			Category: "fact", Content: "the deploy host is bravo", Source: "mcp", Importance: 0.6, Tags: []string{},
+		})
+		if err != nil {
+			t.Fatalf("Create B: %v", err)
+		}
+		cID, err := s.Create(ctx, testProject, Memory{
+			Category: "fact", Content: "the deploy host is charlie", Source: "mcp", Importance: 0.6, Tags: []string{},
+		})
+		if err != nil {
+			t.Fatalf("Create C: %v", err)
+		}
+		fed := corpusRows(t, s, aID, bID, cID)
+		// The resolve lands while the harness is answering. A is resolved, so
+		// it is not a replaceable candidate either — and it is still a row of
+		// the project.
+		if _, err := s.SetResolved(ctx, []string{aID}); err != nil {
+			t.Fatalf("SetResolved A: %v", err)
+		}
+
+		_, dropped, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
+			Category: "fact", Content: "the deploy hosts are one fact", Importance: 0.7,
+			Tags: []string{}, ReplacesIDs: []string{bID, cID},
+		}}, "", fed)
+		if err != nil {
+			t.Fatalf("ReplaceNonManual: %v", err)
+		}
+		if dropped.Total() != 0 {
+			t.Fatalf("dropped.Total() = %d, want 0: the merge named two rows that were there", dropped.Total())
+		}
+		if dropped.Retained != 2 {
+			t.Errorf("dropped.Retained = %d, want 2: the resolved row is still there beside the row the merge wrote",
+				dropped.Retained)
+		}
+		if got := projectRowCount(t, s); got != 2 {
+			t.Errorf("the project holds %d rows, want the 2 the count names", got)
 		}
 	})
 
