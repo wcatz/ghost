@@ -635,6 +635,13 @@ jobs:
               || "$1" =~ ^opencode/[A-Za-z0-9][A-Za-z0-9._-]*-free$ ]]
           }
 
+          # A line that names a tool attempt or a permission decision is
+          # the MODEL's text, not the provider's: opencode echoes a
+          # rejected tool call in its own stderr, and the command it
+          # names is the model's own. A reason may classify an outage
+          # ONLY when the model produced nothing.
+          MODEL_ACTED_STDERR='permission|tool call|tool_use|tool attempt|not permitted|auto-reject|auto rejected|rejected permission|bash'
+
           declare -a candidates=()
           declare -A seen=()
           add_candidate() {
@@ -786,6 +793,12 @@ jobs:
             fi
             [ -n "$reason" ] || reason="probe exited ${probe_status} without a valid JSON event stream"
             printf '%s: %s\n' "$model" "$reason" >> "$probe_failure_file"
+            # The probe's own stderr may name a tool attempt, which is the
+            # model's text. A reason may classify an outage only when the
+            # model produced nothing.
+            if grep -Eqi "$MODEL_ACTED_STDERR" "$probe_err" 2>/dev/null; then
+              printf 'probe acted\n' >> "${RUNNER_TEMP}/model-acted.txt"
+            fi
             # The reason is provider output and it is not printed: the
             # classification reads it, and the log says which model was
             # skipped.
@@ -874,6 +887,12 @@ jobs:
           # The model's own document, kept apart from the reasons: see
           # the note where it is written.
           : > "${RUNNER_TEMP}/free-review-validation.txt"
+          # A line that names a tool attempt or a permission decision is
+          # the MODEL's text, not the provider's: opencode echoes a
+          # rejected tool call in its own stderr, and the command it
+          # names is the model's own. A reason may classify an outage
+          # ONLY when the model produced nothing.
+          MODEL_ACTED_STDERR='permission|tool call|tool_use|tool attempt|not permitted|auto-reject|auto rejected|rejected permission|bash'
           free_review_success=0
           free_attempt=0
           if [ -s "$free_models_file" ]; then
@@ -931,6 +950,24 @@ jobs:
                 free_review_success=1
                 echo "review produced by ${model}"
                 break
+              fi
+
+              # The model ACTED if its event stream holds anything that
+              # is not an error event, or the process's own stderr
+              # reports a rejected permission or a tool attempt. A reason
+              # may classify an outage ONLY when the model produced
+              # nothing: a stream that is not parseable counts as acted,
+              # so this fails closed.
+              model_acted=0
+              if [ -s model-reply.txt ] \
+                 && ! jq -s -e 'all(.[]; .type == "error")' model-reply.txt >/dev/null 2>&1; then
+                model_acted=1
+              fi
+              if grep -Eqi "$MODEL_ACTED_STDERR" model-stderr.txt 2>/dev/null; then
+                model_acted=1
+              fi
+              if [ "$model_acted" = 1 ]; then
+                printf 'the model acted\n' >> "${RUNNER_TEMP}/model-acted.txt"
               fi
 
               free_failure_reason=$(
@@ -1091,6 +1128,24 @@ jobs:
             exit 0
           fi
 
+          # The model ACTED if its event stream holds anything that is
+          # not an error event, or the process's own stderr reports a
+          # rejected permission or a tool attempt. A reason may classify
+          # an outage ONLY when the model produced nothing: a stream that
+          # is not parseable counts as acted, so this fails closed.
+          MODEL_ACTED_STDERR='permission|tool call|tool_use|tool attempt|not permitted|auto-reject|auto rejected|rejected permission|bash'
+          model_acted=0
+          if [ -s model-reply.txt ] \
+             && ! jq -s -e 'all(.[]; .type == "error")' model-reply.txt >/dev/null 2>&1; then
+            model_acted=1
+          fi
+          if grep -Eqi "$MODEL_ACTED_STDERR" model-stderr.txt 2>/dev/null; then
+            model_acted=1
+          fi
+          if [ "$model_acted" = 1 ]; then
+            printf 'the model acted\n' >> "${RUNNER_TEMP}/model-acted.txt"
+          fi
+
           reason=$(
             {
               jq -r 'select(.type == "error") | (.error.data.message // .error.message // .error.name // tostring)' model-reply.txt 2>/dev/null || true
@@ -1145,6 +1200,10 @@ jobs:
           # the helper keeps today's behaviour instead of breaking.
           classification="failure"
           cause="no valid free or paid review result was produced"
+          model_acted=""
+          if [ -s "${RUNNER_TEMP}/model-acted.txt" ]; then
+            model_acted="true"
+          fi
           if [ -f "${RUNNER_TEMP}/base-scripts/review_outcome.py" ]; then
             report="$(python3 -I "${RUNNER_TEMP}/base-scripts/review_outcome.py" \
               --free-status "${FREE_STATUS}" \
@@ -1154,6 +1213,7 @@ jobs:
               --paid-reason "${RUNNER_TEMP}/paid-review-failure.txt" \
               --free-validation "${RUNNER_TEMP}/free-review-validation.txt" \
               --paid-validation "${RUNNER_TEMP}/paid-review-validation.txt" \
+              --model-acted "${model_acted}" \
               --select-agent-fatal "${SELECT_AGENT_FATAL}" \
               --free-agent-fatal "${FREE_AGENT_FATAL}" \
               --paid-agent-fatal "${PAID_AGENT_FATAL}" 2>/dev/null)"

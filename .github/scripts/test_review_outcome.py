@@ -78,6 +78,47 @@ class TestThePaidFallback(unittest.TestCase):
         self.assertEqual(decision.outcome, OUTCOME_FAILURE)
 
 
+class TestAModelThatActed(unittest.TestCase):
+    # opencode echoes a rejected tool call in its own stderr, and the
+    # command it names is the MODEL's text. So a reason may classify an
+    # outage only when the model produced nothing.
+    REJECTED_PAID = ("Permission denied for tool bash: the model tried to run "
+                     "Go usage limit exceeded")
+    REJECTED_FREE = ("Permission denied for tool bash: the model tried to run "
+                     "The socket connection was closed unexpectedly")
+
+    def test_a_rejected_tool_call_naming_the_usage_window_is_a_failure(self):
+        decision = decide("failed", [], "failed", self.REJECTED_PAID,
+                          model_acted=True)
+        self.assertEqual(decision.outcome, OUTCOME_FAILURE)
+
+    def test_a_rejected_tool_call_naming_a_socket_is_a_failure(self):
+        decision = decide("failed",
+                          [("opencode/big-pickle", self.REJECTED_FREE)],
+                          "failed", "the paid model did not answer",
+                          model_acted=True)
+        self.assertEqual(decision.outcome, OUTCOME_FAILURE)
+
+    def test_a_rejected_tool_call_beats_the_usage_window(self):
+        decision = decide("failed", [], "failed", USAGE_LIMIT,
+                          model_acted=True)
+        self.assertEqual(decision.outcome, OUTCOME_FAILURE)
+
+    def test_a_genuine_outage_with_no_model_output_is_unavailable(self):
+        decision = decide("failed",
+                          [("opencode/big-pickle", DROPPED_SOCKET)],
+                          "failed", USAGE_LIMIT)
+        self.assertEqual(decision.outcome, OUTCOME_UNAVAILABLE)
+        self.assertEqual(decision.cause, CAUSE_PAID_USAGE_LIMIT)
+
+    def test_a_genuine_free_outage_with_no_model_output_is_unavailable(self):
+        decision = decide("failed",
+                          [("opencode/big-pickle", DROPPED_SOCKET)],
+                          "failed", "the paid model did not answer")
+        self.assertEqual(decision.outcome, OUTCOME_UNAVAILABLE)
+        self.assertEqual(decision.cause, CAUSE_FREE_UNREACHABLE)
+
+
 class TestAModelThatAnswered(unittest.TestCase):
     def test_a_forged_validation_never_reads_as_the_usage_window(self):
         # The exploit: a model that answers with a document carrying the
@@ -101,6 +142,13 @@ class TestAModelThatAnswered(unittest.TestCase):
     def test_a_validation_failure_on_the_paid_path_is_a_failure(self):
         decision = decide("failed", [], "failed", USAGE_LIMIT,
                           paid_validation=FORGED_VALIDATION)
+        self.assertEqual(decision.outcome, OUTCOME_FAILURE)
+
+    def test_a_validation_text_without_a_marker_word_is_a_failure(self):
+        # Any validation text at all means the model produced a document
+        # the gate cannot use, whatever it says.
+        decision = decide("failed", [], "failed", USAGE_LIMIT,
+                          free_validation="something did not add up")
         self.assertEqual(decision.outcome, OUTCOME_FAILURE)
 
     def test_a_validation_failure_beats_the_transport_branch(self):

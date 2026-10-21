@@ -56,6 +56,7 @@ OUTCOME_FAILURE = "failure"
 CAUSE_PAID_USAGE_LIMIT = "paid fallback usage limit"
 CAUSE_FREE_UNREACHABLE = "free models unreachable"
 CAUSE_MODEL_ANSWERED = "a model answered with a document nobody can use"
+CAUSE_MODEL_ACTED = "the model acted on the pull request"
 CAUSE_AGENT_MISSING = "the reviewer agent did not register"
 CAUSE_FREE_STEP_FATAL = "the free review step could not run"
 CAUSE_NO_RESULT = "no valid free or paid review result was produced"
@@ -180,7 +181,7 @@ def is_usage_limit(reason):
 
 
 def decide(free_status, free_failures, paid_status, paid_reason,
-           free_validation="", paid_validation="",
+           free_validation="", paid_validation="", model_acted=False,
            select_agent_fatal=False, free_agent_fatal=False,
            paid_agent_fatal=False):
     """Classify a review run.
@@ -190,7 +191,10 @@ def decide(free_status, free_failures, paid_status, paid_reason,
     `paid_status` are the two steps' own statuses, and `paid_reason` is
     the provider's reason when the paid step failed. The two validation
     texts are the MODEL's own document errors, and they are read only as
-    the sign that a model answered.
+    the sign that a model answered. `model_acted` says the model did
+    something - it produced output, or it tried a tool - which is
+    reported by the workflow from the event stream and the process's own
+    stderr.
     """
     free_status = str(free_status or "").strip()
     paid_status = str(paid_status or "").strip()
@@ -204,12 +208,22 @@ def decide(free_status, free_failures, paid_status, paid_reason,
     if paid_status == "success":
         return Decision(OUTCOME_SUCCESS, CAUSE_PAID_RESULT)
 
-    # A model that ANSWERED has produced a verdict, whatever the
-    # transport did on the way. This is asked first, on both paths: a
-    # model can write the provider's own words, so a report that carries
-    # a model's words is never evidence of an outage.
-    reported = [paid_reason, free_validation, paid_validation]
-    reported += [reason for _model, reason in free_failures]
+    # The model ACTED, or ANSWERED: it produced something, so the run
+    # has a verdict to judge rather than an outage to wait for. This is
+    # asked first, on both paths, because a model can write anything,
+    # including the provider's own words - and because the process's
+    # stderr carries a rejected tool call, whose command is the model's
+    # own text.
+    if model_acted:
+        return Decision(OUTCOME_FAILURE, CAUSE_MODEL_ACTED)
+    if free_validation.strip() or paid_validation.strip():
+        # Any validation text at all means the model produced a document
+        # the gate cannot use, whatever the text says.
+        return Decision(OUTCOME_FAILURE, CAUSE_MODEL_ANSWERED)
+    # A reason that carries a model's words forces a failure too: the
+    # marker list fails closed on purpose, because a phrase the model
+    # chose is not evidence of an outage.
+    reported = [paid_reason] + [reason for _model, reason in free_failures]
     if any(model_answered(text) for text in reported):
         return Decision(OUTCOME_FAILURE, CAUSE_MODEL_ANSWERED)
 
@@ -271,6 +285,10 @@ def main(argv):
     parser.add_argument("--paid-validation", default="",
                         help="a file holding the paid step's validation "
                              "error")
+    parser.add_argument("--model-acted", default="",
+                        help="true when the model produced output or tried "
+                             "a tool: a reason may classify an outage only "
+                             "when the model produced nothing")
     parser.add_argument("--select-agent-fatal", default="")
     parser.add_argument("--free-agent-fatal", default="")
     parser.add_argument("--paid-agent-fatal", default="")
@@ -284,6 +302,7 @@ def main(argv):
                       _read(args.paid_reason),
                       free_validation=_read(args.free_validation),
                       paid_validation=_read(args.paid_validation),
+                      model_acted=_flag(args.model_acted),
                       select_agent_fatal=_flag(args.select_agent_fatal),
                       free_agent_fatal=_flag(args.free_agent_fatal),
                       paid_agent_fatal=_flag(args.paid_agent_fatal))
