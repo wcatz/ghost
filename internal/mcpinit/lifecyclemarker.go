@@ -69,9 +69,10 @@ const (
 	// self-clean expires it on this bound, on the same path as an old one,
 	// and newestMarker ranks a stamp dated ahead of the read's now BELOW every
 	// stamp dated at or before it, so its future date cannot outrank a real
-	// failure. This is a stamp-plausibility bound and deliberately NOT the
-	// 30-day age horizon and not the cooldown's one-window rule; each bounds a
-	// different thing.
+	// failure — and an expired marker never ranks at all, so it cannot
+	// outrank one either. This is a stamp-plausibility bound and deliberately
+	// NOT the 30-day age horizon and not the cooldown's one-window rule; each
+	// bounds a different thing.
 	lifecycleMarkerClockSkew = 24 * time.Hour
 	// lifecycleSelfCleanMaxPasses bounds how many expired markers one
 	// session-start removes before giving up on finding a current one: more
@@ -82,7 +83,9 @@ const (
 	// project, so charging a skip here could exhaust the bound on files that
 	// are never removed and hide the current failure behind them. The no-project
 	// read's sweep of the expired markers counts against the same bound, so a
-	// session start never spends an unbounded number of removals.
+	// session start never spends an unbounded number of removals — and it is
+	// the whole of them: a read never returns an expired marker, so the alert
+	// removes nothing the sweep did not.
 	lifecycleSelfCleanMaxPasses = 8
 	// lifecycleMarkerErrorMaxBytes caps what the ALERT renders, so the block
 	// printed at session start stays short enough to read.
@@ -656,6 +659,15 @@ func readMarkerAtPath(path string) *lifecycleFailureMarker {
 // first, so the markers it ranked below were never reached; the project
 // branch returns the FIRST candidate that is neither silent nor another
 // project's, so the candidates behind it were never reached either.
+//
+// And BOTH branches PASS OVER the markers the sweep could not remove, so a
+// refused expired marker never stands in for the failure this session has to
+// show. The project branch does it in the lookup, one candidate at a time; the
+// no-project branch does it in the ranking, which is over every marker in the
+// data directory at once. It has to: the ranking puts every stamp at or
+// before now above every stamp dated ahead of it, so a refused expired marker
+// 40 days old outranked a current failure stamped an hour ahead, inside the
+// tolerated clock skew.
 func readLifecycleFailure(projectID, projectName string) *lifecycleFailureMarker {
 	dataDir, err := config.DataDirPath()
 	if err != nil {
@@ -677,11 +689,12 @@ func readLifecycleFailure(projectID, projectName string) *lifecycleFailureMarker
 		// the ranking buried.
 		blocked := sweepExpiredMarkers(now, patterns...)
 		// The ranking decides what is shown: a current failure is never
-		// hidden by a marker the sweep could not remove. The blocked marker
-		// is the fallback, for the case where nothing current is left — it
+		// hidden by a marker the sweep could not remove, and never by an
+		// expired one the sweep did not reach. The blocked marker is the
+		// fallback, for the case where nothing current is left — it
 		// can be neither cleared nor called stale, so the caller names the
 		// directory as the blocker.
-		if m := newestMarker(now, patterns...); m != nil {
+		if m := newestMarker(now, blocked, patterns...); m != nil {
 			return m
 		}
 		if len(blocked) > 0 {
@@ -882,7 +895,19 @@ func sweepExpiredMarkers(now time.Time, paths ...string) []*lifecycleFailureMark
 // A marker in the kept-but-silent band (markerSilent) is dropped before the
 // ranking, so it cannot end the read and hide a marker behind it; the caller
 // needs no separate skip list for it.
-func newestMarker(now time.Time, patterns ...string) *lifecycleFailureMarker {
+//
+// A DEAD MARKER IS DROPPED TOO: one the sweep could not remove — the
+// directory refused it, so it can be neither cleared nor called stale — and
+// one past an expiry bound, whether the sweep removed it, could not remove
+// it, or never reached it (the sweep's bound is a bound on removals, so the
+// expired markers past it are still on disk). A dead file must never end the
+// read: the ranking puts every stamp at or before now above every stamp dated
+// ahead of it, so an expired marker 40 days old outranked a current failure
+// stamped an hour ahead, inside the tolerated clock skew.
+//
+// blocked is what the sweep could not remove; the caller passes it so both
+// reads agree on which markers are dead.
+func newestMarker(now time.Time, blocked []*lifecycleFailureMarker, patterns ...string) *lifecycleFailureMarker {
 	var newest *lifecycleFailureMarker
 	var newestAt time.Time
 	for _, pattern := range patterns {
@@ -900,6 +925,17 @@ func newestMarker(now time.Time, patterns ...string) *lifecycleFailureMarker {
 				continue
 			}
 			if markerSilent(at, now) {
+				continue
+			}
+			// The sweep's own answer: the directory refused this marker,
+			// so it can be neither cleared nor called stale.
+			if blockedCandidate(blocked, filepath.Base(path)) {
+				continue
+			}
+			// The expiry rule: a marker past a bound is a dead file, and
+			// the sweep's bound is a bound on removals, so the expired
+			// markers it never reached are still on disk.
+			if markerExpired(at, now) {
 				continue
 			}
 			if newest == nil || ranksAbove(at, newestAt, now) {
@@ -960,7 +996,8 @@ func markerCandidatePaths(dataDir string, candidates []markerCandidate) []string
 
 // blockedCandidate reports whether the candidate named name is one of the
 // markers the sweep could not remove — every one of them, because a refusal
-// says nothing about the files behind it.
+// says nothing about the files behind it. Both reads ask it: the project read
+// over its own candidates, the no-project read over the markers it ranks.
 func blockedCandidate(blocked []*lifecycleFailureMarker, name string) bool {
 	for _, m := range blocked {
 		if filepath.Base(m.path) == name {
