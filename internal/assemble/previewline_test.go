@@ -172,77 +172,75 @@ func TestPreviewLineLineBreaksCutNotEscape(t *testing.T) {
 	}
 }
 
-// TestPreviewLineManyFormatRunesStaysWithinMax verifies that a preview with
-// many format characters (category Cf) stays within the max rune bound and
-// never ends mid-escape. It also checks exact outputs for key cases.
+// TestPreviewLineManyFormatRunesStaysWithinMax pins the exact output of the
+// rendered bound: an escape counts as its full rune length, a rune that does
+// not fit is not split, and the ellipsis follows only a cut. The table also
+// covers a literal U+FFFD (one rune) and an invalid byte (rendered U+FFFD).
 func TestPreviewLineManyFormatRunesStaysWithinMax(t *testing.T) {
-	// Exact output table for format rune bounding
 	for _, tc := range []struct {
 		name string
 		in   string
 		max  int
 		want string
 	}{
-		// U+202E RIGHT-TO-LEFT OVERRIDE
+		// U+202E RIGHT-TO-LEFT OVERRIDE renders as six runes, so it does not
+		// fit in three and must not be split.
 		{"rlo only max 3", "\u202eabc", 3, "…"},
 		{"rlo only max 6", "\u202eabc", 6, "\\u202e…"},
-		// U+200B ZERO WIDTH SPACE
+		// U+200B ZERO WIDTH SPACE renders as six runes.
 		{"zwsp between ascii max 7", "a\u200bb", 7, "a\\u200b…"},
-		// Many format runes
 		{"many zwsp max 20", strings.Repeat("a\u200b", 70), 20, "a\\u200ba\\u200ba…"},
-		// max 0
-		{"max 0", "abc", 0, ""},
+		// A zero width still cuts, so the ellipsis is printed for non-empty
+		// text exactly as it was.
+		{"max 0", "abc", 0, "…"},
+		{"empty max 0", "", 0, ""},
+		{"negative max", "", -1, ""},
+		// A literal U+FFFD is one rune, not three invalid bytes.
+		{"literal replacement characters", "\uFFFD\uFFFD\uFFFDx", 3, "\uFFFD\uFFFD\uFFFD…"},
+		// An invalid byte renders as U+FFFD and counts one rune.
+		{"invalid byte", "a\xffb", 200, "a\uFFFDb"},
+		{"invalid byte at bound", "a\xffb", 2, "a\uFFFD…"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := PreviewLine(tc.in, tc.max)
 			if got != tc.want {
 				t.Errorf("PreviewLine(%q, %d) = %q, want %q", tc.in, tc.max, got, tc.want)
 			}
-			// The output without ellipsis must equal the full rendering of some prefix of the input
-			withoutEllipsis := strings.TrimSuffix(got, "…")
 			if !utf8.ValidString(got) {
-				t.Errorf("PreviewLine output is not valid UTF-8: %q", got)
+				t.Errorf("PreviewLine(%q, %d) is not valid UTF-8: %q", tc.in, tc.max, got)
 			}
-			// The rendered runes (excluding ellipsis) must not exceed max
-			runes := len([]rune(withoutEllipsis))
-			if runes > tc.max {
-				t.Errorf("PreviewLine rendered %d runes (excl ellipsis), max %d: %q", runes, tc.max, got)
+			withoutEllipsis := strings.TrimSuffix(got, "…")
+			if !fullRenderings(tc.in)[withoutEllipsis] {
+				t.Errorf("PreviewLine(%q, %d) = %q: %q is not the full rendering of any prefix",
+					tc.in, tc.max, got, withoutEllipsis)
+			}
+			if tc.max >= 0 && len([]rune(withoutEllipsis)) > tc.max {
+				t.Errorf("PreviewLine(%q, %d) rendered %d runes before the ellipsis",
+					tc.in, tc.max, len([]rune(withoutEllipsis)))
 			}
 		})
 	}
-
-	// Also test the general case: many format runes stays within bound
-	const many = 70
-	var b strings.Builder
-	for i := 0; i < many; i++ {
-		b.WriteRune('a')
-		b.WriteRune(0x200B) // ZWSP
-	}
-	in := b.String() // 140 runes: "a\u200ba\u200b..."
-
-	got := PreviewLine(in, 20)
-
-	// Must not exceed max runes in rendered form (plus ellipsis if cut)
-	renderedRunes := countRenderedRunes(got)
-	if renderedRunes > 20+1 { // +1 for possible ellipsis
-		t.Errorf("PreviewLine rendered %d runes, max 20 (+1 ellipsis): %q", renderedRunes, got)
-	}
-	// Must not end mid-escape
-	if strings.HasSuffix(got, "\\u") || strings.HasSuffix(got, "\\U") {
-		t.Errorf("PreviewLine ended mid-escape: %q", got)
-	}
-	// Must end with ellipsis since we cut
-	if !strings.HasSuffix(got, "…") {
-		t.Errorf("PreviewLine did not end with ellipsis: %q", got)
-	}
-	// Output must be valid UTF-8
-	if !utf8.ValidString(got) {
-		t.Errorf("PreviewLine output is not valid UTF-8: %q", got)
-	}
 }
 
-// countRenderedRunes counts runes in the string, treating escape sequences
-// as single runes (they're already expanded in the output).
-func countRenderedRunes(s string) int {
-	return len([]rune(s))
+// fullRenderings returns the full rendered form of every prefix of s, the empty
+// prefix included. PreviewLine's output without its ellipsis must be one of
+// these: anything else means it split an escape or dropped text.
+func fullRenderings(s string) map[string]bool {
+	out := map[string]bool{"": true}
+	var b strings.Builder
+	for i := 0; i < len(s); {
+		r, n := utf8.DecodeRuneInString(s[i:])
+		switch {
+		case r == utf8.RuneError && n == 1:
+			b.WriteString("\uFFFD")
+		case isEscapedControl(r):
+			q := strconv.QuoteRuneToASCII(r)
+			b.WriteString(q[1 : len(q)-1])
+		default:
+			b.WriteString(string(r))
+		}
+		i += n
+		out[b.String()] = true
+	}
+	return out
 }
