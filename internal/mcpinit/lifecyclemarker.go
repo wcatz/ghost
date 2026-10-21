@@ -15,6 +15,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/wcatz/ghost/internal/assemble"
 	"github.com/wcatz/ghost/internal/config"
@@ -90,6 +91,40 @@ const (
 	// lifecycleMarkerErrorMaxBytes caps what the ALERT renders, so the block
 	// printed at session start stays short enough to read.
 	lifecycleMarkerErrorMaxBytes = 300
+	// lifecycleMarkerErrorRenderMaxBytes caps the error line as it RENDERS.
+	// The cap above is on the STORED text, and the quoting ESCAPES it: a
+	// control rune costs up to six bytes in the rendered form, so a content at
+	// its cap can render six times as long. The cap that matters is on the
+	// rendered field — the field is what the alert line spends — so the
+	// content is cut again when the escaping grew it past this. It is above
+	// the content cap's own worst case for an ordinary error, so an error
+	// carrying no control rune is untouched.
+	lifecycleMarkerErrorRenderMaxBytes = 320
+	// lifecycleMarkerPhasesMaxBytes caps the failed-phase LIST the alert
+	// renders. The list is read from the marker file verbatim and a marker
+	// written by hand can hold any number of entries, so it was the one field
+	// of the alert line with no bound at all.
+	lifecycleMarkerPhasesMaxBytes = 100
+	// lifecycleMarkerPhaseMaxBytes caps ONE entry of that list.
+	lifecycleMarkerPhaseMaxBytes = 64
+	// lifecycleAlertMaxBytes is the byte cap on a WHOLE session-start alert
+	// line.
+	//
+	// The alert is printed on the SAME stdout as the context block, ahead of
+	// it, and the host's limit covers the two together: the block's own cap
+	// (sessionStartByteCap) leaves a margin under the host's 10,000
+	// characters, and that margin is what the alert has to fit in. The cap is
+	// on the LINE and not on each field alone, because the fields are not
+	// independent: the project is printed TWICE on the line, and the phase
+	// list is a list, so bounding the error alone still leaves the line
+	// unbounded in the tail — and the marker is a file any local process can
+	// write.
+	//
+	// 900 of the margin's 1,000 bytes: the rest covers the session-number
+	// line the load cannot see (the counter is bumped after the load, so the
+	// block is measured with the count before it and delivered with the count
+	// after it) and the two newlines the hook prints.
+	lifecycleAlertMaxBytes = 900
 	// lifecycleMarkerProjectMaxBytes caps the project the ALERT renders, beside
 	// the error cap above because it is caller text on the same line and the
 	// same surface: the value is printed TWICE on the first line of every
@@ -1077,6 +1112,10 @@ func blockedIsThisSessions(blocked *lifecycleFailureMarker, candidates []markerC
 // includes paths — only the project identifier and one (≤300-byte) line of
 // the recorded error, the one that explains it (markerExplainingLine),
 // withheld by the token guard or framed as data — see renderMarkerError.
+//
+// The line is assembled under lifecycleAlertMaxBytes: its parts are paid for
+// in the order the reader needs them and the project — printed TWICE — takes
+// what is left. See lifecycleAlertProject.
 func lifecycleFailureAlert(projectID, projectName string) string {
 	var (
 		m  *lifecycleFailureMarker
@@ -1152,11 +1191,17 @@ func lifecycleFailureAlert(projectID, projectName string) string {
 	if alert := lifecycleUnclearableAlert(p, at); alert != "" {
 		return alert
 	}
-	p = renderMarkerProject(p)
-	return fmt.Sprintf(
-		"**Ghost maintenance alert:** last automatic consolidation failed for project %s at %s (phase(s): %s; %s). Memory consolidation is paused until a run succeeds — run `ghost lifecycle --project %s` to retry, and check config cli.*_binary if no LLM CLI was found.",
-		p, at.Format(time.RFC3339), renderMarkerPhases(m.PhasesFailed),
-		renderMarkerError(m.Error), p)
+	// The line's parts, each rendered under its own cap: the timestamp, the
+	// failed phases, the error that says why. The project is rendered last,
+	// because it is printed TWICE and is what decides whether the line fits.
+	ts := at.Format(time.RFC3339)
+	phases := renderMarkerPhases(m.PhasesFailed)
+	errLine := renderMarkerError(m.Error)
+	// What the line costs without the project: the sentence around the parts
+	// and the parts themselves. The project gets the rest.
+	rest := lifecycleAlertMaxBytes - len(fmt.Sprintf(lifecycleAlertFormat, "", ts, phases, errLine, ""))
+	p = lifecycleAlertProject(p, rest)
+	return fmt.Sprintf(lifecycleAlertFormat, p, ts, phases, errLine, p)
 }
 
 // markerAlertProject decides whether a marker is this session's to report and
@@ -1185,6 +1230,10 @@ func markerAlertProject(m *lifecycleFailureMarker, projectID, projectName string
 // current marker and for an expired one whose self-clean removal failed, so
 // both read the directory as the blocker rather than presenting a failure that
 // may already be fixed as the current cause.
+//
+// The line is assembled under lifecycleAlertMaxBytes like the other one: the
+// project is printed TWICE here too, so it is what takes what is left of the
+// budget.
 func lifecycleUnclearableAlert(p string, at time.Time) string {
 	dataDir, err := config.DataDirPath()
 	if err != nil {
@@ -1194,10 +1243,133 @@ func lifecycleUnclearableAlert(p string, at time.Time) string {
 	if werr == nil {
 		return ""
 	}
-	p = renderMarkerProject(p)
-	return fmt.Sprintf(
-		"**Ghost maintenance alert:** the data directory refuses new files (%s), so lifecycle bookkeeping cannot be written; the failure recorded for project %s at %s can be neither cleared nor confirmed as the current cause. Fix the directory's write access, then run `ghost lifecycle --project %s` to retry.",
-		withoutPath(werr), p, at.Format(time.RFC3339), p)
+	ts := at.Format(time.RFC3339)
+	refusal := withoutPath(werr).Error()
+	rest := lifecycleAlertMaxBytes - len(fmt.Sprintf(lifecycleUnclearableAlertFormat, refusal, "", ts, ""))
+	p = lifecycleAlertProject(p, rest)
+	return fmt.Sprintf(lifecycleUnclearableAlertFormat, refusal, p, ts, p)
+}
+
+// lifecycleAlertFormat and lifecycleUnclearableAlertFormat are the two shapes
+// of the session-start alert line. They are constants because the line's
+// budget is measured against them: the cost of the sentence around the parts
+// is what the parts have to share, and a sentence written twice would be two
+// sentences to keep in step.
+const (
+	lifecycleAlertFormat = "**Ghost maintenance alert:** last automatic consolidation failed for project %s at %s (phase(s): %s; %s). Memory consolidation is paused until a run succeeds — run `ghost lifecycle --project %s` to retry, and check config cli.*_binary if no LLM CLI was found."
+	// The unclearable form carries the directory's own refusal where the
+	// other carries the error: the directory is the blocker there, not a
+	// phase.
+	lifecycleUnclearableAlertFormat = "**Ghost maintenance alert:** the data directory refuses new files (%s), so lifecycle bookkeeping cannot be written; the failure recorded for project %s at %s can be neither cleared nor confirmed as the current cause. Fix the directory's write access, then run `ghost lifecycle --project %s` to retry."
+)
+
+// lifecycleAlertProject renders the project for an alert line, at the share of
+// the line's budget that is left after the rest of the line is paid for.
+//
+// The project is printed TWICE on the line — once as the subject of the
+// failure, once in the retry command — so it is what decides whether the line
+// fits under lifecycleAlertMaxBytes: every other part is paid for first (the
+// sentence, the timestamp, the phase list, the error line), and what is left
+// is halved, because the project is printed twice. The share is capped at
+// lifecycleMarkerProjectMaxBytes, the cap the project has carried since it was
+// rendered at all, so a project shorter than its share renders exactly as it
+// did before.
+//
+// The ellipsis the truncation adds is part of the share, so the share is one
+// ellipsis shorter than half of what is left: the line stays inside its cap.
+func lifecycleAlertProject(p string, rest int) string {
+	share := rest/2 - len("…")
+	if share > lifecycleMarkerProjectMaxBytes {
+		share = lifecycleMarkerProjectMaxBytes
+	}
+	if share < 0 {
+		share = 0
+	}
+	return renderMarkerProject(p, share)
+}
+
+// markerPrefixWithin returns the length of the longest prefix of s that ends
+// on a rune boundary and whose measured length is at most room.
+//
+// The prefix is MEASURED rather than counted, because a renderer that escapes
+// a control rune to up to six bytes makes the length of a prefix a function
+// of the prefix itself: the search is over that function, and the answer is
+// a rune boundary, so a cut never lands inside a multi-byte character.
+//
+// It is the ONE search the alert's three cuts use (the project's label, a
+// phase name and the error line), because a cut that lands inside an escape
+// sequence is the same mistake three times over.
+//
+// The bytes are walked in halves, so the candidate is moved to a rune
+// boundary: DOWN to the boundary before it, and — when the whole stretch
+// below the candidate is one character — UP to the boundary after it. The
+// second move is the one that matters: stopping at the lower bound instead
+// loses every boundary above it, and a value led by a multi-byte character
+// put all of them out of reach. An emoji at the front of an error made the
+// whole field empty, and an emoji at the front of a project rendered it as an
+// ellipsis although several bytes of it fitted.
+func markerPrefixWithin(s string, measure func(string) int, room int) int {
+	if room < 0 || s == "" {
+		return 0
+	}
+	lo, hi := 0, len(s)
+	for lo < hi {
+		mid := lo + (hi-lo+1)/2
+		// A prefix must end on a rune boundary: the byte at mid starts a
+		// character only when it is not a continuation byte.
+		for mid > 0 && mid < len(s) && !utf8.RuneStart(s[mid]) {
+			mid--
+		}
+		if mid <= lo {
+			// No rune boundary between the lower bound and the
+			// candidate: the boundaries that are left are all above it.
+			mid = lo + (hi-lo+1)/2
+			for mid <= hi && mid < len(s) && !utf8.RuneStart(s[mid]) {
+				mid++
+			}
+			if mid > hi {
+				break
+			}
+		}
+		if measure(s[:mid]) > room {
+			// Every longer prefix measures longer, so the answer is below
+			// this one.
+			hi = mid - 1
+			continue
+		}
+		lo = mid
+	}
+	return lo
+}
+
+// markerPhaseEntry renders one entry of the failed-phase list, cut so that
+// the entry fits the bound.
+//
+// The cut is made on the RAW value and the RENDERED entry is what the bound
+// is checked against: the quoting puts an entry holding a space inside quotes
+// and expands a control rune to up to six bytes, so cutting the rendered form
+// could leave an escape sequence half-written — "\x" where the value held
+// "\x1b" — or a quote unclosed. The raw value is cut at a rune boundary
+// instead, so the cut is always a whole escape sequence, and the ellipsis
+// goes on AFTER the rendering, so it reads as the cut it is and cannot be
+// escaped into the entry's own quoting.
+//
+// ok is false when the entry cannot be shown at all: not even one rune of it
+// fits the bound once it is rendered. Such an entry is dropped and counted
+// rather than shown half.
+func markerPhaseEntry(p string, maxBytes int) (string, bool) {
+	if t := assemble.Token(p); len(t) <= maxBytes {
+		return t, true
+	}
+	room := maxBytes - len("…")
+	if room < 0 {
+		return "", false
+	}
+	cut := markerPrefixWithin(p, func(s string) int { return len(assemble.Token(s)) }, room)
+	if cut == 0 {
+		return "", false
+	}
+	return assemble.Token(p[:cut]) + "…", true
 }
 
 // renderMarkerPhases renders the marker's failed-phase list for the alert, the
@@ -1216,15 +1388,52 @@ func lifecycleUnclearableAlert(p string, at time.Time) string {
 // rather than an empty gap between its two separators. The stand-in is a
 // constant, not caller data, so it carries nothing through the token guard the
 // entries do.
+//
+// The list is BOUNDED, and it was the one field of the line with no bound at
+// all: the entries are read from a file any local process can write, and a
+// marker written by hand can hold any number of them. The entries the list
+// can carry are named and the ones it left out are COUNTED, so a phase the
+// reader cannot see is a phase the reader knows is there. The count's room is
+// kept back from the start, because the count's own length depends on how many
+// were left out.
 func renderMarkerPhases(phases []string) string {
 	if len(phases) == 0 {
 		return "none"
 	}
-	rendered := make([]string, len(phases))
-	for i, p := range phases {
-		rendered[i] = assemble.Token(p)
+	// The room the count of the entries left out takes: " (+N more)", where N
+	// is a count of entries in a file and so is at most a machine's number.
+	const countRoom = 32
+	var (
+		shown   []string
+		size    int
+		dropped int
+	)
+	for _, p := range phases {
+		// The entry is cut on the raw value and the RENDERED entry is what
+		// the bound is checked against: an entry that renders past the
+		// bound is dropped and counted rather than shown cut inside its
+		// own quoting.
+		t, ok := markerPhaseEntry(p, lifecycleMarkerPhaseMaxBytes)
+		if !ok {
+			dropped++
+			continue
+		}
+		add := len(t)
+		if len(shown) > 0 {
+			add += len(", ")
+		}
+		if size+add > lifecycleMarkerPhasesMaxBytes-countRoom {
+			dropped++
+			continue
+		}
+		shown = append(shown, t)
+		size += add
 	}
-	return strings.Join(rendered, ", ")
+	list := strings.Join(shown, ", ")
+	if dropped == 0 {
+		return list
+	}
+	return list + fmt.Sprintf(" (+%d more)", dropped)
 }
 
 // renderMarkerError renders the marker's error for the alert. The error is the
@@ -1237,6 +1446,11 @@ func renderMarkerPhases(phases []string) string {
 // quoted text rather than as Ghost's own words. The cap applies before the
 // frame, so the closing delimiter is never cut.
 //
+// The field is then capped as it RENDERS, which is not the same cap: the
+// framing ESCAPES what it renders, so a content at the content cap can render
+// six times as long (markerErrorContent). The line the field sits on has a
+// budget of its own, and the field is what spends it.
+//
 // Paths are stripped from the stored error text so that markers written by
 // older builds (which stored the raw PathError/LinkError text containing
 // absolute paths) also render without paths, keeping the alert's no-paths
@@ -1247,7 +1461,37 @@ func renderMarkerError(text string) string {
 	// it, because moving the interruption ahead of the report can put words
 	// that were apart in the file next to each other on the shown line.
 	errLine := markerErrorField(markerExplainingLine(markerErrorField(text)))
-	return quoteData(truncateUTF8(errLine, lifecycleMarkerErrorMaxBytes))
+	content := truncateUTF8(errLine, lifecycleMarkerErrorMaxBytes)
+	return quoteData(markerErrorContent(content, lifecycleMarkerErrorRenderMaxBytes))
+}
+
+// markerErrorContent trims the error's content to the longest prefix whose
+// QUOTED form fits maxBytes.
+//
+// The quoting escapes what it renders: a control rune costs up to six bytes in
+// the rendered form, so a content at its own cap can render six times as long,
+// and the budget the field sits in is spent on the rendered field. Cutting the
+// content by a fixed factor would throw away text an error carrying two
+// colour codes still deserves, so the prefix is found instead — the quoted
+// form grows with the content, so the longest prefix that fits is a search
+// away (markerPrefixWithin). The cut is marked with an ellipsis, and the
+// framing's own delimiters are kept back from the room, so the field is still
+// a whole «...» frame.
+func markerErrorContent(content string, maxBytes int) string {
+	if len(quoteData(content)) <= maxBytes {
+		return content
+	}
+	// The room left for the content: the framing's two delimiters and the
+	// ellipsis the cut adds.
+	room := maxBytes - len("«»…")
+	if room < 0 {
+		return ""
+	}
+	cut := markerPrefixWithin(content, func(s string) int { return len(quoteData(s)) }, room)
+	if cut == 0 {
+		return ""
+	}
+	return content[:cut] + "…"
 }
 
 // markerExplainingLine picks the one line of a stored error the alert shows.
@@ -1340,9 +1584,35 @@ func markerInterrupt(lines []string) (string, int, bool) {
 // The result is bounded beside the error line (lifecycleMarkerProjectMaxBytes),
 // and the bound is applied AFTER the branch above rather than before it, so the
 // one value that is already short — the placeholder — is never cut.
-func renderMarkerProject(p string) string {
+//
+// The bound the caller hands in is the alert line's own share of its budget
+// (lifecycleAlertProject), which is what decides the size of the value here:
+// the project is printed twice on the line, so it is the part of the line that
+// has to give way when the line runs out of room.
+//
+// The cut is made on the RAW value and the ESCAPED form is what the bound is
+// measured against: the renderer escapes a control rune to an escape sequence
+// and a backtick to a backslash and a backtick, so cutting the escaped form
+// could land inside an escape sequence — leaving "\x" where the value held
+// "\x1b" — and could leave the backtick span of the retry command the reader
+// is told to run unclosed. The raw value is cut at a rune boundary instead,
+// so the cut is always a whole escape sequence, and the ellipsis goes on
+// after the escaping, so it reads as the cut it is.
+func renderMarkerProject(p string, maxBytes int) string {
 	if memory.RejectSecret("project", p) != nil {
 		return memory.ProjectArg("project", p)
 	}
-	return truncateUTF8(assemble.Label(p), lifecycleMarkerProjectMaxBytes)
+	label := assemble.Label(p)
+	if len(label) <= maxBytes {
+		return label
+	}
+	room := maxBytes - len("…")
+	if room < 0 {
+		return ""
+	}
+	cut := markerPrefixWithin(p, func(s string) int { return len(assemble.Label(s)) }, room)
+	if cut == 0 {
+		return "…"
+	}
+	return assemble.Label(p[:cut]) + "…"
 }

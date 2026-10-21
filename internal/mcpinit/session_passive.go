@@ -50,6 +50,13 @@ const (
 // session-number line (the counter is bumped after the load), a lifecycle alert
 // line written to the same stdout ahead of the block, and the newline the hook
 // appends.
+//
+// The margin now HOLDS rather than being slack the alert could spend: the
+// alert line carries a byte cap of its own (lifecycleAlertMaxBytes, 900 of
+// those 1,000 bytes), so the alert is bounded whatever the marker file holds
+// and the room the block's cap leaves is the room the alert has. The
+// margin's other two parts are the session-number line and the newlines,
+// which are the host's own counting and cannot grow with the marker.
 const sessionStartByteCap = 9000
 
 // sessionHostLimit is Claude Code's 10,000-character cap on a hook's output.
