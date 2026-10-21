@@ -34,6 +34,45 @@ func TestLoadSettings_Empty(t *testing.T) {
 	}
 }
 
+// TestLoadSettings_BlankFileIsPopulated pins #1684: a 0-byte or
+// whitespace-only settings.json carries nothing to merge, so it is populated as
+// if it were absent, the way a blank codex hooks.json is written rather than
+// refused (#1296). Refusing it would leave every re-run refusing the same file
+// until the user deleted it, and the field hint names a field the file does not
+// have.
+func TestLoadSettings_BlankFileIsPopulated(t *testing.T) {
+	cases := []struct {
+		name string
+		doc  string
+	}{
+		{"zero bytes", ""},
+		{"whitespace only", " \n\t\r\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "settings.json")
+			if err := os.WriteFile(path, []byte(tc.doc), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			sf, err := loadSettings(path)
+			if err != nil {
+				t.Fatalf("loadSettings refused a blank settings.json: %v", err)
+			}
+			if len(sf.raw) != 0 {
+				t.Errorf("expected an empty document ready to populate, got %d keys", len(sf.raw))
+			}
+			added, err := sf.addPermissions([]string{"mcp__ghost__ghost_health"})
+			if err != nil {
+				t.Fatalf("addPermissions on a blank settings.json: %v", err)
+			}
+			if len(added) != 1 {
+				t.Errorf("addPermissions added %d permissions, want 1", len(added))
+			}
+		})
+	}
+}
+
 func TestLoadSettings_Existing(t *testing.T) {
 	path := tempSettings(t, `{"permissions":{"allow":["Bash"]},"effortLevel":"high"}`)
 	sf, err := loadSettings(path)

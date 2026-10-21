@@ -94,6 +94,10 @@ func settingsPath() (string, error) {
 
 // loadSettings reads and parses the settings file.
 // If the file does not exist, returns an empty settings ready to populate.
+// A file that exists but is blank — 0 bytes, or only whitespace — is treated
+// the same way: it carries nothing to merge, and refusing it would leave every
+// re-run refusing the same file until the user deleted it, the rule a blank
+// codex hooks.json already follows (#1296).
 // One leading UTF-8 byte-order mark (what a Windows editor or PowerShell 5.1
 // `-Encoding UTF8` writes) is stripped before decoding, because Claude Code
 // itself reads such a file; save puts it back, so the file keeps its mark.
@@ -119,16 +123,23 @@ func loadSettings(path string) (*settingsFile, error) {
 		s.bom = jsonBOM
 		data = data[len(jsonBOM):]
 	}
-	if err := json.Unmarshal(data, &s.raw); err != nil {
-		return nil, fmt.Errorf("%s must be a JSON object", filepath.Base(path))
-	}
-	// A document that is the JSON literal null decodes into a nil map with no
-	// error — an empty object leaves the map above in place, so nil means null
-	// and nothing else. Refuse it by name rather than hand back a settingsFile
-	// whose raw map is nil: the first addPermissions write would panic on
-	// assignment to that nil map, mid-way through init's ten steps.
-	if s.raw == nil {
-		return nil, fmt.Errorf("%s is null", filepath.Base(path))
+	// A blank file is not decoded: there is no JSON document to decode, and the
+	// initialized empty map is already the document init populates. The empty
+	// document counts as ghost-managed, so save does not capture it as the
+	// one-time .bak — an empty backup would stand forever and block the user's
+	// real file, the reason a 0-byte config.toml is skipped rather than copied.
+	if len(bytes.TrimSpace(data)) > 0 {
+		if err := json.Unmarshal(data, &s.raw); err != nil {
+			return nil, fmt.Errorf("%s must be a JSON object", filepath.Base(path))
+		}
+		// A document that is the JSON literal null decodes into a nil map with no
+		// error — an empty object leaves the map above in place, so nil means null
+		// and nothing else. Refuse it by name rather than hand back a settingsFile
+		// whose raw map is nil: the first addPermissions write would panic on
+		// assignment to that nil map, mid-way through init's ten steps.
+		if s.raw == nil {
+			return nil, fmt.Errorf("%s is null", filepath.Base(path))
+		}
 	}
 	s.ghostManaged = s.holdsOnlyGhostManaged()
 	return s, nil

@@ -188,6 +188,47 @@ func TestRunInstallsWithMissingSettings(t *testing.T) {
 	}
 }
 
+// TestRunInstallsWithBlankSettings is the blank-file case (#1684): a 0-byte or
+// whitespace-only settings.json carries nothing to merge, so init populates it
+// as if it were absent rather than refusing it with a hint that names no field.
+// The blank file is not captured as the one-time .bak either: an empty backup
+// would stand forever and block the user's real file, the reason a 0-byte
+// config.toml is skipped rather than copied.
+func TestRunInstallsWithBlankSettings(t *testing.T) {
+	cases := []struct {
+		name string
+		doc  string
+	}{
+		{"zero bytes", ""},
+		{"whitespace only", " \n\t\r\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			home, _ := installEnv(t)
+			path := writeSettings(t, home, tc.doc)
+
+			var out bytes.Buffer
+			if err := Run(&out, false); err != nil {
+				t.Fatalf("Run refused a blank settings.json: %v\noutput:\n%s", err, out.String())
+			}
+			got, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("re-read settings.json: %v", err)
+			}
+			var merged map[string]json.RawMessage
+			if err := json.Unmarshal(got, &merged); err != nil {
+				t.Fatalf("settings.json is not valid JSON after init: %v", err)
+			}
+			if !strings.Contains(string(got), "mcp__ghost__ghost_health") {
+				t.Errorf("init did not add ghost permissions: %s", got)
+			}
+			if _, err := os.Stat(path + ".bak"); !os.IsNotExist(err) {
+				t.Errorf("a blank settings.json was captured as the .bak (Stat err = %v)", err)
+			}
+		})
+	}
+}
+
 // TestRunDoesNotBackUpItsOwnSettings pins that the one-time settings.json.bak
 // stays the user's pre-ghost file and never becomes ghost's own output. On a
 // fresh install the first run creates settings.json from nothing, so it has
