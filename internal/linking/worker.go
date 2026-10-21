@@ -106,7 +106,7 @@ func (w *Worker) processProject(ctx context.Context, projectID string) {
 		if err != nil {
 			// Leave unscanned so the next sweep retries; errors here are
 			// transient (deleted memories cascade out of the scan queue).
-			w.logger.Debug("linking: get embedding", "error", err, "memory_id", id)
+			w.logger.Debug("linking: get embedding", "error", err, "memory_id", memory.RefusalArg("memory_id", id))
 			continue
 		}
 		if len(vec) == 0 {
@@ -117,16 +117,16 @@ func (w *Worker) processProject(ctx context.Context, projectID string) {
 			// in the queue and is linked once the embedding worker rewrites its
 			// vector. Marking it scanned here would spend the memory's one scan
 			// slot on a pass that produced no edge.
-			w.logger.Debug("linking: no usable vector yet", "memory_id", id)
+			w.logger.Debug("linking: no usable vector yet", "memory_id", memory.RefusalArg("memory_id", id))
 			continue
 		}
 		sourceMemories, err := w.store.GetByIDs(ctx, []string{id})
 		if err != nil {
-			w.logger.Debug("linking: get source scope", "error", err, "memory_id", id)
+			w.logger.Debug("linking: get source scope", "error", err, "memory_id", memory.RefusalArg("memory_id", id))
 			continue
 		}
 		if len(sourceMemories) != 1 {
-			w.logger.Debug("linking: source memory disappeared", "memory_id", id)
+			w.logger.Debug("linking: source memory disappeared", "memory_id", memory.RefusalArg("memory_id", id))
 			continue
 		}
 		sourceScope := sourceMemories[0].Scope
@@ -140,7 +140,7 @@ func (w *Worker) processProject(ctx context.Context, projectID string) {
 		// +1 because the memory itself is its own nearest neighbor.
 		candidates, err := w.store.SearchVectorScoped(ctx, projectID, vec, maxCandidates+1, sourceScope)
 		if err != nil {
-			w.logger.Debug("linking: search", "error", err, "memory_id", id)
+			w.logger.Debug("linking: search", "error", err, "memory_id", memory.RefusalArg("memory_id", id))
 			continue
 		}
 		failed := false
@@ -155,7 +155,7 @@ func (w *Worker) processProject(ctx context.Context, projectID string) {
 				continue
 			}
 			if err := w.store.CreateLink(ctx, id, cand.MemoryID, "related", cand.Score, "auto"); err != nil {
-				w.logger.Debug("linking: create link", "error", err, "memory_id", id)
+				w.logger.Debug("linking: create link", "error", err, "memory_id", memory.RefusalArg("memory_id", id))
 				failed = true
 				continue
 			}
@@ -170,7 +170,7 @@ func (w *Worker) processProject(ctx context.Context, projectID string) {
 		// vector this pass compared is still the memory's embedding, so an
 		// edit that landed mid-scan leaves the memory queued for its new text.
 		if err := w.store.MarkLinkScanned(ctx, id, vec); err != nil {
-			w.logger.Error("linking: mark scanned", "error", err, "memory_id", id)
+			w.logger.Error("linking: mark scanned", "error", err, "memory_id", memory.RefusalArg("memory_id", id))
 		}
 	}
 	if linked > 0 {

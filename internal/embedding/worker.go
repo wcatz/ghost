@@ -399,23 +399,23 @@ func (w *Worker) SweepOnce(ctx context.Context) {
 func (w *Worker) EmbedOne(ctx context.Context, memoryID string) {
 	content, err := w.store.GetMemoryContent(ctx, memoryID)
 	if err != nil {
-		w.logger.Debug("embed: get content", "error", err, "memory_id", memoryID)
+		w.logger.Debug("embed: get content", "error", err, "memory_id", memory.RefusalArg("memory_id", memoryID))
 		return
 	}
 
 	vec, err := w.client.EmbedDocument(ctx, content)
 	if err != nil {
-		w.logger.Debug("embed: ollama", "error", err, "memory_id", memoryID)
+		w.logger.Debug("embed: ollama", "error", err, "memory_id", memory.RefusalArg("memory_id", memoryID))
 		return
 	}
 
 	stored, err := w.store.StoreEmbeddingForContent(ctx, memoryID, vec, w.client.Identity(), content)
 	if err != nil {
-		w.logger.Error("embed: store", "error", err, "memory_id", memoryID)
+		w.logger.Error("embed: store", "error", err, "memory_id", memory.RefusalArg("memory_id", memoryID))
 		return
 	}
 	if !stored {
-		w.logger.Debug("embed: content changed while embedding, left pending", "memory_id", memoryID)
+		w.logger.Debug("embed: content changed while embedding, left pending", "memory_id", memory.RefusalArg("memory_id", memoryID))
 	}
 }
 
@@ -553,7 +553,7 @@ func (w *Worker) EmbedPending(ctx context.Context, projectID string, limit int) 
 
 		content, err := w.store.GetMemoryContent(ctx, id)
 		if err != nil {
-			w.logger.Debug("embed: get content", "error", err, "memory_id", id)
+			w.logger.Debug("embed: get content", "error", err, "memory_id", memory.RefusalArg("memory_id", id))
 			continue
 		}
 
@@ -561,7 +561,7 @@ func (w *Worker) EmbedPending(ctx context.Context, projectID string, limit int) 
 		if err != nil {
 			failed++
 			lastErr = err
-			w.logger.Debug("embed: ollama", "error", err, "memory_id", id)
+			w.logger.Debug("embed: ollama", "error", err, "memory_id", memory.RefusalArg("memory_id", id))
 			// The caller's own context ending is a shutdown or the caller's
 			// budget, not news about the endpoint: return without a verdict line.
 			if ctx.Err() != nil {
@@ -618,14 +618,14 @@ func (w *Worker) EmbedPending(ctx context.Context, projectID string, limit int) 
 
 		stored, err := w.store.StoreEmbeddingForContent(ctx, id, vec, w.client.Identity(), content)
 		if err != nil {
-			w.logger.Error("embed: store", "error", err, "memory_id", id)
+			w.logger.Error("embed: store", "error", err, "memory_id", memory.RefusalArg("memory_id", id))
 			continue
 		}
 		w.forgetSlowRow(id)
 		if !stored {
 			// An edit landed while the endpoint was computing: the vector is the
 			// old text's, so it is dropped and the row stays pending (#1159).
-			w.logger.Debug("embed: content changed while embedding, left pending", "memory_id", id)
+			w.logger.Debug("embed: content changed while embedding, left pending", "memory_id", memory.RefusalArg("memory_id", id))
 			continue
 		}
 		embedded++
@@ -657,7 +657,7 @@ func (w *Worker) EmbedPending(ctx context.Context, projectID string, limit int) 
 // verdict it reports: Inconclusive, which ends SweepOnce's sweep.
 func (w *Worker) embedStalled(embedded int, lastID string) Reachability {
 	w.logger.Info("embed stalled, pausing batch",
-		"embedded", embedded, "memory_id", lastID, "reachability", Inconclusive.String())
+		"embedded", embedded, "memory_id", memory.RefusalArg("memory_id", lastID), "reachability", Inconclusive.String())
 	return Inconclusive
 }
 
