@@ -281,7 +281,7 @@ func TestReplacedIDsSkipAnEmissionThatRestatesARow(t *testing.T) {
 		Merges: []reflection.Merge{{IDs: []string{"m1", "m2"}, Text: text}},
 	}
 	for _, order := range [][]reflection.ReflectMemory{{merge, twin}, {twin, merge}} {
-		rows := reflectMemoriesToMemory("p1", order, replacedIDsByText(result))
+		rows := reflectMemoriesToMemory("p1", order, replacedIDsFor(result))
 		for i, row := range rows {
 			if order[i].RestatesID != "" {
 				if len(row.ReplacesIDs) != 0 {

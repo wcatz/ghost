@@ -406,7 +406,7 @@ func TestReflectSummaryListsAScopeRefusedMergeAsTheApplyRefusesIt(t *testing.T) 
 	// a scope refusal, its sources are both still there under their own scopes,
 	// and the agreeing merge consumed its two.
 	projectMems, globalMems := splitByScope(result.Memories)
-	_, _, _, _, _, projectDropped, globalDropped, _, _, _, err := applyReflection(ctx, store, project, projectMems, globalMems, "", false, replacedIDsByText(&result), nil)
+	_, _, _, _, _, projectDropped, globalDropped, _, _, _, err := applyReflection(ctx, store, project, projectMems, globalMems, "", false, replacedIDsFor(&result), nil)
 	if err != nil {
 		t.Fatalf("applyReflection: %v", err)
 	}

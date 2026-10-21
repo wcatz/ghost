@@ -69,7 +69,7 @@ func TestAReflectReuseChangesTagsWithoutChangingAnyRecordedColumn(t *testing.T) 
 	if len(result.Memories) != 1 {
 		t.Fatalf("the tier emitted %d memories, want 1 (the pair is one fact)", len(result.Memories))
 	}
-	if _, _, _, _, _, _, _, _, _, _, err := applyReflection(ctx, s, project, result.Memories, nil, consolidatedSince, false, replacedIDsByText(&result), nil); err != nil {
+	if _, _, _, _, _, _, _, _, _, _, err := applyReflection(ctx, s, project, result.Memories, nil, consolidatedSince, false, replacedIDsFor(&result), nil); err != nil {
 		t.Fatalf("applyReflection: %v", err)
 	}
 

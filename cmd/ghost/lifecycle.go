@@ -2076,7 +2076,7 @@ func runReflect() {
 		})
 	}
 	keptProjectMems, keptGlobalMems, preserved, promoted, keptMems, droppedProject, droppedGlobal, deleted, appliedByCategory, applied, err := applyReflection(
-		ctx, store, projectID, projectMems, globalMems, consolidatedSince, parsed.promoteGlobals, replacedIDsByText(&result), fed)
+		ctx, store, projectID, projectMems, globalMems, consolidatedSince, parsed.promoteGlobals, replacedIDsFor(&result), fed)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: save memories: %v\n", err)
 		os.Exit(1)
