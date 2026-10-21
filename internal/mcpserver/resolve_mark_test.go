@@ -638,3 +638,40 @@ func (c *countingMarkStore) MarkResolved(ctx context.Context, projectID string, 
 	c.writes++
 	return c.store.MarkResolved(ctx, projectID, ids, prov)
 }
+
+// TestResolveMarkEscapesControlAndFormatCharacters verifies that the
+// ghost_resolve_mark tool result escapes control characters (ESC) and format
+// characters (U+202E RLO) in the preview so they are visible rather than
+// executed or reordering the line.
+func TestResolveMarkEscapesControlAndFormatCharacters(t *testing.T) {
+	srv, store := linkWithdrawServer(t)
+	session := connectedClientNamed(t, srv, "claude-code")
+
+	// Store a memory with ESC and U+202E (RIGHT-TO-LEFT OVERRIDE)
+	content := "gh\x1b[31most\u202ereversed"
+	id := seedMarkable(t, store, "test-project", content)
+
+	out := resultText(callTool(t, session, "ghost_resolve_mark", map[string]any{
+		"project_id": "test-project",
+		"memory_ids": []string{id[:8]},
+	}))
+
+	// The preview in the result should show the escaped forms, not raw bytes
+	if strings.Contains(out, "\x1b") {
+		t.Errorf("ghost_resolve_mark printed raw ESC: %q", out)
+	}
+	if strings.Contains(out, "\u202e") {
+		t.Errorf("ghost_resolve_mark printed raw U+202E: %q", out)
+	}
+	// The escape sequences should be visible
+	if !strings.Contains(out, "\\x1b") {
+		t.Errorf("ghost_resolve_mark missing ESC escape: %q", out)
+	}
+	if !strings.Contains(out, "\\u202e") {
+		t.Errorf("ghost_resolve_mark missing U+202E escape: %q", out)
+	}
+	// The tool should report the mark
+	if !strings.Contains(out, "Marked 1") {
+		t.Errorf("ghost_resolve_mark did not report mark: %q", out)
+	}
+}

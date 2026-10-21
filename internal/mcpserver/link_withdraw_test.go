@@ -633,3 +633,51 @@ func TestLinkWithdrawSaysNoSurfaceCanNameANewlineID(t *testing.T) {
 		t.Errorf("the result does not say what actually clears it: %q", msg)
 	}
 }
+
+// TestLinkWithdrawEscapesControlAndFormatCharacters verifies that the
+// ghost_link_withdraw tool result escapes control characters (ESC) and format
+// characters (U+202E RLO) in the target text preview.
+func TestLinkWithdrawEscapesControlAndFormatCharacters(t *testing.T) {
+	srv, store := linkWithdrawServer(t)
+	ctx := context.Background()
+
+	// Store a target memory with ESC and U+202E (RIGHT-TO-LEFT OVERRIDE)
+	olderContent := "The restore path needs two spindles to be safe.\x1b[31m and red\u202ereversed"
+	older, err := store.Create(ctx, "abc123", memory.Memory{
+		Category: "fact", Content: olderContent, Source: "mcp", Importance: 0.7,
+	})
+	if err != nil {
+		t.Fatalf("Create(older): %v", err)
+	}
+	newer, err := store.Create(ctx, "abc123", memory.Memory{
+		Category: "fact", Content: "The restore path is safe on one spindle.", Source: "mcp", Importance: 0.7,
+	})
+	if err != nil {
+		t.Fatalf("Create(newer): %v", err)
+	}
+	if err := store.CreateLink(ctx, newer, older, "supersedes", 0.95, "llm"); err != nil {
+		t.Fatalf("CreateLink: %v", err)
+	}
+
+	msg, err := srv.withdrawSupersedesLink(ctx, "test-project", newer, older, "")
+	if err != nil {
+		t.Fatalf("withdrawSupersedesLink: %v", err)
+	}
+
+	// The preview in the result should show the escaped forms
+	if strings.Contains(msg, "\x1b") {
+		t.Errorf("ghost_link_withdraw printed raw ESC: %q", msg)
+	}
+	if strings.Contains(msg, "\u202e") {
+		t.Errorf("ghost_link_withdraw printed raw U+202E: %q", msg)
+	}
+	if !strings.Contains(msg, "\\x1b") {
+		t.Errorf("ghost_link_withdraw missing ESC escape: %q", msg)
+	}
+	if !strings.Contains(msg, "\\u202e") {
+		t.Errorf("ghost_link_withdraw missing U+202E escape: %q", msg)
+	}
+	if !strings.Contains(msg, "Withdrew 1 of 1") {
+		t.Errorf("ghost_link_withdraw did not report withdrawal: %q", msg)
+	}
+}

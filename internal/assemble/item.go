@@ -577,17 +577,63 @@ func isLineEndingOrControl(r rune) bool {
 // CR as readily as on LF, so this was never terminal-specific. Cutting at
 // whichever comes first drops the CR of a CRLF pair too, since s[:i] ends
 // immediately before it (#791).
+//
+// The preview escapes C0/C1 control characters (except TAB) and invisible FORMAT
+// characters (category Cf) the same way Data, Label and TagsLabel do, so an ESC
+// cannot start a terminal sequence and a U+202E cannot reorder the rest of the
+// line. The preview is bounded by max runes of its RENDERED form, so an escape
+// sequence counts as its full length and the result never exceeds max (plus the
+// one-rune ellipsis when the text was cut).
 func PreviewLine(s string, max int) string {
 	// The same set Data folds (isLineBreak), so a preview and a memory line agree
 	// on what ends a line (#911): U+2028, U+0085, VT, FF and FS/GS/RS too.
 	if i := strings.IndexFunc(s, isLineBreak); i >= 0 {
 		s = s[:i]
 	}
-	r := []rune(s)
-	if len(r) > max {
-		return string(r[:max]) + "…"
+
+	var b strings.Builder
+	b.Grow(max * 6) // worst case: each rune becomes a 6-rune escape like \u202e
+	renderedRunes := 0
+	cut := false
+	for i := 0; i < len(s); {
+		r, n := utf8.DecodeRuneInString(s[i:])
+		if r == utf8.RuneError {
+			// Invalid UTF-8: copy the byte as-is (never happens for valid input)
+			if renderedRunes+1 > max {
+				cut = true
+				break
+			}
+			b.WriteByte(s[i])
+			renderedRunes++
+			i++
+			continue
+		}
+
+		// Determine the rendered form of this rune
+		var rendered string
+		if isEscapedControl(r) {
+			q := strconv.QuoteRuneToASCII(r)
+			rendered = q[1 : len(q)-1] // strip surrounding quotes
+		} else {
+			rendered = string(r)
+		}
+
+		rr := len([]rune(rendered))
+		// If adding this would exceed max, stop (never split an escape)
+		if renderedRunes+rr > max {
+			cut = true
+			break
+		}
+
+		b.WriteString(rendered)
+		renderedRunes += rr
+		i += n
 	}
-	return s
+
+	if cut {
+		b.WriteString("…")
+	}
+	return b.String()
 }
 
 // isTokenRune is the set Token writes bare. It is memory.SafeToken's own set,
