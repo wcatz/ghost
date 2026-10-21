@@ -435,7 +435,7 @@ func opencodeMCPEntryVerdict(entry opencodeMCPEntry, origin opencodeMCPOrigin, g
 		return false, fmt.Sprintf("ghost MCP server command %q in %s is not an executable file (%v)",
 			command[0], commandFile, err)
 	}
-	if !opencodeMCPCommandIsGhost(resolved, ghostBin) {
+	if !mcpCommandIsGhost(resolved, ghostBin) {
 		return false, fmt.Sprintf("ghost MCP server command %q in %s is not the ghost binary — update mcp.ghost.command to %s",
 			command[0], commandFile, opencodeMCPCommandHint(ghostBin))
 	}
@@ -459,29 +459,6 @@ func opencodeMCPCommandHint(ghostBin string) string {
 		bin = "ghost"
 	}
 	return fmt.Sprintf("[%q, \"mcp\"]", bin)
-}
-
-// opencodeMCPCommandIsGhost reports whether the configured command resolves
-// to the ghost binary this run resolved. Identity is the file itself, not
-// its spelling, so a symlink onto the resolved binary is the same
-// registration rather than a different one. When ghost is not on PATH at all
-// there is no reference to compare against, so the command is accepted by
-// name — the ghost-binary check has already failed that run, and a config
-// entry opencode can still spawn is not a second thing to report against it.
-func opencodeMCPCommandIsGhost(resolved, ghostBin string) bool {
-	if ghostBin == "" {
-		base := filepath.Base(resolved)
-		return strings.EqualFold(strings.TrimSuffix(base, filepath.Ext(base)), "ghost")
-	}
-	want, err := os.Stat(ghostBin)
-	if err != nil {
-		return false
-	}
-	got, err := os.Stat(resolved)
-	if err != nil {
-		return false
-	}
-	return os.SameFile(got, want)
 }
 
 // parseOpencodeConfig reads one opencode config file into the slice of the
