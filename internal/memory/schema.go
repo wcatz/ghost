@@ -276,13 +276,6 @@ CREATE TABLE IF NOT EXISTS memory_snapshots (
     -- written, and created_at feeds decay, so restoring "the same memory"
     -- silently aged it backwards.
     created_at    TEXT NOT NULL DEFAULT (datetime('now')),
-    -- The ORIGINAL memory's updated_at, not the moment the snapshot was
-    -- taken. A restore that reset updated_at made an old memory look freshly
-    -- edited (or never edited), and updated_at feeds supersede's candidate
-    -- orientation and the history compact anchor, so restoring "the same
-    -- memory" silently moved its stamp. NULL only on snapshots written
-    -- before this column existed, which recorded no stamp at all.
-    updated_at    TEXT,
     -- Identity and history, so a restore returns the same memory rather than
     -- a lookalike. memory_embeddings and memory_links both reference
     -- memories(id) ON DELETE CASCADE, so a delete-then-reinsert destroys the
@@ -339,7 +332,14 @@ CREATE TABLE IF NOT EXISTS memory_snapshots (
     -- storing one would be a second source for the only value a caller never
     -- states.
     retention TEXT,
-    retention_captured INTEGER NOT NULL DEFAULT 0
+    retention_captured INTEGER NOT NULL DEFAULT 0,
+    -- The ORIGINAL memory's updated_at, not the moment the snapshot was
+    -- taken (schema v29). A restore that reset updated_at made an old memory
+    -- look freshly edited (or never edited), and updated_at feeds supersede's
+    -- candidate orientation and the history compact anchor, so restoring "the
+    -- same memory" silently moved its stamp. NULL on snapshots written
+    -- before this column existed, which recorded no stamp at all.
+    updated_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_snapshots_project ON memory_snapshots(project_id, snapshot_id);
 
