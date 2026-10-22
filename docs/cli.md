@@ -957,6 +957,8 @@ A row refused by the credential guard is different from every other left-out row
 
 The `!` line names the **field** and nothing else. The value is not in the report, not in the exit error, and not in any part of the export's own output — a refused credential must not be relocated into a terminal, a log or a paste. The same is true of the importer's report, and for the same reason.
 
+The value is judged as a READER sees it, so an invisible Unicode FORMAT character (category Cf — a zero-width space, a soft hyphen) inside a token does not hide it: a record whose token carries one is refused exactly as the record carrying the token itself is, and the report names the field in the same words. **The detection-only set is broader: category Cf, combining marks (Mn/Me), the Hangul fillers (U+115F, U+1160, U+3164, U+FFA0), the object replacement character (U+FFFC), the braille blank (U+2800), and all control characters (Cc) except tab, newline and carriage return. This set is used only to build the copy the detector judges; the renderers and tag boundary still use Cf only.**
+
 To fix the row, **edit the field** rather than delete the memory: put a pointer to where the value lives and how to read it, never the value, then **re-export** — a corrected row is still refused until the artifact is written again.
 
 Which tool edits which field is derived from the tools' own arguments, so the list cannot drift from them:

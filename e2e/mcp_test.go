@@ -1282,6 +1282,26 @@ func TestMCPLifecycles(t *testing.T) {
 		mustContain(t, "credential refusal", out, "content")
 	})
 
+	t.Run("a save whose token carries an invisible character is refused", func(t *testing.T) {
+		s := newSandbox(t)
+		cs := s.mcpSession(t)
+		// One invisible character inside the token, which is what an
+		// obfuscated paste looks like: the reader sees the key and the bytes
+		// spell something else, so the guard read a value that was not there.
+		const hidden = "\u200b"
+		key := "AKIAIOSFODNN7" + hidden + "EXAMPLE"
+		out := callExpectingError(t, cs, "ghost_memory_save", map[string]any{
+			"project_id": e2eProject,
+			"content":    "the staging access key id is " + key + " and it is in the vault",
+		})
+		mustContain(t, "credential refusal", out, "credential")
+		mustNotContain(t, "credential refusal", out, key)
+		if n := s.queryInt(t, `SELECT COUNT(*) FROM memories WHERE content LIKE '%' || ? || '%'`, key); n != 0 {
+			t.Fatalf("the refused content reached the store")
+		}
+		mustContain(t, "credential refusal", out, "content")
+	})
+
 	t.Run("the decision tool refuses a credential in a nested field", func(t *testing.T) {
 		s := newSandbox(t)
 		cs := s.mcpSession(t)

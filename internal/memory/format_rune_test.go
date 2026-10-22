@@ -2,11 +2,16 @@ package memory
 
 // The FORMAT class, pinned EXACTLY.
 //
-// IsFormatRune is the ONE predicate that answers "is this rune invisible?" for
-// the renderers that print stored text and the write boundaries that refuse
-// it, so the class it names is the whole guarantee: a renderer that escapes the
-// class shows a reader every invisible character a stored value carries, and a
-// write boundary that refuses it keeps one out of the store in the first place.
+// IsFormatRune is the predicate that answers "is this rune invisible?" for the
+// renderers that print stored text and the write boundaries that refuse it, so
+// the class it names is the whole guarantee: a renderer that escapes the class
+// shows a reader every invisible character a stored value carries, and a write
+// boundary that refuses it keeps one out of the store in the first place.
+//
+// The class itself is named in the package the credential guard is written in —
+// the guard has to see THROUGH it to recognise a token one of its characters
+// hides — and this function delegates to that one, so the assertion below pins
+// the answer this package's callers get rather than a second copy of the rule.
 //
 // The assertion below enumerates the EXACT membership over EVERY code point
 // rather than checking a table of hostile examples, because the failures are
