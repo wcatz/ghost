@@ -347,11 +347,13 @@ func responsePartsLen(parts []responsePart) int {
 // of these tools, and a filter or a query narrows the population so a smaller
 // slice of it is the part worth keeping.
 const (
-	memoriesListCutAdvice   = "Ask for fewer results (a lower `limit`) or narrow with `category` or `retention` to see the rest."
-	searchAllCutAdvice      = "Ask for fewer results (a lower `limit`) or narrow the query to see the rest."
-	taskListCutAdvice       = "Ask for fewer results (a lower `limit`) or narrow with `status` to see the rest."
-	decisionsListCutAdvice  = "Ask for fewer results (a lower `limit`) or narrow with `status` to see the rest."
-	listProjectsCutAdvice   = "No argument pages this list: a project left out is still reachable by passing its id or path as `project_id` to the other tools."
-	healthCutAdvice         = "Only the per-project lines are cut, last first; the Projects count above is the whole store, and every other line is shown in full. `ghost_list_projects` lists the same projects within the same budget."
-	projectContextCutAdvice = "Ask for fewer results (a lower `limit`) or use ghost_memories_list to browse the rest."
+	memoriesListCutAdvice      = "Ask for fewer results (a lower `limit`) or narrow with `category` or `retention` to see the rest."
+	searchAllCutAdvice         = "Ask for fewer results (a lower `limit`) or narrow the query to see the rest."
+	taskListCutAdvice          = "Ask for fewer results (a lower `limit`) or narrow with `status` to see the rest."
+	decisionsListCutAdvice     = "Ask for fewer results (a lower `limit`) or narrow with `status` to see the rest."
+	taskResourceCutAdvice      = "Use ghost_task_list to browse the rest."
+	decisionsResourceCutAdvice = "Use ghost_decisions_list to browse the rest."
+	listProjectsCutAdvice      = "No argument pages this list: a project left out is still reachable by passing its id or path as `project_id` to the other tools."
+	healthCutAdvice            = "Only the per-project lines are cut, last first; the Projects count above is the whole store, and every other line is shown in full. `ghost_list_projects` lists the same projects within the same budget."
+	projectContextCutAdvice    = "Ask for fewer results (a lower `limit`) or use ghost_memories_list to browse the rest."
 )
