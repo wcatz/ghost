@@ -613,3 +613,58 @@ func TestReap_UnusableRootReturnsError(t *testing.T) {
 		t.Errorf("removed = %d, want 0", removed)
 	}
 }
+
+func TestOwnerMarker_RefusesSymlink(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "entry")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(t.TempDir(), "outside")
+	if err := os.WriteFile(outside, []byte("pid=1\nstart=none\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(dir, ownerFile)
+	if err := os.Symlink(outside, marker); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skip("symlink creation requires privileges on Windows")
+		}
+		t.Fatal(err)
+	}
+	pid, start, ok := ownerMarker(dir)
+	if ok {
+		t.Fatalf("ownerMarker followed a symlinked marker: pid=%d start=%q", pid, start)
+	}
+}
+
+func TestOwnerMarker_RefusesOversized(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "entry")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(dir, ownerFile)
+	valid := "pid=" + strconv.Itoa(os.Getpid()) + "\nstart=none\n"
+	if err := os.WriteFile(marker, []byte(valid), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// unpadded valid marker works
+	pid, start, ok := ownerMarker(dir)
+	if !ok {
+		t.Fatalf("valid unpadded marker refused: pid=%d start=%q", pid, start)
+	}
+
+	// pad past the limit
+	pad := make([]byte, ownerMarkerMaxBytes+1-len(valid))
+	for i := range pad {
+		pad[i] = 'a'
+	}
+	big := append([]byte(valid), pad...)
+	if err := os.WriteFile(marker, big, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pid, start, ok = ownerMarker(dir)
+	if ok {
+		t.Fatalf("ownerMarker accepted an oversized marker: pid=%d start=%q", pid, start)
+	}
+}
