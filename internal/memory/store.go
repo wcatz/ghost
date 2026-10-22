@@ -8862,8 +8862,11 @@ func corpusRowsStillPresent(ctx context.Context, tx *sql.Tx, projectID string, f
 // instead of leaving the operator to find out later, when the row they thought
 // was short-lived turns up in every session's context.
 type RestoreResult struct {
-	// Restored is the number of memories the restore brought back: rows it
-	// rewrote in place plus rows it re-inserted under their old ids.
+	// Restored is the number of memories the restore changed: rows it removed
+	// (the replace's output), rows it rewrote in place because a recorded
+	// column differed, plus rows it re-inserted under their old ids. A row it
+	// matched and found already equal to the snapshot is not counted, so a
+	// repeat run reports zero.
 	Restored int
 	// UncapturedRetention is the count of the marker-0 rows the restore
 	// actually covered — a "covered" row being one the restore rewrote in
@@ -9097,7 +9100,43 @@ func (s *Store) RestoreSnapshot(ctx context.Context, projectID string) (RestoreR
 		`DELETE FROM link_scans WHERE memory_id IN (`+revertTextIDsSQL+`)`, snapshotID); err != nil {
 		return RestoreResult{}, fmt.Errorf("invalidate reverted link scan: %w", err)
 	}
-	updated, err := tx.ExecContext(ctx, `
+	// The rows the UPDATE below actually changes, for the count the caller
+	// reports. This is WIDER than changedIDs: that set is the history gate and
+	// compares the four recorded columns only, while the UPDATE also rewrites
+	// tags, timestamps, access counters, provenance, scope, retention and the
+	// expiry, and a row whose only difference is one of those was still changed
+	// by the restore. IS NOT keeps a NULL on either side comparable, and scope,
+	// retention and the expiry are compared the way the UPDATE assigns them
+	// (under their captured markers), so a row the UPDATE leaves as it is never
+	// counts. It is read before the UPDATE for the same reason changedIDs is.
+	changedRowIDs, err := selectIDs(ctx, tx, `
+		SELECT m.id FROM memories m
+		JOIN memory_snapshots s ON s.memory_id = m.id
+		WHERE s.snapshot_id = ? AND m.project_id = s.project_id
+		  AND m.pinned = 0 AND m.resolved_at IS NULL
+		  AND m.`+retentionExemptSQL+`
+		  AND (m.category IS NOT s.category OR m.content IS NOT s.content
+		       OR m.importance IS NOT s.importance OR m.source IS NOT s.source
+		       OR m.tags IS NOT s.tags OR m.created_at IS NOT s.created_at
+		       OR m.updated_at IS NOT COALESCE(s.updated_at, m.updated_at)
+		       OR m.access_count IS NOT s.access_count
+		       OR m.last_accessed IS NOT s.last_accessed
+		       OR m.agent IS NOT s.agent OR m.session_id IS NOT s.session_id
+		       OR m.source_ref IS NOT s.source_ref OR m.confidence IS NOT s.confidence
+		       OR m.valid_from IS NOT s.valid_from OR m.valid_until IS NOT s.valid_until
+		       OR m.verified_at IS NOT s.verified_at
+		       OR (s.scope_captured = 1 AND m.scope IS NOT s.scope)
+		       OR (s.retention_captured = 1 AND s.retention IS NOT NULL
+		           AND (m.retention IS NOT s.retention
+		                OR m.expires_at IS NOT CASE
+		                     WHEN s.retention = 'session' AND m.retention = 'session'
+		                          AND m.expires_at IS NOT NULL THEN m.expires_at
+		                     WHEN s.retention = 'session' THEN ?
+		                     ELSE NULL END)))`, snapshotID, sessionExp)
+	if err != nil {
+		return RestoreResult{}, fmt.Errorf("find rows this restore rewrites: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
 		UPDATE memories SET
 		    category = s.category, content = s.content, importance = s.importance,
 		    source = s.source, tags = s.tags, created_at = s.created_at,
@@ -9161,11 +9200,13 @@ func (s *Store) RestoreSnapshot(ctx context.Context, projectID string) (RestoreR
 		  AND memories.project_id = s.project_id
 		  AND memories.pinned = 0 AND memories.resolved_at IS NULL
 		  AND memories.`+retentionExemptSQL+`
-	`, sessionExp, snapshotID)
-	if err != nil {
+	`, sessionExp, snapshotID); err != nil {
 		return RestoreResult{}, fmt.Errorf("restore existing rows: %w", err)
 	}
-	updatedN, _ := updated.RowsAffected()
+	// The UPDATE's RowsAffected would count every covered row, changed or not,
+	// so a repeat run would report work it never did; the count is the set read
+	// before it.
+	updatedN := int64(len(changedRowIDs))
 
 	// Bring back rows that are genuinely gone, under the id they had, so
 	// anything still pointing at them resolves again.

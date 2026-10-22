@@ -201,8 +201,8 @@ func TestRestoreDoesNotConsumeTheSnapshot(t *testing.T) {
 	if got := state(); got != afterFirst {
 		t.Errorf("second restore changed the corpus:\nafter first:  %s\nafter second: %s", afterFirst, got)
 	}
-	if second.Restored == 0 {
-		t.Errorf("second restore reported no work; it should still find the row to confirm in place")
+	if second.Restored != 0 {
+		t.Errorf("second restore reported %d; it changed nothing, so it must report none", second.Restored)
 	}
 }
 
@@ -641,5 +641,120 @@ func TestRestorePicksTheSnapshotInsideItsWriteTransaction(t *testing.T) {
 	}
 	if live(reflect2Out) {
 		t.Errorf("reflection 2's output survived the restore: it was serialised before the restore and should have been undone")
+	}
+}
+
+// TestRestoreCountsOnlyRowsItChanged: Restored is what the operator is told, so
+// it must count rows the restore removed, rewrote or re-inserted — not rows it
+// matched and found already equal to the snapshot. A repeat run changes no
+// column and appends no history row, so it has to report zero.
+func TestRestoreCountsOnlyRowsItChanged(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	for _, c := range []string{"first merged source fact", "second merged source fact", "verbatim kept fact", "dropped fact"} {
+		if _, err := s.Create(ctx, testProject, Memory{
+			Category: "fact", Content: c, Source: "reflection", Importance: 0.5,
+		}); err != nil {
+			t.Fatalf("create %q: %v", c, err)
+		}
+	}
+	if _, _, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
+		{Category: "fact", Content: "first and second merged into one", Importance: 0.6},
+		{Category: "fact", Content: "verbatim kept fact", Importance: 0.5},
+		{Category: "fact", Content: "brand new fact", Importance: 0.6},
+	}, "", nil); err != nil {
+		t.Fatalf("ReplaceNonManual: %v", err)
+	}
+
+	historyRows := func() int {
+		t.Helper()
+		var n int
+		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM memory_history`).Scan(&n); err != nil {
+			t.Fatalf("count history: %v", err)
+		}
+		return n
+	}
+
+	first, err := s.RestoreSnapshot(ctx, testProject)
+	if err != nil {
+		t.Fatalf("first RestoreSnapshot: %v", err)
+	}
+	// Two removed (merge output, new row) + three re-inserted (both merge
+	// sources, dropped row); the verbatim row matched and changed nothing.
+	if first.Restored != 5 {
+		t.Errorf("first restore reported %d, want 5 (2 removed + 3 re-inserted; the unchanged verbatim row is not a change)", first.Restored)
+	}
+
+	h := historyRows()
+	second, err := s.RestoreSnapshot(ctx, testProject)
+	if err != nil {
+		t.Fatalf("second RestoreSnapshot: %v", err)
+	}
+	if second.Restored != 0 {
+		t.Errorf("second restore reported %d, want 0: it changed no column of any memory", second.Restored)
+	}
+	if got := historyRows(); got != h {
+		t.Errorf("second restore appended %d history rows, want 0", got-h)
+	}
+}
+
+// TestRestoreCountsATagsOnlyRevert: the history gate compares four recorded
+// columns, but the restore rewrites more than those. A row whose only
+// difference from the snapshot is its tags was changed by the restore, so the
+// count includes it, while the history (which records no tags-only change)
+// stays untouched.
+func TestRestoreCountsATagsOnlyRevert(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	id, err := s.Create(ctx, testProject, Memory{
+		Category: "fact", Content: "a fact whose tags get edited", Source: "reflection",
+		Importance: 0.5, Tags: []string{"a"},
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, _, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
+		{Category: "fact", Content: "a fact whose tags get edited", Importance: 0.5, Tags: []string{"a"}},
+	}, "", nil); err != nil {
+		t.Fatalf("ReplaceNonManual: %v", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `UPDATE memories SET tags = '["zzz"]' WHERE id = ?`, id); err != nil {
+		t.Fatalf("edit tags: %v", err)
+	}
+	var h int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM memory_history`).Scan(&h); err != nil {
+		t.Fatalf("count history: %v", err)
+	}
+
+	res, err := s.RestoreSnapshot(ctx, testProject)
+	if err != nil {
+		t.Fatalf("RestoreSnapshot: %v", err)
+	}
+	if res.Restored != 1 {
+		t.Errorf("restore reported %d, want 1: it put the tags back", res.Restored)
+	}
+	var tags string
+	if err := s.db.QueryRowContext(ctx, `SELECT tags FROM memories WHERE id = ?`, id).Scan(&tags); err != nil {
+		t.Fatalf("read tags: %v", err)
+	}
+	if tags != `["a"]` {
+		t.Fatalf("tags = %s, want [\"a\"]: the restore did not revert them", tags)
+	}
+	var h2 int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM memory_history`).Scan(&h2); err != nil {
+		t.Fatalf("count history: %v", err)
+	}
+	if h2 != h {
+		t.Errorf("a tags-only revert appended %d history rows, want 0", h2-h)
+	}
+
+	again, err := s.RestoreSnapshot(ctx, testProject)
+	if err != nil {
+		t.Fatalf("second RestoreSnapshot: %v", err)
+	}
+	if again.Restored != 0 {
+		t.Errorf("second restore reported %d, want 0", again.Restored)
 	}
 }
