@@ -2670,7 +2670,7 @@ Three layers, and the third is about the artifact rather than the packages.
 make test-e2e          # or: go test -tags e2e ./e2e/ -count=1
 ```
 
-The tag is the whole mechanism for keeping `go test ./...` and CI unchanged: with it absent every file in `e2e/` is excluded, and the `./...` pattern skips a directory whose files are all build-constrained out — silently, and verified rather than assumed. There is no second `go test` line in CI, so the layer runs on demand and locally, not on every push.
+The tag is the whole mechanism for keeping `go test ./...` unchanged: with it absent every file in `e2e/` is excluded, and the `./...` pattern skips a directory whose files are all build-constrained out — silently, and verified rather than assumed. CI does run the layer regardless — both the required `build-and-test` job and the `ubuntu-26-canary` job in `.github/workflows/ci.yml` carry an `E2E (built binary)` step running `go test -tags e2e -count=1 ./e2e/` ("Without this step nothing ran it"), so the suite runs on every pull request and every push to main, and a red run in `build-and-test` blocks a merge. The layer also runs on demand and locally, via `make test-e2e` or `go test -tags e2e ./e2e/ -count=1`.
 
 What it covers, and why it cannot be in-process:
 
