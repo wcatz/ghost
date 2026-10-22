@@ -163,3 +163,77 @@ func TestTheExportReportNamesTheEdgesItLeftOut(t *testing.T) {
 		t.Errorf("the artifact carries an edge whose endpoint it does not:\n%s", body)
 	}
 }
+
+// TestTheExportReportNamesEachRefusedEdgeDistinctly: two refused supersedes
+// edges from one source must not print the same left-out line. The report names
+// the source, the relation and each edge's own target, so the two lines differ.
+func TestTheExportReportNamesEachRefusedEdgeDistinctly(t *testing.T) {
+	ctx := context.Background()
+	db, src := transferTestStoreWithDB(t)
+	if err := src.EnsureProject(ctx, "p1", "/src/p1", "one"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	newer, err := src.Create(ctx, "p1", memory.Memory{Category: "fact", Content: "the new answer", Source: "mcp"})
+	if err != nil {
+		t.Fatalf("Create(newer): %v", err)
+	}
+	older1, err := src.Create(ctx, "p1", memory.Memory{Category: "fact", Content: "the first old answer", Source: "mcp"})
+	if err != nil {
+		t.Fatalf("Create(older1): %v", err)
+	}
+	older2, err := src.Create(ctx, "p1", memory.Memory{Category: "fact", Content: "the second old answer", Source: "mcp"})
+	if err != nil {
+		t.Fatalf("Create(older2): %v", err)
+	}
+	if _, err := db.Exec(
+		`INSERT INTO memory_links (source_id, target_id, relation, strength, source, created_at) VALUES (?, ?, 'supersedes', 4.2, 'llm', 'not a stamp')`,
+		newer, older1); err != nil {
+		t.Fatalf("plant the first edge: %v", err)
+	}
+	if _, err := db.Exec(
+		`INSERT INTO memory_links (source_id, target_id, relation, strength, source, created_at) VALUES (?, ?, 'supersedes', 4.2, 'llm', 'not a stamp')`,
+		newer, older2); err != nil {
+		t.Fatalf("plant the second edge: %v", err)
+	}
+
+	path := filepath.Join(t.TempDir(), "artifact.jsonl")
+	var summary, warn strings.Builder
+	err = runExportCore(ctx, src, &summary, &warn, path, "")
+	if err == nil {
+		t.Fatal("the export exited zero with edges it left out of the artifact")
+	}
+	report := warn.String()
+
+	var linkLines []string
+	for _, line := range strings.Split(report, "\n") {
+		if strings.Contains(line, "! left out: link ") {
+			linkLines = append(linkLines, line)
+		}
+	}
+	if len(linkLines) != 2 {
+		t.Fatalf("got %d left-out link lines, want 2:\n%s", len(linkLines), report)
+	}
+	if linkLines[0] == linkLines[1] {
+		t.Fatalf("the two left-out link lines are identical:\n%s", report)
+	}
+	for _, target := range []string{older1, older2} {
+		found := false
+		for _, line := range linkLines {
+			if strings.Contains(line, target) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("no left-out link line names target %s:\n%s", target, report)
+		}
+	}
+	for _, line := range linkLines {
+		if !strings.Contains(line, newer) {
+			t.Errorf("a left-out link line does not name the source %s:\n%s", newer, line)
+		}
+		if !strings.Contains(line, "supersedes") {
+			t.Errorf("a left-out link line does not name the relation:\n%s", line)
+		}
+	}
+}
