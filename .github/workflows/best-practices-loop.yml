@@ -61,7 +61,8 @@ jobs:
             | .reviewThreads.nodes[]
             | select(.isResolved)
             | .comments.nodes[]
-            | select((.author.login // "") | startswith("github-actions"))
+            | select((.author.login // "") == "github-actions[bot]"
+                     or (.author.login // "") == "review-sweeper[bot]")
             | "--- FINDING (PR #\($pr.number) \($pr.title)) ---\n\(.body)\n"
           ' prs.json > findings.txt
           echo "findings bytes: $(wc -c < findings.txt)"

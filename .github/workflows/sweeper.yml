@@ -48,6 +48,9 @@ permissions:
   # Publishing the merge gate. GITHUB_TOKEN can create check runs with
   # this scope; no App identity is involved in gating.
   checks: write
+  # Reading the Reviewer workflow's runs, so a comment can check whether
+  # the newest run for this head completed with success.
+  actions: read
 
 concurrency:
   group: sweeper-${{ github.event.workflow_run.pull_requests[0].number || github.event.issue.number }}
@@ -109,6 +112,14 @@ jobs:
           APP_TOKEN: ${{ steps.app-token.outputs.token }}
           NUMBER: ${{ steps.pr.outputs.number }}
           WF_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          # The commit the run that woke the sweeper reviewed. Empty for a
+          # comment: a comment is not a run.
+          WF_HEAD: ${{ github.event.workflow_run.head_sha }}
+          # The path and triggering event of the run that woke the sweeper,
+          # so a run that merely shares the "Reviewer" name cannot stand
+          # in for the real one.
+          WF_PATH: ${{ github.event.workflow_run.path }}
+          WF_EVENT: ${{ github.event.workflow_run.event }}
         run: |
           [ -n "$NUMBER" ] || { echo "no PR"; exit 0; }
 
@@ -179,35 +190,79 @@ jobs:
             -F number="$NUMBER" \
             --jq '.data.repository.pullRequest.headRefOid')"
 
-          # No judgement was produced for this commit, so the gate fails
-          # closed. It is still WRITTEN — leaving it unpublished would
-          # read as "Expected — waiting for status" forever, which blocks
-          # the PR with nothing a re-run can clear.
-          case "${GITHUB_EVENT_NAME}:${WF_CONCLUSION}" in
-            workflow_run:success|workflow_run:skipped|issue_comment:*) ;;
-            *)
-              set_gate "$HEADREF" failure \
-                "The review did not complete (${WF_CONCLUSION})" \
-                "The Reviewer workflow ended as \`${WF_CONCLUSION}\`, so this commit was never judged. Re-run the Reviewer or push a new commit."
-              exit 0
-              ;;
-          esac
+          # The conclusion the gate is allowed to trust. For a run that
+          # woke the sweeper it is the run's own; for a comment it is the
+          # newest Reviewer run for this head, looked up below, because a
+          # comment is not a run and cannot vouch for one. An empty value
+          # means no run was found, and the gate fails closed on that.
+          if [ "$GITHUB_EVENT_NAME" = "workflow_run" ]; then
+            WF_PATH_CLEAN="${WF_PATH%%@*}"
+            if [ "$WF_PATH_CLEAN" = ".github/workflows/reviewer.yml" ] \
+               && [ "$WF_EVENT" = "pull_request" ]; then
+              RUN_CONCLUSION="$WF_CONCLUSION"
+              RUN_HEAD="$WF_HEAD"
+            else
+              RUN_CONCLUSION=""
+              RUN_HEAD=""
+            fi
+          else
+            RUN_CONCLUSION="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs?head_sha=$HEADREF&event=pull_request&per_page=100" 2>/dev/null \
+              | jq -r '[.workflow_runs[] | select((.path | split("@")[0]) == ".github/workflows/reviewer.yml" and .event == "pull_request")] | sort_by(.created_at) | reverse | .[0].conclusion // empty' 2>/dev/null)" || RUN_CONCLUSION=""
+            RUN_HEAD=""
+          fi
+          [ -n "$RUN_CONCLUSION" ] || RUN_CONCLUSION=""
+
+          # The decision is ONE tested script (.github/scripts/review_gate.py)
+          # and the question it asks - which commits a review of the review
+          # bot's own says were reviewed - is another
+          # (.github/scripts/review_marker.py). Both are read from the
+          # TRUSTED base: the default branch, at the commit this workflow
+          # file itself came from (GITHUB_SHA is the default branch's tip
+          # for both events this workflow runs on). The pull request
+          # cannot edit them.
+          #
+          # The sweeper checks nothing out - it runs with the
+          # pull-requests and checks scopes only, and no scope is added
+          # here - so the scripts are read over the repository's own raw
+          # endpoint, which serves the file at the commit named in the
+          # URL. That is the same base the reviewer reads its scripts
+          # from, and the same one the pull request cannot reach.
+          SCRIPTS="${RUNNER_TEMP}/sweeper-scripts"
+          mkdir -p "$SCRIPTS"
+          BASE="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/.github/scripts"
+          for script in review_gate.py review_marker.py; do
+            if ! curl -fsSL "${BASE}/${script}" -o "${SCRIPTS}/${script}"; then
+              echo "::error::could not read the trusted ${script} from the base branch"
+              exit 1
+            fi
+          done
+
+          # A marker counts only when the review carrying it was posted by
+          # the review bot itself — the app the workflow mints, or the
+          # workflow token it falls back to. The review author must be
+          # exactly `github-actions[bot]` or `review-sweeper[bot]` with
+          # user type `Bot`. Nobody else says what has been reviewed.
+          REVIEWS_FILE="$(mktemp)"
+          gh api "repos/$GITHUB_REPOSITORY/pulls/$NUMBER/reviews" --paginate \
+            > "$REVIEWS_FILE" 2>/dev/null || : > "$REVIEWS_FILE"
+          report="$(python3 -I "${SCRIPTS}/review_marker.py" \
+            --reviews "$REVIEWS_FILE" --head "$HEADREF" 2>/dev/null)" || report=""
+          rm -f "$REVIEWS_FILE"
+          JUDGED="$(printf '%s' "$report" | jq -r '.judged // false' 2>/dev/null)"
+          [ "$JUDGED" = "true" ] || JUDGED=false
 
           # A gate that is still PENDING on REVIEW-UNAVAILABLE is the
           # review's own report that the models were unavailable: an
           # outage, not a verdict. It is left pending while NO review
           # judged this head — the review that just ran produced
           # nothing — because a completed gate published here would
-          # replace it with a verdict nobody reached, and a green gate on
-          # a pull request nothing was judged on is the exact harm the
-          # pending gate exists to avoid.
+          # replace it with a verdict nobody reached. A green gate on a
+          # pull request nothing judged is the harm the pending gate
+          # exists to avoid.
           #
           # A review that DOES judge this head completes it: the gate
           # published below is the newer check run of the same name, and
           # a re-run of the review is what the gate has always meant.
-          # The marker is the reviewer's own — post_review.py appends it
-          # to every review it posts, and the Reviewer workflow reads it
-          # back the same way.
           #
           # The title is the one the Reviewer workflow publishes
           # (.github/workflows/reviewer.yml, the publish-pending-gate
@@ -215,19 +270,55 @@ jobs:
           # (.github/workflows/review-retry.yml).
           PENDING_TITLES="$(gh api "repos/$GITHUB_REPOSITORY/commits/$HEADREF/check-runs" --paginate \
             --jq '.check_runs[] | select(.name == "review-gate" and .status != "completed") | .output.title // ""')"
-          PENDING_TITLE="$(printf '%s\n' "$PENDING_TITLES" | grep -F "REVIEW-UNAVAILABLE" | head -n 1 || true)"
-          if [ -n "$PENDING_TITLE" ]; then
-            if gh api "repos/$GITHUB_REPOSITORY/pulls/$NUMBER/reviews" --paginate \
-                 --jq ".[] | (.body // \"\")
-                        | select(contains(\"<!-- ghost-review:${HEADREF} -->\")) | \"judged\"" \
-                 | grep -q .; then
-              echo "::notice::a review judged this head; the pending gate is completed below"
-            else
-              echo "::notice::the review-gate is pending on REVIEW-UNAVAILABLE and is left pending: ${PENDING_TITLE}"
+          PENDING_ARGS=()
+          while IFS= read -r title; do
+            [ -n "$title" ] || continue
+            PENDING_ARGS+=(--pending-title "$title")
+          done <<< "$PENDING_TITLES"
+
+          # The first question: the one that needs no thread counts. A
+          # run that did not complete, a run that was skipped, a run that
+          # judged another commit, and a head no review judged all have
+          # their answer here — and none of them is a green gate. A run
+          # that succeeded on another commit, or an empty run head, says
+          # nothing about the commit the pull request is on now.
+          #
+          # No judgement was produced for this commit, so the gate fails
+          # closed. It is still WRITTEN — leaving it unpublished would
+          # read as "Expected — waiting for status" forever, which blocks
+          # the PR with nothing a re-run can clear.
+          pre="$(python3 -I "${SCRIPTS}/review_gate.py" --mode pre \
+            --event "$GITHUB_EVENT_NAME" \
+            --conclusion "$RUN_CONCLUSION" \
+            --run-head "$RUN_HEAD" \
+            --head "$HEADREF" \
+            --judged "$JUDGED" \
+            "${PENDING_ARGS[@]}" 2>/dev/null)" || pre=""
+          pre_publish="$(printf '%s' "$pre" | jq -r '.publish // empty' 2>/dev/null)"
+          pre_title="$(printf '%s' "$pre" | jq -r '.title // empty' 2>/dev/null)"
+          pre_summary="$(printf '%s' "$pre" | jq -r '.summary // empty' 2>/dev/null)"
+          pre_reason="$(printf '%s' "$pre" | jq -r '.reason // empty' 2>/dev/null)"
+          if [ -z "$pre_publish" ]; then
+            # A script that does not answer decides nothing, and a gate
+            # that cannot be evaluated fails closed.
+            echo "::error::the gate decision script did not answer"
+            exit 1
+          fi
+          case "$pre_publish" in
+            none)
+              echo "::notice::the review-gate is pending on REVIEW-UNAVAILABLE and is left pending: ${pre_reason}"
               GATE_PENDING=1
               exit 0
-            fi
-          fi
+              ;;
+            success|failure)
+              echo "review-gate decision: ${pre_publish} — ${pre_reason}"
+              set_gate "$HEADREF" "$pre_publish" "$pre_title" "$pre_summary"
+              exit 0
+              ;;
+            *)
+              # The reviewer's threads decide the rest.
+              ;;
+          esac
 
           PAGES_FILE="$(mktemp)"
           CURSOR_ARG=()
@@ -268,35 +359,51 @@ jobs:
           # accepted trade-off for never letting a dead thread block merge.
           STALE="$(echo "$THREADS" | jq '[.reviewThreads.nodes[]
             | select(.isResolved==false and .isOutdated==true)
-            | select((.comments.nodes[0].author.login // "")
-              | startswith("github-actions") or startswith("review-sweeper")) | .id]')"
+            | select((.comments.nodes[0].author.login // "") == "github-actions[bot]"
+              or (.comments.nodes[0].author.login // "") == "review-sweeper[bot]") | .id]')"
 
           LIVE="$(echo "$THREADS" | jq '[.reviewThreads.nodes[]
             | select(.isResolved==false and .isOutdated==false)
-            | select((.comments.nodes[0].author.login // "")
-              | startswith("github-actions") or startswith("review-sweeper"))]')"
+            | select((.comments.nodes[0].author.login // "") == "github-actions[bot]"
+              or (.comments.nodes[0].author.login // "") == "review-sweeper[bot]") | .id]')"
 
           N_STALE="$(jq length <<<"$STALE")"
           N_LIVE="$(jq length <<<"$LIVE")"
 
-          # A stale thread may only be swept when a review actually
-          # judged this commit. workflow_run:skipped reaches this point so
-          # the gate still gets published, but a skipped review produced
-          # no judgement — resolving on its strength would clear findings
-          # nothing re-checked. That loss is permanent, not cosmetic:
-          # reviewer.yml feeds resolved threads back to the model as
-          # dismissed, so a still-valid finding swept here is never
-          # re-raised. This is the guard the old success-only job `if`
-          # used to provide; publishing the gate on every conclusion took
-          # it away, so it is restored explicitly here.
-          SWEEP_OK=1
-          if [ "$GITHUB_EVENT_NAME" = "workflow_run" ] \
-             && [ "$WF_CONCLUSION" != "success" ]; then
-            SWEEP_OK=0
+          # The rest of the decision: the reviewer's threads. The head was
+          # judged, so the verdict is the findings that are still open
+          # against it.
+          decision="$(python3 -I "${SCRIPTS}/review_gate.py" --mode gate \
+            --event "$GITHUB_EVENT_NAME" \
+            --conclusion "$RUN_CONCLUSION" \
+            --run-head "$RUN_HEAD" \
+            --head "$HEADREF" \
+            --judged "$JUDGED" \
+            --live "$N_LIVE" \
+            --stale "$N_STALE" \
+            "${PENDING_ARGS[@]}" 2>/dev/null)" || decision=""
+          publish="$(printf '%s' "$decision" | jq -r '.publish // empty' 2>/dev/null)"
+          title="$(printf '%s' "$decision" | jq -r '.title // empty' 2>/dev/null)"
+          summary="$(printf '%s' "$decision" | jq -r '.summary // empty' 2>/dev/null)"
+          sweep_ok="$(printf '%s' "$decision" | jq -r '.sweep // false' 2>/dev/null)"
+          reason="$(printf '%s' "$decision" | jq -r '.reason // empty' 2>/dev/null)"
+          if [ -z "$publish" ]; then
+            echo "::error::the gate decision script did not answer"
+            exit 1
           fi
+          echo "review-gate decision: ${publish} — ${reason}"
 
-          if [ "$N_STALE" -gt 0 ] && [ "$SWEEP_OK" != 1 ]; then
-            echo "not sweeping $N_STALE stale thread(s): the Reviewer ended as '${WF_CONCLUSION}', so nothing judged this commit."
+          # A stale thread may only be swept when a review actually
+          # judged this commit. The decision says so: a run that judged
+          # nothing - a skipped run, a run that judged another commit -
+          # has no judgement to sweep on, and resolving on its strength
+          # would clear findings nothing re-checked. That loss is
+          # permanent, not cosmetic: reviewer.yml feeds resolved threads
+          # back to the model as dismissed, so a still-valid finding
+          # swept here is never re-raised. A comment is not a review
+          # either, so it never sweeps.
+          if [ "$N_STALE" -gt 0 ] && [ "$sweep_ok" != "true" ]; then
+            echo "not sweeping $N_STALE stale thread(s): nothing judged this commit."
           elif [ "$N_STALE" -gt 0 ]; then
             if [ -n "$APP_TOKEN" ]; then
               RESOLVED=0
@@ -328,12 +435,17 @@ jobs:
           # it: the author fixes the code (the thread goes outdated) or a
           # human resolves the thread. Nothing here needs a capability the
           # bot lacks.
-          if [ "$N_LIVE" -gt 0 ]; then
-            set_gate "$HEADREF" failure \
-              "$N_LIVE unresolved reviewer finding(s)" \
-              "The reviewer has $N_LIVE finding(s) that are still open against the current diff. Address the code, or resolve the thread if the finding is wrong. The gate re-evaluates on the next review."
-          else
-            set_gate "$HEADREF" success \
-              "No unresolved reviewer findings" \
-              "Every reviewer finding on this PR is either resolved or outdated against the current diff."
-          fi
+          case "$publish" in
+            success)
+              set_gate "$HEADREF" success "$title" "$summary"
+              ;;
+            failure)
+              set_gate "$HEADREF" failure "$title" "$summary"
+              ;;
+            *)
+              # Nothing is published: a gate that is waiting for a review
+              # keeps waiting.
+              GATE_PENDING=1
+              echo "::notice::no gate published: ${reason}"
+              ;;
+          esac

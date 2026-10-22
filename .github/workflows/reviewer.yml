@@ -394,19 +394,34 @@ jobs:
           # written into the review body by build_review(); reading it back
           # keeps this independent of the summary comment (phase 4).
           #
-          # `gh api --paginate` applies --jq to EACH page separately and
-          # concatenates the results, so a PR with more than one page of
-          # reviews emits one SHA per page and LAST_SHA would become a
-          # multi-line string that `git cat-file -e` rejects, silently
-          # forcing a full review forever. `tail -n 1` keeps the newest.
-          # gh sets per_page=100 when paginating (verified against
-          # pulls/421/reviews: 32 reviews -> 1 page; per_page=10 -> 4
-          # separate --jq outputs), so this only bites past 100 reviews —
-          # rare, but PR #421 reached 32 unattended.
-          LAST_SHA="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews" \
-            --paginate --jq '[.[] | .body
-              | capture("<!-- ghost-review:(?<sha>[0-9a-f]{7,40}) -->")?.sha]
-              | last // empty' 2>/dev/null | tail -n 1 || true)"
+          # A marker counts only when the review carrying it was posted by
+          # the review bot itself — the app the workflow mints, or the
+          # workflow token it falls back to. The review author must be
+          # exactly `github-actions[bot]` or `review-sweeper[bot]` with
+          # user type `Bot`. Nobody else says what has been reviewed.
+          #
+          # The rule is ONE tested script (.github/scripts/review_marker.py),
+          # read from the TRUSTED copy of the scripts - the default
+          # branch - so a pull request cannot edit the question. It reads
+          # every page of the answer (`gh api --paginate` prints one
+          # array per page) and keeps the newest marker the bot posted.
+          #
+          # A base branch that predates the rule cannot answer, and an
+          # unknown answer is NO MARKER: the whole pull request is
+          # reviewed below, which is the safe direction - a review, not
+          # a skip.
+          REVIEWS_FILE="$(mktemp "${RUNNER_TEMP}/reviews.XXXXXX")"
+          gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews" \
+            --paginate > "$REVIEWS_FILE" 2>/dev/null || : > "$REVIEWS_FILE"
+          LAST_SHA=""
+          if [ -f "${RUNNER_TEMP}/base-scripts/review_marker.py" ]; then
+            report="$(python3 -I "${RUNNER_TEMP}/base-scripts/review_marker.py" \
+              --reviews "$REVIEWS_FILE" 2>/dev/null)" || report=""
+            LAST_SHA="$(printf '%s' "$report" | jq -r '.marker // empty' 2>/dev/null)"
+          else
+            echo "::notice::the base branch carries no review_marker.py; no commit is treated as reviewed, so the whole pull request is reviewed"
+          fi
+          rm -f "$REVIEWS_FILE"
 
           # Decide incremental vs full from the local snapshot. An incremental
           # diff (LAST_SHA..HEAD) is only the PR's own work when the base has
@@ -532,8 +547,8 @@ jobs:
           done
 
           if [ "$PT_OK" = 1 ] && jq -n '[inputs | .nodes[]
-                 | select((.comments.nodes[0].author.login // "")
-                     | startswith("github-actions") or startswith("review-sweeper"))
+                 | select((.comments.nodes[0].author.login // "") == "github-actions[bot]"
+                     or (.comments.nodes[0].author.login // "") == "review-sweeper[bot]")
                  | {resolved: .isResolved,
                     path: .comments.nodes[0].path,
                     line: .comments.nodes[0].line,

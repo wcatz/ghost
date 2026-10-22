@@ -15,6 +15,7 @@ as well, and a model that produced something in its stream was read as
 one that produced nothing.
 """
 
+import json
 import os
 import shutil
 import subprocess
@@ -255,6 +256,92 @@ def cause_of(output):
         if line.startswith("cause<<"):
             return lines[index + 1]
     return ""
+
+
+class TestTheMarkerRead(unittest.TestCase):
+    """The step that decides which commit was already reviewed.
+
+    The reviewer reads the newest review marker out of the pull
+    request's reviews and reviews only what changed since it. Only a
+    marker the review bot posted may be read: a pull request author
+    can post a review on their own pull request, and a marker they
+    wrote used to name a commit the reviewer had never looked at, which
+    made the diff come out empty and every model step skip.
+    """
+
+    BOT = "review-sweeper[bot]"
+    HEAD = "8877fc9b" + "0" * 32
+
+    def _marker_read(self):
+        """The marker read, out of the step's own shell."""
+        lines = step_shell("Prepare review context").splitlines()
+        start = next(index for index, line in enumerate(lines)
+                     if line.startswith("REVIEWS_FILE="))
+        end = next(index for index, line in enumerate(lines)
+                   if line.startswith('rm -f "$REVIEWS_FILE"'))
+        return "\n".join(lines[start:end + 1]) + "\n"
+
+    def _run(self, reviews):
+        """The marker read, run over fixture reviews."""
+        with tempfile.TemporaryDirectory() as folder:
+            runner = os.path.join(folder, "runner-temp")
+            scripts = os.path.join(runner, "base-scripts")
+            os.makedirs(scripts)
+            shutil.copyfile(script_path("review_marker.py"),
+                            os.path.join(scripts, "review_marker.py"))
+            reviews_path = os.path.join(folder, "reviews.json")
+            _write(reviews_path, json.dumps(reviews))
+            # A fake gh: the reviews are the only call this read makes.
+            gh = os.path.join(folder, "gh")
+            _write(gh, "#!/bin/sh\ncat \"$FIXTURE_REVIEWS\"\n")
+            os.chmod(gh, 0o755)
+            step = os.path.join(folder, "marker-read.sh")
+            _write(step, self._marker_read() + '\necho "LAST_SHA=$LAST_SHA"\n')
+            environment = dict(os.environ)
+            environment.update({
+                "PATH": folder + os.pathsep + environment.get("PATH", ""),
+                "RUNNER_TEMP": runner,
+                "GITHUB_REPOSITORY": "wcatz/ghost",
+                "PR_NUMBER": "42",
+                "FIXTURE_REVIEWS": reviews_path,
+            })
+            result = subprocess.run(["bash", "-e", step], env=environment,
+                                    capture_output=True, text=True, check=False)
+            return result
+
+    def _last_sha(self, result):
+        for line in result.stdout.splitlines():
+            if line.startswith("LAST_SHA="):
+                return line.split("=", 1)[1]
+        return None
+
+    def _review(self, login, body):
+        user_type = "Bot" if login == self.BOT else "User"
+        return {"user": {"login": login, "type": user_type},
+                "body": body, "state": "COMMENTED"}
+
+    def _marker(self, sha):
+        return "<!-- ghost-review:%s -->" % sha
+
+    def test_the_marker_the_bot_posted_is_the_commit_to_review_from(self):
+        result = self._run([self._review(self.BOT, self._marker(self.HEAD))])
+        self.assertEqual(self._last_sha(result), self.HEAD)
+
+    def test_a_marker_the_author_posted_is_not_a_commit_to_review_from(self):
+        result = self._run([self._review("the-author",
+                                         self._marker(self.HEAD))])
+        self.assertEqual(self._last_sha(result), "")
+
+    def test_the_bot_marker_is_read_past_the_author_one(self):
+        result = self._run([
+            self._review(self.BOT, self._marker(self.HEAD)),
+            self._review("the-author", self._marker("1111111")),
+        ])
+        self.assertEqual(self._last_sha(result), self.HEAD)
+
+    def test_no_review_at_all_leaves_nothing_to_review_from(self):
+        result = self._run([])
+        self.assertEqual(self._last_sha(result), "")
 
 
 class TestTheClassifyStep(unittest.TestCase):
