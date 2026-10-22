@@ -97,12 +97,22 @@ class _Unreadable:
 UNREADABLE = _Unreadable()
 
 
+# Events opencode writes around the model's work without carrying any of
+# it: a step opens before the first token and closes after the last. A
+# run killed by its own timeout while the provider is still thinking
+# leaves only these behind, and they name nothing the model produced.
+# Text, reasoning and tool events are the model's own and stay evidence,
+# and so does any event type this list does not name.
+_LIFECYCLE_EVENTS = ("step_start", "step_finish")
+
+
 def stream_acted(text):
     """True when the event stream holds anything the model produced.
 
-    An event that is not an error event is the model's own output, and a
-    stream that does not parse counts as produced: the rule fails
-    closed. A stream that could not be READ counts as produced too.
+    An event that is neither an error event nor step bookkeeping is the
+    model's own output, and a stream that does not parse counts as
+    produced: the rule fails closed. A stream that could not be READ
+    counts as produced too.
     """
     if text is UNREADABLE:
         return True
@@ -114,7 +124,9 @@ def stream_acted(text):
             event = json.loads(line)
         except ValueError:
             return True
-        if not isinstance(event, dict) or event.get("type") != "error":
+        if not isinstance(event, dict):
+            return True
+        if event.get("type") not in ("error",) + _LIFECYCLE_EVENTS:
             return True
     return False
 
