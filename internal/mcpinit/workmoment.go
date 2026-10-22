@@ -117,7 +117,7 @@ func runWorkingMoment(p hostevent.Payload, stdout io.Writer) {
 	var label string
 	switch event {
 	case hostevent.EventMessageSubmit:
-		terms = memory.DistinctiveTerms(in.Prompt, workMomentTerms)
+		terms = memory.DistinctiveTerms(in.Prompt, workMomentTerms, sessionLog())
 		label = "message"
 	case hostevent.EventEdit:
 		terms = editTerms(in)
@@ -340,7 +340,7 @@ func editTerms(in workMomentInput) []memory.QueryTerm {
 		text.WriteString(e.OldString)
 	}
 	n := 0
-	for _, t := range memory.DistinctiveTerms(text.String(), 64) {
+	for _, t := range memory.DistinctiveTerms(text.String(), 64, sessionLog()) {
 		if !t.Identifier || n >= workMomentEditTextTerms {
 			continue
 		}

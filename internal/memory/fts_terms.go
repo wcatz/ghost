@@ -1,6 +1,7 @@
 package memory
 
 import (
+	"log/slog"
 	"sort"
 	"strings"
 )
@@ -235,7 +236,7 @@ const (
 // then content words, each tier in original order. It is the SAME extraction
 // the FTS query uses (ftsQueryTerms), so a caller judging a match and the leg
 // retrieving it cannot disagree about what the query's terms are.
-func DistinctiveTerms(text string, max int) []QueryTerm {
+func DistinctiveTerms(text string, max int, logger *slog.Logger) []QueryTerm {
 	if max <= 0 {
 		return nil
 	}
@@ -244,7 +245,7 @@ func DistinctiveTerms(text string, max int) []QueryTerm {
 	}
 	var ids, words []QueryTerm
 	seen := make(map[string]bool)
-	for _, t := range ftsQueryTerms(text, maxDistinctiveScanTerms) {
+	for _, t := range ftsQueryTerms(text, maxDistinctiveScanTerms, logger) {
 		if t.value == ftsTermValueStopword {
 			continue
 		}

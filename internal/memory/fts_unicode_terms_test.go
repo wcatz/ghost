@@ -240,7 +240,7 @@ func TestSanitizeFTSKeepsNonLatinWords(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := sanitizeFTS(tc.input); got != tc.want {
+			if got := sanitizeFTS(tc.input, nil); got != tc.want {
 				t.Errorf("sanitizeFTS(%q)\n  got:  %s\n  want: %s", tc.input, got, tc.want)
 			}
 		})
@@ -256,7 +256,7 @@ func TestSanitizeFTSKeepsTheTermBudgetForNonLatinWords(t *testing.T) {
 		"память", "запуск", "деплоя", "конфигурация", "хранилище", "ключ",
 		"مرحبا", "النشر", "التكوين", "المخزن", "المفتاح", "الاحتفاظ",
 	}
-	got := sanitizeFTS(strings.Join(words, " "))
+	got := sanitizeFTS(strings.Join(words, " "), nil)
 	terms := splitFTSTERMs(t, got)
 	if len(terms) != ftsSearchWordLimit {
 		t.Errorf("sanitizeFTS emitted %d terms, want exactly %d: the budget is unchanged by the widening", len(terms), ftsSearchWordLimit)
@@ -273,14 +273,14 @@ func TestSanitizeFTSKeepsTheTermBudgetForNonLatinWords(t *testing.T) {
 // characters, is not a term and takes no slot from the budget.
 func TestFTSQueryTermsDropsAWordOfOnlyMarks(t *testing.T) {
 	for _, q := range []string{"\u0301", "\u0301\u0301 \u200b\u200d"} {
-		if got := ftsQueryTerms(q, ftsSearchWordLimit); len(got) != 0 {
+		if got := ftsQueryTerms(q, ftsSearchWordLimit, nil); len(got) != 0 {
 			t.Errorf("ftsQueryTerms(%q) = %d term(s), want none: a word of marks or zero-width characters only matches nothing", q, len(got))
 		}
 	}
-	if got := ftsQueryTerms("\u0301 \u043f\u0440\u0438\u0432\u0435\u0442", ftsSearchWordLimit); len(got) != 1 {
+	if got := ftsQueryTerms("\u0301 \u043f\u0440\u0438\u0432\u0435\u0442", ftsSearchWordLimit, nil); len(got) != 1 {
 		t.Errorf("a lone mark beside one real word gave %d term(s), want 1", len(got))
 	}
-	if got := ftsQueryTerms("cafe\u0301", ftsSearchWordLimit); len(got) != 1 {
+	if got := ftsQueryTerms("cafe\u0301", ftsSearchWordLimit, nil); len(got) != 1 {
 		t.Errorf("a word with an edge mark gave %d term(s), want 1: the mark stays on its word", len(got))
 	}
 }

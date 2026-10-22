@@ -68,7 +68,7 @@ func seedFTSBucketStore(t *testing.T) *Store {
 // write-lock hold grew with the rows of other projects.
 func TestFTSStatementsBoundTheScanToTheProject(t *testing.T) {
 	s := seedFTSBucketStore(t)
-	match := sanitizeFTSN("the deploy is to staging", 30)
+	match := sanitizeFTSN("the deploy is to staging", 30, nil)
 	scope := scopeJSON(map[string]string{"env": "prod"})
 	scoped := "AND NOT " + scopesConflictSQL("m.scope", "?")
 	now := time.Now()
@@ -249,7 +249,7 @@ func TestBucketedFTSMatchesTheStoreWideScan(t *testing.T) {
 		t.Helper()
 		assertFTSInSync(t, s)
 		for _, raw := range queries {
-			match := sanitizeFTS(raw)
+			match := sanitizeFTS(raw, nil)
 			for _, p := range []string{testProject, "foreign", "other", GlobalProjectID, "no-such-project"} {
 				want := queryIDs(t, s, ftsStoreWideSearchSQL, match, p, 50)
 				got, err := s.SearchFTS(ctx, p, raw, 50)
@@ -260,7 +260,7 @@ func TestBucketedFTSMatchesTheStoreWideScan(t *testing.T) {
 					t.Errorf("%s: SearchFTS(%s, %q)\n got %v\nwant %v", stage, p, raw, g, want)
 				}
 				for _, cat := range []string{"fact", "gotcha"} {
-					dmatch := sanitizeFTSN(raw, 30)
+					dmatch := sanitizeFTSN(raw, 30, nil)
 					want := queryIDs(t, s, ftsStoreWideDedupSQL, dmatch, p, cat)
 					q, a := dedupLookupStatement(false, "", nil, p, cat, dmatch)
 					got := queryIDs(t, s, "SELECT id FROM ("+q+")", a...)
