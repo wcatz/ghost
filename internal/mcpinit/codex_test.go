@@ -1828,6 +1828,96 @@ func TestRunCodex_HooksMergePreservesUserHooks(t *testing.T) {
 	}
 }
 
+// TestRunCodex_HooksMergePreservesUserTextAndKeyOrder verifies that merging
+// preserves user text with &&, <, > and non-alphabetical key order, and that
+// a second run is a byte-for-byte no-op.
+func TestRunCodex_HooksMergePreservesUserTextAndKeyOrder(t *testing.T) {
+	home, _ := setupCodexTestEnv(t)
+
+	hooksPath := codexHooksJSON(home)
+	if err := os.MkdirAll(filepath.Dir(hooksPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	// Seed with user content containing &&, <, > and keys in non-alphabetical order:
+	// Zeta, hooks, Alpha at top level; within hooks: Stop before SessionStart
+	seed := "{\"Zeta\":1,\"hooks\":{\"Stop\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"echo a && cat <x >y\"}]}],\"SessionStart\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"mytool --check <input && echo ok\"}]}]},\"Alpha\":2}"
+	if err := os.WriteFile(hooksPath, []byte(seed), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// First run
+	var out bytes.Buffer
+	if err := RunCodex(&out, false); err != nil {
+		t.Fatalf("RunCodex first: %v", err)
+	}
+
+	data, err := os.ReadFile(hooksPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := string(data)
+	t.Logf("first run output:\n%s", first)
+
+	// Verify user content preserved exactly
+	if !strings.Contains(first, "echo a && cat <x >y") {
+		t.Errorf("user Stop command escaped/lost")
+	}
+	if !strings.Contains(first, "mytool --check <input && echo ok") {
+		t.Errorf("user SessionStart command escaped/lost")
+	}
+	// Verify top-level key order: Zeta, hooks, Alpha (plus description appended)
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(first), &doc); err != nil {
+		t.Fatal(err)
+	}
+	// Use a simple scanner to find top-level key positions
+	findTopLevelKey := func(key string, start int) int {
+		target := "\"" + key + "\""
+		for i := start; i < len(first); i++ {
+			if strings.HasPrefix(first[i:], target) {
+				// Check if preceded by { or , (skipping whitespace)
+				j := i - 1
+				for j >= 0 && (first[j] == ' ' || first[j] == '\n' || first[j] == '\t' || first[j] == '\r') {
+					j--
+				}
+				if j >= 0 && (first[j] == '{' || first[j] == ',') {
+					return i
+				}
+			}
+		}
+		return -1
+	}
+	iZeta := findTopLevelKey("Zeta", 0)
+	iHooks := findTopLevelKey("hooks", iZeta+1)
+	iAlpha := findTopLevelKey("Alpha", iHooks+1)
+	t.Logf("iZeta=%d, iHooks=%d, iAlpha=%d", iZeta, iHooks, iAlpha)
+	if iZeta < 0 || iHooks < 0 || iAlpha < 0 || iZeta >= iHooks || iHooks >= iAlpha {
+		t.Errorf("top-level key order changed: want Zeta < hooks < Alpha (iZeta=%d, iHooks=%d, iAlpha=%d)", iZeta, iHooks, iAlpha)
+	}
+	// Verify hooks event order: Stop then SessionStart (check by byte position in raw text)
+	hooksRaw := doc["hooks"]
+	// Find positions of "Stop" and "SessionStart" at the top level of hooks object
+	hooksStr := string(hooksRaw)
+	stopPos := strings.Index(hooksStr, "Stop")
+	sessionStartPos := strings.Index(hooksStr, "SessionStart")
+	if stopPos < 0 || sessionStartPos < 0 || stopPos >= sessionStartPos {
+		t.Errorf("hooks event order changed: want Stop before SessionStart (stopPos=%d, sessionStartPos=%d)", stopPos, sessionStartPos)
+	}
+	// Second run - must be byte-for-byte identical
+	var secondOut bytes.Buffer
+	if err := RunCodex(&secondOut, false); err != nil {
+		t.Fatalf("RunCodex second: %v", err)
+	}
+	data2, err := os.ReadFile(hooksPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := string(data2)
+	if first != second {
+		t.Errorf("second run changed bytes:\nfirst:\n%s\nsecond:\n%s", first, second)
+	}
+}
+
 // codexMergedRule is the parsed view of one rule in a merged hooks.json.
 type codexMergedRule struct {
 	Matcher string           `json:"matcher"`
