@@ -211,26 +211,25 @@ func TestOpenLogForAppendCreatesMissingLog(t *testing.T) {
 
 // TestOpenLogForAppendSkipsSymlink: rotation is decided by Lstat, so a symlink
 // wearing the log's name is never renamed — renaming it would move the link
-// out from under whatever arranged it, and the file it points at keeps
-// growing, which is the caller's problem, not this function's.
+// out from under whatever arranged it. The open then refuses the link, so the
+// file it points at is not appended through.
 func TestOpenLogForAppendSkipsSymlink(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "real.log")
 	seedOversizedLog(t, target, "through a link")
+	before, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("read target: %v", err)
+	}
 	path := filepath.Join(dir, "lifecycle.log")
 	if err := os.Symlink(target, path); err != nil {
 		t.Fatalf("seed symlink: %v", err)
 	}
 
 	f, err := openLogForAppend(path)
-	if err != nil {
-		t.Fatalf("openLogForAppend: %v", err)
-	}
-	if _, err := f.Write([]byte("appended\n")); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	if err := f.Close(); err != nil {
-		t.Fatalf("close: %v", err)
+	if err == nil {
+		_ = f.Close()
+		t.Fatal("openLogForAppend followed a symlink")
 	}
 
 	fi, err := os.Lstat(path)
@@ -243,8 +242,8 @@ func TestOpenLogForAppendSkipsSymlink(t *testing.T) {
 	if _, err := os.Lstat(path + ".1"); !os.IsNotExist(err) {
 		t.Errorf("rotating a symlink would rename the link itself; .1 exists, Lstat err = %v", err)
 	}
-	if b, err := os.ReadFile(target); err != nil || !strings.HasSuffix(string(b), "appended\n") {
-		t.Errorf("the target must still receive the append, got %d bytes starting %q (err %v)", len(b), head(b, 40), err)
+	if b, err := os.ReadFile(target); err != nil || !bytes.Equal(b, before) {
+		t.Errorf("the target must be untouched, got %d bytes (was %d), err %v", len(b), len(before), err)
 	}
 }
 
