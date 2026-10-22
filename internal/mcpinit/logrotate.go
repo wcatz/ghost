@@ -26,7 +26,15 @@ const logRotateCap = 5 << 20
 // on the descriptor): the data dir is writable by every local process, so a FIFO
 // wearing a log's name would block every hook that appends to it, and a symlink
 // would be appended through into whatever it names.
+//
+// The lstat first refuses an existing link or special file without opening it.
+// On unix O_NOFOLLOW also covers a link swapped in after the lstat; on Windows,
+// which has no such flag, the lstat is what keeps a link from being appended
+// through.
 var createLog = func(path string) (*os.File, error) {
+	if info, err := os.Lstat(path); err == nil && !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s: %w (%s)", path, errNotRegularMarker, info.Mode().Type())
+	}
 	return openRegularAppend(path, logAppendOpenFlags)
 }
 

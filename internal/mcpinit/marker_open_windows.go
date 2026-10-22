@@ -22,8 +22,8 @@ const markerOpenFlags = os.O_RDONLY
 const momentAppendOpenFlags = os.O_APPEND | os.O_CREATE | os.O_WRONLY
 
 // logAppendOpenFlags are the flags createLog opens a data-dir log with. Windows
-// has no O_NOFOLLOW or O_NONBLOCK in Go's syscall package, so the fstat after
-// the open is the whole of the defence.
+// has no O_NOFOLLOW or O_NONBLOCK in Go's syscall package, so createLog's lstat
+// before the open refuses a link and the fstat after it refuses a special file.
 const logAppendOpenFlags = os.O_APPEND | os.O_CREATE | os.O_WRONLY
 
 // operatorLogOpenFlags are the flags the operator-chosen log path is opened
