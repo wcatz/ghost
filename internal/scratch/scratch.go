@@ -22,6 +22,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -307,6 +308,11 @@ func Reap(maxAge time.Duration) (int, error) {
 	return removed, nil
 }
 
+// ownerMarkerMaxBytes is the most bytes an owner marker can carry. A marker is a
+// handful of key=value lines, so anything larger is not a marker this package
+// wrote and is refused rather than read into memory.
+const ownerMarkerMaxBytes = 4096
+
 // ownerMarker reads dir's ownerFile marker. ok is false when the marker is
 // missing, unreadable, or has no usable pid; without one, Reap collects the
 // directory only when its name matches the Open shape and the mtime age
@@ -314,8 +320,28 @@ func Reap(maxAge time.Duration) (int, error) {
 // startNone sentinel when the writer could not read one, or "" for a true
 // legacy marker written before start lines existed.
 func ownerMarker(dir string) (pid int, start string, ok bool) {
-	data, err := os.ReadFile(filepath.Join(dir, ownerFile))
+	// The marker sits inside an entry whose type Reap has already checked, but
+	// the entry (and the marker itself) is untrusted: $GHOST_SCRATCH_DIR may
+	// point at a shared directory, and any local process can place a FIFO or a
+	// symlink where the marker belongs. O_NOFOLLOW refuses a symlink swapped in
+	// between the lstat and this open, O_NONBLOCK keeps a FIFO from blocking
+	// the open until a writer appears, and the fstat on the descriptor refuses
+	// anything that is not a regular file before a byte is read. This mirrors
+	// internal/audit's openSidecar for the same reason.
+	f, err := os.OpenFile(filepath.Join(dir, ownerFile), ownerOpenFlags, 0)
 	if err != nil {
+		return 0, "", false
+	}
+	defer func() { _ = f.Close() }()
+	info, err := f.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		return 0, "", false
+	}
+	data, err := io.ReadAll(io.LimitReader(f, ownerMarkerMaxBytes+1))
+	if err != nil {
+		return 0, "", false
+	}
+	if len(data) > ownerMarkerMaxBytes {
 		return 0, "", false
 	}
 	for _, line := range strings.Split(string(data), "\n") {
