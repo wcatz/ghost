@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -104,13 +105,23 @@ const (
 func padGlobalScan(ctx context.Context, t *testing.T, s *Store) {
 	t.Helper()
 	filler := strings.Repeat("x", seedRacePadBytes)
+	// One transaction of plain inserts: the rows only have to exist, and a
+	// Create per row ran the whole save path 400 times, which is what made this
+	// test the second slowest under the race detector.
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin pad: %v", err)
+	}
+	defer func() { _ = tx.Rollback() }()
 	for i := 0; i < seedRacePadRows; i++ {
-		if _, err := s.Create(ctx, GlobalProjectID, Memory{
-			Category: "fact",
-			Content:  filler,
-			Source:   "mcp",
-		}); err != nil {
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO memories (id, project_id, category, content, source) VALUES (?, ?, 'fact', ?, 'mcp')`,
+			fmt.Sprintf("%032x", i+1), GlobalProjectID, filler,
+		); err != nil {
 			t.Fatalf("pad global row %d: %v", i, err)
 		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit pad: %v", err)
 	}
 }

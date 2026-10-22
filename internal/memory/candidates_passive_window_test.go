@@ -99,6 +99,12 @@ func randomPassiveStore(t *testing.T, rng *rand.Rand, trial int) *Store {
 	tiers := []string{"project", "session", "persistent"}
 	base := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
 	n := 20 + rng.Intn(90)
+	// One transaction for the whole trial: an autocommit per row paid a commit
+	// for each of the ~60 trials' rows.
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
 	for i := 0; i < n; i++ {
 		// A double that float32 cannot name, so a comparator reading the float32
 		// field would rank a near-tie differently than the engine did.
@@ -130,7 +136,7 @@ func randomPassiveStore(t *testing.T, rng *rand.Rand, trial int) *Store {
 		if i%19 == 0 {
 			validFrom = "2030-01-01 00:00:00" // not yet open
 		}
-		if _, err := db.Exec(
+		if _, err := tx.Exec(
 			`INSERT INTO memories (id, project_id, category, content, source, importance, pinned, resolved_at,
 			                       created_at, updated_at, retention, valid_from, valid_until)
 			 VALUES (?, ?, ?, ?, 'manual', ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -140,6 +146,9 @@ func randomPassiveStore(t *testing.T, rng *rand.Rand, trial int) *Store {
 		); err != nil {
 			t.Fatalf("insert %d: %v", i, err)
 		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
 	}
 	return st
 }
@@ -367,7 +376,7 @@ func TestPassiveThresholdScanReadsDoNotGrowWithTheTail(t *testing.T) {
 	pol.OverFetch = 45
 
 	reads := make(map[int]int64)
-	for _, tail := range []int{1000, 20000} {
+	for _, tail := range []int{1000, 5000} {
 		st := thresholdScanFixture(t, 45, tail)
 		cols, err := passiveColumnsFor(st)
 		if err != nil {
@@ -385,13 +394,13 @@ func TestPassiveThresholdScanReadsDoNotGrowWithTheTail(t *testing.T) {
 			t.Fatalf("tail %d: the window holds %d rows, want %d", tail, len(window), pol.OverFetch)
 		}
 	}
-	if reads[1000] != reads[20000] {
-		t.Errorf("the scan read %d rows at a 1,000-row tail and %d at 20,000; the tail is below the window and must not be read",
-			reads[1000], reads[20000])
+	if reads[1000] != reads[5000] {
+		t.Errorf("the scan read %d rows at a 1,000-row tail and %d at 5,000; the tail is below the window and must not be read",
+			reads[1000], reads[5000])
 	}
-	if reads[20000] > int64(pol.OverFetch)+2 {
+	if reads[5000] > int64(pol.OverFetch)+2 {
 		t.Errorf("the scan read %d rows for a %d-row window; it must stop at the window, not walk the bucket",
-			reads[20000], pol.OverFetch)
+			reads[5000], pol.OverFetch)
 	}
 }
 

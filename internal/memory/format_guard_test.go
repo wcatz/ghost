@@ -133,10 +133,12 @@ var hiddenTokenShapes = []struct {
 // it, so the save is refused and nothing is written — the refusal names the
 // field and the format, and never the value.
 func TestTheWriteBoundaryRefusesATokenHiddenByAnInvisibleCharacter(t *testing.T) {
+	// One store for every case: each case asserts the store is still empty, and
+	// a refused save writes nothing, so a case cannot see another's work.
+	s := testStore(t)
 	for _, inv := range hiddenInvisibles {
 		for _, sh := range hiddenTokenShapes {
 			t.Run(inv.name+" in "+sh.name, func(t *testing.T) {
-				s := testStore(t)
 				ctx := context.Background()
 				content := "the staging note carries " + sh.split(inv.ch) + " and it is in the vault"
 
