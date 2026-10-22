@@ -13,6 +13,7 @@ import (
 
 	"github.com/wcatz/ghost/internal/config"
 	"github.com/wcatz/ghost/internal/hostevent"
+	"github.com/wcatz/ghost/internal/memory"
 )
 
 // Codex integration (spec §4 Phase 2). Ghost installs two artifacts, both
@@ -1235,7 +1236,7 @@ func installCodexMCP(w io.Writer, ghostBin string, dryRun bool) (bool, error) {
 	// line-wise merge: appending a table next to it would give codex a
 	// duplicate definition. Leave the file alone and say why.
 	if at, text, dotted := findCodexDottedGhost(lines, codexMCPServerKey); dotted {
-		_, _ = fmt.Fprintf(w, "  ! %s defines the ghost MCP server with a dotted or inline key (line %d: %s)\n", path, at, text)
+		_, _ = fmt.Fprintf(w, "  ! %s defines the ghost MCP server with a dotted or inline key (line %d: %s)\n", path, at, memory.RefusalArg("config line", text))
 		_, _ = fmt.Fprintln(w, "    ghost manages the [mcp_servers.ghost] table only, so the file was left unchanged.")
 		_, _ = fmt.Fprintln(w, "    Rewrite the entry as a [mcp_servers.ghost] table and re-run, or register the server yourself.")
 		return false, nil
@@ -1245,7 +1246,7 @@ func installCodexMCP(w io.Writer, ghostBin string, dryRun bool) (bool, error) {
 	// not the table we manage. Appending a second one would be a duplicate-key
 	// document, so leave the file alone and say why.
 	if at, text, ambiguous := findCodexAmbiguousGhostHeader(lines, codexMCPServerKey); ambiguous {
-		_, _ = fmt.Fprintf(w, "  ! %s has a table header ghost cannot parse (line %d: %s)\n", path, at, text)
+		_, _ = fmt.Fprintf(w, "  ! %s has a table header ghost cannot parse (line %d: %s)\n", path, at, memory.RefusalArg("config line", text))
 		_, _ = fmt.Fprintln(w, "    ghost manages a plain [mcp_servers.ghost] table only, so the file was left unchanged.")
 		_, _ = fmt.Fprintln(w, "    Rewrite the header as [mcp_servers.ghost] and re-run, or register the server yourself.")
 		return false, nil
@@ -2192,10 +2193,10 @@ func codexMCPEntryStatus(ghostBin string) (bool, string) {
 	// an absent table on an install that is actually healthy.
 	lines, _ := splitCodexLines(string(data))
 	if at, text, dotted := findCodexDottedGhost(lines, codexMCPServerKey); dotted {
-		return false, fmt.Sprintf("ghost MCP server defined by a dotted or inline key in config.toml (line %d: %s), a form ghost cannot manage", at, text)
+		return false, fmt.Sprintf("ghost MCP server defined by a dotted or inline key in config.toml (line %d: %s), a form ghost cannot manage", at, memory.RefusalArg("config line", text))
 	}
 	if at, text, ambiguous := findCodexAmbiguousGhostHeader(lines, codexMCPServerKey); ambiguous {
-		return false, fmt.Sprintf("ghost MCP server behind a table header ghost cannot parse in config.toml (line %d: %s)", at, text)
+		return false, fmt.Sprintf("ghost MCP server behind a table header ghost cannot parse in config.toml (line %d: %s)", at, memory.RefusalArg("config line", text))
 	}
 	start, end, found := findCodexTOMLTable(lines, codexMCPServerKey)
 	if !found {
