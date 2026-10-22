@@ -223,12 +223,14 @@ jobs:
         with:
           go-version-file: go.mod
 
-      # -timeout 20m is DECLARED, not a raised limit: Go's implicit default is
+      # -timeout 35m is DECLARED, not a raised limit: Go's implicit default is
       # 10m per test binary, and internal/memory's race binary sits at or past
       # it. Measured 2026-09-28 on feat/retention-tiers: 314s on a developer
       # laptop, 479.267s on one CI runner, and two runs on the same head that
       # hit the default and failed at 600.05s — the same tree, so the spread is
-      # the runner, not the code. Nothing is weakened by declaring it: no
+      # the runner, not the code. Raised from 20m on 2026-10-22: the binary took
+      # 937.534s and 1183.843s on two passing runs that day and hit the 20m
+      # alarm at 1200.185s on a third, a change that did not touch the package. Nothing is weakened by declaring it: no
       # assertion changes, nothing is skipped, and the hang-prone tests keep
       # their own far tighter backstops (TestMultiProcessSharedDatabase's 90s
       # context, its 30s barrier waits, SQLite's busy timeouts), so this alarm
@@ -236,7 +238,7 @@ jobs:
       # with a measurement beside it, never instead of one. The E2E step below
       # is left at the default on purpose: it measures ~67s.
       - name: Test
-        run: go test -race -count=1 -timeout 20m ./...
+        run: go test -race -count=1 -timeout 35m ./...
 
       # The built-binary suite (e2e/, build tag e2e): every MCP tool, CLI
       # subcommand and hook against a sandboxed HOME with fake harnesses.
@@ -288,12 +290,12 @@ jobs:
         with:
           go-version-file: go.mod
 
-      # The same -timeout 20m build-and-test declares, and for the same reason
+      # The same -timeout 35m build-and-test declares, and for the same reason
       # (see its comment): internal/memory's race binary sits at or past Go's
       # implicit 10m default on a hosted runner. A canary must not fail for a
       # reason the leg it canaries also fails on, or its own verdict is noise.
       - name: Test
-        run: go test -race -count=1 -timeout 20m ./...
+        run: go test -race -count=1 -timeout 35m ./...
 
       - name: E2E (built binary)
         run: go test -tags e2e -count=1 ./e2e/
