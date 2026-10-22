@@ -1376,11 +1376,14 @@ func renderCodexHookAction(eventToken, ghostBin string) codexHookAction {
 // indent, sorted map keys, trailing newline. Byte-stable rendering is what
 // makes install idempotency and status's byte-compare work.
 func marshalCodexJSON(v any) string {
-	data, err := json.MarshalIndent(v, "", "  ")
-	if err != nil {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(v); err != nil {
 		panic(fmt.Sprintf("render codex config: %v", err))
 	}
-	return string(data) + "\n"
+	return buf.String()
 }
 
 // codexIsGhostHookAction reports whether cmd runs ghost's hook for this event:
@@ -1658,7 +1661,18 @@ func mergeCodexHooksConfig(existing []byte, ghostBin string) (string, error) {
 		return "", err
 	}
 
+	// Preserve the document's own key order for both the top level and the
+	// "hooks" object, so a merge never reorders entries the user wrote.
+	topOrder := topLevelKeyOrder(existing)
+	eventOrder := []string{}
+	if hooksRaw, ok := top["hooks"]; ok {
+		eventOrder = topLevelKeyOrder(hooksRaw)
+	}
+
 	for _, ev := range codexLifecycleEvents {
+		if !containsString(eventOrder, ev.Key) {
+			eventOrder = append(eventOrder, ev.Key)
+		}
 		var rules []json.RawMessage
 		if raw, ok := events[ev.Key]; ok {
 			if err := json.Unmarshal(raw, &rules); err != nil {
@@ -1669,10 +1683,7 @@ func mergeCodexHooksConfig(existing []byte, ghostBin string) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		rendered, err := json.Marshal(merged)
-		if err != nil {
-			return "", fmt.Errorf("render %s rules: %w", ev.Key, err)
-		}
+		rendered := marshalRawSliceCompact(merged)
 		events[ev.Key] = rendered
 	}
 
@@ -1686,14 +1697,21 @@ func mergeCodexHooksConfig(existing []byte, ghostBin string) (string, error) {
 			return "", fmt.Errorf("render description: %w", err)
 		}
 		out["description"] = desc
+		if !containsString(topOrder, "description") {
+			topOrder = append([]string{"description"}, topOrder...)
+		}
 	}
-	hooks, err := json.Marshal(events)
+	hooksBytes, err := marshalOrderedRawObjectCompact(events, eventOrder)
 	if err != nil {
 		return "", fmt.Errorf("render hooks: %w", err)
 	}
-	out["hooks"] = hooks
+	out["hooks"] = hooksBytes
 
-	return marshalCodexJSON(out), nil
+	pretty, err := marshalOrderedRawObjectPretty(out, topOrder)
+	if err != nil {
+		return "", fmt.Errorf("render hooks document: %w", err)
+	}
+	return string(pretty) + "\n", nil
 }
 
 // mergeCodexEventRules rewrites ghost's own hook action where it already sits
@@ -1843,10 +1861,7 @@ func mergeCodexEventRules(rules []json.RawMessage, eventToken, ghostBin string) 
 		if len(kept) == 0 {
 			continue
 		}
-		hooks, err := json.Marshal(kept)
-		if err != nil {
-			return nil, fmt.Errorf("render %s rule hooks: %w", eventToken, err)
-		}
+		hooks := marshalRawSliceCompact(kept)
 		obj.set("hooks", hooks)
 		rebuilt, err := obj.marshal()
 		if err != nil {
