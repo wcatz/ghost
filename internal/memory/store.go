@@ -9879,6 +9879,13 @@ func ftsQueryTerms(text string, maxWords int, logger *slog.Logger) []ftsTerm {
 		// punctuation (192.168.9.150, sealed-secrets) is preserved so FTS5's
 		// tokenizer can still split and match exact identifiers.
 		clean := strings.TrimFunc(word, ftsEdgeRuneTrimmed)
+		// A NUL byte is a separator to FTS5's tokenizer, but it is not
+		// whitespace, so it survives strings.Fields and the edge trim above.
+		// Left in place it is quoted into the MATCH string, where it
+		// truncates the C string SQLite receives and breaks the query. Turn
+		// any surviving (interior) NUL into a space so it stays a separator
+		// inside the quoted phrase instead of terminating it.
+		clean = strings.ReplaceAll(clean, "\x00", " ")
 		if ftsHasBaseRune(clean) {
 			// Quote each word to treat as literal. An interior quote survives
 			// the edge trim and must be doubled per FTS5's escaping rule —
