@@ -7062,12 +7062,12 @@ func (s *Store) snapshotReplaceableTx(ctx context.Context, tx *sql.Tx, projectID
 	snapshotID = fmt.Sprintf("%s-%d", projectID, time.Now().UnixNano())
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO memory_snapshots (snapshot_id, project_id, category, content, importance, source, tags,
-		                              created_at, memory_id, access_count, last_accessed,
+		                              created_at, updated_at, memory_id, access_count, last_accessed,
 		                              agent, session_id, source_ref, confidence,
 		                              valid_from, valid_until, verified_at, scope, scope_captured,
 		                              retention, retention_captured)
 		SELECT ?, project_id, category, content, importance, source, tags,
-		       created_at, id, access_count, last_accessed,
+		       created_at, updated_at, id, access_count, last_accessed,
 		       agent, session_id, source_ref, confidence,
 		       valid_from, valid_until, verified_at, scope, 1,
 		       -- The tier is copied with the same captured marker scope has
@@ -9087,6 +9087,7 @@ func (s *Store) RestoreSnapshot(ctx context.Context, projectID string) (RestoreR
 		UPDATE memories SET
 		    category = s.category, content = s.content, importance = s.importance,
 		    source = s.source, tags = s.tags, created_at = s.created_at,
+		    updated_at = COALESCE(s.updated_at, memories.updated_at),
 		    access_count = s.access_count, last_accessed = s.last_accessed,
 		    agent = s.agent, session_id = s.session_id, source_ref = s.source_ref,
 		    confidence = s.confidence, valid_from = s.valid_from,
@@ -9170,7 +9171,7 @@ func (s *Store) RestoreSnapshot(ctx context.Context, projectID string) (RestoreR
 		                      valid_from, valid_until, verified_at, scope,
 		                      retention, expires_at)
 		SELECT COALESCE(memory_id, hex(randomblob(16))), project_id, category, content,
-		       source, importance, tags, created_at, created_at, access_count, last_accessed,
+		       source, importance, tags, created_at, COALESCE(updated_at, created_at), access_count, last_accessed,
 		       agent, session_id, source_ref, confidence,
 		       valid_from, valid_until, verified_at,
 		       -- The same marker the UPDATE above honours. A snapshot whose

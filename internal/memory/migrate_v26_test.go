@@ -55,8 +55,12 @@ func TestMigrateV26MatchesTheFreshDatabaseSchema(t *testing.T) {
 		return db
 	}
 	fresh, migrated := newDB(t), newDB(t)
+	// Strip the v29 column from the fresh side too, so a store at v26 is not
+	// compared against a column it does not yet carry.
+	dropSnapshotUpdatedAt(t, fresh)
 	// Strip the v26 columns, so the step has work to do and the rest of the
 	// table is left in place as a database upgrading from v25 would have it.
+	dropSnapshotUpdatedAt(t, migrated)
 	dropSnapshotRetention(t, migrated)
 	tx, err := migrated.Begin()
 	if err != nil {
