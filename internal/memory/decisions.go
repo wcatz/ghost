@@ -1122,7 +1122,7 @@ func (s *Store) ListDecisions(ctx context.Context, projectID, status string, lim
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	inner := `SELECT id, project_id, title, decision, alternatives, rationale, status,
+	inner := `SELECT rowid AS rid, id, project_id, title, decision, alternatives, rationale, status,
 	                 COALESCE(superseded_by, '') AS superseded_by, tags, created_at, updated_at
 	          FROM decisions WHERE project_id = ?`
 	args := []interface{}{projectID}
@@ -1139,12 +1139,14 @@ func (s *Store) ListDecisions(ctx context.Context, projectID, status string, lim
 	// reversed. (This is the same truncate-first invariant the search path's
 	// decayRank applies to superseded memories.) The outer sort is a no-op when
 	// the caller already filtered by status.
-	inner += ` ORDER BY created_at DESC LIMIT ?`
+	inner += ` ORDER BY created_at DESC, rowid DESC LIMIT ?`
 	args = append(args, limit)
 
+	// created_at has one-second resolution, so rows of a burst tie on it; rowid
+	// (insertion order) breaks the tie newest first in both sorts.
 	query := `SELECT id, project_id, title, decision, alternatives, rationale, status,
 	                 superseded_by, tags, created_at, updated_at
-	          FROM (` + inner + `) ORDER BY (status = 'superseded'), created_at DESC`
+	          FROM (` + inner + `) ORDER BY (status = 'superseded'), created_at DESC, rid DESC`
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -1171,7 +1173,7 @@ func (s *Store) LiveDecisions(ctx context.Context, projectID string, limit int) 
 	                 COALESCE(superseded_by, '') AS superseded_by, tags, created_at, updated_at
 	          FROM decisions
 	          WHERE project_id = ? AND status != 'superseded'
-	          ORDER BY (status = 'revisit'), created_at DESC
+	          ORDER BY (status = 'revisit'), created_at DESC, rowid DESC
 	          LIMIT ?`, projectID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("list live decisions: %w", err)
@@ -1238,7 +1240,7 @@ func (s *Store) FindLiveDecisionByTitle(ctx context.Context, projectID, title st
 	err := s.db.QueryRowContext(ctx,
 		`SELECT id FROM decisions
 		  WHERE project_id = ? AND status != 'superseded' AND lower(trim(title)) = lower(?)
-		  ORDER BY created_at DESC LIMIT 1`, projectID, title).Scan(&id)
+		  ORDER BY created_at DESC, rowid DESC LIMIT 1`, projectID, title).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}

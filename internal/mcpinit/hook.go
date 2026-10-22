@@ -1253,7 +1253,7 @@ func loadSessionContextFrom(dbPath, cwd string, cfg *config.Config, clock func()
 		SELECT id, status, priority, title, COALESCE(description, '')
 		FROM tasks
 		WHERE project_id = ? AND status IN ('pending', 'active', 'blocked')
-		ORDER BY priority ASC, created_at DESC
+		ORDER BY priority ASC, created_at DESC, rowid DESC
 		LIMIT 10
 	`, projectID)
 	if err == nil {
@@ -1276,7 +1276,7 @@ func loadSessionContextFrom(dbPath, cwd string, cfg *config.Config, clock func()
 	decRows, err := db.Query(`
 		SELECT id, title, decision, status FROM decisions
 		WHERE project_id = ? AND status != 'superseded'
-		ORDER BY (status = 'revisit'), created_at DESC
+		ORDER BY (status = 'revisit'), created_at DESC, rowid DESC
 		LIMIT 5
 	`, projectID)
 	if err == nil {
