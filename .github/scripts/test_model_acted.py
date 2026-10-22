@@ -63,6 +63,22 @@ class TestTheEventStream(unittest.TestCase):
         self.assertFalse(stream_acted(ERROR_EVENT))
         self.assertFalse(stream_acted(ERROR_EVENT + "\n" + ERROR_EVENT))
 
+    def test_a_step_that_opened_and_never_answered_produced_nothing(self):
+        # A run killed at its own timeout leaves only the step bookkeeping
+        # behind: the model produced nothing of its own.
+        start = '{"type":"step_start","part":{"type":"step-start"}}'
+        finish = '{"type":"step_finish","part":{"type":"step-finish"}}'
+        self.assertFalse(stream_acted(start))
+        self.assertFalse(stream_acted(start + "\n" + ERROR_EVENT))
+        self.assertFalse(stream_acted(start + "\n" + finish))
+
+    def test_a_step_does_not_hide_what_the_model_produced(self):
+        start = '{"type":"step_start","part":{"type":"step-start"}}'
+        self.assertTrue(stream_acted(start + "\n" + TEXT_EVENT))
+        self.assertTrue(stream_acted(start + "\n" + TOOL_EVENT))
+        self.assertTrue(stream_acted(start + "\n" + '{"type":"reasoning"}'))
+        self.assertTrue(stream_acted(start + "\nnot json"))
+
     def test_a_stream_that_does_not_parse_counts_as_produced(self):
         # The rule fails closed: a stream nobody can read is a stream
         # nobody can say was empty.
