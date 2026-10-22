@@ -16,6 +16,7 @@ import (
 	"github.com/wcatz/ghost/internal/linking"
 	"github.com/wcatz/ghost/internal/mcpinit"
 	"github.com/wcatz/ghost/internal/mcpserver"
+	"github.com/wcatz/ghost/internal/memory"
 )
 
 // mcpUsage is the help for the bare `ghost mcp` server command: stdout for
@@ -113,6 +114,8 @@ func parseMCPClient(args []string) (string, error) {
 			if client == "" {
 				return "", fmt.Errorf("--client requires a value (claude, opencode, codex, goose, or all)")
 			}
+		default:
+			return "", fmt.Errorf("unknown argument %s", memory.RefusalArg("argument", args[i]))
 		}
 	}
 	return client, nil
@@ -179,17 +182,24 @@ prints the changes without writing them. Idempotent and safe to re-run.
 // for all of them (or just the one found). --client all installs into every
 // supported client unconditionally.
 func runMCPInit() {
-	client, err := parseMCPClient(os.Args[3:])
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
-	}
-
+	// --dry-run is a boolean flag handled here rather than by parseMCPClient,
+	// which only knows --client. Filter it out of the args before parsing so a
+	// misspelled form (--dry-run=true, --dryrun, ...) is not silently dropped
+	// and instead reaches parseMCPClient as an unknown argument.
 	dryRun := false
+	var filtered []string
 	for _, a := range os.Args[3:] {
 		if a == "--dry-run" {
 			dryRun = true
+		} else {
+			filtered = append(filtered, a)
 		}
+	}
+
+	client, err := parseMCPClient(filtered)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
 	}
 
 	// Auto-detect when --client is omitted.
