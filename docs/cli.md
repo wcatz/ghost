@@ -62,7 +62,7 @@ ghost mcp init --client all
 
 | Flag | Meaning |
 |---|---|
-| `--client <name>` | Target `claude`, `opencode`, `codex`, `goose`, or `all`. Without it, detect clients on `PATH`. |
+| `--client <name>` | Target `claude`, `opencode`, `codex`, `goose`, or `all`. Without it, detect clients on `PATH` and in the home bin directories (not the system-wide dirs). |
 | `--dry-run` | Print the changes without writing them. |
 
 `--dry-run` writes nothing, including to the store. It resolves the data directory without creating it and opens the database read-only, so it neither creates a missing store nor migrates an older one: a store behind this build's schema is reported and its import preview skipped, because a read-only handle cannot run the migration the preview would need. The data-directory guard still applies. Every step reports a change it would make in the `~ would …` form — `~ would add …` for a permission or a hook — and never the `+ ` marker a written change carries, so the preview cannot read as though it added wiring it never touched.

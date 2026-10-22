@@ -693,7 +693,9 @@ func TestDetectClients(t *testing.T) {
 	writeStub(t, dir, "opencode")
 	writeStub(t, dir, "goose")
 
-	// Override PATH to include only our temp dir.
+	// Override PATH to include only our temp dir, and keep the host's home and
+	// system bin dirs out of the lookup.
+	isolateClientLookup(t)
 	t.Setenv("PATH", dir)
 
 	got := detectClients()
@@ -711,11 +713,22 @@ func TestDetectClients(t *testing.T) {
 // TestDetectClients_EmptyPath verifies that detectClients returns nil when
 // no client binaries are on PATH.
 func TestDetectClients_EmptyPath(t *testing.T) {
+	isolateClientLookup(t)
 	t.Setenv("PATH", t.TempDir())
 	got := detectClients()
 	if len(got) != 0 {
 		t.Fatalf("detectClients() = %v, want empty", got)
 	}
+}
+
+// isolateClientLookup points HOME at a temp dir, so no client in the host's home
+// bin dirs is reachable. It returns the home.
+func isolateClientLookup(t *testing.T) string {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	return home
 }
 
 // writeStub creates an executable stub script at binDir/name.
@@ -2696,5 +2709,36 @@ func TestClampReflectMemories(t *testing.T) {
 	if mems[2].Content != want {
 		t.Errorf("over-cap content = len %d ending %q, want len %d ending %q",
 			len(mems[2].Content), mems[2].Content[len(mems[2].Content)-len(markerLiteral):], len(want), markerLiteral)
+	}
+}
+
+// TestDetectClients_FindsHomeBinDirs verifies that auto-detect finds a client
+// that lives only in a home bin directory, the same place --client looks. The
+// environment is built from nothing: PATH is an empty temp dir, HOME is a temp
+// dir, and the system bin dirs are emptied so a client installed on the host
+// is never reachable.
+func TestDetectClients_FindsHomeBinDirs(t *testing.T) {
+	home := isolateClientLookup(t)
+	t.Setenv("PATH", t.TempDir())
+
+	localBin := filepath.Join(home, ".local", "bin")
+	goBin := filepath.Join(home, "go", "bin")
+	for _, d := range []string{localBin, goBin} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeStub(t, localBin, "claude")
+	writeStub(t, goBin, "goose")
+
+	got := detectClients()
+	want := []string{"claude", "goose"}
+	if len(got) != len(want) {
+		t.Fatalf("detectClients() = %v, want %v", got, want)
+	}
+	for i, name := range want {
+		if got[i] != name {
+			t.Errorf("detectClients()[%d] = %q, want %q", i, got[i], name)
+		}
 	}
 }
