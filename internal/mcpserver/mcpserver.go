@@ -4716,9 +4716,7 @@ func (s *Server) registerResources() {
 		if len(decisions) == 0 {
 			text = "No live decisions for this project."
 		} else {
-			var sb strings.Builder
-			sb.WriteString("## Decisions\n\n")
-			sb.WriteString(dataDelimiterNote + "\n\n")
+			rows := make([]string, 0, len(decisions))
 			for _, d := range decisions {
 				// Same rule as the Recent Decisions section above, plus the
 				// rationale, which is stored text written by the same callers
@@ -4726,11 +4724,18 @@ func (s *Server) registerResources() {
 				// unconditionally, as it always was: an empty rationale reads as
 				// "there is none", and dropping it would change what a pinned
 				// resource shows for every decision recorded without one.
-				fmt.Fprintf(&sb, "- `%s` **%s**%s: %s (rationale: %s)\n",
+				rows = append(rows, fmt.Sprintf("- `%s` **%s**%s: %s (rationale: %s)\n",
 					assemble.Token(d.ID), quoteData(d.Title), decisionRevisitMarker(d.Status),
-					quoteData(d.Decision), quoteData(d.Rationale))
+					quoteData(d.Decision), quoteData(d.Rationale)))
 			}
-			text = sb.String()
+			parts := []responsePart{
+				{text: "## Decisions\n\n"},
+				{text: dataDelimiterNote + "\n\n"},
+			}
+			for _, r := range rows {
+				parts = append(parts, responsePart{text: r, cuttable: true})
+			}
+			text, _ = capResponseParts(parts, s.searchResponseCap(), decisionsResourceCutAdvice)
 		}
 
 		return &mcp.ReadResourceResult{
@@ -4767,9 +4772,8 @@ func (s *Server) registerResources() {
 			return nil, projectResourceNotFound(req.Params.URI, rawID)
 		}
 
-		var sb strings.Builder
-		sb.WriteString("## Open Tasks\n\n")
 		hasContent := false
+		rows := make([]string, 0)
 
 		for _, status := range []string{"active", "blocked", "pending"} {
 			tasks, err := s.store.ListTasks(ctx, projectID, status, 15)
@@ -4782,15 +4786,14 @@ func (s *Server) registerResources() {
 				// means, and an empty section must still answer with its own
 				// sentence rather than with an explanation of nothing (#791). The
 				// id and the text take the same two rules as everywhere else.
-				if !hasContent {
-					sb.WriteString(dataDelimiterNote + "\n\n")
-				}
 				hasContent = true
-				fmt.Fprintf(&sb, "- [%s] P%d `%s` %s\n", t.Status, t.Priority,
+				var row strings.Builder
+				fmt.Fprintf(&row, "- [%s] P%d `%s` %s\n", t.Status, t.Priority,
 					shortID(t.ID), quoteData(t.Title))
 				if t.Description != "" {
-					fmt.Fprintf(&sb, "  %s\n", quoteData(t.Description))
+					fmt.Fprintf(&row, "  %s\n", quoteData(t.Description))
 				}
+				rows = append(rows, row.String())
 			}
 		}
 
@@ -4798,7 +4801,14 @@ func (s *Server) registerResources() {
 		if !hasContent {
 			text = "No open tasks for this project."
 		} else {
-			text = sb.String()
+			parts := []responsePart{
+				{text: "## Open Tasks\n\n"},
+				{text: dataDelimiterNote + "\n\n"},
+			}
+			for _, r := range rows {
+				parts = append(parts, responsePart{text: r, cuttable: true})
+			}
+			text, _ = capResponseParts(parts, s.searchResponseCap(), taskResourceCutAdvice)
 		}
 
 		return &mcp.ReadResourceResult{
