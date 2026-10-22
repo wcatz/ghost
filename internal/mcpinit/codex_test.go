@@ -3,6 +3,7 @@ package mcpinit
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -924,7 +925,7 @@ func TestRunCodex_TOMLAmbiguousGhostHeaderLeftAlone(t *testing.T) {
 			if !strings.Contains(output, "left unchanged") {
 				t.Errorf("expected a warning that the file was left unchanged, got:\n%s", output)
 			}
-			if !strings.Contains(output, header) {
+			if !strings.Contains(output, fmt.Sprintf("%q", header)) {
 				t.Errorf("the warning should quote the offending header %q, got:\n%s", header, output)
 			}
 
@@ -3229,4 +3230,68 @@ func TestCodexHooksJSONBOMIsRefusedByName(t *testing.T) {
 			t.Errorf("status refusal must name the byte-order mark, got: %v", err)
 		}
 	})
+}
+
+// TestCodexRefusedLineIsRendered holds the refused config line to the rule every
+// other refusal follows: a value read from a user-owned file is rendered, never
+// echoed raw. A token-shaped value on the line is withheld (the token guard) and
+// a control character is escaped, while the line number stays so the entry can
+// still be found.
+func TestCodexRefusedLineIsRendered(t *testing.T) {
+	const token = "sk-ant-api03-FAKEFAKEFAKEFAKEFAKEFAKEFAKE"
+	cases := map[string]struct {
+		line    string
+		mention string
+	}{
+		"dotted or inline key with a token-shaped value": {
+			line:    `mcp_servers.ghost = { command = "ghost", args = ["mcp", "--key=` + token + `"] }`,
+			mention: "dotted or inline",
+		},
+		"dotted or inline key with a control character": {
+			line:    "mcp_servers.ghost = { command = \"ghost\", args = [\"mcp\", \"\x1b[31mred\x07\"] }",
+			mention: "dotted or inline",
+		},
+		"unparseable header with a token-shaped value": {
+			line:    `[mcp_servers.ghost."` + token,
+			mention: "table header ghost cannot parse",
+		},
+		"unparseable header with a control character": {
+			line:    "[mcp_servers.ghost.\"\x1b[31m",
+			mention: "table header ghost cannot parse",
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			home, _ := setupCodexTestEnv(t)
+			seed := "model = \"gpt-5\"\n\n" + tc.line + "\n"
+			if err := os.MkdirAll(filepath.Dir(codexConfigToml(home)), 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(codexConfigToml(home), []byte(seed), 0644); err != nil {
+				t.Fatal(err)
+			}
+
+			var initOut, statusOut bytes.Buffer
+			if err := RunCodex(&initOut, false); err != nil {
+				t.Fatalf("RunCodex: %v", err)
+			}
+			if _, err := StatusCodex(&statusOut); err != nil {
+				t.Fatalf("StatusCodex: %v", err)
+			}
+			for surface, out := range map[string]string{"init": initOut.String(), "status": statusOut.String()} {
+				if !strings.Contains(out, tc.mention) {
+					t.Errorf("%s: expected the refusal to be reported, got:\n%s", surface, out)
+				}
+				if !strings.Contains(out, "line 3") {
+					t.Errorf("%s: the line number must stay so the entry can be found, got:\n%s", surface, out)
+				}
+				if strings.Contains(out, token) || strings.Contains(out, "FAKEFAKE") {
+					t.Errorf("%s: a token-shaped value reached the output:\n%s", surface, out)
+				}
+				if strings.ContainsAny(out, "\x1b\x07") {
+					t.Errorf("%s: a control character reached the output raw:\n%q", surface, out)
+				}
+			}
+		})
+	}
 }
