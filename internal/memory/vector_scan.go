@@ -474,6 +474,7 @@ func (s *Store) loadVectorRows(v *vectorRows, rows *sql.Rows, queryVec []float32
 	// its face, and a count gated on a log call is one refactor away from being
 	// gated on it for real.
 	v.facts.mismatched = mismatched
+	v.facts.usable = len(v.rows)
 	for m := range foreign {
 		v.facts.foreign += foreign[m]
 	}

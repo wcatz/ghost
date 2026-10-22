@@ -1127,9 +1127,20 @@ func (s *Store) runCandidateLegs(ctx context.Context, req CandidateRequest, p Se
 			// query vector: a different width, or a recorded identity from
 			// another vector space (a model or task-prefix change). Both leave
 			// the leg silent about that row. It is free — the scan already
-			// counted them — so it is reported even though nothing reads it
-			// yet.
+			// counted them — so it is reported, and it is what tells a leg
+			// that skipped every row from one that scored some.
 			vecStatus.DimMismatch = facts.mismatched + facts.foreign
+			// A scan that read rows and skipped every one computed no cosine:
+			// the leg did not run, whatever the store held. It is reported as
+			// never attempted, which the outcome line prints as `not_run`, so
+			// a model or width change that has not been re-embedded yet reads
+			// as the keyword-only search it is rather than as `vector:ok`.
+			// DimMismatch keeps the count. A store with no vector at all
+			// skipped nothing and stays attempted, as before.
+			if facts.usable == 0 && vecStatus.DimMismatch > 0 {
+				vecStatus.Attempted = false
+				vecStatus.Available = false
+			}
 			vecStatus.Eligible = len(kept)
 			// #1053 moved the window predicate into the vector scan too, so a
 			// semantic-only (or hybrid) query whose every match above the

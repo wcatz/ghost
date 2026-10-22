@@ -379,6 +379,7 @@ func (s *Store) viewVectorCorpus(cp *vectorCorpus, scratch *vectorRows, projectI
 		v.rows = append(v.rows, row)
 	}
 	v.facts.mismatched = mismatched
+	v.facts.usable = len(v.rows)
 	for _, n := range foreign {
 		v.facts.foreign += n
 	}

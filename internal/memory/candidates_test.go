@@ -1468,3 +1468,104 @@ func TestCandidatesCountsTheRowsTheVectorLegWithheld(t *testing.T) {
 			"leg comes back empty", set.ValidityExcluded)
 	}
 }
+
+// TestVectorLegIsNotRunWhenItSkippedEveryRow: a vector leg that skipped every
+// row it read computed no cosine, so it did not run. Reporting it attempted and
+// available printed `vector:ok` for a search the vector side never answered,
+// and the advice to retry a surprising miss on `vector:not_run` never applied to
+// the state a model or width change leaves the store in until the worker has
+// re-embedded it. A leg that scored at least one row, and a leg with nothing to
+// read at all, stay as they were.
+func TestVectorLegIsNotRunWhenItSkippedEveryRow(t *testing.T) {
+	for _, mode := range []struct {
+		name string
+		mode ProjectMode
+	}{{"project", ProjectScoped}, {"all projects", AllProjects}} {
+		for _, tc := range []struct {
+			name        string
+			seed        func(t *testing.T, store *Store, ctx context.Context)
+			wantRun     bool
+			wantSkipped int
+		}{
+			{
+				name: "every stored vector has another width",
+				seed: func(t *testing.T, store *Store, ctx context.Context) {
+					for _, text := range []string{"pool timeout one", "pool timeout two", "pool timeout three"} {
+						id := createTestMemory(t, store, ctx, text)
+						if err := store.StoreEmbedding(ctx, id, []float32{1, 0, 0, 0}, identityCurrent); err != nil {
+							t.Fatalf("StoreEmbedding: %v", err)
+						}
+					}
+				},
+				wantSkipped: 3,
+			},
+			{
+				name: "every stored vector carries another identity",
+				seed: func(t *testing.T, store *Store, ctx context.Context) {
+					for _, text := range []string{"pool timeout one", "pool timeout two"} {
+						id := createTestMemory(t, store, ctx, text)
+						if err := store.StoreEmbedding(ctx, id, []float32{1, 0, 0}, identityStale); err != nil {
+							t.Fatalf("StoreEmbedding: %v", err)
+						}
+					}
+				},
+				wantSkipped: 2,
+			},
+			{
+				name: "one vector is usable and one is skipped",
+				seed: func(t *testing.T, store *Store, ctx context.Context) {
+					ok := createTestMemory(t, store, ctx, "pool timeout one")
+					bad := createTestMemory(t, store, ctx, "pool timeout two")
+					if err := store.StoreEmbedding(ctx, ok, []float32{1, 0, 0}, identityCurrent); err != nil {
+						t.Fatalf("StoreEmbedding: %v", err)
+					}
+					if err := store.StoreEmbedding(ctx, bad, []float32{1, 0, 0, 0}, identityCurrent); err != nil {
+						t.Fatalf("StoreEmbedding: %v", err)
+					}
+				},
+				wantRun:     true,
+				wantSkipped: 1,
+			},
+			{
+				name:    "no vector is stored at all",
+				seed:    func(*testing.T, *Store, context.Context) {},
+				wantRun: true,
+			},
+		} {
+			t.Run(mode.name+"/"+tc.name, func(t *testing.T) {
+				store, ctx := setupTestStore(t)
+				store.SetEmbeddingIdentity(identityCurrent)
+				tc.seed(t, store, ctx)
+
+				req := candidateRequest("pool timeout", 10, time.Now().UTC())
+				req.ProjectID = "test-proj"
+				req.Mode = mode.mode
+				req.QueryVec = []float32{1, 0, 0}
+				req.Condition = CondHybrid
+				set, err := store.Candidates(ctx, req)
+				if err != nil {
+					t.Fatalf("Candidates: %v", err)
+				}
+				leg := set.Legs["vector"]
+				if !leg.Applicable {
+					t.Fatal("precondition: the vector leg applies to a hybrid request")
+				}
+				if leg.Attempted != tc.wantRun {
+					t.Errorf("Attempted = %v, want %v: a leg that skipped every row it read ran no cosine", leg.Attempted, tc.wantRun)
+				}
+				if leg.Available != tc.wantRun {
+					t.Errorf("Available = %v, want %v", leg.Available, tc.wantRun)
+				}
+				if leg.Err != "" {
+					t.Errorf("Err = %q, want empty: skipping rows is not a failure", leg.Err)
+				}
+				if leg.DimMismatch != tc.wantSkipped {
+					t.Errorf("DimMismatch = %d, want %d", leg.DimMismatch, tc.wantSkipped)
+				}
+				if got := set.Legs["fts"]; !got.Attempted || !got.Available {
+					t.Errorf("the keyword leg is %+v, want it untouched", got)
+				}
+			})
+		}
+	}
+}
