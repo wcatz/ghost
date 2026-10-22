@@ -29,7 +29,7 @@ func TestReflectRestorePrintsTheUncapturedRetentionNote(t *testing.T) {
 	}
 	const memoryID = "mcov"
 	if _, err := db.Exec(`INSERT INTO memories (id, project_id, category, content, source, importance, retention)
-		VALUES (?, ?, 'fact', 'a session fact recorded before the tier column', 'mcp', 0.5, 'project')`, memoryID, project); err != nil {
+		VALUES (?, ?, 'fact', 'a later edit the restore reverts', 'mcp', 0.5, 'project')`, memoryID, project); err != nil {
 		t.Fatalf("plant memory: %v", err)
 	}
 	if _, err := db.Exec(`INSERT INTO memory_snapshots (snapshot_id, project_id, category, content, importance, source, memory_id, retention, retention_captured)
@@ -98,7 +98,7 @@ func TestUncapturedCountStaysOnCoveredRowsOnly(t *testing.T) {
 	// A covered marker-0 row: pinned=0, retention != 'persistent', live in the
 	// project. This is the one row the restore rewrites in place.
 	const body = "a coverable row the restore rewrites"
-	plant("mcover", project, "mcp", 0, "project", body)
+	plant("mcover", project, "mcp", 0, "project", "a later edit the restore reverts")
 	plantSnap("mcover", "mcp", body, 0)
 
 	// Pinned: live, but the UPDATE predicate (pinned = 0) excludes it.
