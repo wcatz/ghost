@@ -1819,3 +1819,33 @@ func TestStatus_OllamaDownDurationSuppressedWhenInconclusive(t *testing.T) {
 		t.Errorf("expected the expired probe to be reported as undetermined, got:\n%s", out.String())
 	}
 }
+
+// TestFindClientBinary_IgnoresSystemDirs verifies that the auto-detect lookup
+// reports a client in the home bin dir but not one that exists only in a
+// system bin dir, while findBinary still finds the system-dir one.
+func TestFindClientBinary_IgnoresSystemDirs(t *testing.T) {
+	setHome(t, t.TempDir())
+	t.Setenv("PATH", t.TempDir())
+	sysDir := t.TempDir()
+	orig := systemBinDirs
+	systemBinDirs = []string{sysDir}
+	t.Cleanup(func() { systemBinDirs = orig })
+
+	sysStub := writeStub(t, sysDir, "claude")
+	if got := FindClientBinary("claude"); got != "" {
+		t.Fatalf("FindClientBinary found %q in a system dir, want none", got)
+	}
+	if got := findBinary("claude"); got != sysStub {
+		t.Fatalf("findBinary = %q, want %q", got, sysStub)
+	}
+
+	home, _ := os.UserHomeDir()
+	localBin := filepath.Join(home, ".local", "bin")
+	if err := os.MkdirAll(localBin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	homeStub := writeStub(t, localBin, "claude")
+	if got := FindClientBinary("claude"); got != homeStub {
+		t.Fatalf("FindClientBinary = %q, want %q", got, homeStub)
+	}
+}

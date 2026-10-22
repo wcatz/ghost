@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"os/signal"
 	"strings"
 	"syscall"
@@ -124,7 +123,7 @@ func parseMCPClient(args []string) (string, error) {
 // clientTarget pairs a display name with its `mcp init` installer.
 type clientTarget struct {
 	name   string
-	binary string // binary name to detect on PATH
+	binary string // binary name to detect (see mcpinit.FindClientBinary)
 	run    func(w io.Writer, dryRun bool) error
 }
 
@@ -138,11 +137,14 @@ func mcpInitTargets() []clientTarget {
 	}
 }
 
-// detectClients returns the names of clients whose binaries are found on PATH.
+// detectClients returns the names of clients whose binaries are found by
+// mcpinit.FindClientBinary: PATH, then the home bin dirs that --client also
+// searches. It deliberately skips the fixed system dirs, so a client installed
+// system-wide is configured only by naming it with --client.
 func detectClients() []string {
 	var found []string
 	for _, t := range mcpInitTargets() {
-		if _, err := exec.LookPath(t.binary); err == nil {
+		if mcpinit.FindClientBinary(t.binary) != "" {
 			found = append(found, t.name)
 		}
 	}
@@ -172,7 +174,8 @@ func runAllClients(stdout, stderr io.Writer, dryRun bool, targets []clientTarget
 const mcpInitUsage = `Usage: ghost mcp init [--client claude|opencode|codex|goose|all] [--dry-run]
 
 Configures supported MCP clients to use Ghost as their memory system.
-Without --client, every supported client found on PATH is configured;
+Without --client, every supported client found on PATH or in the home bin
+directories is configured;
 --client all configures every supported client unconditionally. --dry-run
 prints the changes without writing them. Idempotent and safe to re-run.
 `
@@ -207,7 +210,7 @@ func runMCPInit() {
 		detected := detectClients()
 		switch len(detected) {
 		case 0:
-			fmt.Fprintf(os.Stderr, "error: no supported MCP client found on PATH\n"+
+			fmt.Fprintf(os.Stderr, "error: no supported MCP client found\n"+
 				"  Install one of: Claude Code, opencode, codex, goose\n"+
 				"  Or specify explicitly: ghost mcp init --client <name>\n")
 			os.Exit(1)

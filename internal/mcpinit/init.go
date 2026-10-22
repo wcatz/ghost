@@ -249,6 +249,18 @@ func checkPrereqs(w io.Writer, client string) (ghostBin, claudeBin string, err e
 // Tests override this to stay isolated from host binaries.
 var systemBinDirs = []string{"/opt/homebrew/bin", "/usr/local/bin"}
 
+// FindClientBinary is the lookup `ghost mcp init` auto-detect uses: PATH, then
+// the home bin dirs. It never reads the fixed system dirs, which a sandbox
+// cannot redirect, so a client installed system-wide is not detected on its
+// own; findBinary builds on this same lookup and adds those dirs. It returns
+// "" when the binary is in neither place.
+func FindClientBinary(name string) string {
+	if c := homeBinaryCandidates(name); len(c) > 0 {
+		return c[0]
+	}
+	return ""
+}
+
 // windowsBinExts is the deliberately pinned extension set findBinary's
 // common-dir fallback probes on Windows: .exe first, then .cmd, then .bat —
 // fixed order and fixed content on every machine. It is not PATHEXT: the
@@ -315,6 +327,14 @@ func findBinary(name string) string {
 // binaryCandidates lists every location findBinary would accept for name, in
 // findBinary's order: the PATH hit first, then each executable common-dir hit.
 func binaryCandidates(name string) []string {
+	out := homeBinaryCandidates(name)
+	return appendDirHits(out, systemBinDirs, name)
+}
+
+// homeBinaryCandidates lists the PATH hit and then each executable hit in the
+// home bin dirs, in that order. It is the shared first half of findBinary and
+// the whole of FindClientBinary.
+func homeBinaryCandidates(name string) []string {
 	var out []string
 	if p, err := exec.LookPath(name); err == nil {
 		out = append(out, p)
@@ -323,10 +343,16 @@ func binaryCandidates(name string) []string {
 	if err != nil {
 		return out
 	}
-	for _, dir := range append([]string{
+	return appendDirHits(out, []string{
 		filepath.Join(home, ".local", "bin"),
 		filepath.Join(home, "go", "bin"),
-	}, systemBinDirs...) {
+	}, name)
+}
+
+// appendDirHits appends each executable name candidate found in dirs to out,
+// skipping paths already present.
+func appendDirHits(out, dirs []string, name string) []string {
+	for _, dir := range dirs {
 		for _, candidate := range commonBinCandidates(name) {
 			p := filepath.Join(dir, candidate)
 			if st, err := os.Stat(p); err == nil && commonDirExecutable(p, st) && !slices.Contains(out, p) {
