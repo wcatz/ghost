@@ -21,7 +21,7 @@ func TestFTSQueryTermsUsesConfiguredLogger_issue1778(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	s := NewStore(db, logger)
 	ctx := context.Background()
