@@ -2374,6 +2374,15 @@ func TestCLIMCPInit(t *testing.T) {
 		r := bare.mustFail("mcp", "init")
 		mustMatch(t, "no client found", r.stderr, "(?i)no supported MCP client|install one of|--client")
 	})
+
+	t.Run("an unknown flag is refused and writes nothing", func(t *testing.T) {
+		s := newSandbox(t)
+		r := s.mustFail("mcp", "init", "--clien", "codex")
+		mustMatch(t, "unknown flag", r.stderr, "(?i)unknown")
+		for _, client := range []string{"claude", "opencode", "codex", "goose"} {
+			mustNotExist(t, "no file for "+client, clientMarkerPath(t, s, client))
+		}
+	})
 }
 
 // ghostEntryMarker is the string that identifies the ghost entry in each
