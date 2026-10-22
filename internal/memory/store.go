@@ -4975,12 +4975,26 @@ func (s *Store) GetTopMemories(ctx context.Context, projectID string, limit int)
 // path calls searchFTSValidating directly, which applies the window predicate
 // before the LIMIT (#1053); the two share one statement so they cannot drift.
 func (s *Store) SearchFTS(ctx context.Context, projectID, query string, limit int) ([]Memory, error) {
-	return s.searchFTSValidating(ctx, projectID, query, limit, time.Time{}, false)
+	memories, err := s.searchFTSValidating(ctx, projectID, query, limit, time.Time{}, false)
+	if err != nil {
+		return nil, err
+	}
+	if limit > 0 && len(memories) > limit {
+		memories = memories[:limit]
+	}
+	return memories, nil
 }
 
 // SearchFTSAll searches memories across ALL projects using full-text search.
 func (s *Store) SearchFTSAll(ctx context.Context, query string, limit int) ([]Memory, error) {
-	return s.searchFTSValidating(ctx, "", query, limit, time.Time{}, true)
+	memories, err := s.searchFTSValidating(ctx, "", query, limit, time.Time{}, true)
+	if err != nil {
+		return nil, err
+	}
+	if limit > 0 && len(memories) > limit {
+		memories = memories[:limit]
+	}
+	return memories, nil
 }
 
 // searchFTSValidating is the one full-text statement SearchFTS, SearchFTSAll and
