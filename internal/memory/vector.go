@@ -360,6 +360,10 @@ func (s *Store) SearchVectorScoped(ctx context.Context, projectID string, queryV
 // withholds nothing.
 type vectorLegFacts struct {
 	mismatched, foreign, validityExcluded int
+	// usable is how many rows the scan could compare against the query vector.
+	// Zero with a non-zero mismatched+foreign means the scan read rows and
+	// skipped every one, so no cosine was computed (#1777).
+	usable int
 }
 
 // searchVectorLeg is the project's vector leg, with its facts. Every exported
