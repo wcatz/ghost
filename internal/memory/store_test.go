@@ -1683,6 +1683,45 @@ func TestStoreSearchFTSSpecialCharacters(t *testing.T) {
 	}
 }
 
+// TestSearchFTSRespectsLimit: SearchFTS must never return more than the
+// requested limit, even when the per-bucket statement fetches limit from each
+// bucket (#1771). This test passes on origin/main (it guards the new trim).
+func TestSearchFTSRespectsLimit(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	if err := s.EnsureProject(ctx, "_global", "_global", "global"); err != nil {
+		t.Fatalf("EnsureProject(_global): %v", err)
+	}
+	for i := 0; i < 15; i++ {
+		if _, err := s.Create(ctx, "_global", Memory{
+			Category:   "preference",
+			Content:    fmt.Sprintf("shared note about helm service %d", i),
+			Source:     "manual",
+			Importance: 0.7,
+		}); err != nil {
+			t.Fatalf("Create global %d: %v", i, err)
+		}
+	}
+	for i := 0; i < 5; i++ {
+		if _, err := s.Create(ctx, testProject, Memory{
+			Category:   "gotcha",
+			Content:    fmt.Sprintf("project helm release %d", i),
+			Source:     "manual",
+			Importance: 0.7,
+		}); err != nil {
+			t.Fatalf("Create project %d: %v", i, err)
+		}
+	}
+
+	results, err := s.SearchFTS(ctx, testProject, "helm", 10)
+	if err != nil {
+		t.Fatalf("SearchFTS: %v", err)
+	}
+	if len(results) > 10 {
+		t.Fatalf("SearchFTS returned %d rows, want <= 10", len(results))
+	}
+}
+
 func TestSanitizeFTS(t *testing.T) {
 	tests := []struct {
 		name  string

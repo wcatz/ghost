@@ -2,7 +2,9 @@ package memory
 
 import (
 	"context"
+	"fmt"
 	"testing"
+	"time"
 )
 
 // Issue #559: `ghost_memory_search` ranked resolved memories and unrelated
@@ -408,6 +410,60 @@ func TestKeywordOnlyGlobalHitReturnsWhenWindowHasRoom(t *testing.T) {
 				"still rank below the live ones when both come back (results = %s)",
 				pos[globalID], pos[id], contents(results))
 		}
+	}
+}
+
+// TestVectorSearchDoesNotCrowdProjectRows: the vector leg's per-bucket depth
+// must protect project rows from being crowded out by many similar _global rows
+// before the status demotion runs. Before the fix, the vector leg cut the union
+// of the two buckets at limit*2 by cosine, so many near-identical _global
+// vectors could fill the depth and push the project's own row out of the
+// candidates. The per-bucket depth gives each bucket its own limit*2, so the
+// project row stays a candidate and is returned after demotion halves the
+// _global rows' scores (#1771).
+//
+// This test calls the internal searchVectorLegAt directly with limit*2 to
+// mirror the query path's leg depth, bypassing the public wrapper's trim to
+// limit. The vector leg alone does not apply status demotion; the project row
+// is asserted to be in the returned candidate pool (untrimmed).
+func TestVectorSearchDoesNotCrowdProjectRows(t *testing.T) {
+	store, ctx := setupTestStore(t)
+	if err := store.EnsureProject(ctx, "_global", "_global", "global"); err != nil {
+		t.Fatalf("EnsureProject(_global): %v", err)
+	}
+
+	// Ten _global embeddings all more similar to the query than the project row.
+	for i := 0; i < 10; i++ {
+		id := createStatusMemory(t, store, ctx, "_global", fmt.Sprintf("unrelated global note %d", i), 0.7)
+		if err := store.StoreEmbedding(ctx, id, []float32{1, 0.01 * float32(i+1)}, "test-model"); err != nil {
+			t.Fatalf("StoreEmbedding global %d: %v", i, err)
+		}
+	}
+
+	// One project row with a lower similarity to the query.
+	projectID := createStatusMemory(t, store, ctx, "test-proj", "my project helm release workflow", 0.8)
+	if err := store.StoreEmbedding(ctx, projectID, []float32{1, 0.05}, "test-model"); err != nil {
+		t.Fatalf("StoreEmbedding project: %v", err)
+	}
+
+	// Call the internal leg with limit*2 (the query path's leg depth).
+	// The public SearchVector wraps and trims to limit; we want the raw leg output.
+	queryVec := []float32{1, 0}
+	const legLimit = 2
+	results, _, err := store.searchVectorLegAt(ctx, "test-proj", queryVec, legLimit*2, nil, time.Time{})
+	if err != nil {
+		t.Fatalf("searchVectorLegAt: %v", err)
+	}
+
+	found := false
+	for _, r := range results {
+		if r.MemoryID == projectID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("project row not in vector leg candidates (should be present with per-bucket depth): %v", results)
 	}
 }
 

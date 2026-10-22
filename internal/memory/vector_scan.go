@@ -238,9 +238,16 @@ type vectorRows struct {
 	validFroms, validUntils []byte
 	// rows locates each row's bytes inside those buffers.
 	rows []vectorRowSpan
-	// cands is the bounded top-k, reused so a search does not allocate a heap
-	// per query.
+	// cands is the bounded top-k for the project bucket, reused so a search
+	// does not allocate a heap per query.
 	cands []vecCandidate
+	// globalCands is the bounded top-k for the shared _global bucket, used when
+	// splitGlobal is set so a project's own rows cannot be crowded out of the
+	// candidate set by shared rows before the status demotion runs (#1771).
+	globalCands []vecCandidate
+	// splitGlobal, when set, keeps the shared _global bucket under its own top-k
+	// so the project's own rows stay candidates (#1771). Cleared by reset().
+	splitGlobal bool
 	// now is the clock the validity window is judged against. The zero time is
 	// "do not filter", which is every read that does not ask for it (the exported
 	// vector wrappers); the query path sets it to its request's Now.
@@ -278,10 +285,12 @@ func (v *vectorRows) reset() {
 	v.validUntils = v.validUntils[:0]
 	v.rows = v.rows[:0]
 	v.cands = v.cands[:0]
+	v.globalCands = v.globalCands[:0]
 	// The clock belongs to the search that set it, and the snapshot is pooled
 	// across queries, so a stale one would filter this query against another's
 	// Now — or, worse, keep filtering a browse read that asked for no filter.
 	v.now = time.Time{}
+	v.splitGlobal = false
 	// The counts belong to the scan that set them, and the snapshot is pooled
 	// across queries, so a stale one would be read as this query's.
 	v.facts = vectorLegFacts{}
@@ -531,6 +540,7 @@ func (v *vectorRows) search(queryVec []float32, limit int, scope map[string]stri
 
 	probe := newScopeProbe(scope)
 	v.cands = v.cands[:0]
+	v.globalCands = v.globalCands[:0]
 	for i := range v.rows {
 		sp := &v.rows[i]
 		// Drop non-positive scores: a cosine of 0 or below is not a match, and
@@ -569,15 +579,36 @@ func (v *vectorRows) search(queryVec []float32, limit int, scope map[string]stri
 		if len(probe.want) > 0 && !probe.eligible(v.column(v.scopes, sp.scope)) {
 			continue
 		}
-		v.offer(limit, vecCandidate{score: sim, row: i, seq: sp.seq})
+		c := vecCandidate{score: sim, row: i, seq: sp.seq}
+		if v.splitGlobal && string(v.column(v.projects, sp.project)) == globalProject {
+			offerCandidate(&v.globalCands, limit, c)
+		} else {
+			offerCandidate(&v.cands, limit, c)
+		}
 	}
-	if len(v.cands) == 0 {
+	if len(v.cands) == 0 && len(v.globalCands) == 0 {
 		return nil
 	}
 	slices.SortFunc(v.cands, compareCandidates)
+	slices.SortFunc(v.globalCands, compareCandidates)
+	// Merge the two buckets by score, so the leg's rank stays the store-wide
+	// order and each bucket keeps its own depth (#1771).
+	merged := make([]vecCandidate, 0, len(v.cands)+len(v.globalCands))
+	i, j := 0, 0
+	for i < len(v.cands) && j < len(v.globalCands) {
+		if compareCandidates(v.cands[i], v.globalCands[j]) <= 0 {
+			merged = append(merged, v.cands[i])
+			i++
+		} else {
+			merged = append(merged, v.globalCands[j])
+			j++
+		}
+	}
+	merged = append(merged, v.cands[i:]...)
+	merged = append(merged, v.globalCands[j:]...)
 
-	out := make([]ScoredMemory, len(v.cands))
-	for i, c := range v.cands {
+	out := make([]ScoredMemory, len(merged))
+	for i, c := range merged {
 		sp := &v.rows[c.row]
 		out[i] = ScoredMemory{
 			MemoryID:  string(v.column(v.ids, sp.id)),
@@ -617,53 +648,54 @@ func (v *vectorRows) validityWithheld(sp *vectorRowSpan) bool {
 	return false
 }
 
-// offer puts c in the top-k if it belongs there. Once the window is full a
-// candidate has to beat the worst row held, which is a single comparison for
-// every row of the corpus that does not make it.
-func (v *vectorRows) offer(k int, c vecCandidate) {
-	if len(v.cands) < k {
-		v.cands = append(v.cands, c)
-		v.siftUp(len(v.cands) - 1)
+// offerCandidate puts c into the heap cands if it belongs there. Once the window
+// is full a candidate has to beat the worst row held, which is a single comparison
+// for every row of the corpus that does not make it. It is the free-function form
+// so a search can keep one heap per bucket (#1771).
+func offerCandidate(cands *[]vecCandidate, k int, c vecCandidate) {
+	if len(*cands) < k {
+		*cands = append(*cands, c)
+		siftUpCandidate(cands, len(*cands)-1)
 		return
 	}
-	if !c.betterThan(v.cands[0]) {
+	if !c.betterThan((*cands)[0]) {
 		return
 	}
-	v.cands[0] = c
-	v.siftDown(0)
+	(*cands)[0] = c
+	siftDownCandidate(cands, 0)
 }
 
-// siftUp restores the heap after a new candidate was appended. The root of this
-// heap is the WORST candidate held, so a parent is never better than its child;
-// a freshly appended candidate that is worse than its parent belongs nearer the
-// root, and bubbles up past exactly the parents it is worse than.
-func (v *vectorRows) siftUp(i int) {
+// siftUpCandidate restores the heap after a new candidate was appended. The root
+// of this heap is the WORST candidate held, so a parent is never better than its
+// child; a freshly appended candidate that is worse than its parent belongs nearer
+// the root, and bubbles up past exactly the parents it is worse than.
+func siftUpCandidate(cands *[]vecCandidate, i int) {
 	for i > 0 {
 		parent := (i - 1) / 2
-		if !v.cands[i].worseThan(v.cands[parent]) {
+		if !(*cands)[i].worseThan((*cands)[parent]) {
 			return
 		}
-		v.cands[i], v.cands[parent] = v.cands[parent], v.cands[i]
+		(*cands)[i], (*cands)[parent] = (*cands)[parent], (*cands)[i]
 		i = parent
 	}
 }
 
-// siftDown restores the heap after the root was replaced: the worst child of a
-// node rises until the node is worse than both of them.
-func (v *vectorRows) siftDown(i int) {
-	n := len(v.cands)
+// siftDownCandidate restores the heap after the root was replaced: the worst child
+// of a node rises until the node is worse than both of them.
+func siftDownCandidate(cands *[]vecCandidate, i int) {
+	n := len(*cands)
 	for {
 		worst := i
-		if l := 2*i + 1; l < n && v.cands[l].worseThan(v.cands[worst]) {
+		if l := 2*i + 1; l < n && (*cands)[l].worseThan((*cands)[worst]) {
 			worst = l
 		}
-		if r := 2*i + 2; r < n && v.cands[r].worseThan(v.cands[worst]) {
+		if r := 2*i + 2; r < n && (*cands)[r].worseThan((*cands)[worst]) {
 			worst = r
 		}
 		if worst == i {
 			return
 		}
-		v.cands[i], v.cands[worst] = v.cands[worst], v.cands[i]
+		(*cands)[i], (*cands)[worst] = (*cands)[worst], (*cands)[i]
 		i = worst
 	}
 }

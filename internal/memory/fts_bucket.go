@@ -118,29 +118,73 @@ func dedupLookupStatement(cross bool, scopeClause string, scopeArgs []any, proje
 // whole-second-truncated instant. The tie order is the store-wide scan's, as in
 // dedupLookupStatement.
 func ftsSearchStatement(projectID, match string, limit int, now time.Time, allProjects bool) (string, []any) {
-	var projects []string
-	if !allProjects {
-		projects = ftsSearchProjects(projectID)
-	}
-	source, args := ftsMatchSource(match, true, projects...)
-	where := "1"
-	if !allProjects {
-		where = "(m.project_id = ? OR m.project_id = '_global')"
-		args = append(args, projectID)
-	}
-	if !now.IsZero() {
-		where += " AND " + validityMatchesSQLFor("m.")
-		stamp := now.UTC().Format(stampLayoutForSQL)
-		args = append(args, stamp, stamp)
-	}
-	args = append(args, limit)
-	return `
+	// A project-scoped search reads two buckets — the project's own and _global's
+	// — and a single cut over the union lets one bucket's rows crowd the other
+	// out of the candidate set before the status demotion runs (#1771). Give
+	// each bucket its own cut and merge the two in the store-wide order, so a
+	// project's own matching rows are candidates even when the shared bucket
+	// has more, and equally matching rows keep the order the store-wide scan
+	// gave them. A single bucket (all-projects, or a _global search) keeps one
+	// cut.
+	if allProjects || projectID == GlobalProjectID {
+		var projects []string
+		if !allProjects {
+			projects = ftsSearchProjects(projectID)
+		}
+		source, args := ftsMatchSource(match, true, projects...)
+		where := "1"
+		if !allProjects {
+			where = "(m.project_id = ? OR m.project_id = '_global')"
+			args = append(args, projectID)
+		}
+		if !now.IsZero() {
+			where += " AND " + validityMatchesSQLFor("m.")
+			stamp := now.UTC().Format(stampLayoutForSQL)
+			args = append(args, stamp, stamp)
+		}
+		args = append(args, limit)
+		return `
 		SELECT ` + memoryColumnsPrefixed + `
 		FROM ` + source + `
 		CROSS JOIN memories m ON m.rowid = f.mrowid
 		WHERE ` + where + `
 		ORDER BY f.frank, m.importance DESC, m.rowid
 		LIMIT ?
+	`, args
+	}
+
+	buildArm := func(bucket string) (string, []any) {
+		src, args := ftsMatchSource(match, true, bucket)
+		where := "m.project_id = ?"
+		args = append(args, bucket)
+		if !now.IsZero() {
+			where += " AND " + validityMatchesSQLFor("m.")
+			stamp := now.UTC().Format(stampLayoutForSQL)
+			args = append(args, stamp, stamp)
+		}
+		args = append(args, limit)
+		return `
+		SELECT ` + memoryColumnsPrefixed + `, f.frank AS frank, m.rowid AS mrowid
+		FROM ` + src + `
+		CROSS JOIN memories m ON m.rowid = f.mrowid
+		WHERE ` + where + `
+		ORDER BY f.frank, m.importance DESC, m.rowid
+		LIMIT ?`, args
+	}
+
+	projArm, projArgs := buildArm(projectID)
+	globArm, globArgs := buildArm(GlobalProjectID)
+	args := append([]any{}, projArgs...)
+	args = append(args, globArgs...)
+
+	return `
+		SELECT ` + memoryColumns + `
+		FROM (
+			SELECT * FROM (` + projArm + `)
+			UNION ALL
+			SELECT * FROM (` + globArm + `)
+		)
+		ORDER BY frank, importance DESC, mrowid
 	`, args
 }
 

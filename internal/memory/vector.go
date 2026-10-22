@@ -306,6 +306,12 @@ func (s *Store) GetMemoryContent(ctx context.Context, id string) (string, error)
 // Returns memory IDs sorted by descending similarity.
 func (s *Store) SearchVector(ctx context.Context, projectID string, queryVec []float32, limit int) ([]ScoredMemory, error) {
 	rows, _, err := s.searchVectorLeg(ctx, projectID, queryVec, limit, nil)
+	// The per-bucket split (#1771) keeps a separate top-k per bucket, so the
+	// leg may return up to 2*limit rows; the wrapper's contract stays "at most
+	// limit", so trim the merged list here (it is already sorted by score).
+	if limit > 0 && len(rows) > limit {
+		rows = rows[:limit]
+	}
 	return rows, err
 }
 
@@ -323,6 +329,9 @@ func (s *Store) SearchVector(ctx context.Context, projectID string, queryVec []f
 // nothing that deciding on the results would not have cost either.
 func (s *Store) SearchVectorScoped(ctx context.Context, projectID string, queryVec []float32, limit int, scope map[string]string) ([]ScoredMemory, error) {
 	rows, _, err := s.searchVectorLeg(ctx, projectID, queryVec, limit, scope)
+	if limit > 0 && len(rows) > limit {
+		rows = rows[:limit]
+	}
 	return rows, err
 }
 
@@ -387,6 +396,7 @@ func (s *Store) searchVectorLegAt(ctx context.Context, projectID string, queryVe
 		v := s.viewVectorCorpus(cp, scratch, projectID, false, queryVec)
 		defer releaseViewScratch(scratch, v)
 		v.now = now
+		v.splitGlobal = true
 		return v.search(queryVec, limit, scope), v.facts, nil
 	}
 
@@ -410,6 +420,7 @@ func (s *Store) searchVectorLegAt(ctx context.Context, projectID string, queryVe
 	// the same bounded window as every other vector search, so the facts and the
 	// results come off one scan.
 	rows.now = now
+	rows.splitGlobal = true
 	return rows.search(queryVec, limit, scope), rows.facts, nil
 }
 

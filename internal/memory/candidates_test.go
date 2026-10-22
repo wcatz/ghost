@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -46,6 +47,54 @@ func sameIDs(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// TestProjectSearchIsNotCrowdedOutByGlobalRows: a project search whose default
+// limit is met by short _global rows that share the query term must still return
+// the project's own matching rows. Before the fix, the leg cut the union of the
+// two buckets at limit*2 by bm25, so ten short global rows filled the depth and
+// the project's rows never became candidates (#1771).
+func TestProjectSearchIsNotCrowdedOutByGlobalRows(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	if err := s.EnsureProject(ctx, "_global", "_global", "global"); err != nil {
+		t.Fatalf("EnsureProject(_global): %v", err)
+	}
+	for i := 0; i < 10; i++ {
+		if _, err := s.Create(ctx, "_global", Memory{
+			Category:   "preference",
+			Content:    fmt.Sprintf("Prefer helm charts over kustomize for service %d.", i),
+			Source:     "manual",
+			Importance: 0.7,
+		}); err != nil {
+			t.Fatalf("Create global %d: %v", i, err)
+		}
+	}
+	for i := 0; i < 3; i++ {
+		if _, err := s.Create(ctx, testProject, Memory{
+			Category:   "gotcha",
+			Content:    fmt.Sprintf("The helm release for service %d must be rolled back with the documented procedure after a failed deploy.", i),
+			Source:     "manual",
+			Importance: 0.7,
+		}); err != nil {
+			t.Fatalf("Create project %d: %v", i, err)
+		}
+	}
+
+	now := time.Now().UTC()
+	set, err := s.Candidates(ctx, candidateRequest("helm", 5, now))
+	if err != nil {
+		t.Fatalf("Candidates: %v", err)
+	}
+	projectCount := 0
+	for _, c := range set.Rows {
+		if c.ProjectID == testProject {
+			projectCount++
+		}
+	}
+	if projectCount == 0 {
+		t.Fatalf("no project row among the %d candidates: %v", len(set.Rows), candidateIDs(t, set))
+	}
 }
 
 // TestCandidatesCarriesTheEvidenceCounts: the assembler's only route to the store
