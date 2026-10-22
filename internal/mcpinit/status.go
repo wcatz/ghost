@@ -236,10 +236,10 @@ func claudeMCPVerdict(out, ghostBin string) (present, current bool, why string) 
 	if rerr != nil {
 		// There is no program there to run: the binary was moved away, or the
 		// registration names a path that never held one.
-		return true, false, fmt.Sprintf("MCP server registered for a command that is not there (%s)", command)
+		return true, false, fmt.Sprintf("MCP server registered for a command that is not there (%s)", claudeMCPCommandLabel(command))
 	}
 	if !mcpCommandIsGhost(resolved, ghostBin) {
-		return true, false, fmt.Sprintf("MCP server registered for a different binary (%s)", command)
+		return true, false, fmt.Sprintf("MCP server registered for a different binary (%s)", claudeMCPCommandLabel(command))
 	}
 	args, _ := reg.config["args"].([]string)
 	if len(args) != 1 || args[0] != "mcp" {
@@ -253,14 +253,42 @@ func claudeMCPVerdict(out, ghostBin string) (present, current bool, why string) 
 // re-registers Claude Code's ghost server with this build's binary.
 const claudeMCPRepair = "run ghost mcp init --client claude"
 
+// claudeMCPCommandLabel renders the command a registration runs for the drift
+// line.
+//
+// The command is read from the client's own rendering, so it is text Ghost did
+// not author, and the line it lands on is a line of Ghost's own report: it
+// goes through the same renderer every other report uses for a value read from
+// outside (`memory.RefusalArg`), so a token-shaped value is withheld behind a
+// placeholder naming the format the guard found and a control character is
+// escaped. Quoting is what keeps a value carrying a line break from ending
+// the report line and putting a line of Ghost's own on the next one.
+func claudeMCPCommandLabel(command string) string {
+	return memory.RefusalArg("command", command)
+}
+
 // claudeMCPArgsLabel renders the arguments a registration carries for the
-// status line: the list as the client printed it, or "none" when it carries
+// status line: each one as the client printed it, or "none" when it carries
 // none.
+//
+// Each argument is rendered on its own rather than the list as one span, for
+// two reasons. An argument is a place where a key really is passed, so the
+// token guard is asked of each one and a token-shaped one is withheld behind a
+// placeholder naming the format — while the arguments beside it are still
+// named, because a renderer that withheld the whole list would keep the token
+// out and leave the line unable to say what the registration runs. And each
+// argument is quoted on its own, so an argument carrying a line break cannot
+// end the report line: the line break is escaped, and the report keeps one
+// line per check.
 func claudeMCPArgsLabel(args []string) string {
 	if len(args) == 0 {
 		return "none"
 	}
-	return strings.Join(args, " ")
+	parts := make([]string, 0, len(args))
+	for i, arg := range args {
+		parts = append(parts, memory.RefusalArg(fmt.Sprintf("argument[%d]", i), arg))
+	}
+	return strings.Join(parts, " ")
 }
 
 // mcpCommandIsGhost reports whether a resolved MCP command path is the ghost
