@@ -13,7 +13,7 @@ import (
 // Bump it and append to migrations whenever initSQL changes in a way that
 // CREATE TABLE IF NOT EXISTS cannot deliver to existing databases (new columns,
 // CHECK values, foreign keys, dropped tables).
-const schemaVersion = 28
+const schemaVersion = 29
 
 // SchemaVersion returns the schema version this build of Ghost expects, which is
 // the value a fully migrated database carries in PRAGMA user_version.
@@ -91,6 +91,7 @@ var migrations = []func(*sql.Tx) error{
 	migrateV26,
 	migrateV27,
 	migrateV28,
+	migrateV29,
 }
 
 // migrate brings an existing database up to schemaVersion. Fresh databases
@@ -2048,6 +2049,23 @@ END`,
 	for _, stmt := range stmts {
 		if _, err := tx.Exec(stmt); err != nil {
 			return fmt.Errorf("v28 fts project buckets: %q: %w", stmt[:min(40, len(stmt))], err)
+		}
+	}
+	return nil
+}
+
+// migrateV29 adds memory_snapshots.updated_at, the write stamp of the memory
+// the snapshot recorded. A restore can then put updated_at back rather than
+// leaving the replace's stamp or defaulting to created_at. NULL on rows that
+// predate the column: the restore leaves the live stamp alone in that case.
+func migrateV29(tx *sql.Tx) error {
+	has, err := columnExists(tx, "memory_snapshots", "updated_at")
+	if err != nil {
+		return err
+	}
+	if !has {
+		if _, err := tx.Exec(`ALTER TABLE memory_snapshots ADD COLUMN updated_at TEXT`); err != nil {
+			return fmt.Errorf("add memory_snapshots.updated_at: %w", err)
 		}
 	}
 	return nil
