@@ -104,10 +104,10 @@ func collectFTSAnswers(t *testing.T, db *sql.DB, search func(project, match stri
 	}
 	for _, raw := range []string{"the deploy is to staging", "staging cache", "nightly", "zebra"} {
 		for _, p := range []string{"alpha", "beta", GlobalProjectID} {
-			q, a := search(p, sanitizeFTS(raw))
+			q, a := search(p, sanitizeFTS(raw, nil))
 			run(fmt.Sprintf("search|%s|%s", raw, p), q, a)
 			for _, c := range []string{"fact", "gotcha"} {
-				q, a := dedup(p, c, sanitizeFTSN(raw, 30))
+				q, a := dedup(p, c, sanitizeFTSN(raw, 30, nil))
 				run(fmt.Sprintf("dedup|%s|%s|%s", raw, p, c), q, a)
 			}
 		}

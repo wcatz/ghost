@@ -4303,7 +4303,7 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 	// (precision): mergeScore over the full token sets confirms a true
 	// duplicate — the OR-probe alone treats a single shared word as a match,
 	// which silently swallowed unrelated saves.
-	ftsQuery := sanitizeFTSN(content, 30)
+	ftsQuery := sanitizeFTSN(content, 30, s.logger)
 	// A candidate that names a shared key differently is a different fact about
 	// a different place, not a second wording of this one, so it is not a
 	// candidate at all — and "not a candidate" has to be decided before the
@@ -5004,7 +5004,7 @@ func (s *Store) searchFTSValidating(ctx context.Context, projectID, query string
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	stmt, args := ftsSearchStatement(projectID, sanitizeFTS(query), limit, now, allProjects)
+	stmt, args := ftsSearchStatement(projectID, sanitizeFTS(query, s.logger), limit, now, allProjects)
 	rows, err := s.queryDB().QueryContext(ctx, stmt, args...)
 	if err != nil {
 		if allProjects {
@@ -9792,8 +9792,8 @@ const ftsSearchWordLimit = 10
 
 // sanitizeFTS sanitizes text into an FTS5 OR-query. Used on the search path
 // (SearchFTS, SearchFTSAll); capped by ftsSearchWordLimit.
-func sanitizeFTS(text string) string {
-	return sanitizeFTSN(text, ftsSearchWordLimit)
+func sanitizeFTS(text string, logger *slog.Logger) string {
+	return sanitizeFTSN(text, ftsSearchWordLimit, logger)
 }
 
 // sanitizeFTSN sanitizes text into an FTS5 OR-query, capped at maxWords
@@ -9806,8 +9806,8 @@ func sanitizeFTS(text string) string {
 // content improves candidate recall for the precision pass (mergeScore) that
 // follows; widening the cap globally would instead perturb ranked search
 // results.
-func sanitizeFTSN(text string, maxWords int) string {
-	terms := ftsQueryTerms(text, maxWords)
+func sanitizeFTSN(text string, maxWords int, logger *slog.Logger) string {
+	terms := ftsQueryTerms(text, maxWords, logger)
 	if len(terms) == 0 {
 		return `""`
 	}
@@ -9861,7 +9861,11 @@ func ftsHasBaseRune(word string) bool {
 // has to match the text as it stood at T. It reuses the term selection and the
 // phrase/prefix semantics here, so an as_of query selects the same terms a
 // current one would.
-func ftsQueryTerms(text string, maxWords int) []ftsTerm {
+func ftsQueryTerms(text string, maxWords int, logger *slog.Logger) []ftsTerm {
+	if logger == nil {
+		logger = slog.Default()
+	}
+
 	// Remove FTS5 operators and punctuation, keep only words.
 	var terms []ftsTerm
 	for _, word := range strings.Fields(text) {
@@ -9899,7 +9903,7 @@ func ftsQueryTerms(text string, maxWords int) []ftsTerm {
 	// Select the maxWords highest-value terms (stopwords only fill the cap
 	// when content words can't) instead of truncating the tail positionally.
 	if len(terms) > maxWords {
-		slog.Warn("fts query truncated",
+		logger.Warn("fts query truncated",
 			"original_terms", len(terms),
 			"limit", maxWords)
 		terms = selectFTSTERMs(terms, maxWords)

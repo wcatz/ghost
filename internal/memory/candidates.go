@@ -1222,7 +1222,7 @@ func (s *Store) runCandidateLegs(ctx context.Context, req CandidateRequest, p Se
 // keyword leg applies later rather than in its statement — so the count cannot
 // describe rows the leg never considered.
 func (s *Store) keywordValidityExcluded(ctx context.Context, req CandidateRequest, project string, allProjects bool) (int, error) {
-	query, args := keywordValidityExcludedStatement(project, sanitizeFTS(req.Query), req.Now, allProjects)
+	query, args := keywordValidityExcludedStatement(project, sanitizeFTS(req.Query, s.logger), req.Now, allProjects)
 	var n int
 	if err := s.queryDB().QueryRowContext(ctx, query, args...).Scan(&n); err != nil {
 		return 0, fmt.Errorf("candidates: keyword validity exclusion count: %w", err)

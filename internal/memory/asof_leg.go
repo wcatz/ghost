@@ -10,6 +10,7 @@ package memory
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 	"time"
@@ -157,8 +158,8 @@ type asOfLeg struct {
 // historicalTerms tokenizes a query the way the FTS leg's sanitizer selects it
 // (ftsQueryTerms, so the term budget, the identifier ranking and the stopword
 // rule are one rule) and prepares each term for matching.
-func historicalTerms(query string) []asOfLeg {
-	raw := ftsQueryTerms(query, ftsSearchWordLimit)
+func historicalTerms(query string, logger *slog.Logger) []asOfLeg {
+	raw := ftsQueryTerms(query, ftsSearchWordLimit, logger)
 	if len(raw) == 0 {
 		return nil
 	}
@@ -266,7 +267,7 @@ func (cand *Store) candidatesAsOf(ctx context.Context, req CandidateRequest, p S
 	}
 	set.Unrecorded = len(asof.Unknown)
 
-	terms := historicalTerms(req.Query)
+	terms := historicalTerms(req.Query, cand.logger)
 	var hits []asOfHit
 	// No extracted term means no term matched, never "no keyword filter": the
 	// current leg returns no rows for such a query, and treating the empty list

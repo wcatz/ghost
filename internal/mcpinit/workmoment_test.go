@@ -157,7 +157,7 @@ func TestAnUnrelatedMessageEmitsNothing(t *testing.T) {
 	// Shares one ordinary word ("cloud") with a stored row: retrieved by the
 	// keyword leg, kept out by the floor.
 	msg := "what is the weather in the cloud today"
-	terms := memory.DistinctiveTerms(msg, workMomentTerms)
+	terms := memory.DistinctiveTerms(msg, workMomentTerms, nil)
 	if _, w := keywordMatch(assemble.Item{Content: momentFiller}, terms); w == 0 {
 		t.Fatalf("the filler row shares no word with the message, so the floor is not what silences it")
 	}

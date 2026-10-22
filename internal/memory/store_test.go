@@ -1743,7 +1743,7 @@ func TestSanitizeFTS(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := sanitizeFTS(tc.input)
+			got := sanitizeFTS(tc.input, nil)
 			if got != tc.want {
 				t.Errorf("sanitizeFTS(%q)\n  got:  %s\n  want: %s", tc.input, got, tc.want)
 			}
@@ -1758,7 +1758,7 @@ func TestSanitizeFTS(t *testing.T) {
 func TestSanitizeFTSNWiderCap(t *testing.T) {
 	input := "one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty twentyone twentytwo twentythree twentyfour twentyfive twentysix twentyseven twentyeight twentynine thirty thirtyone thirtytwo"
 	want := `"one" OR "two" OR "three" OR "four" OR "five" OR "six" OR "seven" OR "eight" OR "nine" OR "ten" OR "eleven" OR "twelve" OR "thirteen" OR "fourteen" OR "fifteen" OR "sixteen" OR "seventeen" OR "eighteen" OR "nineteen" OR "twenty" OR "twentyone" OR "twentytwo" OR "twentythree" OR "twentyfour" OR "twentyfive" OR "twentysix" OR "twentyseven" OR "twentyeight" OR "twentynine" OR "thirty"`
-	got := sanitizeFTSN(input, 30)
+	got := sanitizeFTSN(input, 30, nil)
 	if got != want {
 		t.Errorf("sanitizeFTSN(%q, 30)\n  got:  %s\n  want: %s", input, got, want)
 	}
@@ -1771,7 +1771,7 @@ func TestSanitizeFTSDefaultCap(t *testing.T) {
 	for i := 1; i <= 35; i++ {
 		terms = append(terms, fmt.Sprintf("t%d", i))
 	}
-	got := sanitizeFTS(strings.Join(terms, " "))
+	got := sanitizeFTS(strings.Join(terms, " "), nil)
 	if n := strings.Count(got, " OR ") + 1; n != ftsSearchWordLimit {
 		t.Errorf("sanitizeFTS returned %d terms, want %d", n, ftsSearchWordLimit)
 	}
@@ -1830,7 +1830,7 @@ func assertOriginalOrder(t *testing.T, query string, terms []string) {
 // emit exactly ftsSearchWordLimit terms, and preserve original query order.
 func TestSanitizeFTSN_SelectsTailTerms(t *testing.T) {
 	const query = "please can you tell me exactly how to pin the ghost_windows_arm64 sha256 digest"
-	got := sanitizeFTS(query)
+	got := sanitizeFTS(query, nil)
 	terms := splitFTSTERMs(t, got)
 	t.Logf("sanitizeFTS(%q) = %s", query, got)
 
@@ -1858,7 +1858,7 @@ func TestSanitizeFTSN_SelectsTailTerms(t *testing.T) {
 // original position — the output is the first maxWords terms.
 func TestSanitizeFTSN_CountPinUnderSelection(t *testing.T) {
 	query := "deploy rollback shard replica cache buffer goroutine channel defer panic recover closure ticker mutex"
-	got := sanitizeFTS(query)
+	got := sanitizeFTS(query, nil)
 	want := `"deploy" OR "rollback" OR "shard" OR "replica" OR "cache" OR "buffer" OR "goroutine" OR "channel" OR "defer" OR "panic"`
 	if got != want {
 		t.Errorf("sanitizeFTS(%q)\n  got:  %s\n  want: %s", query, got, want)
@@ -1878,7 +1878,7 @@ func TestSanitizeFTSN_CountPinUnderSelection(t *testing.T) {
 func TestSanitizeFTSN_StopwordSelectionRules(t *testing.T) {
 	t.Run("stops dropped when content words fill the cap", func(t *testing.T) {
 		query := "alpha bravo the charlie delta echo the foxtrot golf hotel the india juliet kilo lima mike november oscar"
-		got := sanitizeFTS(query)
+		got := sanitizeFTS(query, nil)
 		want := `"alpha" OR "bravo" OR "charlie" OR "delta" OR "echo" OR "foxtrot" OR "golf" OR "hotel" OR "india" OR "juliet"`
 		if got != want {
 			t.Errorf("sanitizeFTS(%q)\n  got:  %s\n  want: %s", query, got, want)
@@ -1893,7 +1893,7 @@ func TestSanitizeFTSN_StopwordSelectionRules(t *testing.T) {
 		// the two earliest stopwords must reach FTS (never fewer than
 		// min(len(terms), maxWords) = 10 terms).
 		query := "rotate the kes signing keys and the artifact digest of the release notes"
-		got := sanitizeFTS(query)
+		got := sanitizeFTS(query, nil)
 		want := `"rotate" OR "the" OR "kes" OR "signing" OR "keys" OR "and" OR "artifact" OR "digest" OR "release" OR "notes"`
 		if got != want {
 			t.Errorf("sanitizeFTS(%q)\n  got:  %s\n  want: %s", query, got, want)
@@ -1913,7 +1913,7 @@ func TestSanitizeFTSN_StopwordSelectionRules(t *testing.T) {
 		// since an all-tie stable selection collapses to the same first-10
 		// output.
 		query := "one alpha bravo charlie delta echo foxtrot golf hotel india juliet november"
-		got := sanitizeFTS(query)
+		got := sanitizeFTS(query, nil)
 		want := `"one" OR "alpha" OR "bravo" OR "charlie" OR "delta" OR "echo" OR "foxtrot" OR "golf" OR "hotel" OR "india"`
 		if got != want {
 			t.Errorf("sanitizeFTS(%q)\n  got:  %s\n  want: %s", query, got, want)
@@ -1938,7 +1938,7 @@ func TestSanitizeFTSKeepsLongQueryTails(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := sanitizeFTS(tc.query)
+			got := sanitizeFTS(tc.query, nil)
 			terms := splitFTSTERMs(t, got)
 			t.Logf("sanitizeFTS(%q) = %s", tc.query, got)
 
@@ -1973,7 +1973,7 @@ func TestSanitizeFTSKeepsLongQueryTails(t *testing.T) {
 // panic/absent assertions below reject.
 func TestSanitizeFTSN_PromotesIdentifierOverContentTail(t *testing.T) {
 	query := "deploy rollback shard replica cache buffer goroutine channel defer panic recover ghost_windows_arm64"
-	got := sanitizeFTS(query)
+	got := sanitizeFTS(query, nil)
 	terms := splitFTSTERMs(t, got)
 	t.Logf("sanitizeFTS(%q) = %s", query, got)
 
