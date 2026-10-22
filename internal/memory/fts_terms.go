@@ -268,6 +268,31 @@ func DistinctiveTerms(text string, max int, logger *slog.Logger) []QueryTerm {
 	return out
 }
 
+// wordYieldsTerm reports whether a single word (as split by strings.Fields)
+// yields at least one extractable term after edge trimming. It is the shared
+// predicate used by HasFTSTerm and ftsQueryTerms so they cannot drift.
+func wordYieldsTerm(word string) bool {
+	clean := strings.TrimFunc(word, ftsEdgeRuneTrimmed)
+	return ftsHasBaseRune(clean)
+}
+
+// HasFTSTerm reports whether text yields at least one extractable term under
+// sanitizeFTSN's extraction. A query with none — whitespace, punctuation, or a
+// mix of separators only — matches nothing, and callers that embed the raw
+// query must not run the vector leg on it.
+//
+// It asks only whether a term EXISTS, so it never truncates the term list and
+// never logs the "fts query truncated" warning that sanitizeFTSN emits when a
+// query carries more than its cap.
+func HasFTSTerm(text string) bool {
+	for _, word := range strings.Fields(text) {
+		if wordYieldsTerm(word) {
+			return true
+		}
+	}
+	return false
+}
+
 // isFileNameTerm reports a term shaped like a file name or a dotted symbol
 // (stophook.go, config.toml, fmt.Sprintf): letters or digits on both sides of an
 // interior dot. The FTS term tiers do not call that an identifier, but in a

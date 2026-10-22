@@ -1038,6 +1038,21 @@ func (s *Server) searchResponseCap() int {
 	return searchResponseMaxBytes
 }
 
+// queryVectorForSearch returns the embedded query vector if an embedder is
+// configured, the query has at least one extractable term, and asOf is nil.
+// Otherwise it returns nil, which causes the vector leg to be recorded as not
+// run (ghost_memory_search) or skipped (ghost_search_all).
+func (s *Server) queryVectorForSearch(ctx context.Context, query string, asOf *time.Time) []float32 {
+	if s.embedder == nil || asOf != nil || !memory.HasFTSTerm(query) {
+		return nil
+	}
+	vec, err := s.embedder.EmbedQuery(ctx, query)
+	if err != nil {
+		return nil
+	}
+	return vec
+}
+
 // searchResponseMaxBytes is the default response cap for every formatted read
 // answer: the search tool and, since #1039, the listing tools that render their
 // own rows. It is the same order as the session-start injector's block — 15
@@ -2239,12 +2254,7 @@ func (s *Server) registerTools() {
 		// for a historical read. An embedding is a vector of the text a memory
 		// holds NOW, so embedding the query for a past content set buys a leg that
 		// cannot be run and an embedding call spent on it.
-		var queryVec []float32
-		if s.embedder != nil && asOf == nil {
-			if vec, err := s.embedder.EmbedQuery(ctx, args.Query); err == nil {
-				queryVec = vec
-			}
-		}
+		queryVec := s.queryVectorForSearch(ctx, args.Query, asOf)
 		// Parse scope once at the tool boundary so plain search can pass the
 		// same normalized map into window selection.
 		scopeFilter, err := optScope(args.Scope, "scope")
@@ -3107,12 +3117,7 @@ func (s *Server) registerTools() {
 			args.Limit = 100
 		}
 
-		var queryVec []float32
-		if s.embedder != nil {
-			if vec, err := s.embedder.EmbedQuery(ctx, args.Query); err == nil {
-				queryVec = vec
-			}
-		}
+		queryVec := s.queryVectorForSearch(ctx, args.Query, nil)
 		memories, err := s.store.SearchHybridAll(ctx, args.Query, queryVec, args.Limit)
 		if err != nil {
 			return nil, nil, fmt.Errorf("search failed: %w", err)
