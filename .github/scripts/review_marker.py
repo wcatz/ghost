@@ -48,7 +48,7 @@ MARKER_RE = re.compile(r"<!--\s*ghost-review:([0-9a-f]{7,40})\s*-->")
 TRUSTED_IDENTITIES = frozenset({"github-actions[bot]", "review-sweeper[bot]"})
 
 
-def is_trusted(user):
+def posted_by_review_bot(user):
     """True when a review was posted by the review bot itself."""
     if not isinstance(user, dict):
         return False
@@ -101,11 +101,11 @@ def marker_in(body):
     return match.group(1) if match else ""
 
 
-def trusted_markers(reviews):
+def bot_markers(reviews):
     """The commits the trusted reviews name, in the order they came."""
     markers = []
     for review in reviews or []:
-        if not isinstance(review, dict) or not is_trusted(review.get("user")):
+        if not isinstance(review, dict) or not posted_by_review_bot(review.get("user")):
             continue
         sha = marker_in(review.get("body"))
         if sha:
@@ -115,7 +115,7 @@ def trusted_markers(reviews):
 
 def last_marker(reviews):
     """The commit the newest trusted review says was reviewed."""
-    markers = trusted_markers(reviews)
+    markers = bot_markers(reviews)
     return markers[-1] if markers else ""
 
 
@@ -124,7 +124,7 @@ def judged(reviews, head):
     head = str(head or "").lower()
     if not head:
         return False
-    for sha in trusted_markers(reviews):
+    for sha in bot_markers(reviews):
         if head.startswith(sha.lower()):
             return True
     return False
