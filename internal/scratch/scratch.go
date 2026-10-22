@@ -326,9 +326,15 @@ func ownerMarker(dir string) (pid int, start string, ok bool) {
 	// symlink where the marker belongs. O_NOFOLLOW refuses a symlink swapped in
 	// between the lstat and this open, O_NONBLOCK keeps a FIFO from blocking
 	// the open until a writer appears, and the fstat on the descriptor refuses
-	// anything that is not a regular file before a byte is read. This mirrors
-	// internal/audit's openSidecar for the same reason.
-	f, err := os.OpenFile(filepath.Join(dir, ownerFile), ownerOpenFlags, 0)
+	// anything that is not a regular file before a byte is read. The lstat
+	// first refuses a symlink or pipe without opening it, which is the only
+	// defence before the open on Windows. This mirrors internal/audit's
+	// openSidecar for the same reason.
+	path := filepath.Join(dir, ownerFile)
+	if li, err := os.Lstat(path); err != nil || !li.Mode().IsRegular() {
+		return 0, "", false
+	}
+	f, err := os.OpenFile(path, ownerOpenFlags, 0)
 	if err != nil {
 		return 0, "", false
 	}
