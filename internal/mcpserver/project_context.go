@@ -29,10 +29,13 @@ import (
 // than infer it from a literal.
 const (
 	// recallProjectPrefaceMaxBytes is how much of a project id the recall_project
-	// prompt echoes whole in its preface and Description. Beyond it the id is
-	// withheld in the refusal form, so a long id cannot push the message past the
-	// response budget. A few KB keeps TestPromptsRenderALongProjectPathWholeAndRefusalsDoNot's
-	// ~300-byte id whole.
+	// prompt echoes whole in its preface and Description, and how much the
+	// project-context tool echoes whole in its not-registered answer. Beyond it
+	// the id is withheld in the refusal form, so a long id cannot push the answer
+	// past the response budget: the tool's not-registered sentence is FRAMING,
+	// and a framing at or over the budget keeps every row rather than cutting
+	// any, so the cap stops applying at all. A few KB keeps
+	// TestPromptsRenderALongProjectPathWholeAndRefusalsDoNot's ~300-byte id whole.
 	recallProjectPrefaceMaxBytes = 512
 
 	// projectContextMemoriesCap bounds the `## Memories` section of the
@@ -226,9 +229,17 @@ func assembleProjectContext(ctx context.Context, s *Server, req assemble.Request
 }
 
 // recallProjectPrefaceName renders a project id for the recall_project prompt's
-// preface and Description. Short ids come back whole (quoted), so an agent can
-// copy them; a long id is withheld in the refusal form so it cannot push the
-// message past the response budget.
+// preface and Description, and for the project-context tool's not-registered
+// answer. Short ids come back whole (quoted), so an agent can copy them and the
+// sentence names the project the caller asked about; a long id is withheld in
+// the refusal form so it cannot push the answer past the response budget.
+//
+// The tool's use of it is the one that BOUNDS rather than abbreviates: that
+// sentence is framing, and a framing at or over the budget makes the fit pass
+// keep every row, so an unbounded echo there stopped the cap applying at all.
+// The bound belongs to the surface that renders the answer, and the prompt's
+// bound is the same number because it is the same id in the same kind of
+// sentence.
 func recallProjectPrefaceName(rawID string) string {
 	if len(rawID) <= recallProjectPrefaceMaxBytes {
 		return memory.ProjectArg("project_id", rawID)
@@ -889,7 +900,7 @@ func (s *Server) projectContextBlock(ctx context.Context, projectID, asked strin
 		case exists:
 			text = "Project is registered but has no memories or learned context yet — nothing has been saved for it."
 		default:
-			text = projectNotRegistered(memory.ProjectArg("project_id", asked))
+			text = projectNotRegistered(recallProjectPrefaceName(asked))
 		}
 		// A sentence about the store is not a large answer and has no rows to cut,
 		// so it is not fitted to the budget.

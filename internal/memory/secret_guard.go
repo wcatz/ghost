@@ -184,8 +184,15 @@ func ProjectArg(field, value string) string {
 //
 // It is a separate function because ProjectArg is also used where the value must
 // come back whole: the prompts that tell an agent to call a tool with this very
-// project id, and the not-registered answers. Bounding those would hand the agent
-// a placeholder to pass as an id.
+// project id, and the not-registered answers of the listing tools. Bounding those
+// would hand the agent a placeholder to pass as an id.
+//
+// A surface whose answer is BOUNDED BYTES can still bound the value itself
+// rather than through this function: the project-context tool renders its
+// not-registered answer inside a byte budget, so it echoes a long project id
+// through its own 512-byte rule and a longer one comes back withheld. The
+// renderer here is not that bound, and a surface that needs one asks for it
+// where the answer is built rather than widening this one for every caller.
 func RefusalArg(field, value string) string {
 	if len(value) > ArgEchoMaxBytes {
 		if refusal := rejectSecret(field, value); refusal != nil {

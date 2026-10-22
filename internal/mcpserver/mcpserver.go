@@ -2720,10 +2720,18 @@ func (s *Server) registerTools() {
 				// The section body ends in a newline, so replacing that final
 				// newline with the blank line before the sentence reproduces
 				// projectContextWithNotRegistered byte for byte.
-				parts = append(parts, responsePart{text: "\n" + projectNotRegistered(memory.ProjectArg("project_id", asked))})
+				//
+				// The id in the sentence goes through the SAME bound the
+				// recall_project preface uses, and it is bound because of what
+				// the sentence is: FRAMING. A framing at or over the budget
+				// makes the fit pass keep every row rather than cutting any, so
+				// the cap stopped applying at all — a 20,000-byte id produced
+				// an answer of about 180 KB with no cut notice. The bound is
+				// the surface's own because the answer is the surface's.
+				parts = append(parts, responsePart{text: "\n" + projectNotRegistered(recallProjectPrefaceName(asked))})
 				text, _ = capResponseParts(parts, s.searchResponseCap(), projectContextCutAdvice)
 			} else {
-				text = projectNotRegistered(memory.ProjectArg("project_id", asked))
+				text = projectNotRegistered(recallProjectPrefaceName(asked))
 			}
 			return &mcp.CallToolResult{
 				Content: []mcp.Content{&mcp.TextContent{Text: text}},
