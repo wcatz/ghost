@@ -1102,7 +1102,7 @@ Import does not run Upsert's near-duplicate probe. A restore is putting back wha
 
 ### `ghost context`
 
-Two modes. Without `--audit` it prints the passive session-start context block:
+Two modes. Without `--audit` it prints the passive session-start context block (its open-task and live-decision windows list the newest row first, including rows created in the same second, so a cap drops the earliest of a burst):
 
 ```bash
 ghost context

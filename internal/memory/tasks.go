@@ -78,7 +78,7 @@ func (s *Store) ListTasks(ctx context.Context, projectID, status string, limit i
 		query += ` AND status = ?`
 		args = append(args, status)
 	}
-	query += ` ORDER BY priority ASC, created_at DESC LIMIT ?`
+	query += ` ORDER BY priority ASC, created_at DESC, rowid DESC LIMIT ?`
 	args = append(args, limit)
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
