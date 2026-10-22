@@ -20,3 +20,12 @@ const markerOpenFlags = os.O_RDONLY
 // swapped in before the open would be followed, and the fstat still refuses a
 // target that is not a regular file.
 const momentAppendOpenFlags = os.O_APPEND | os.O_CREATE | os.O_WRONLY
+
+// logAppendOpenFlags are the flags createLog opens a data-dir log with. Windows
+// has no O_NOFOLLOW or O_NONBLOCK in Go's syscall package, so the fstat after
+// the open is the whole of the defence.
+const logAppendOpenFlags = os.O_APPEND | os.O_CREATE | os.O_WRONLY
+
+// operatorLogOpenFlags are the flags the operator-chosen log path is opened
+// with; the fstat in openRegularAppend refuses a special file.
+const operatorLogOpenFlags = os.O_APPEND | os.O_CREATE | os.O_WRONLY

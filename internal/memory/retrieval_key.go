@@ -33,6 +33,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -140,6 +141,33 @@ func (s *Store) WarmQueryKey() error {
 	return err
 }
 
+// errKeyNotRegular is readKeyFile's refusal of a path that is not a regular file.
+var errKeyNotRegular = errors.New("the retrieval key path is not a regular file")
+
+// readKeyFile reads the retrieval key file and only ever opens a regular file.
+// The data directory is writable by every local process, so a FIFO at the key's
+// path used to block os.ReadFile's open until a writer appeared (wedging the
+// stop hook's audit scan and the coordinator's audit phase), and a symlink was
+// followed to whatever it named. A missing file still reports os.ErrNotExist so
+// the callers' "no key yet" branches keep working; every other refusal is an
+// error that is never read as "no key", so a planted entry is not silently
+// replaced by a fresh key.
+func readKeyFile(path string) ([]byte, error) {
+	f, err := os.OpenFile(path, keyFileOpenFlags, 0) // #nosec G304 -- a file inside the Ghost data directory
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close() //nolint:errcheck
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("%w (%s)", errKeyNotRegular, info.Mode().Type())
+	}
+	return io.ReadAll(f)
+}
+
 func loadOrCreateQueryKey() ([]byte, error) {
 	// DataDirPath, not DataDir: resolving the location must not be what creates
 	// the directory, and a refusal here has to name the path rather than a
@@ -150,7 +178,7 @@ func loadOrCreateQueryKey() ([]byte, error) {
 	}
 	path := filepath.Join(dir, queryKeyFileName)
 
-	raw, err := os.ReadFile(path)
+	raw, err := readKeyFile(path)
 	if err == nil {
 		// Classified by the same function the loser's retry uses, so "too short"
 		// and "not hex" mean the same thing wherever a key file is read. A file we
@@ -305,7 +333,7 @@ const (
 )
 
 func readPublishedQueryKeyOnce(path string) ([]byte, error) {
-	raw, err := os.ReadFile(path)
+	raw, err := readKeyFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, err // unwrapped: the loop recognises "not there yet"
@@ -404,7 +432,7 @@ func ReadRetrievalKey() ([]byte, error) {
 		return nil, fmt.Errorf("locate the data directory for the retrieval key: %w", err)
 	}
 	path := filepath.Join(dir, queryKeyFileName)
-	raw, err := os.ReadFile(path)
+	raw, err := readKeyFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, fmt.Errorf("the retrieval key at %s does not exist yet (a store that has "+

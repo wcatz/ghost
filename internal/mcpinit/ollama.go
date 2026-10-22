@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -64,6 +63,9 @@ func checkOllama(w io.Writer, cfg *config.Config, check func(ok bool, pass, fail
 	return embedding.Reachable
 }
 
+// ollamaMarkerMax bounds the down-marker, which holds one RFC 3339 timestamp.
+const ollamaMarkerMax = 4096
+
 // reportOllamaDownDuration prints how long Ollama has been unreachable, based
 // on the down-since marker file the embedding worker (internal/embedding.Worker)
 // maintains at filepath.Join(dataDir, embedding.OllamaDownMarkerFilename) — see
@@ -86,8 +88,18 @@ func checkOllama(w io.Writer, cfg *config.Config, check func(ok bool, pass, fail
 // reporter (it does not delete a stale marker itself even when it declines to
 // print); the marker is harmless clutter until a future worker run clears it.
 func reportOllamaDownDuration(w io.Writer, dataDir string) {
-	data, err := os.ReadFile(filepath.Join(dataDir, embedding.OllamaDownMarkerFilename))
+	// openMarker, not os.ReadFile: the marker sits in the data dir beside files
+	// any local process can plant, and a FIFO at its name would block `ghost mcp
+	// status` in the open. A non-regular entry is no marker.
+	f, err := openMarker(filepath.Join(dataDir, embedding.OllamaDownMarkerFilename))
 	if err != nil {
+		return
+	}
+	defer f.Close() //nolint:errcheck
+	// One byte past the bound, so an oversized marker is ignored rather than
+	// parsed from its first bytes.
+	data, err := io.ReadAll(io.LimitReader(f, ollamaMarkerMax+1))
+	if err != nil || len(data) > ollamaMarkerMax {
 		return
 	}
 	since, err := time.Parse(time.RFC3339, strings.TrimSpace(string(data)))

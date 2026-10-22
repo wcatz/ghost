@@ -21,3 +21,15 @@ const markerOpenFlags = os.O_RDONLY | syscall.O_NOFOLLOW | syscall.O_NONBLOCK
 // and the fstat on the open descriptor refuses anything that is not a regular
 // file before a byte is written. O_NONBLOCK changes nothing for a regular file.
 const momentAppendOpenFlags = os.O_APPEND | os.O_CREATE | os.O_WRONLY | syscall.O_NOFOLLOW | syscall.O_NONBLOCK
+
+// logAppendOpenFlags are the flags createLog opens a data-dir log with. The
+// same guard as momentAppendOpenFlags: O_NOFOLLOW makes the kernel refuse a
+// symlink planted at the log's name, O_NONBLOCK keeps a FIFO from blocking the
+// open until a reader appears, and the fstat on the open descriptor refuses
+// anything that is not a regular file before a byte is written.
+const logAppendOpenFlags = os.O_APPEND | os.O_CREATE | os.O_WRONLY | syscall.O_NOFOLLOW | syscall.O_NONBLOCK
+
+// operatorLogOpenFlags are logAppendOpenFlags without O_NOFOLLOW, for the log
+// path the operator chose: a symlink is followed, and O_NONBLOCK plus the fstat
+// in openRegularAppend still refuse a FIFO or other special file.
+const operatorLogOpenFlags = os.O_APPEND | os.O_CREATE | os.O_WRONLY | syscall.O_NONBLOCK

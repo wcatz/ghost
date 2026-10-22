@@ -21,8 +21,40 @@ const logRotateCap = 5 << 20
 // a test can make an open fail — the real cause is ENOSPC or an inode
 // exhaustion on the very filesystem the rotation exists to protect, which a
 // test cannot stage.
+//
+// The open refuses what is not a regular file (logAppendOpenFlags, then an fstat
+// on the descriptor): the data dir is writable by every local process, so a FIFO
+// wearing a log's name would block every hook that appends to it, and a symlink
+// would be appended through into whatever it names.
 var createLog = func(path string) (*os.File, error) {
-	return os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	return openRegularAppend(path, logAppendOpenFlags)
+}
+
+// createOperatorLog is createLog for a path the operator chose
+// (GHOST_LOG_FILE): a symlink there is followed, as the operator arranged it,
+// while a FIFO or other special file is still refused. Only the data-dir logs
+// refuse links.
+var createOperatorLog = func(path string) (*os.File, error) {
+	return openRegularAppend(path, operatorLogOpenFlags)
+}
+
+// openRegularAppend opens path with flags and returns it only when the open
+// descriptor is a regular file.
+func openRegularAppend(path string, flags int) (*os.File, error) {
+	f, err := os.OpenFile(path, flags, 0o600) // #nosec G304 -- a log inside the Ghost data directory or the operator's own GHOST_LOG_FILE
+	if err != nil {
+		return nil, err
+	}
+	info, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		_ = f.Close()
+		return nil, fmt.Errorf("%w (%s)", errNotRegularMarker, info.Mode().Type())
+	}
+	return f, nil
 }
 
 // openLogForAppend opens path for append, creating it if it is missing, and
@@ -71,10 +103,17 @@ var createLog = func(path string) (*os.File, error) {
 // or not a regular file), which names the fresh path; and both opens failing,
 // which names both paths and both causes.
 //
-// Rotation is decided by Lstat, so a symlink wearing the log's name is
-// appended through and never renamed: renaming it would move the link out from
-// under whoever arranged it, and untangling the target is theirs to do.
+// Rotation is decided by Lstat, so a symlink wearing the log's name is never
+// renamed: renaming it would move the link out from under whoever arranged it.
+// The open then refuses the link (createLog), so nothing is appended through it
+// and the caller gets an error naming a non-regular file.
 func openLogForAppend(path string) (*os.File, error) {
+	return openLogWith(path, createLog)
+}
+
+// openLogWith is openLogForAppend with the create function given: createLog
+// for a data-dir log, createOperatorLog for the operator's own GHOST_LOG_FILE.
+func openLogWith(path string, createLog func(string) (*os.File, error)) (*os.File, error) {
 	rotatedPath := path + ".1"
 	rotateLogIfOversized(path, rotatedPath, os.Lstat)
 
@@ -157,9 +196,11 @@ const LogRotateCap = logRotateCap
 
 // OpenLogForAppend is openLogForAppend for a caller outside this package: the
 // MCP server's GHOST_LOG_FILE redirect names an arbitrary path rather than a
-// data-dir file, and takes the same cap, single ".1" copy and 0600 create.
+// data-dir file, and takes the same cap, single ".1" copy and 0600 create. The
+// path is the operator's choice, so a symlink there is followed; a FIFO or
+// other special file is refused.
 func OpenLogForAppend(path string) (*os.File, error) {
-	return openLogForAppend(path)
+	return openLogWith(path, createOperatorLog)
 }
 
 // RotatingLog is an append-only log writer that holds the cap while it is
@@ -199,7 +240,7 @@ type RotatingLog struct {
 // could not rename it before the writer tries again.
 const retryAfterFailedRotation = 1 << 20
 
-// OpenRotatingLog opens path through openLogForAppend and returns a writer
+// OpenRotatingLog opens path through OpenLogForAppend and returns a writer
 // that keeps it within the cap for as long as it stays open.
 func OpenRotatingLog(path string) (*RotatingLog, error) {
 	l := &RotatingLog{path: path}
@@ -211,7 +252,7 @@ func OpenRotatingLog(path string) (*RotatingLog, error) {
 
 // open opens the log and reads its size. The caller holds mu, or owns l.
 func (l *RotatingLog) open() error {
-	f, err := openLogForAppend(l.path)
+	f, err := OpenLogForAppend(l.path)
 	if err != nil {
 		return err
 	}
