@@ -1835,37 +1835,50 @@ func importMemories(w io.Writer, dryRun bool) ([]projectInfo, error) {
 		}
 
 		if dryRun {
-			_, _ = fmt.Fprintf(w, "  ~ %s — would scan for importable memories\n", assemble.Label(p.Name))
+			_, _ = fmt.Fprintf(w, "  ~ %s — would scan for importable memories\n", progressLabel(p.Name))
 			continue
 		}
 
 		n, refused, failed, notRegular, err := claudeimport.Import(ctx, store, p.ID, p.Path, logger)
 		if err != nil {
-			_, _ = fmt.Fprintf(w, "  ! %s — import error: %v\n", assemble.Label(p.Name), err)
+			_, _ = fmt.Fprintf(w, "  ! %s — import error: %v\n", progressLabel(p.Name), err)
 			continue
 		}
 		if n > 0 {
-			_, _ = fmt.Fprintf(w, "  ✓ %s — %d memories imported\n", assemble.Label(p.Name), n)
+			_, _ = fmt.Fprintf(w, "  ✓ %s — %d memories imported\n", progressLabel(p.Name), n)
 		} else {
-			_, _ = fmt.Fprintf(w, "  - %s — no new memories\n", assemble.Label(p.Name))
+			_, _ = fmt.Fprintf(w, "  - %s — no new memories\n", progressLabel(p.Name))
 		}
 		for _, f := range refused {
-			_, _ = fmt.Fprintf(w, "  ! %s — refused by the token guard: %s\n", assemble.Label(p.Name), memory.ProjectArg("file", f))
+			_, _ = fmt.Fprintf(w, "  ! %s — refused by the token guard: %s\n", progressLabel(p.Name), memory.ProjectArg("file", f))
 		}
 		for _, f := range failed {
-			_, _ = fmt.Fprintf(w, "  ! %s — could not store (a later run retries it): %s\n", assemble.Label(p.Name), memory.ProjectArg("file", f))
+			_, _ = fmt.Fprintf(w, "  ! %s — could not store (a later run retries it): %s\n", progressLabel(p.Name), memory.ProjectArg("file", f))
 		}
 		for _, f := range notRegular {
-			_, _ = fmt.Fprintf(w, "  ! %s — skipped, not a regular file (never read): %s\n", assemble.Label(p.Name), memory.ProjectArg("file", f))
+			_, _ = fmt.Fprintf(w, "  ! %s — skipped, not a regular file (never read): %s\n", progressLabel(p.Name), memory.ProjectArg("file", f))
 		}
 	}
 
 	return infos, nil
 }
 
+// progressLabel renders a stored project name for an init progress line. A
+// name the token guard recognises (a row from an older build) is withheld as the
+// guard's placeholder; any other name is escaped by assemble.Label.
+func progressLabel(name string) string {
+	if placeholder, withheld := memory.TokenGuardPlaceholder("project", name); withheld {
+		return placeholder
+	}
+	return assemble.Label(name)
+}
+
 // sanitizeName allowlists safe characters for project names interpolated into
 // MEMORY.md files that Claude Code auto-loads (prevents prompt injection).
 func sanitizeName(name string) string {
+	if _, withheld := memory.TokenGuardPlaceholder("project", name); withheld {
+		return "unknown"
+	}
 	var sb strings.Builder
 	for _, r := range name {
 		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') ||
@@ -1909,7 +1922,7 @@ func writeRedirects(w io.Writer, projects []projectInfo, dryRun bool) {
 			// Only a missing redirect is created. Anything else — not a regular
 			// file, or unreadable — is left as it is and named, never written over.
 			if !errors.Is(err, os.ErrNotExist) {
-				_, _ = fmt.Fprintf(w, "  ! %s — %v\n", assemble.Label(p.Name), err)
+				_, _ = fmt.Fprintf(w, "  ! %s — %v\n", progressLabel(p.Name), err)
 				continue
 			}
 			// File doesn't exist yet — that's fine, we'll create it.
@@ -1932,26 +1945,26 @@ All project knowledge is stored in Ghost. At session start, run:
 `, safeName, safeName)
 
 			if content == currentContent {
-				_, _ = fmt.Fprintf(w, "  ✓ %s — redirect exists\n", assemble.Label(p.Name))
+				_, _ = fmt.Fprintf(w, "  ✓ %s — redirect exists\n", progressLabel(p.Name))
 				continue
 			}
 			// Rewrite only an unedited old-format Ghost redirect. Anything else
 			// (including a redirect the user has edited) is left alone, the same
 			// way an unrecognised MEMORY.md is.
 			if content != oldContent {
-				_, _ = fmt.Fprintf(w, "  - %s — MEMORY.md exists (not overwriting)\n", assemble.Label(p.Name))
+				_, _ = fmt.Fprintf(w, "  - %s — MEMORY.md exists (not overwriting)\n", progressLabel(p.Name))
 				continue
 			}
 			// Old Ghost redirect with stale tool-call instructions — update it.
 		}
 
 		if dryRun {
-			_, _ = fmt.Fprintf(w, "  ~ %s — would create redirect\n", assemble.Label(p.Name))
+			_, _ = fmt.Fprintf(w, "  ~ %s — would create redirect\n", progressLabel(p.Name))
 			continue
 		}
 
 		if err := os.MkdirAll(dir, 0755); err != nil {
-			_, _ = fmt.Fprintf(w, "  ! %s — mkdir error: %v\n", assemble.Label(p.Name), err)
+			_, _ = fmt.Fprintf(w, "  ! %s — mkdir error: %v\n", progressLabel(p.Name), err)
 			continue
 		}
 
@@ -1966,9 +1979,9 @@ Use `+"`ghost_memory_search`"+` to search for specific facts.
 `, safeName)
 
 		if err := writeFileAtomic(target, []byte(content), 0644); err != nil {
-			_, _ = fmt.Fprintf(w, "  ! %s — write error: %v\n", assemble.Label(p.Name), err)
+			_, _ = fmt.Fprintf(w, "  ! %s — write error: %v\n", progressLabel(p.Name), err)
 			continue
 		}
-		_, _ = fmt.Fprintf(w, "  + %s — created redirect\n", assemble.Label(p.Name))
+		_, _ = fmt.Fprintf(w, "  + %s — created redirect\n", progressLabel(p.Name))
 	}
 }
