@@ -307,7 +307,7 @@ func Export(ctx context.Context, s *memory.Store, w io.Writer, projectFilter str
 			continue
 		}
 		if reason, secret := exportRefusal(memory.CheckImportedLink(l)); reason != "" {
-			skipped = append(skipped, SkippedRecord{Type: TypeLink, ID: l.SourceID, Reason: reason, Secret: secret})
+			skipped = append(skipped, SkippedRecord{Type: TypeLink, ID: l.SourceID, Detail: linkDetail(&l), Reason: reason, Secret: secret})
 			continue
 		}
 		keptLinks = append(keptLinks, l)
@@ -407,8 +407,13 @@ func Export(ctx context.Context, s *memory.Store, w io.Writer, projectFilter str
 // printing it — the same obligation `RecordResult.ID` carries. An id carrying a
 // newline would otherwise forge a report line on the very report that names it.
 type SkippedRecord struct {
-	Type   string
-	ID     string
+	Type string
+	ID   string
+	// Detail carries the relation and target of an edge left out of the
+	// artifact, so the report can name which edge of the graph was refused
+	// rather than only the memory that makes the claim. It is empty for every
+	// other kind, and a caller MUST still render ID through assemble.Token.
+	Detail string
 	Reason string
 	// Secret marks a record the CREDENTIAL guard refused, which is a different
 	// kind of news from every other reason here and gets its own advice from the

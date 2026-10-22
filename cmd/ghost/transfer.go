@@ -921,7 +921,15 @@ func reportSkippedRecords(out io.Writer, skipped []portable.SkippedRecord) error
 		// refusal it names the FIELD and nothing else — so this line is safe to
 		// print for the same reason the import report's is. The value itself is in
 		// no SkippedRecord field and never reaches this writer.
-		if _, err := fmt.Fprintf(out, "  ! left out: %s %s — %s\n", sk.Type, assemble.Token(sk.ID), sk.Reason); err != nil {
+		// An edge of the graph is identified by both ends and its relation, not
+		// only by the memory that makes the claim: two refused edges from the
+		// same source are otherwise indistinguishable on the report. The import
+		// side names them through linkDetail, and this side does the same.
+		label := assemble.Token(sk.ID)
+		if sk.Type == portable.TypeLink && sk.Detail != "" {
+			label = sk.Detail + " (" + assemble.Token(sk.ID) + ")"
+		}
+		if _, err := fmt.Fprintf(out, "  ! left out: %s %s — %s\n", sk.Type, label, sk.Reason); err != nil {
 			return err
 		}
 		// An orphan is in neither bucket: its own bytes were never judged and its
