@@ -327,7 +327,7 @@ func TestExportIsDeterministic(t *testing.T) {
 	// added here would break byte-reproducibility while every field the test
 	// looked for would still be there.
 	head := strings.SplitN(string(first), "\n", 2)[0]
-	if want := `{"type":"header","schema_version":2,"features":["links","retention"]}`; head != want {
+	if want := `{"type":"header","schema_version":3,"features":["links","retention"]}`; head != want {
 		t.Errorf("header line = %s, want exactly %s", head, want)
 	}
 }
@@ -655,11 +655,11 @@ func TestImportDryRunWritesNothing(t *testing.T) {
 // mean whatever this build guesses, which is the one outcome an import must
 // never produce.
 func TestImportRejectsAnUnknownSchemaVersion(t *testing.T) {
-	// 3 and 0 are outside the readable range; 1 is inside it, and is checked by
-	// TestImportStillReadsAV1Artifact — the range is a list of the versions whose
-	// rules hold, so a test that forgot a version inside it would let a break
-	// through silently.
-	for _, version := range []string{"3", "99", "0"} {
+	// 4 and 0 are outside the readable range; 1, 2 and 3 are inside it, and 1 is
+	// checked by TestImportStillReadsAV1Artifact and 3 by the new export — the
+	// range is a list of the versions whose rules hold, so a test that forgot a
+	// version inside it would let a break through silently.
+	for _, version := range []string{"4", "99", "0"} {
 		t.Run("version "+version, func(t *testing.T) {
 			store := newTestStore(t)
 			body := `{"type":"header","schema_version":` + version + "}\n" +

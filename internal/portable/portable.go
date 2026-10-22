@@ -43,6 +43,14 @@ import (
 // version alone would have made every v1 artifact unreadable, which is why the
 // readable range below is explicit rather than "this version only".
 //
+// v3 is the link record type (#1762): the feature list that protects `links`
+// and `retention` shipped after those fields, so an older build that ignores the
+// feature list would import a v2 artifact carrying links and silently drop them
+// (and lose `retention` on builds without that field). Bumping the version is
+// the check every released build performs, so the refusal the docs promise
+// happens on those builds too. The feature list stays the mechanism for any later
+// must-understand addition.
+//
 // Import refuses any version outside the range it reads. A newer one is a file
 // whose fields this build cannot interpret, and reading it would insert records
 // that mean whatever this build guesses. An older one would normally be a file
@@ -52,7 +60,7 @@ import (
 // files do not carry, and an absent optional field is the documented no-change
 // case. A future shape change removes v1 from the range rather than widening it,
 // and the test that pins the range is the one that has to be edited to do it.
-const SchemaVersion = 2
+const SchemaVersion = 3
 
 // minReadableSchemaVersion is the oldest artifact this build reads. See
 // SchemaVersion for why it is a range and not everything below.
