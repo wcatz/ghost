@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+
+	"github.com/wcatz/ghost/internal/memory"
 )
 
 // Decision 3: abstention is an outcome, not an empty list. Every assembled block
@@ -233,7 +235,13 @@ func (p *pipeline) emptyReason() string {
 	// operator whose embedder answered that they have no embedder, which is the
 	// same conflation `verdict()` refuses further down. A second failed leg makes
 	// it the general case, and says so.
-	if p.legNeverRan("vector") && !p.legFailed("fts") {
+	// A vector leg that never ran is "unavailable" only when the query could
+	// have produced a vector at all. A query with no extractable term is skipped
+	// deliberately (it is not a missing embedder), so it must not be reported as
+	// one — it falls through to no_candidates below. Passive requests have no
+	// query by construction and keep the original behaviour.
+	if p.legNeverRan("vector") && !p.legFailed("fts") &&
+		(p.passive || memory.HasFTSTerm(p.req.Query)) {
 		return reasonVectorUnavailable
 	}
 	if p.legFailed("fts") || p.legFailed("vector") {
@@ -484,6 +492,13 @@ func (p *pipeline) coverageComplete() bool {
 	for _, name := range []string{"fts", "vector"} {
 		leg := p.set.Legs[name]
 		if !leg.Applicable {
+			continue
+		}
+		// A vector leg skipped because the query has no extractable term was
+		// never going to run, so it does not make coverage incomplete. Passive
+		// requests keep the original behaviour.
+		if name == "vector" && !leg.Attempted && !p.passive &&
+			!memory.HasFTSTerm(p.req.Query) {
 			continue
 		}
 		if !leg.Attempted || !leg.Available || leg.Truncated || !leg.CoverageComplete {

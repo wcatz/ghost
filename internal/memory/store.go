@@ -9886,24 +9886,25 @@ func ftsQueryTerms(text string, maxWords int, logger *slog.Logger) []ftsTerm {
 		// any surviving (interior) NUL into a space so it stays a separator
 		// inside the quoted phrase instead of terminating it.
 		clean = strings.ReplaceAll(clean, "\x00", " ")
-		if ftsHasBaseRune(clean) {
-			// Quote each word to treat as literal. An interior quote survives
-			// the edge trim and must be doubled per FTS5's escaping rule —
-			// otherwise it unbalances the "..." wrapper and lets the token
-			// re-enter raw FTS5 query grammar instead of staying a literal.
-			escaped := strings.ReplaceAll(clean, `"`, `""`)
-			term := `"` + escaped + `"`
-			if prefix {
-				term += "*"
-			}
-			terms = append(terms, ftsTerm{
-				text:   term,
-				clean:  clean,
-				value:  ftsTermValue(clean),
-				pos:    len(terms),
-				prefix: prefix,
-			})
+		if !wordYieldsTerm(word) {
+			continue
 		}
+		// Quote each word to treat as literal. An interior quote survives
+		// the edge trim and must be doubled per FTS5's escaping rule —
+		// otherwise it unbalances the "..." wrapper and lets the token
+		// re-enter raw FTS5 query grammar instead of staying a literal.
+		escaped := strings.ReplaceAll(clean, `"`, `""`)
+		term := `"` + escaped + `"`
+		if prefix {
+			term += "*"
+		}
+		terms = append(terms, ftsTerm{
+			text:   term,
+			clean:  clean,
+			value:  ftsTermValue(clean),
+			pos:    len(terms),
+			prefix: prefix,
+		})
 	}
 	if len(terms) == 0 {
 		return nil
