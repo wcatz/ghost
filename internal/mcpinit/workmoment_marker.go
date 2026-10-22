@@ -97,7 +97,7 @@ func momentMarkerPath(sessionID string) string {
 // could not write, must not be allowed to overspend on a guess.
 func readMomentState(path string) (momentState, error) {
 	st := momentState{delivered: map[string]bool{}, valid: map[string]bool{}}
-	f, err := os.Open(path)
+	f, err := openMarker(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			st.spent = sessionStartByteCap
@@ -176,9 +176,17 @@ func parseMomentEntry(line string) (momentEntry, bool) {
 
 // appendMomentEntry appends one claim as a single O_APPEND write.
 func appendMomentEntry(path string, e momentEntry) error {
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	f, err := os.OpenFile(path, momentAppendOpenFlags, 0o600) // #nosec G304 -- a marker inside the Ghost data directory, not caller input
 	if err != nil {
 		return err
+	}
+	info, err := f.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		_ = f.Close()
+		if err != nil {
+			return err
+		}
+		return fmt.Errorf("%w (%s)", errNotRegularMarker, info.Mode().Type())
 	}
 	line := fmt.Sprintf("D %s %d %s\n", e.token, e.bytes, strings.Join(e.ids, " "))
 	if _, err := f.WriteString(line); err != nil {

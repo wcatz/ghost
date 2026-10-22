@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -848,5 +849,32 @@ func TestADeliveryUnderAHeldWriteLockStillDeliversButItsRecordIsDropped(t *testi
 	}
 	if !strings.Contains(stderr, "retrieval record not written") {
 		t.Errorf("the dropped record must be a WARN on stderr, got %q", stderr)
+	}
+}
+
+// A symlink at the working-moment marker path must not be written through:
+// appendMomentEntry refuses it and leaves the link target untouched.
+func TestWorkingMomentMarkerAppendDoesNotWriteThroughSymlink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks are not available on this platform")
+	}
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target.log")
+	if err := os.WriteFile(target, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "working-moment-link.log")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if err := appendMomentEntry(link, momentEntry{token: "t", bytes: 1, ids: []string{"a"}}); err == nil {
+		t.Error("appendMomentEntry through a symlink: want an error, got nil")
+	}
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "keep" {
+		t.Errorf("symlink target changed: got %q, want %q", string(got), "keep")
 	}
 }
