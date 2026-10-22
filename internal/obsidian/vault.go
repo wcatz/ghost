@@ -2,6 +2,7 @@ package obsidian
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -85,11 +86,54 @@ func isStagingName(base string) bool {
 	return rest == "" || rest[0] == '-'
 }
 
+// readAndCompare opens the path with the given flags, checks it is a regular
+// file on fstat, reads it, and compares to content. Returns (true, nil) if
+// identical, (false, nil) if different, and (false, err) on any open/read/fstat
+// error so the caller falls through to the temp+rename.
+func readAndCompare(path string, flags int, content string) (bool, error) {
+	f, err := os.OpenFile(path, flags, 0)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = f.Close() }()
+	st, err := f.Stat()
+	if err != nil {
+		return false, err
+	}
+	if !st.Mode().IsRegular() {
+		return false, fmt.Errorf("%s is not a regular file (%s)", path, st.Mode().Type())
+	}
+	existing, rerr := io.ReadAll(f)
+	if rerr != nil {
+		return false, rerr
+	}
+	return string(existing) == content, nil
+}
+
 // writeIfChanged writes content atomically (temp+rename), skipping the write
 // when the file already has identical content — no mtime churn.
 func writeIfChanged(path, content string) (bool, error) {
-	if existing, err := os.ReadFile(path); err == nil && string(existing) == content {
-		return false, nil
+	// Only a non-regular entry that is not a symlink (FIFO, device, socket,
+	// directory) is refused, and it is refused unopened, because opening a
+	// FIFO blocks until a writer appears. A symlinked note is compared by
+	// reading through the link, so one whose target already holds the content
+	// is left alone; otherwise the rename replaces the link with a regular
+	// file. Every open is non-blocking and the descriptor is checked before a
+	// byte is read, so an entry swapped after the Lstat cannot block either;
+	// a compare that fails for any reason falls through to the replace.
+	if info, err := os.Lstat(path); err == nil {
+		flags := obsidianOpenFlags
+		switch {
+		case info.Mode()&os.ModeSymlink != 0:
+			flags = obsidianFollowOpenFlags
+		case !info.Mode().IsRegular():
+			return false, fmt.Errorf("%s is not a regular file (%s)", path, info.Mode().Type())
+		}
+		if identical, err := readAndCompare(path, flags, content); err == nil && identical {
+			return false, nil
+		}
+	} else if !os.IsNotExist(err) {
+		return false, err
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return false, err
@@ -134,7 +178,19 @@ func writeIfChanged(path, content string) (bool, error) {
 // filename instead; this function answers "is this Ghost's note, and which id does
 // it say it is", and only the first is a question with a reliable answer.
 func hasGhostID(path string) (string, bool) {
-	data, err := os.ReadFile(path)
+	// Open with O_NONBLOCK but follow symlinks, so a symlinked Ghost note is
+	// still recognized and pruned. A FIFO or other non-regular target is
+	// refused on fstat. The descriptor, not a separate stat, is what decides.
+	f, err := os.OpenFile(path, obsidianFollowOpenFlags, 0)
+	if err != nil {
+		return "", false
+	}
+	defer func() { _ = f.Close() }()
+	info, err := f.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		return "", false
+	}
+	data, err := io.ReadAll(f)
 	if err != nil {
 		return "", false
 	}
@@ -189,11 +245,20 @@ func unquoteYAMLScalar(s string) string {
 }
 
 // hasGhostContent reports whether dir contains any .md file with a ghost_id
-// in its frontmatter — the signature of a Ghost-managed note.
+// in its frontmatter — the signature of a Ghost-managed note. Symlinks to
+// regular files are followed; only non-regular, non-symlink entries are skipped.
 func hasGhostContent(dir string) bool {
 	var found bool
 	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
-		if err != nil || d.IsDir() || !strings.HasSuffix(path, ".md") {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		// Skip non-regular, non-symlink entries (FIFO, device, socket).
+		// Symlinks to .md files are followed by hasGhostID.
+		if !d.Type().IsRegular() && d.Type()&os.ModeSymlink == 0 {
+			return nil
+		}
+		if !strings.HasSuffix(path, ".md") {
 			return nil
 		}
 		if _, ok := hasGhostID(path); ok {
@@ -275,6 +340,11 @@ func prune(root string, subtrees []string, keep keepSet, knownFolders []string) 
 				return err
 			}
 			if d.IsDir() {
+				return nil
+			}
+			// Skip non-regular, non-symlink entries (FIFO, device, socket).
+			// Symlinks are followed by hasGhostID.
+			if !d.Type().IsRegular() && d.Type()&os.ModeSymlink == 0 {
 				return nil
 			}
 			if isStagingName(filepath.Base(path)) {
