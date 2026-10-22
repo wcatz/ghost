@@ -24,7 +24,8 @@ package memory
 
 import (
 	"strconv"
-	"unicode"
+
+	"github.com/wcatz/ghost/internal/secret"
 )
 
 // SafeToken renders one stored value that a line prints OUTSIDE the «...» data
@@ -76,10 +77,12 @@ func IsSafeTokenRune(r rune) bool {
 // IsFormatRune reports whether r is a Unicode FORMAT character — category Cf —
 // and so carries no width of its own and prints as nothing a reader can see.
 //
-// It is exported for the ONE reason IsSafeTokenRune is: the renderers that
-// print stored text and the write boundaries that refuse it ask the class one
-// rune at a time, and a second copy of the rule is a second rule — the one
-// nobody tests is the one that ships the bug.
+// The rule lives in the package the credential guard is written in, because the
+// guard has to see THROUGH the class to recognise a token one of its characters
+// hides, and the dependency runs internal/memory -> internal/secret. This
+// function delegates rather than keeping a second copy, so the renderers that
+// print stored text, the write boundaries that refuse it and the detector that
+// sees through it share ONE implementation of the class.
 //
 // The class is the WHOLE of category Cf rather than the bidirectional subset
 // the renderers escaped first (#1649, #1651): the bidi controls reorder the
@@ -87,13 +90,6 @@ func IsSafeTokenRune(r rune) bool {
 // JOINER, U+FEFF ZERO WIDTH NO-BREAK SPACE among them) hide a spelling inside
 // one, so a value that differs from another only in one of them prints as the
 // other.
-//
-// The lower bound is a fast path and not a second rule: the lowest FORMAT
-// character is SOFT HYPHEN (U+00AD), and every code point below it is assigned
-// and cannot become one.
 func IsFormatRune(r rune) bool {
-	if r < 0x00AD {
-		return false
-	}
-	return unicode.In(r, unicode.Cf)
+	return secret.IsFormatRune(r)
 }

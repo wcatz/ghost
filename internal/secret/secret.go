@@ -27,6 +27,13 @@
 // positive trains a user to route around the control within a week, and every
 // rule's length floor is chosen against the longest innocent value of the same
 // shape (see longHexFloor, mnemonicWords).
+//
+// The value the rules judge is the value a READER sees, and the invisible
+// Unicode FORMAT class is why that is a rule of its own: a zero-width space
+// inside a token is invisible, so a token that differs from a real one only by
+// such a character is that token to whoever reads it. The class is named here
+// rather than in the package above, because the detector has to see through it
+// and this package is below that one — see format.go.
 package secret
 
 import (
@@ -1368,6 +1375,14 @@ func isLetter(r rune) bool { return isLower(r) || isUpper(r) }
 // call on every save: text is bounded by memory.MaxContentLen and the rules are
 // linear scans.
 //
+// A value carrying an invisible FORMAT character is judged TWICE: as the reader
+// sees it, with those characters removed, and as the bytes are. The first
+// reading is what closes the hole the class opened — the rules below matched
+// the bytes, so one invisible character inside a token-shaped value broke the
+// match and the value was stored — and the second keeps the verdict from ever
+// being weaker than it was, because a rule that needs a word boundary reads the
+// bytes and the invisible character is not a word character. See format.go.
+//
 // Three rules are checked after the table rather than in it, because matching
 // them is only half the test: longHexRe, urlCredentialsRe and assignmentRe all
 // need the matched text inspected (looksLikeKeyMaterial,
@@ -1383,6 +1398,16 @@ func Detect(text string) (Finding, bool) {
 	if text == "" {
 		return Finding{}, false
 	}
+	if visible, stripped := withoutInvisibleForDetection(text); stripped {
+		if f, ok := detect(visible); ok {
+			return f, true
+		}
+	}
+	return detect(text)
+}
+
+// detect is Detect's rule table and its post-table passes over one text.
+func detect(text string) (Finding, bool) {
 	for _, r := range rules {
 		if r.re.MatchString(text) {
 			return Finding{Rule: r.name, Label: r.label}, true
