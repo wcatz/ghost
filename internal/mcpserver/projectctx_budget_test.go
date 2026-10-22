@@ -333,8 +333,16 @@ func TestRecallProjectPromptResolvedLongNameFitsBudget(t *testing.T) {
 }
 
 func TestRecallProjectPromptNearBudget(t *testing.T) {
-	store := testStore(t)
+	db, err := memory.OpenDB(":memory:")
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	store := memory.NewStore(db, slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})))
 	ctx := context.Background()
+	if err := store.EnsureProject(ctx, "abc123", "/tmp/test", "test-project"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
 	if err := store.EnsureProject(ctx, "_global", "_global", "global"); err != nil {
 		t.Fatalf("EnsureProject _global: %v", err)
 	}
@@ -349,6 +357,16 @@ func TestRecallProjectPromptNearBudget(t *testing.T) {
 		if _, _, _, err := store.Upsert(ctx, "_global", "fact", content, "mcp", 0.5, nil); err != nil {
 			t.Fatalf("Upsert global: %v", err)
 		}
+	}
+	// The fixture's premise is that the 20 project rows and the 20 global rows
+	// rank as ties, so the 20-row window mixes both buckets. created_at is
+	// second-resolution and ranks newest first, so left to the clock a second
+	// boundary between the two insert loops makes every global row newer than
+	// every project row, the window fills with globals alone, and the prompt
+	// shrinks to two rows (about 10.9 KB). Pin one stamp, as the #778 fixture does.
+	stamp := "2026-06-01 00:00:00"
+	if _, err := db.ExecContext(ctx, `UPDATE memories SET created_at = ?, updated_at = ?`, stamp, stamp); err != nil {
+		t.Fatalf("pin stamps: %v", err)
 	}
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	srv := New(store, logger, "test")
