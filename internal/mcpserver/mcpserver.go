@@ -3969,8 +3969,25 @@ func (s *Server) registerTools() {
 			// stores the caller's project_id argument as both id and name), and a
 			// newline in one put a second entry on a health report a human reads
 			// (#791).
-			projectRows = append(projectRows, fmt.Sprintf("- **%s** (%s): %d memories\n",
-				assemble.Label(p.Name), shortID(p.ID), count))
+			row := fmt.Sprintf("- **%s** (%s): %d memories\n",
+				assemble.Label(p.Name), shortID(p.ID), count)
+			// Frozen-row share: reflect never consolidates pinned, persistent,
+			// manual, builtin or resolved rows. A project whose rows are mostly
+			// frozen looks maintained while nothing can shrink it (#1849).
+			if r, ok := read.reader.(interface {
+				ReflectionExclusionStats(context.Context, string) (memory.ReflectionExclusionStats, error)
+			}); ok {
+				if st, serr := r.ReflectionExclusionStats(ctx, p.ID); serr == nil {
+					if st.Total > 0 {
+						pct := float64(st.Frozen) * 100 / float64(st.Total)
+						row += fmt.Sprintf("  ↳ %d frozen (%.0f%% excluded from consolidation: pinned %d, persistent %d, manual %d, builtin %d, resolved %d; %d consolidatable)\n",
+							st.Frozen, pct, st.Pinned, st.Persistent, st.Manual, st.Builtin, st.Resolved, st.Consolidatable)
+					}
+				} else {
+					row += fmt.Sprintf("  ↳ consolidation exclusion could not be read: %v\n", serr)
+				}
+			}
+			projectRows = append(projectRows, row)
 		}
 		// Everything written to sb from here on is store-wide and never cut.
 		if uncountedProjects > 0 {
