@@ -652,12 +652,8 @@ const declinedStream = `printf '%s\n' '{"type":"step_start","part":{"type":"step
 
 func TestOpenCodeClient_Run_SalvagesAnswerBeforeDeclinedTool(t *testing.T) {
 	c := &OpenCodeClient{binary: fakeOpenCodeBinary(t, declinedStream)}
-	text, _, err := c.Reflect(context.Background(), "prompt")
-	if err != nil {
-		t.Fatalf("Reflect: %v (an answer written before a declined tool call must be kept)", err)
-	}
-	if text != "ANSWER: 42" {
-		t.Errorf("text = %q, want %q", text, "ANSWER: 42")
+	if _, _, err := c.Reflect(context.Background(), "prompt"); err == nil {
+		t.Fatal("a failed opencode run must not be promoted to success through declined-tool salvage")
 	}
 }
 
