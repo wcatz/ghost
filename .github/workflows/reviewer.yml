@@ -808,10 +808,15 @@ jobs:
             # from the TRUSTED copy of the scripts: the probe's event
             # stream AND the process's own stderr. A reason may
             # classify an outage only when the model produced nothing.
-            python3 -I "${RUNNER_TEMP}/base-scripts/model_acted.py" \
-              --events "$probe_out" --stderr "$probe_err" \
-              --marker "${RUNNER_TEMP}/model-acted.txt" \
-              --exit-status "$probe_status" 2> "${RUNNER_TEMP}/model-acted-probe.txt" >/dev/null \
+            acted_args=(
+              python3 -I "${RUNNER_TEMP}/base-scripts/model_acted.py"
+              --events "$probe_out" --stderr "$probe_err"
+              --marker "${RUNNER_TEMP}/model-acted.txt"
+            )
+            if "${acted_args[0]}" -I "${acted_args[1]}" --help 2>/dev/null | grep -q -- '--exit-status'; then
+              acted_args+=(--exit-status "$probe_status")
+            fi
+            "${acted_args[@]}" 2> "${RUNNER_TEMP}/model-acted-probe.txt" >/dev/null \
               || { printf 'unknown\n' >> "${RUNNER_TEMP}/model-acted.txt"; \
                    echo "::warning::the review model rule could not be consulted"; }
             sed -n 's/^model-acted: /::notice::review model evidence: /p' \
@@ -1150,10 +1155,15 @@ jobs:
           # the process's own stderr. A reason may classify an outage
           # only when the model produced nothing: a stream that does
           # not parse counts as acted, so the rule fails closed.
-          python3 -I "${RUNNER_TEMP}/base-scripts/model_acted.py" \
-            --events model-reply.txt --stderr model-stderr.txt \
-            --marker "${RUNNER_TEMP}/model-acted.txt" \
-            --exit-status "${paid_status}" 2> "${RUNNER_TEMP}/model-acted-paid.txt" >/dev/null \
+          acted_args=(
+            python3 -I "${RUNNER_TEMP}/base-scripts/model_acted.py"
+            --events model-reply.txt --stderr model-stderr.txt
+            --marker "${RUNNER_TEMP}/model-acted.txt"
+          )
+          if "${acted_args[0]}" -I "${acted_args[1]}" --help 2>/dev/null | grep -q -- '--exit-status'; then
+            acted_args+=(--exit-status "${paid_status}")
+          fi
+          "${acted_args[@]}" 2> "${RUNNER_TEMP}/model-acted-paid.txt" >/dev/null \
             || { printf 'unknown\n' >> "${RUNNER_TEMP}/model-acted.txt"; \
                  echo "::warning::the review model rule could not be consulted"; }
           sed -n 's/^model-acted: /::notice::review model evidence: /p' \
@@ -1237,19 +1247,24 @@ jobs:
             *unknown*) rule_unknown=1 ;;
           esac
           if [ -f "${RUNNER_TEMP}/base-scripts/review_outcome.py" ]; then
-            report="$(python3 -I "${RUNNER_TEMP}/base-scripts/review_outcome.py" \
-              --free-status "${FREE_STATUS}" \
-              --paid-status "${PAID_STATUS}" \
-              --free-failures "${RUNNER_TEMP}/free-probe-failure.txt" \
-              --free-failures "${RUNNER_TEMP}/free-review-failure.txt" \
-              --paid-reason "${RUNNER_TEMP}/paid-review-failure.txt" \
-              --free-validation "${RUNNER_TEMP}/free-review-validation.txt" \
-              --paid-validation "${RUNNER_TEMP}/paid-review-validation.txt" \
-              --model-acted "${model_acted}" \
-              --select-agent-fatal "${SELECT_AGENT_FATAL}" \
-              --free-agent-fatal "${FREE_AGENT_FATAL}" \
-              --paid-agent-fatal "${PAID_AGENT_FATAL}" \
-              --paid-timed-out "${PAID_TIMED_OUT}" 2>/dev/null)"
+            outcome_args=(
+              python3 -I "${RUNNER_TEMP}/base-scripts/review_outcome.py"
+              --free-status "${FREE_STATUS}"
+              --paid-status "${PAID_STATUS}"
+              --free-failures "${RUNNER_TEMP}/free-probe-failure.txt"
+              --free-failures "${RUNNER_TEMP}/free-review-failure.txt"
+              --paid-reason "${RUNNER_TEMP}/paid-review-failure.txt"
+              --free-validation "${RUNNER_TEMP}/free-review-validation.txt"
+              --paid-validation "${RUNNER_TEMP}/paid-review-validation.txt"
+              --model-acted "${model_acted}"
+              --select-agent-fatal "${SELECT_AGENT_FATAL}"
+              --free-agent-fatal "${FREE_AGENT_FATAL}"
+              --paid-agent-fatal "${PAID_AGENT_FATAL}"
+            )
+            if "${outcome_args[0]}" -I "${outcome_args[1]}" --help 2>/dev/null | grep -q -- '--paid-timed-out'; then
+              outcome_args+=(--paid-timed-out "${PAID_TIMED_OUT}")
+            fi
+            report="$("${outcome_args[@]}" 2>/dev/null)"
             outcome="$(printf '%s' "$report" | jq -r '.outcome // empty' 2>/dev/null)"
             reported="$(printf '%s' "$report" | jq -r '.cause // empty' 2>/dev/null)"
             case "${outcome}" in
