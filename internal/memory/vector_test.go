@@ -232,7 +232,7 @@ func TestGetByIDsBatchesPastSQLiteVariableLimit(t *testing.T) {
 	store, ctx := setupTestStore(t)
 
 	t.Run("more ids than SQLite has variables", func(t *testing.T) {
-		const n = 2000
+		const n = 33000
 		ids := make([]string, n)
 		for i := range ids {
 			ids[i] = "no-such-memory-" + strconv.Itoa(i)
