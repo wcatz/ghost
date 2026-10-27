@@ -207,7 +207,7 @@ func TestSessionStartBlockIsUnchangedWhenSessionScopeIsUnset(t *testing.T) {
 		"\n" +
 		"**Session #1** with this project.\n" +
 		"\n" +
-		"Save new discoveries with ghost_memory_save during work.\n"
+		"Save to Ghost as it happens, not at the end: when the user corrects you or states a rule, when a bug's root cause is found, when a choice is made for a reason, when a tool or dependency behaves unexpectedly. One memory per fact — refine an earlier one with ghost_memory_update rather than saving it again. A memory is a rule, constraint, decision or reason the code does not state; not what the repository says, not the current task's progress, never a key or token value.\n"
 	if got != want {
 		t.Errorf("session-start block changed with injection.session_scope unset.\n got:\n%q\nwant:\n%q", got, want)
 	}

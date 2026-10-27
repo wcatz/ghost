@@ -10,7 +10,7 @@ session start / ghost context (4 blocks)
   budget use             0.957 (88/92)   rows rendered / row caps
   budget cut             0.642 (158/246)   admissible rows left out
   duplicate rate         0.045 (4/88)   rendered beside the row they restate or replace
-  block size             mean 4017 B / 1005 tok, max 4136 B / 1034 tok
+  block size             mean 4435 B / 1109 tok, max 4554 B / 1139 tok
   header honesty         PASS   (8 count lines agree with the rows rendered)
 
 session start, scope env=production (4 blocks)
@@ -21,7 +21,7 @@ session start, scope env=production (4 blocks)
   budget use             0.946 (87/92)   rows rendered / row caps
   budget cut             0.630 (148/235)   admissible rows left out
   duplicate rate         0.046 (4/87)   rendered beside the row they restate or replace
-  block size             mean 3846 B / 962 tok, max 3975 B / 994 tok
+  block size             mean 4264 B / 1066 tok, max 4393 B / 1099 tok
   header honesty         PASS   (8 count lines agree with the rows rendered)
 
 ghost_project_context (limit 20) (4 blocks)

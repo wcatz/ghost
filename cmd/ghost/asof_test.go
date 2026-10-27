@@ -97,7 +97,7 @@ func TestContextWithoutAsOfIsUnchanged(t *testing.T) {
 	if strings.Contains(stdout, "as_of ") {
 		t.Errorf("a request with no --as-of produced a historical block:\n%s", stdout)
 	}
-	if !strings.Contains(stdout, "Save new discoveries with ghost_memory_save") {
+	if !strings.Contains(stdout, "Save to Ghost as it happens") {
 		t.Errorf("the current block lost its session instruction:\n%s", stdout)
 	}
 }

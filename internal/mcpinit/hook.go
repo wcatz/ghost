@@ -506,7 +506,7 @@ func formatSessionContext(projectID, project string, asOf *time.Time, memories [
 			fmt.Fprintln(&sb, memory.AsOfSourceNote(*asOf))
 		}
 		if asOf == nil {
-			fmt.Fprintln(&sb, "Save discoveries with ghost_memory_save during work.")
+			fmt.Fprintln(&sb, "Save to Ghost as it happens, not at the end: when the user corrects you or states a rule, when a bug's root cause is found, when a choice is made for a reason, when a tool or dependency behaves unexpectedly. One memory per fact — refine an earlier one with ghost_memory_update rather than saving it again. A memory is a rule, constraint, decision or reason the code does not state; not what the repository says, not the current task's progress, never a key or token value.")
 		} else {
 			fmt.Fprintf(&sb, "(%s Run `ghost context` without --as-of for the present.)\n", memory.AsOfUnversionedNote())
 			if len(globals) > 0 || tally.asOfWithheld > 0 {
@@ -622,7 +622,7 @@ func formatSessionContext(projectID, project string, asOf *time.Time, memories [
 		fmt.Fprintf(&sb, "\n(%s Run `ghost context` without --as-of for the present.)\n", memory.AsOfUnversionedNote())
 		return sb.String()
 	}
-	fmt.Fprintf(&sb, "\nSave new discoveries with ghost_memory_save during work.")
+	fmt.Fprintf(&sb, "\nSave to Ghost as it happens, not at the end: when the user corrects you or states a rule, when a bug's root cause is found, when a choice is made for a reason, when a tool or dependency behaves unexpectedly. One memory per fact — refine an earlier one with ghost_memory_update rather than saving it again. A memory is a rule, constraint, decision or reason the code does not state; not what the repository says, not the current task's progress, never a key or token value.")
 	return sb.String()
 }
 
