@@ -150,6 +150,17 @@ token-shaped one — legal because `ghost import` writes an artifact's project i
 verbatim — is withheld behind the guard's placeholder rather than printed, and
 any other one is rendered so it cannot open a data block of its own.
 
+`ghost_health` also reports **maintenance overdue:** projects that hold
+consolidatable memories and have not had lifecycle maintenance within
+`lifecycle.min_interval` (default 30m) or have never had one, and whose claim
+is not currently held. The line names the retry for each project
+(`ghost lifecycle --project <name>`) with the count and the age of the last
+run (`never` when none), rendered through the same label and token guards;
+`ghost mcp status` prints the same projects as `! maintenance overdue:` with
+the same counts, so the two diagnostics cannot disagree. A project with no
+consolidatable memories is never overdue, and a read that cannot be made is a
+missing diagnostic, not a failed check.
+
 ### Retrieval health
 
 `ghost_health` also reports what retrieval did, one line per source, below the

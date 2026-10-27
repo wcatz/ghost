@@ -26,6 +26,7 @@ import (
 	"github.com/wcatz/ghost/internal/claudeimport"
 	"github.com/wcatz/ghost/internal/config"
 	"github.com/wcatz/ghost/internal/followup"
+	"github.com/wcatz/ghost/internal/mcpinit"
 	"github.com/wcatz/ghost/internal/memory"
 	"github.com/wcatz/ghost/internal/provider"
 	"github.com/wcatz/ghost/internal/repo"
@@ -4105,6 +4106,23 @@ func (s *Server) registerTools() {
 		if growthErr == nil {
 			for _, warn := range growth.Warnings {
 				fmt.Fprintf(&sb, "  ⚠ %s\n", warn.Detail)
+			}
+		}
+
+		// Maintenance overdue (#1847): projects that hold consolidatable
+		// memories and have not had a lifecycle run within the configured
+		// interval. The figures are the same data the status diagnostic
+		// reports, so both surfaces cannot disagree.
+		if read.store != nil {
+			if dataDir, derr := config.DataDirPath(); derr == nil {
+				cfg := config.LoadForHook()
+				if overdue, oerr := mcpinit.OverdueMaintenanceProjects(ctx, read.store, dataDir, time.Now(), cfg.Lifecycle.MinIntervalDuration()); oerr == nil && len(overdue) > 0 {
+					if text, ok := mcpinit.FormatOverdueMaintenance(overdue, time.Now()); ok {
+						sb.WriteString("\n")
+						sb.WriteString(text)
+						sb.WriteString("\n")
+					}
+				}
 			}
 		}
 

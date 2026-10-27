@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/wcatz/ghost/internal/assemble"
 	"github.com/wcatz/ghost/internal/claudeimport"
@@ -738,6 +739,7 @@ func checkStoreHealth(w io.Writer, check func(ok bool, pass, fail string)) *memo
 		}
 	}
 	reportHistoryGrowth(w, store)
+	reportOverdueMaintenanceStatus(w, store, dataDir)
 	reportReflectionExclusions(w, store)
 	return store
 }
@@ -822,4 +824,22 @@ func reportHistoryGrowth(w io.Writer, store *memory.Store) {
 	for _, warn := range res.Warnings {
 		_, _ = fmt.Fprintf(w, "  ! %s\n", warn.Detail)
 	}
+}
+
+// reportOverdueMaintenanceStatus lists projects that have consolidatable
+// memories and have not had lifecycle maintenance within the configured
+// interval. It never fails the run — a read that cannot be made is a
+// missing diagnostic, not an unhealthy wiring — and it is reported as a `!`
+// line, the same shape reportHistoryGrowth uses.
+func reportOverdueMaintenanceStatus(w io.Writer, store *memory.Store, dataDir string) {
+	if store == nil || dataDir == "" {
+		return
+	}
+	cfg := config.LoadForHook()
+	minInterval := cfg.Lifecycle.MinIntervalDuration()
+	overdue, err := OverdueMaintenanceProjects(context.Background(), store, dataDir, time.Now(), minInterval)
+	if err != nil || len(overdue) == 0 {
+		return
+	}
+	ReportOverdueMaintenance(w, overdue, time.Now())
 }
