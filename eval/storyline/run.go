@@ -365,9 +365,6 @@ func (r *Run) Execute(ctx context.Context) (*Result, error) {
 				return nil, fmt.Errorf("stage %d record %s: %w", i+1, rec.Key, err)
 			}
 			sess.Saved[rec.Key] = id
-			if sess.Probes == nil {
-				// keep SavedRaw inside SaveOutputs for grade; also store per-session for debug
-			}
 			res.SaveOutputs[rec.Key] = raw
 			order = append(order, id)
 		}
@@ -502,11 +499,6 @@ func (r *Run) arcStages(ctx context.Context, res *Result, order []string) error 
 		return fmt.Errorf("graded state: %w", err)
 	}
 	return nil
-}
-
-func (r *Run) save(ctx context.Context, rec Record) (string, error) {
-	id, _, err := r.saveRaw(ctx, rec)
-	return id, err
 }
 
 func (r *Run) saveRaw(ctx context.Context, rec Record) (string, string, error) {
