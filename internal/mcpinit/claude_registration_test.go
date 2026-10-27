@@ -2,6 +2,7 @@ package mcpinit
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -100,7 +101,7 @@ func TestStatus_ClaudeMCPRegistration(t *testing.T) {
 		if !strings.Contains(line, "✗") {
 			t.Fatalf("a registration running another program must not read as registered, got %q", line)
 		}
-		if !strings.Contains(line, otherGhost) {
+		if !strings.Contains(line, fmt.Sprintf("%q", otherGhost)) {
 			t.Errorf("the failed line must name the command the registration runs, got %q", line)
 		}
 		if !strings.Contains(line, claudeRegistrationRepair) {
@@ -122,7 +123,7 @@ func TestStatus_ClaudeMCPRegistration(t *testing.T) {
 		if !strings.Contains(line, "✗") {
 			t.Fatalf("a registration whose program is gone must not read as registered, got %q", line)
 		}
-		if !strings.Contains(line, gone) {
+		if !strings.Contains(line, fmt.Sprintf("%q", gone)) {
 			t.Errorf("the failed line must name the command the registration runs, got %q", line)
 		}
 		if !strings.Contains(line, claudeRegistrationRepair) {
@@ -147,7 +148,7 @@ func TestStatus_ClaudeMCPRegistration(t *testing.T) {
 		if !strings.Contains(line, "✗") {
 			t.Fatalf("a registration running the ghost's name-sibling must not read as registered, got %q", line)
 		}
-		if !strings.Contains(line, sibling) {
+		if !strings.Contains(line, fmt.Sprintf("%q", sibling)) {
 			t.Errorf("the failed line must name the command the registration runs, got %q", line)
 		}
 		if !strings.Contains(line, claudeRegistrationRepair) {
