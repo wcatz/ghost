@@ -150,3 +150,67 @@ func TestOverdueIsNotReportedWhenInsideCooldown(t *testing.T) {
 		t.Errorf("proj should be overdue after 2h, got %v", overdue2)
 	}
 }
+
+func TestOverdueMaintenanceProjects_DisabledCooldown(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", filepath.Join(tmp, "data"))
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tmp, "config"))
+	setHome(t, filepath.Join(tmp, "home"))
+	t.Setenv("GHOST_REFLECTION_AUTO_REFLECT", "true")
+	if err := os.MkdirAll(filepath.Join(tmp, "home"), 0700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	dataDir, err := config.DataDir()
+	if err != nil {
+		t.Fatalf("DataDir: %v", err)
+	}
+	if err := os.MkdirAll(dataDir, 0700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	dbPath := filepath.Join(dataDir, "ghost.db")
+	db, err := memory.OpenDB(dbPath)
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	store := memory.NewStore(db, nil)
+	ctx := context.Background()
+	if err := store.EnsureProject(ctx, "proj", "/tmp/proj", "proj"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := store.Create(ctx, "proj", memory.Memory{Category: "fact", Content: fmt.Sprintf("mem %d", i), Importance: 0.5, Source: "mcp"}); err != nil {
+			t.Fatalf("create: %v", err)
+		}
+	}
+	if err := TouchLifecycleStart("proj"); err != nil {
+		t.Fatalf("TouchLifecycleStart: %v", err)
+	}
+	now := time.Now()
+	overdue, err := OverdueMaintenanceProjects(ctx, store, dataDir, now, 0, true)
+	if err != nil {
+		t.Fatalf("OverdueMaintenanceProjects: %v", err)
+	}
+	found := false
+	for _, o := range overdue {
+		if o.ID == "proj" {
+			found = true
+			if o.MinInterval != 0 {
+				t.Errorf("minInterval=%v want 0", o.MinInterval)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("proj should be overdue with cooldown disabled, got %v", overdue)
+	}
+	text, ok := FormatOverdueMaintenance(overdue, now)
+	if !ok {
+		t.Fatalf("FormatOverdueMaintenance returned not ok")
+	}
+	if contains(text, "within 0s") {
+		t.Errorf("should not render within 0s: %q", text)
+	}
+	if !contains(text, "lifecycle cooldown disabled") {
+		t.Errorf("missing disabled cooldown text: %q", text)
+	}
+}
