@@ -397,6 +397,11 @@ type Candidate struct {
 	// is carried so the trace can report what supports a memory, which is a
 	// question a reader of a search result has and no other field answers.
 	Evidence EvidenceCounts
+	// Usefulness is #648's negative evidence about this memory: what the
+	// retrieval audit recorded against it. It rides here for the same reason
+	// Evidence does — the assembler may reach the store through this one read —
+	// and a memory with repeated contradicted verdicts may be demoted on it.
+	Usefulness UsefulnessEvidence
 }
 
 // LinkEdge is one edge between two candidates. Stages 5 and 6 read it to
@@ -801,6 +806,35 @@ func (s *Store) Candidates(ctx context.Context, req CandidateRequest) (*Candidat
 	}
 	for i := range rows {
 		rows[i].Evidence = counts[rows[i].ID]
+	}
+
+	// #648: the audit's negative evidence rides with the row, the same way the
+	// evidence counts do, so the assembler can demote a memory the audit has
+	// contradicted repeatedly without a second read. It is read per project,
+	// because UsefulnessByMemory is project-scoped; a row whose project has no
+	// negative evidence simply carries the zero value.
+	usefulness := map[string]UsefulnessEvidence{}
+	projects := map[string]struct{}{}
+	for i := range rows {
+		projects[rows[i].ProjectID] = struct{}{}
+	}
+	for proj := range projects {
+		if strings.TrimSpace(proj) == "" {
+			continue
+		}
+		ev, uErr := s.usefulnessByMemory(ctx, tx, proj)
+		if uErr != nil {
+			if isMissingTable(uErr) {
+				continue
+			}
+			return nil, fmt.Errorf("candidates: usefulness evidence: %w", uErr)
+		}
+		for id, v := range ev {
+			usefulness[id] = v
+		}
+	}
+	for i := range rows {
+		rows[i].Usefulness = usefulness[rows[i].ID]
 	}
 
 	// A row the vector leg could never have retrieved — no embedding it could

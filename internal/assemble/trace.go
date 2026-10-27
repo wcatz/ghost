@@ -99,6 +99,10 @@ type Signals struct {
 	// reader who asks what a memory rests on. Render it with
 	// memory.EvidenceCounts.Label; nothing here ranks on it.
 	Evidence memory.EvidenceCounts
+	// Usefulness is #648's negative evidence about this memory. It is recorded
+	// here, and a memory with repeated contradicted verdicts may be demoted on
+	// it.
+	Usefulness memory.UsefulnessEvidence
 }
 
 // StageTrace is one stage's counts and the rows it removed.
