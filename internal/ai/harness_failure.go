@@ -33,23 +33,23 @@ const harnessFailureOutputMax = 1200
 // The output is passed through the token guard before it reaches the error or
 // the lifecycle log.
 func harnessFailureOutput(stdout, stderr string) string {
-	var s string
+	var full string
 	if t := strings.TrimSpace(stderr); t != "" {
-		s = tail(t, harnessFailureOutputMax)
+		full = t
 	} else {
-		s = tail(strings.TrimSpace(stdout), harnessFailureOutputMax)
+		full = strings.TrimSpace(stdout)
 	}
-	if s == "" {
-		return s
+	if full == "" {
+		return ""
 	}
-	if refusal := memory.RejectSecret("harness output", s); refusal != nil {
+	if refusal := memory.RejectSecret("harness output", full); refusal != nil {
 		var detected *memory.SecretContentError
 		if errors.As(refusal, &detected) {
 			return "<harness output withheld: it holds a " + detected.Format + ">"
 		}
 		return "<harness output withheld: it holds a credential>"
 	}
-	return s
+	return tail(full, harnessFailureOutputMax)
 }
 
 // tail returns the last n bytes of s, cut back to a character boundary so a
