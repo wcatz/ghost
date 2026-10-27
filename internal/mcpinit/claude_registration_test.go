@@ -2,6 +2,7 @@ package mcpinit
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -14,6 +15,11 @@ import (
 // binary. It is spelled out here rather than read from the package, so a
 // change to the message cannot quietly change the expectation with it.
 const claudeRegistrationRepair = "run ghost mcp init --client claude"
+
+// claudeRegistrationToken is a token-shaped value the token guard recognises,
+// so the report must withhold it rather than repeat it in full. It is the
+// shape a key really has where the registration carries one: an argument.
+const claudeRegistrationToken = "sk-ant-api03-FAKEFAKEFAKEFAKEFAKEFAKE"
 
 // writeClaudeStub installs a `claude` stub that answers `mcp get ghost` with
 // the text in the file beside it, and refuses every other command.
@@ -95,7 +101,7 @@ func TestStatus_ClaudeMCPRegistration(t *testing.T) {
 		if !strings.Contains(line, "✗") {
 			t.Fatalf("a registration running another program must not read as registered, got %q", line)
 		}
-		if !strings.Contains(line, otherGhost) {
+		if !strings.Contains(line, fmt.Sprintf("%q", otherGhost)) {
 			t.Errorf("the failed line must name the command the registration runs, got %q", line)
 		}
 		if !strings.Contains(line, claudeRegistrationRepair) {
@@ -117,7 +123,7 @@ func TestStatus_ClaudeMCPRegistration(t *testing.T) {
 		if !strings.Contains(line, "✗") {
 			t.Fatalf("a registration whose program is gone must not read as registered, got %q", line)
 		}
-		if !strings.Contains(line, gone) {
+		if !strings.Contains(line, fmt.Sprintf("%q", gone)) {
 			t.Errorf("the failed line must name the command the registration runs, got %q", line)
 		}
 		if !strings.Contains(line, claudeRegistrationRepair) {
@@ -142,7 +148,7 @@ func TestStatus_ClaudeMCPRegistration(t *testing.T) {
 		if !strings.Contains(line, "✗") {
 			t.Fatalf("a registration running the ghost's name-sibling must not read as registered, got %q", line)
 		}
-		if !strings.Contains(line, sibling) {
+		if !strings.Contains(line, fmt.Sprintf("%q", sibling)) {
 			t.Errorf("the failed line must name the command the registration runs, got %q", line)
 		}
 		if !strings.Contains(line, claudeRegistrationRepair) {
@@ -163,7 +169,7 @@ func TestStatus_ClaudeMCPRegistration(t *testing.T) {
 		if !strings.Contains(line, "✗") {
 			t.Fatalf("a registration with the wrong arguments must not read as registered, got %q", line)
 		}
-		if !strings.Contains(line, "mcp --not-a-flag") {
+		if !strings.Contains(line, `"mcp" "--not-a-flag"`) {
 			t.Errorf("the failed line must name the arguments the registration runs, got %q", line)
 		}
 		if !strings.Contains(line, claudeRegistrationRepair) {
@@ -275,4 +281,100 @@ func TestStatus_ClaudeMCPRegistration(t *testing.T) {
 			t.Errorf("the failed line must say the server is not registered, got %q", line)
 		}
 	})
+}
+
+// TestStatus_ClaudeMCPRegistrationIsRendered holds the registration the report
+// names to the rule every other report follows: the command and the arguments
+// are read from the client's own rendering, so they are RENDERED rather than
+// echoed. Quoting keeps a value carrying a line break from ending the report
+// line — a forged line of Ghost's own on the next one — and the token guard
+// withholds a value it recognises, so a key the registration carries as an
+// argument is not repeated in full.
+func TestStatus_ClaudeMCPRegistrationIsRendered(t *testing.T) {
+	t.Run("a token in an argument is withheld", func(t *testing.T) {
+		statusEnv(t)
+		ghostPath, claudeDir := claudeRegistrationFixture(t)
+		writeRegistration(t, claudeDir, claudeRegistrationText(ghostPath,
+			`["mcp", "--key=`+claudeRegistrationToken+`"]`))
+
+		var out bytes.Buffer
+		if _, err := Status(&out); err != nil {
+			t.Fatalf("Status: %v", err)
+		}
+		line := statusLineContaining(out.String(), "MCP server")
+		if !strings.Contains(line, "✗") {
+			t.Fatalf("a registration carrying a token-shaped argument must read as drift, got %q", line)
+		}
+		if strings.Contains(out.String(), claudeRegistrationToken) || strings.Contains(out.String(), "FAKEFAKE") {
+			t.Errorf("the token-shaped argument reached the report:\n%s", out.String())
+		}
+		if !strings.Contains(line, "withheld") {
+			t.Errorf("the failed line must say the value was withheld, got %q", line)
+		}
+		if !strings.Contains(claudeMCPArgsPart(line), `"mcp"`) {
+			t.Errorf("the failed line must still name the ordinary argument, got %q", line)
+		}
+		if !strings.Contains(line, claudeRegistrationRepair) {
+			t.Errorf("the failed line must name the repair, got %q", line)
+		}
+	})
+
+	t.Run("a token as the command is withheld", func(t *testing.T) {
+		statusEnv(t)
+		_, claudeDir := claudeRegistrationFixture(t)
+		writeRegistration(t, claudeDir, claudeRegistrationText(claudeRegistrationToken, `["mcp"]`))
+
+		var out bytes.Buffer
+		if _, err := Status(&out); err != nil {
+			t.Fatalf("Status: %v", err)
+		}
+		line := statusLineContaining(out.String(), "MCP server")
+		if !strings.Contains(line, "✗") {
+			t.Fatalf("a registration running a token-shaped command must read as drift, got %q", line)
+		}
+		if strings.Contains(out.String(), claudeRegistrationToken) || strings.Contains(out.String(), "FAKEFAKE") {
+			t.Errorf("the token-shaped command reached the report:\n%s", out.String())
+		}
+		if !strings.Contains(line, "withheld") {
+			t.Errorf("the failed line must say the value was withheld, got %q", line)
+		}
+		if !strings.Contains(line, claudeRegistrationRepair) {
+			t.Errorf("the failed line must name the repair, got %q", line)
+		}
+	})
+
+	t.Run("an argument carrying a line break cannot forge a line", func(t *testing.T) {
+		statusEnv(t)
+		ghostPath, claudeDir := claudeRegistrationFixture(t)
+		// An argument whose own text is a line of Ghost's report: printed
+		// raw it would end the failed line and put a PASSING check on the
+		// next one.
+		writeRegistration(t, claudeDir, claudeRegistrationText(ghostPath,
+			`["mcp", "x\n  ✓ MCP server registered — everything is fine"]`))
+
+		var out bytes.Buffer
+		if _, err := Status(&out); err != nil {
+			t.Fatalf("Status: %v", err)
+		}
+		for _, line := range strings.Split(out.String(), "\n") {
+			if strings.HasPrefix(line, "  ✓ MCP server registered") {
+				t.Errorf("the report must not carry a line that reads as a passing check:\n%s", out.String())
+			}
+		}
+		line := statusLineContaining(out.String(), "MCP server")
+		if !strings.Contains(line, "✗") {
+			t.Fatalf("a registration with the wrong arguments must read as drift, got %q", line)
+		}
+	})
+}
+
+// claudeMCPArgsPart returns the part of a drift line that names the arguments
+// the registration carries — everything before the sentence's own "expected"
+// clause — so an assertion about it cannot be satisfied by the expected
+// argument alone.
+func claudeMCPArgsPart(line string) string {
+	if i := strings.Index(line, ", expected"); i >= 0 {
+		return line[:i]
+	}
+	return line
 }
