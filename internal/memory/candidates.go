@@ -504,6 +504,18 @@ func (s *Store) Candidates(ctx context.Context, req CandidateRequest) (*Candidat
 		return nil, fmt.Errorf("candidates: store has no database handle")
 	}
 
+	// Read the in-memory knobs under the lock BEFORE opening the snapshot
+	// transaction. A store with no read handle opens that transaction on the
+	// primary pool, which is pinned to one connection, and a writer holds the
+	// store mutex while it waits for that connection. Taking the lock after
+	// the transaction would let the reader hold the connection while waiting
+	// for the writer's lock — the classic inversion. Reading here and
+	// releasing first removes the overlap.
+	s.mu.RLock()
+	demotion := s.demotionThreshold
+	floor := s.vectorMinSimilarity
+	s.mu.RUnlock()
+
 	p := req.Params
 	if p.RRFK == 0 && p.FTSWeight == 0 && p.VecWeight == 0 {
 		// A caller that passes no parameters gets production's, resolved here
@@ -512,7 +524,7 @@ func (s *Store) Candidates(ctx context.Context, req CandidateRequest) (*Candidat
 		p = DefaultSearchParams()
 	}
 	p.ProjectID = req.ProjectID
-	p.MinSimilarity = s.vectorMinSimilarityFloor()
+	p.MinSimilarity = floor
 	p.Scope = req.Scope
 
 	ftsTopK := req.Fetch.FTSTopK
@@ -530,10 +542,6 @@ func (s *Store) Candidates(ctx context.Context, req CandidateRequest) (*Candidat
 	}
 	defer tx.Rollback() //nolint:errcheck
 
-	s.mu.RLock()
-	demotion := s.demotionThreshold
-	floor := s.vectorMinSimilarity
-	s.mu.RUnlock()
 	identity := s.embeddingIdentityValue()
 	// A store bound to the transaction: every read below has to come from the
 	// snapshot, and the primary handle's single connection is held by the
