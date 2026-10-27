@@ -22,7 +22,7 @@ Ghost exposes 23 tools, 4 resources, and 2 prompts over standard MCP. The server
 | Project | `ghost_project_delete` | Permanently delete a project and its child records; applying is allowed only with the exact project id the dry run printed |
 | Context | `ghost_project_context` | Load top memories and the learned-context summary (assembled, so a memory whose validity window has closed is withheld; tasks and decisions are separate tools and resources). On first contact, when the project holds no memories, it imports Claude Code auto-memory files as `source=onboarding` rows and notifies the project's context resource, so it is not annotated read-only |
 | Context | `ghost_list_projects` | List known projects and their IDs |
-| Context | `ghost_health` | Report store, embedding, Ollama, link, `memory_history` growth, and per-source retrieval health |
+| Context | `ghost_health` | Report store, embedding, Ollama, link, `memory_history` growth, per-project consolidation exclusion, and per-source retrieval health |
 | Tasks | `ghost_task_create` | Create a durable task; `priority` is 0-4 (default 2), and a value outside that range is refused by name rather than reset to the default |
 | Tasks | `ghost_task_list` | List tasks, optionally filtered by status; a status outside pending, active, blocked, done is refused with the allowed list, and a project Ghost has never registered is refused as `project "…" not found` (as `ghost_task_create` refuses it) rather than answered "No tasks found." Tasks come back by priority, then newest first; rows created in the same second keep creation order reversed, so the last one created is listed first and a `limit` drops the earliest. |
 | Tasks | `ghost_task_update` | Change task status, priority, or description; a `priority` outside 0-4 is refused and the stored priority is left unchanged; `completed_at` is stamped when the status becomes `done` and cleared when it leaves `done`. The row is read and merged inside the write transaction that writes it, so two clients editing different fields of one task (two MCP servers on one store, for instance) both land, and a task deleted in that window is an error rather than a reported success. A `task_id` that matches a stored task byte for byte names that task whatever its length; only an id that names no task exactly goes through the unique-prefix scan, so a task whose id prefixes another's — which `ghost import` can write verbatim, `T1` beside `T10` — is still reachable by its full spelling |
@@ -120,6 +120,8 @@ total then stating how many projects it excludes, because a project the read
 could not count is not a project with no memories. `ghost_list_projects` names
 the failure the same way, since a `0` there is a figure an agent acts on when
 choosing where to save.
+
+Each project's bullet also carries its consolidation exclusion: `N frozen (M% excluded from consolidation: pinned A, persistent B, manual C, builtin D, resolved E; K consolidatable)`. Pinned, persistent, manual, builtin and resolved rows are never consolidated by reflect (`replaceableRowSQL` and `memory.IsConsolidatable`), so a project whose rows are mostly frozen looks maintained while nothing can shrink it. The per-project line discloses the share of live rows reflect cannot touch and why; a failed read prints `consolidation exclusion could not be read: …` rather than nothing.
 
 **The two diagnostic tools do not wait for a write in flight.** `ghost_health`
 and `ghost_list_projects` read the store through its read-only handle, in ONE

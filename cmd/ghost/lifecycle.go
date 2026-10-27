@@ -1124,7 +1124,7 @@ func clampReflectMemories(mems []reflection.ReflectMemory) int {
 func consolidatable(mems []memory.Memory) []memory.Memory {
 	out := make([]memory.Memory, 0, len(mems))
 	for _, m := range mems {
-		if m.ResolvedAt != nil || m.Pinned || memory.RetentionExempt(m) || m.Source == "manual" || m.Source == "builtin" {
+		if !memory.IsConsolidatable(m) {
 			continue
 		}
 		out = append(out, m)

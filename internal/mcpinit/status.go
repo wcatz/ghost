@@ -738,7 +738,39 @@ func checkStoreHealth(w io.Writer, check func(ok bool, pass, fail string)) *memo
 		}
 	}
 	reportHistoryGrowth(w, store)
+	reportReflectionExclusions(w, store)
 	return store
+}
+
+// reportReflectionExclusions prints, per project, the share of live rows
+// reflect will never consolidate and why. Pinned, persistent, manual,
+// builtin and resolved rows are the frozen set; a project whose rows are
+// mostly frozen looks maintained while nothing can shrink it (#1849).
+// One line per project with memories, additive and never a health failure:
+// the store was opened cleanly and the read is a `!` line on failure, the
+// same rule reportHistoryGrowth follows.
+func reportReflectionExclusions(w io.Writer, store *memory.Store) {
+	ctx := context.Background()
+	projects, err := store.ListProjects(ctx)
+	if err != nil {
+		_, _ = fmt.Fprintf(w, "  ! consolidation exclusion: %v\n", err)
+		return
+	}
+	for _, p := range projects {
+		st, err := store.ReflectionExclusionStats(ctx, p.ID)
+		if err != nil {
+			_, _ = fmt.Fprintf(w, "  ! %s (%s): consolidation exclusion could not be read: %v\n",
+				assemble.Label(p.Name), assemble.Token(p.ID), err)
+			continue
+		}
+		if st.Total == 0 {
+			continue
+		}
+		pct := float64(st.Frozen) * 100 / float64(st.Total)
+		_, _ = fmt.Fprintf(w, "  - %s (%s): %d memories — %d frozen (%.0f%% excluded from consolidation: pinned %d, persistent %d, manual %d, builtin %d, resolved %d; %d consolidatable)\n",
+			assemble.Label(p.Name), assemble.Token(p.ID), st.Total, st.Frozen, pct,
+			st.Pinned, st.Persistent, st.Manual, st.Builtin, st.Resolved, st.Consolidatable)
+	}
 }
 
 // reportHistoryGrowth prints how fast memory_history is growing into its two
