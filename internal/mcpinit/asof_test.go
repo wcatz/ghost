@@ -175,7 +175,7 @@ func TestRenderSessionContextAtNamesTheInstantWithNoProjectMatched(t *testing.T)
 	if !strings.Contains(block, "as_of 2035-01-01T00:00:00Z") {
 		t.Errorf("the block lists globals from an instant without naming it:\n%s", block)
 	}
-	if strings.Contains(block, "Save discoveries with ghost_memory_save") {
+	if strings.Contains(block, "Save to Ghost as it happens") {
 		t.Errorf("the historical block aims the reader at the present:\n%s", block)
 	}
 }
