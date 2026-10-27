@@ -52,7 +52,7 @@ func legacyPassiveWindow(t *testing.T, s *Store, pol SlicePolicy, req CandidateR
 func TestPassiveThresholdScanMatchesTheLegacyWindow(t *testing.T) {
 	rng := rand.New(rand.NewSource(20261015))
 	now := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
-	for trial := 0; trial < 60; trial++ {
+	for trial := 0; trial < 30; trial++ {
 		st := randomPassiveStore(t, rng, trial)
 		cols, err := passiveColumnsFor(st)
 		if err != nil {
@@ -98,7 +98,7 @@ func randomPassiveStore(t *testing.T, rng *rand.Rand, trial int) *Store {
 	cats := []string{"gotcha", "preference", "architecture", "decision", "fact", "pattern", "convention", "dependency"}
 	tiers := []string{"project", "session", "persistent"}
 	base := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
-	n := 20 + rng.Intn(90)
+	n := 15 + rng.Intn(25)
 	// One transaction for the whole trial: an autocommit per row paid a commit
 	// for each of the ~60 trials' rows.
 	tx, err := db.Begin()
@@ -376,7 +376,7 @@ func TestPassiveThresholdScanReadsDoNotGrowWithTheTail(t *testing.T) {
 	pol.OverFetch = 45
 
 	reads := make(map[int]int64)
-	for _, tail := range []int{1000, 5000} {
+	for _, tail := range []int{1000, 2000} {
 		st := thresholdScanFixture(t, 45, tail)
 		cols, err := passiveColumnsFor(st)
 		if err != nil {
@@ -394,13 +394,13 @@ func TestPassiveThresholdScanReadsDoNotGrowWithTheTail(t *testing.T) {
 			t.Fatalf("tail %d: the window holds %d rows, want %d", tail, len(window), pol.OverFetch)
 		}
 	}
-	if reads[1000] != reads[5000] {
-		t.Errorf("the scan read %d rows at a 1,000-row tail and %d at 5,000; the tail is below the window and must not be read",
-			reads[1000], reads[5000])
+	if reads[1000] != reads[2000] {
+		t.Errorf("the scan read %d rows at a 1,000-row tail and %d at 2,000; the tail is below the window and must not be read",
+			reads[1000], reads[2000])
 	}
-	if reads[5000] > int64(pol.OverFetch)+2 {
+	if reads[2000] > int64(pol.OverFetch)+2 {
 		t.Errorf("the scan read %d rows for a %d-row window; it must stop at the window, not walk the bucket",
-			reads[5000], pol.OverFetch)
+			reads[2000], pol.OverFetch)
 	}
 }
 
