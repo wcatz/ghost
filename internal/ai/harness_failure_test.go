@@ -99,12 +99,13 @@ func TestHarnessFailureOutputGuardsTokens(t *testing.T) {
 // tail cut is withheld by checking the full string before truncation.
 func TestHarnessFailureOutputGuardsTokensAcrossCut(t *testing.T) {
 	token := "ghp_AbCdEfGhIjKlMnOpQrStUvWxYz1234567890"
-	pad := strings.Repeat(" ", harnessFailureOutputMax+50)
-	if got := harnessFailureOutput(pad+token, ""); got == tail(pad+token, harnessFailureOutputMax) {
+	pad := strings.Repeat("x", harnessFailureOutputMax)
+	input := pad + token + strings.Repeat("y", 1160)
+	if got := harnessFailureOutput(input, ""); got == tail(input, harnessFailureOutputMax) {
 		t.Errorf("token straddling cut was not withheld: %q", got)
 	}
-	if got := harnessFailureOutput("", token+pad); got == tail(token+pad, harnessFailureOutputMax) {
-		t.Errorf("token at head of long stderr was not withheld: %q", got)
+	if got := harnessFailureOutput("", input); got == tail(input, harnessFailureOutputMax) {
+		t.Errorf("token straddling cut in stderr was not withheld: %q", got)
 	}
 }
 
