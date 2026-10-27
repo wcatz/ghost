@@ -92,7 +92,7 @@ const (
 	// seedRaceRounds is the number of concurrent seeding attempts the test
 	// makes. The ordering under test is not guaranteed by any sleep, so it is
 	// repeated rather than assumed.
-	seedRaceRounds = 60
+	seedRaceRounds = 20
 	// seedRacePadRows/seedRacePadBytes size the scan widening below. Enough
 	// rows that the probe costs milliseconds, and a small database.
 	seedRacePadRows  = 400

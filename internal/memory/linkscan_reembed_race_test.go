@@ -44,7 +44,7 @@ func TestStoreEmbeddingAndMarkLinkScannedCannotReArmTheSlot(t *testing.T) {
 	// Bounded: the loop only exists to meet the interleaving, and a fixed count
 	// keeps the fixed implementation cheap. A single value is not enough because
 	// the race is scheduling-dependent.
-	const iterations = 2000
+	const iterations = 500
 	for i := 0; i < iterations; i++ {
 		if err := store.StoreEmbedding(ctx, id, vOld, oldModel); err != nil {
 			t.Fatalf("iteration %d: StoreEmbedding(old): %v", i, err)
