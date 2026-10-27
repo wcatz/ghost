@@ -375,7 +375,7 @@ func BuildReflectionPrompt(input ReflectionInput) string {
 		sb.WriteString("\n\n## Near-duplicate pairs that read as duplicates\n")
 		sb.WriteString("These pairs read as duplicates — each pair was withheld as a near-duplicate on a read, so the loser costs a candidate slot before it is cut. Prefer merging these pairs; a merge still goes through grounding, drop guard and accounting, and nothing is merged mechanically without you.\n")
 		for _, p := range input.NearDuplicatePairs {
-			sb.WriteString(fmt.Sprintf("- %s and %s read as duplicates\n", p[0], p[1]))
+			fmt.Fprintf(&sb, "- %s and %s read as duplicates\n", p[0], p[1])
 		}
 	}
 

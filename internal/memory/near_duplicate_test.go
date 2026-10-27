@@ -10,11 +10,12 @@ func TestAreNearDuplicates(t *testing.T) {
 	if AreNearDuplicates("port 2222", "port 2223") {
 		t.Error("numeric conflict should not be near duplicate")
 	}
-	if AreNearDuplicates("always run the full test suite", "never run the full test suite") {
+	if !AreNearDuplicates("always run the full test suite", "never run the full test suite") {
 		// numeric conflict not, but this pair differs by negation; the token
 		// predicate still scores it high – the polarity guard lives in
 		// PlanGlobalFold, not here. This test pins the bare predicate.
 		// It should be near duplicate at this layer.
+		t.Error("expected near duplicate at bare predicate layer")
 	}
 }
 

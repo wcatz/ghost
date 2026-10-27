@@ -73,12 +73,3 @@ func (s *Server) writeNearDuplicateBlock(ctx context.Context, sb *strings.Builde
 		sb.WriteString(line + "\n")
 	}
 }
-
-func containsGlobal(projects []memory.Project) bool {
-	for _, p := range projects {
-		if p.ID == memory.GlobalProjectID {
-			return true
-		}
-	}
-	return false
-}

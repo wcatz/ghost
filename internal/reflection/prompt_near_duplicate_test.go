@@ -81,7 +81,7 @@ func TestNearDuplicatePairMergesWithFakeHarness(t *testing.T) {
 		},
 	}
 	cons := NewLlmConsolidator(fake)
-	res, err := cons.Consolidate(nil, input)
+	res, err := cons.Consolidate(context.TODO(), input)
 	if err != nil {
 		t.Fatalf("Consolidate: %v", err)
 	}
