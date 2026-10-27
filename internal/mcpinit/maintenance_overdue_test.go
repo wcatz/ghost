@@ -17,6 +17,7 @@ func TestOverdueMaintenanceProjects_ListsIdleWithConsolidatableRows(t *testing.T
 	t.Setenv("XDG_DATA_HOME", filepath.Join(tmp, "data"))
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tmp, "config"))
 	setHome(t, filepath.Join(tmp, "home"))
+	t.Setenv("GHOST_REFLECTION_AUTO_REFLECT", "true")
 	if err := os.MkdirAll(filepath.Join(tmp, "home"), 0700); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
 	}
@@ -51,7 +52,7 @@ func TestOverdueMaintenanceProjects_ListsIdleWithConsolidatableRows(t *testing.T
 	if err := TouchLifecycleStart("active-proj"); err != nil {
 		t.Fatalf("TouchLifecycleStart: %v", err)
 	}
-	overdue, err := OverdueMaintenanceProjects(ctx, store, dataDir, time.Now(), 30*time.Minute)
+	overdue, err := OverdueMaintenanceProjects(ctx, store, dataDir, time.Now(), 30*time.Minute, true)
 	if err != nil {
 		t.Fatalf("OverdueMaintenanceProjects: %v", err)
 	}
@@ -109,6 +110,7 @@ func TestOverdueIsNotReportedWhenInsideCooldown(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", filepath.Join(tmp, "data"))
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tmp, "config"))
 	setHome(t, filepath.Join(tmp, "home"))
+	t.Setenv("GHOST_REFLECTION_AUTO_REFLECT", "true")
 	if err := os.MkdirAll(filepath.Join(tmp, "home"), 0700); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
 	}
@@ -130,14 +132,14 @@ func TestOverdueIsNotReportedWhenInsideCooldown(t *testing.T) {
 	if err := TouchLifecycleStart("proj"); err != nil {
 		t.Fatalf("TouchLifecycleStart: %v", err)
 	}
-	overdue, _ := OverdueMaintenanceProjects(ctx, store, dataDir, time.Now(), 30*time.Minute)
+	overdue, _ := OverdueMaintenanceProjects(ctx, store, dataDir, time.Now(), 30*time.Minute, true)
 	for _, o := range overdue {
 		if o.ID == "proj" {
 			t.Fatalf("proj should not be overdue inside cooldown: %v", overdue)
 		}
 	}
 	// Far future: overdue because outside window
-	overdue2, _ := OverdueMaintenanceProjects(ctx, store, dataDir, time.Now().Add(2*time.Hour), 30*time.Minute)
+	overdue2, _ := OverdueMaintenanceProjects(ctx, store, dataDir, time.Now().Add(2*time.Hour), 30*time.Minute, true)
 	found := false
 	for _, o := range overdue2 {
 		if o.ID == "proj" {

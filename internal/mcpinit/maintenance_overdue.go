@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/wcatz/ghost/internal/assemble"
-	"github.com/wcatz/ghost/internal/config"
 	"github.com/wcatz/ghost/internal/memory"
 )
 
@@ -32,20 +31,21 @@ type OverdueProject struct {
 // no consolidatable memories are never overdue, and neither is a project
 // whose lifecycle is currently running. An unsafe project id (one that
 // cannot be a filename component) is skipped, because its bookkeeping cannot
-// be read.
-func OverdueMaintenanceProjects(ctx context.Context, store *memory.Store, dataDir string, now time.Time, minInterval time.Duration) ([]OverdueProject, error) {
+// be read. A non-positive minInterval means the cooldown is disabled (every
+// project with work and no live claim is due). consolidationEnabled gates
+// the listing: when false, automatic lifecycle consolidation is not configured
+// and no retry is useful, so the result is nil.
+func OverdueMaintenanceProjects(ctx context.Context, store *memory.Store, dataDir string, now time.Time, minInterval time.Duration, consolidationEnabled bool) ([]OverdueProject, error) {
 	if store == nil {
 		return nil, nil
 	}
 	if dataDir == "" {
 		return nil, nil
 	}
-	if minInterval <= 0 {
-		minInterval = config.LifecycleConfig{}.MinIntervalDuration()
-		if minInterval <= 0 {
-			minInterval = 30 * time.Minute
-		}
+	if !consolidationEnabled {
+		return nil, nil
 	}
+	noCooldown := minInterval <= 0
 	projects, err := store.ListProjects(ctx)
 	if err != nil {
 		return nil, err
@@ -72,10 +72,12 @@ func OverdueMaintenanceProjects(ctx context.Context, store *memory.Store, dataDi
 		}
 		lastRun, ok := lifecycleStartStamp(dataDir, p.ID)
 		if ok {
-			skip, _ := lifecycleCooldownActive(dataDir, p.ID, minInterval, now)
-			if skip {
-				// Inside the cooldown window, not overdue.
-				continue
+			if !noCooldown {
+				skip, _ := lifecycleCooldownActive(dataDir, p.ID, minInterval, now)
+				if skip {
+					// Inside the cooldown window, not overdue.
+					continue
+				}
 			}
 			out = append(out, OverdueProject{
 				ID:          p.ID,

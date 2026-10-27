@@ -24,6 +24,7 @@ func TestHealthListsOverdueMaintenance(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tmp, "config"))
 	t.Setenv("HOME", filepath.Join(tmp, "home"))
 	t.Setenv("USERPROFILE", filepath.Join(tmp, "home"))
+	t.Setenv("GHOST_REFLECTION_AUTO_REFLECT", "true")
 	if err := os.MkdirAll(filepath.Join(tmp, "home"), 0700); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
 	}
@@ -55,7 +56,7 @@ func TestHealthListsOverdueMaintenance(t *testing.T) {
 	}
 	// Ensure the diagnostic read reports overdue.
 	cfg := config.LoadForHook()
-	overdue, err := mcpinit.OverdueMaintenanceProjects(ctx, store, dataDir, time.Now(), cfg.Lifecycle.MinIntervalDuration())
+	overdue, err := mcpinit.OverdueMaintenanceProjects(ctx, store, dataDir, time.Now(), cfg.Lifecycle.MinIntervalDuration(), cfg.Reflection.AutoReflect || cfg.Reflection.AutoResolve || cfg.Reflection.AutoSupersede)
 	if err != nil {
 		t.Fatalf("Overdue: %v", err)
 	}
