@@ -4074,6 +4074,8 @@ func (s *Server) registerTools() {
 			sb.WriteString("\n")
 		}
 
+		s.writeNearDuplicateBlock(ctx, &sb, read.store, projects)
+
 		// History growth (#729), additive: everything above keeps its name and
 		// its meaning, and this is the one block that says how fast
 		// memory_history is filling and how much of that is version rows that

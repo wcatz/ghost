@@ -44,6 +44,12 @@ type ReflectionInput struct {
 	// with no audit history byte-for-byte on the prompt it was built before this
 	// field existed.
 	Usefulness map[string]memory.UsefulnessEvidence
+	// NearDuplicatePairs are the pairs that read as duplicates: each is an
+	// unordered id pair that the store's dedup predicate flagged. Named in the
+	// prompt as "these pairs read as duplicates" so the harness is pointed at
+	// them instead of scanning 1000 rows for them. The merge still goes through
+	// grounding, drop guard and accounting; nothing is merged mechanically.
+	NearDuplicatePairs [][2]string
 }
 
 // ReflectionResult holds the parsed output from a reflection call.
@@ -362,6 +368,14 @@ func BuildReflectionPrompt(input ReflectionInput) string {
 				line += fmt.Sprintf(" [%s]", audit)
 			}
 			sb.WriteString(line + "\n")
+		}
+	}
+
+	if len(input.NearDuplicatePairs) > 0 {
+		sb.WriteString("\n\n## Near-duplicate pairs that read as duplicates\n")
+		sb.WriteString("These pairs read as duplicates — each pair was withheld as a near-duplicate on a read, so the loser costs a candidate slot before it is cut. Prefer merging these pairs; a merge still goes through grounding, drop guard and accounting, and nothing is merged mechanically without you.\n")
+		for _, p := range input.NearDuplicatePairs {
+			sb.WriteString(fmt.Sprintf("- %s and %s read as duplicates\n", p[0], p[1]))
 		}
 	}
 
