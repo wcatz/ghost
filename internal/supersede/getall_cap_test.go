@@ -75,3 +75,52 @@ func TestSelectCandidatesFetchesNeighborOutsideGetAllCap(t *testing.T) {
 		t.Errorf("wrong orientation")
 	}
 }
+
+type capStoreErrGetByIDs struct {
+	*memory.Store
+	all  []memory.Memory
+	byID map[string]memory.Memory
+}
+
+func newCapStoreErrGetByIDs(t *testing.T, base *memory.Store) *capStoreErrGetByIDs {
+	t.Helper()
+	ctx := context.Background()
+	mems, err := base.GetAll(ctx, "p", 100000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs := &capStoreErrGetByIDs{
+		Store: base,
+		all:   mems[:1], // only first in GetAll
+		byID:  make(map[string]memory.Memory),
+	}
+	for _, m := range mems {
+		cs.byID[m.ID] = m
+	}
+	return cs
+}
+
+func (c *capStoreErrGetByIDs) GetAll(ctx context.Context, projectID string, limit int) ([]memory.Memory, error) {
+	if projectID == "p" {
+		return c.all, nil
+	}
+	return c.Store.GetAll(ctx, projectID, limit)
+}
+
+func (c *capStoreErrGetByIDs) GetByIDs(ctx context.Context, ids []string) ([]memory.Memory, error) {
+	return nil, context.DeadlineExceeded
+}
+
+func TestSelectCandidatesPropagatesGetByIDsFetchError(t *testing.T) {
+	store, db := seed(t)
+	ctx := context.Background()
+
+	_ = add(t, store, db, "postgres upgraded to 16", []float32{1, 0, 0}, "2026-07-10 00:00:00")
+	_ = add(t, store, db, "postgres runs version 14", []float32{0.98, 0.02, 0}, "2026-01-01 00:00:00")
+
+	cs := newCapStoreErrGetByIDs(t, store)
+	_, err := SelectCandidates(ctx, cs, "p", 0.9)
+	if err == nil {
+		t.Fatal("expected error when GetByIDs fails on fetching out-of-cap neighbour")
+	}
+}

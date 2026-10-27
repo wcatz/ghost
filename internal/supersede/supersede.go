@@ -325,7 +325,10 @@ func SelectCandidates(ctx context.Context, store vectorStore, projectID string, 
 			other, ok := byID[n.MemoryID]
 			if !ok {
 				fetched, err := store.GetByIDs(ctx, []string{n.MemoryID})
-				if err != nil || len(fetched) == 0 {
+				if err != nil {
+					return sel, fmt.Errorf("load neighbor %s: %w", memory.RefusalArg("memory_id", n.MemoryID), err)
+				}
+				if len(fetched) == 0 {
 					continue
 				}
 				other = fetched[0]
