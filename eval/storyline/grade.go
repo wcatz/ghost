@@ -131,7 +131,106 @@ func grade(res *Result) []Check {
 		raw, ran := res.Probes[p.Name]
 		out = append(out, probeChecks(res, p, p.Name, raw, ran)...)
 	}
+	// Efficiency arcs for #1831, #1834, #1832.
+	switch s.Key {
+	case "pins-over-bucket":
+		out = append(out, pinsOverflowNoticed(res))
+	case "duplicate-never-merged":
+		out = append(out, duplicateMergedBlock(res))
+		out = append(out, duplicateMergedStore(res))
+	case "dated-global-status":
+		out = append(out, datedGlobalWithheld(res))
+		out = append(out, datedGlobalAdvisory(res))
+	}
 	return applyKnown(s, out)
+}
+
+// pinsOverflowNoticed checks that the owner was told the bucket overflowed.
+// #1831 requires the pin result or the health output to carry the notice; the
+// grade reads the save outputs for the pins that push the bucket over its cap.
+// The block's own pinned-cut line is not the surface the issue grades, which is
+// why the check looks at the save path rather than the block.
+func pinsOverflowNoticed(res *Result) Check {
+	name := "pins-overflow-noticed:pin-result"
+	// The 16th and 17th pins are the ones that overflow the 15-slot bucket.
+	for _, key := range []string{"pin-16", "pin-long"} {
+		raw := res.SaveOutputs[key]
+		if raw == "" {
+			raw = res.OpeningRaw[key]
+		}
+		low := strings.ToLower(raw)
+		if strings.Contains(low, "pinned") && strings.Contains(low, "exceed") {
+			return Check{Name: name, Passed: true, Detail: "pin result reports that pinned rows exceed the cap"}
+		}
+		if strings.Contains(low, "overflow") || strings.Contains(low, "cut") && strings.Contains(low, "pinned") {
+			return Check{Name: name, Passed: true, Detail: "pin result reports overflow"}
+		}
+	}
+	return Check{Name: name, Passed: false, Detail: "pin result does not report that pinned rows exceed the cap"}
+}
+
+// duplicateMergedBlock checks that the rule saved twice in near-identical words
+// appears once in the final block. The store holds the rule, the block is what
+// the next session is handed, and showing it twice is the same defect as
+// holding it twice.
+func duplicateMergedBlock(res *Result) Check {
+	name := "duplicate-merged:block-shows-once"
+	// The shared phrase both records contain (lower-cased for the count).
+	needle := "explicit approval"
+	block := strings.ToLower(res.FinalBlock)
+	count := strings.Count(block, needle)
+	if count == 1 {
+		return Check{Name: name, Passed: true, Detail: "final block shows the rule once"}
+	}
+	if count == 0 {
+		return Check{Name: name, Passed: false, Detail: "final block does not show the rule at all"}
+	}
+	return Check{Name: name, Passed: false, Detail: fmt.Sprintf("final block shows the rule %d times, want once", count)}
+}
+
+// duplicateMergedStore checks that the store holds one live row for the rule
+// rather than two. The two saves are near-identical, so the save path should
+// have folded the second into the first; the fake-harness lifecycle runs, then
+// the graded store read counts what is there.
+func duplicateMergedStore(res *Result) Check {
+	name := "duplicate-merged:store-holds-one"
+	// Total live memories: opening (1) plus the one merged rule = 2. Two live
+	// duplicate rows would be 3. The count is the store's own, via State.Stamps.
+	n := len(res.State.Stamps)
+	if n == 2 {
+		return Check{Name: name, Passed: true, Detail: "store holds one live row for the rule (2 memories total with the opening)"}
+	}
+	return Check{Name: name, Passed: false, Detail: fmt.Sprintf("store holds %d memories, want 2 (one live row for the rule)", n)}
+}
+
+// datedGlobalWithheld checks that an expired global rollout status is not in the
+// final block. The global is visible to every project, so a later session in a
+// different project must not carry it once its valid_until has passed.
+func datedGlobalWithheld(res *Result) Check {
+	name := "dated-global-withheld:final-block:rollout-status"
+	mark := "Relay v2.3.1 is live in prod"
+	if strings.Contains(res.FinalBlock, mark) {
+		return Check{Name: name, Passed: false, Detail: "final block still carries the expired global rollout status"}
+	}
+	return Check{Name: name, Passed: true, Detail: "final block does not carry the expired global rollout status"}
+}
+
+// datedGlobalAdvisory checks that saving a dated rollout status without a
+// valid_until advises the caller to add one. The save without a window is the
+// defect that lets undated status linger forever; the advisory is the pin that
+// makes the next save carry a window. The grade reads the tool's raw output for
+// that record, which the runner now records per key.
+func datedGlobalAdvisory(res *Result) Check {
+	name := "dated-global-advisory:rollout-status-undated"
+	raw := res.SaveOutputs["rollout-status-undated"]
+	if raw == "" {
+		raw = res.OpeningRaw["rollout-status-undated"]
+	}
+	low := strings.ToLower(raw)
+	if strings.Contains(low, "valid_until") {
+		return Check{Name: name, Passed: true, Detail: "save without valid_until advises to add one"}
+	}
+	return Check{Name: name, Passed: false, Detail: "save without valid_until does not advise to add valid_until"}
 }
 
 // staleSite names a stale-original line. One superseded record per site keeps

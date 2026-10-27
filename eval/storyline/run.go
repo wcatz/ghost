@@ -53,6 +53,11 @@ type Ghost interface {
 	// Save writes one record through the real MCP tool — the genuine save path,
 	// embedding-worker notification included.
 	Save(ctx context.Context, project string, rec Record) (string, error)
+	// SaveRaw is Save that also returns the tool's raw text output, so the grade
+	// can check for advisories the save path emits (e.g. the dated-global
+	// advisory when no valid_until was given). A fake may return the id with an
+	// empty raw when it has no advisory to emit.
+	SaveRaw(ctx context.Context, project string, rec Record) (string, string, error)
 	// Context renders the session-start injection block for a working directory:
 	// the real `ghost context`, which is what the opencode plugin hands a session
 	// and what the SessionStart hook renders for the same cwd.
@@ -105,13 +110,15 @@ type Result struct {
 	// storyline reverse an opening record, which makes the supersede-edge check
 	// need their ids. Holding them here rather than in a local slice is what
 	// keeps that lookup from failing on a store that got the edge right.
-	Opening    map[string]string
-	Sessions   []Session
-	Supersede  string
-	Resolve    string
-	FinalBlock string
-	State      State
-	Checks     []Check
+	Opening     map[string]string
+	OpeningRaw  map[string]string
+	Sessions    []Session
+	Supersede   string
+	Resolve     string
+	FinalBlock  string
+	State       State
+	Checks      []Check
+	SaveOutputs map[string]string
 	// Judged records whether the opt-in judge ran, and Verdict is its raw answer.
 	// An unreadable verdict is recorded as a failed ADVISORY check naming it
 	// (never read as a yes or a no): the judge is a second column, and one reply
@@ -277,16 +284,11 @@ func (r *Run) Execute(ctx context.Context) (*Result, error) {
 	if r.Timeout <= 0 {
 		r.Timeout = defaultTimeout
 	}
-	res := &Result{Story: r.Story, WorkDir: r.WorkDir, WithoutGhost: r.WithoutGhost, FakeHarness: r.FakeHarness}
-
-	// The project's own history first, then the location its sessions stand in.
-	// Both happen before the first block is rendered: a project with no recorded
-	// path renders no project half at all, and the first session would read as an
-	// empty one for a reason that has nothing to do with the storyline.
+	res := &Result{Story: r.Story, WorkDir: r.WorkDir, WithoutGhost: r.WithoutGhost, FakeHarness: r.FakeHarness, SaveOutputs: map[string]string{}, OpeningRaw: map[string]string{}}
 	order := []string{}
 	res.Opening = make(map[string]string, len(r.Story.Opening))
 	for _, rec := range r.Story.Opening {
-		id, err := r.save(ctx, rec)
+		id, raw, err := r.saveRaw(ctx, rec)
 		if err != nil {
 			return nil, fmt.Errorf("opening record %s: %w", rec.Key, err)
 		}
@@ -295,6 +297,8 @@ func (r *Run) Execute(ctx context.Context) (*Result, error) {
 		// reverse an opening record, and the grade resolves the edge through both
 		// keys. See Result.Opening.
 		res.Opening[rec.Key] = id
+		res.OpeningRaw[rec.Key] = raw
+		res.SaveOutputs[rec.Key] = raw
 	}
 	if len(r.Story.Opening) > 0 {
 		r.lastStageSave = time.Now()
@@ -356,11 +360,15 @@ func (r *Run) Execute(ctx context.Context) (*Result, error) {
 			}
 		}
 		for _, rec := range stage.Records {
-			id, err := r.save(ctx, rec)
+			id, raw, err := r.saveRaw(ctx, rec)
 			if err != nil {
 				return nil, fmt.Errorf("stage %d record %s: %w", i+1, rec.Key, err)
 			}
 			sess.Saved[rec.Key] = id
+			if sess.Probes == nil {
+				// keep SavedRaw inside SaveOutputs for grade; also store per-session for debug
+			}
+			res.SaveOutputs[rec.Key] = raw
 			order = append(order, id)
 		}
 		if len(stage.Records) > 0 {
@@ -497,9 +505,28 @@ func (r *Run) arcStages(ctx context.Context, res *Result, order []string) error 
 }
 
 func (r *Run) save(ctx context.Context, rec Record) (string, error) {
-	return r.call(ctx, func(c context.Context) (string, error) {
+	id, _, err := r.saveRaw(ctx, rec)
+	return id, err
+}
+
+func (r *Run) saveRaw(ctx context.Context, rec Record) (string, string, error) {
+	if rawSaver, ok := r.Ghost.(interface {
+		SaveRaw(context.Context, string, Record) (string, string, error)
+	}); ok {
+		return r.callRaw(ctx, func(c context.Context) (string, string, error) {
+			return rawSaver.SaveRaw(c, r.Story.Project, rec)
+		})
+	}
+	id, err := r.call(ctx, func(c context.Context) (string, error) {
 		return r.Ghost.Save(c, r.Story.Project, rec)
 	})
+	return id, "", err
+}
+
+func (r *Run) callRaw(ctx context.Context, fn func(context.Context) (string, string, error)) (string, string, error) {
+	c, cancel := context.WithTimeout(ctx, r.Timeout)
+	defer cancel()
+	return fn(c)
 }
 
 // call bounds one ghost or harness call with the run's own deadline. The CLI LLM
@@ -731,6 +758,9 @@ func saveCall(project string, rec Record) (string, map[string]any) {
 	if len(rec.Scope) > 0 {
 		args["scope"] = rec.Scope
 	}
+	if rec.Pin {
+		args["pin"] = true
+	}
 	if rec.Global {
 		return "ghost_save_global", args
 	}
@@ -739,19 +769,24 @@ func saveCall(project string, rec Record) (string, map[string]any) {
 }
 
 func (g *binaryGhost) Save(ctx context.Context, project string, rec Record) (string, error) {
+	id, _, err := g.SaveRaw(ctx, project, rec)
+	return id, err
+}
+
+func (g *binaryGhost) SaveRaw(ctx context.Context, project string, rec Record) (string, string, error) {
 	if g.mcp == nil {
-		return "", fmt.Errorf("mcp session is not open")
+		return "", "", fmt.Errorf("mcp session is not open")
 	}
 	tool, args := saveCall(project, rec)
 	out, err := g.mcp.callText(ctx, tool, args)
 	if err != nil {
-		return "", err
+		return "", out, err
 	}
 	m := savedIDRe.FindStringSubmatch(out)
 	if m == nil {
-		return "", fmt.Errorf("unrecognized %s response %q", tool, out)
+		return "", out, fmt.Errorf("unrecognized %s response %q", tool, out)
 	}
-	return m[1], nil
+	return m[1], out, nil
 }
 
 // Settle waits for every project memory to have an embedding row before the arc

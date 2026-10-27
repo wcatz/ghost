@@ -102,10 +102,16 @@ func TestAnswerGradePassAndFailPerArc(t *testing.T) {
 // TestEveryShippedArcGradesTheAnswer guards the table above against a storyline
 // that quietly lost its answer grade: each shipped arc must carry at least one
 // answer-carries check, and the arcs that claim a stale or mistaken claim must
-// carry an avoid check.
+// carry an avoid check. The efficiency arcs for #1831, #1834, #1832 run under
+// -fake-harness with no model and are graded on block and store lines only, so
+// they carry no answer checks.
 func TestEveryShippedArcGradesTheAnswer(t *testing.T) {
 	wantAvoids := map[string]bool{"reversed-decision": true, "correction-replay": true, "stale-fact": true}
+	skip := map[string]bool{"pins-over-bucket": true, "duplicate-never-merged": true, "dated-global-status": true}
 	for _, s := range storylines() {
+		if skip[s.Key] {
+			continue
+		}
 		var carries, avoids int
 		for _, st := range s.Stages {
 			carries += len(st.Carries)

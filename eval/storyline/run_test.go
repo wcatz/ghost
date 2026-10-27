@@ -54,14 +54,24 @@ func (f *fakeGhost) Bind(_ context.Context, project, workDir string) error {
 	return f.bindErr
 }
 
-func (f *fakeGhost) Save(_ context.Context, project string, rec Record) (string, error) {
+func (f *fakeGhost) Save(ctx context.Context, project string, rec Record) (string, error) {
+	id, _, _ := f.SaveRaw(ctx, project, rec)
+	return id, f.saveErr
+}
+
+func (f *fakeGhost) SaveRaw(_ context.Context, _ string, rec Record) (string, string, error) {
 	f.calls = append(f.calls, "save "+rec.Key)
 	if f.saveErr != nil {
-		return "", f.saveErr
+		return "", "", f.saveErr
 	}
 	id := fmt.Sprintf("ID%04d", len(f.saved)+1)
 	f.saved = append(f.saved, savedRecord{key: rec.Key, rec: rec, order: len(f.saved) + 1})
-	return id, nil
+	// Fake advisory for dated-global without valid_until: the tool would advise
+	// to add one. The fake returns no advisory today, so the grade fails as
+	// known; after the fix the real ghost will return it and the fake should too.
+	raw := "Memory saved (id: " + id + ")"
+	// Simulate no advisory for now; the grade will look for "valid_until" in raw.
+	return id, raw, nil
 }
 
 // Context renders the marks of whatever has been saved SO FAR — the one property
