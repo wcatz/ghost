@@ -316,6 +316,15 @@ def main(argv):
                              "own timeout")
     args = parser.parse_args(argv[1:])
 
+    raw_paid_timed_out = args.paid_timed_out
+    if raw_paid_timed_out not in ("", "true", "false"):
+        print(
+            "paid-timed-out must be true, false, or empty, "
+            "got %r" % raw_paid_timed_out,
+            file=sys.stderr,
+        )
+        return 2
+
     failures = []
     for path in args.free_failures:
         failures.extend(parse_failures(_read(path)))
@@ -328,7 +337,7 @@ def main(argv):
                       select_agent_fatal=_flag(args.select_agent_fatal),
                       free_agent_fatal=_flag(args.free_agent_fatal),
                       paid_agent_fatal=_flag(args.paid_agent_fatal),
-                      paid_timed_out=_flag(args.paid_timed_out))
+                      paid_timed_out=(raw_paid_timed_out == "true"))
     print(json.dumps({"outcome": decision.outcome, "cause": decision.cause}))
     return 0
 

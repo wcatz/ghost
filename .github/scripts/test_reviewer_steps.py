@@ -497,5 +497,90 @@ class TestACallSite(unittest.TestCase):
             self.assertEqual(classification_of(output), "unavailable")
 
 
+class TestTheGitHubOutputWrites(unittest.TestCase):
+    """Every printf that writes to GITHUB_OUTPUT must end with a real newline.
+
+    A single-quoted format with ``\\\\n`` reaches printf as a literal
+    backslash and n, so the next write is appended to the same line:
+    ``paid_timed_out=false\\npaid_status=success``. The file then has one
+    line, ``paid_timed_out`` carries ``false\\npaid_status=success``, and
+    ``paid_status`` is never set. The regression keeps the three places
+    that ask the rule and the paid timeout flag on their own lines.
+    """
+
+    def test_no_single_quoted_printf_uses_a_double_escaped_newline(self):
+        workflow = open(workflow_path(), encoding="utf-8").read()
+        bad = []
+        for lineno, line in enumerate(workflow.splitlines(), 1):
+            if "GITHUB_OUTPUT" in line and "printf" in line and "'" in line:
+                # A single-quoted format ends with \n; \\n inside the quotes
+                # is a literal \n that does not terminate the GITHUB_OUTPUT
+                # line. The correct form is '...%s\n' with one backslash.
+                if "\\\\n" in line:
+                    bad.append((lineno, line.strip()))
+        self.assertEqual(
+            bad, [],
+            "a GITHUB_OUTPUT printf still uses \\\\n inside single quotes: %r"
+            % bad,
+        )
+
+    def test_a_timed_out_flag_and_its_status_are_two_lines(self):
+        # The exact bug: the paid step wrote paid_timed_out and paid_status
+        # to the same GITHUB_OUTPUT file, and a \\n merged them.
+        with tempfile.TemporaryDirectory() as folder:
+            output = os.path.join(folder, "github-output")
+            open(output, "w", encoding="utf-8").close()
+            good = (
+                "paid_status=0\n"
+                "printf 'paid_timed_out=%s\\n' "
+                "\"$([ \"$paid_status\" -eq 124 ] && echo true || echo false)\" "
+                ">> \"$GITHUB_OUTPUT\"\n"
+                "printf 'paid_status=success\\n' >> \"$GITHUB_OUTPUT\"\n"
+            )
+            bad = (
+                "paid_status=0\n"
+                "printf 'paid_timed_out=%s\\\\n' "
+                "\"$([ \"$paid_status\" -eq 124 ] && echo true || echo false)\" "
+                ">> \"$GITHUB_OUTPUT\"\n"
+                "printf 'paid_status=success\\n' >> \"$GITHUB_OUTPUT\"\n"
+            )
+            for snippet, want_lines in ((good, 2), (bad, 1)):
+                script = os.path.join(folder, "probe.sh")
+                with open(script, "w", encoding="utf-8") as handle:
+                    handle.write(snippet)
+                env = dict(os.environ, GITHUB_OUTPUT=output)
+                open(output, "w", encoding="utf-8").close()
+                subprocess.run(["bash", script], env=env, check=True)
+                with open(output, encoding="utf-8") as handle:
+                    lines = [l for l in handle.read().splitlines() if l]
+                self.assertEqual(
+                    len(lines), want_lines,
+                    "snippet %r produced %r, want %d lines" % (snippet, lines, want_lines),
+                )
+            # The workflow on disk must be the good shape.
+            with open(output, "w", encoding="utf-8") as handle:
+                handle.write("")
+            # Run a tiny slice of the real paid step's two writes.
+            # The paid_status is 0, so paid_timed_out must be false on its
+            # own line and paid_status on the next.
+            workflow = open(workflow_path(), encoding="utf-8").read()
+            # Find the paid_timed_out line the workflow has today.
+            found = [l for l in workflow.splitlines() if "paid_timed_out" in l and "GITHUB_OUTPUT" in l]
+            self.assertTrue(found, "the workflow has no paid_timed_out GITHUB_OUTPUT line")
+            script = os.path.join(folder, "real.sh")
+            with open(script, "w", encoding="utf-8") as handle:
+                handle.write("paid_status=0\n")
+                handle.write(found[0].strip() + "\n")
+                handle.write("printf 'paid_status=success\\n' >> \"$GITHUB_OUTPUT\"\n")
+            env = dict(os.environ, GITHUB_OUTPUT=output)
+            open(output, "w", encoding="utf-8").close()
+            subprocess.run(["bash", script], env=env, check=True)
+            with open(output, encoding="utf-8") as handle:
+                content = handle.read()
+            self.assertIn("paid_timed_out=false\n", content)
+            self.assertIn("paid_status=success\n", content)
+            self.assertEqual(len([l for l in content.splitlines() if l]), 2)
+
+
 if __name__ == "__main__":
     unittest.main()

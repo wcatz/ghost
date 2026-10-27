@@ -1127,7 +1127,7 @@ jobs:
             timeout --foreground "${paid_timeout}s" opencode run --standalone \
             --agent ghost-reviewer -m "$PAID_MODEL" --format json \
             "$REVIEW_PROMPT" > model-reply.txt 2> model-stderr.txt || paid_status=$?
-          printf 'paid_timed_out=%s\\n' "$([ "$paid_status" -eq 124 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          printf 'paid_timed_out=%s\n' "$([ "$paid_status" -eq 124 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
           valid_reply=0
           if [ "$paid_status" -eq 0 ] && [ -s model-reply.txt ] \
              && jq -s -e 'length > 0 and all(.[]; .type != "error")' \

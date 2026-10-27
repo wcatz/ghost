@@ -379,5 +379,53 @@ class TestTheCommand(unittest.TestCase):
         self.assertEqual(report["outcome"], OUTCOME_FAILURE)
 
 
+class TestThePaidTimedOutFlag(unittest.TestCase):
+    """The paid timeout flag is exactly true, false, or empty.
+
+    A broken GITHUB_OUTPUT write once merged the flag with the next
+    output, so the flag reached the helper as "false\\npaid_status=success"
+    and the helper silently read it as false while the paid status stayed
+    empty. The helper now fails loudly and names the bad value.
+    """
+
+    def _call_raw(self, value):
+        with tempfile.TemporaryDirectory() as folder:
+            empty = os.path.join(folder, "empty.txt")
+            with open(empty, "w", encoding="utf-8") as handle:
+                handle.write("")
+            argv = ["review_outcome.py", "--free-status", "failed",
+                    "--paid-status", "failed",
+                    "--free-failures", empty, "--paid-reason", empty,
+                    "--paid-timed-out", value]
+            stderr = io.StringIO()
+            with contextlib.redirect_stdout(io.StringIO()), \
+                 contextlib.redirect_stderr(stderr):
+                code = review_outcome.main(argv)
+            return code, stderr.getvalue()
+
+    def test_true_and_false_and_empty_are_accepted(self):
+        for value in ("true", "false", ""):
+            code, _err = self._call_raw(value)
+            self.assertEqual(code, 0, "value %r should be accepted" % value)
+
+    def test_a_bare_word_is_not_accepted(self):
+        for value in ("True", "TRUE", "1", "yes", "false\npaid_status=success"):
+            with self.subTest(value=value):
+                code, err = self._call_raw(value)
+                self.assertNotEqual(code, 0)
+                self.assertIn(repr(value), err)
+
+    def test_the_merged_output_is_rejected(self):
+        # The exact shape a single-quoted printf with \\n left behind:
+        # the file ends up as `paid_timed_out=false\npaid_status=success`
+        # with a literal backslash, so the flag reaches the helper as
+        # `false\npaid_status=success` with a backslash and an n.
+        merged = "false\\npaid_status=success"
+        code, err = self._call_raw(merged)
+        self.assertNotEqual(code, 0)
+        self.assertIn("paid-timed-out", err)
+        self.assertIn(repr(merged), err)
+
+
 if __name__ == "__main__":
     unittest.main()
