@@ -5116,9 +5116,11 @@ func (s *Server) buildProjectContext(ctx context.Context, projectID, asked strin
 			} else {
 				emptyText = "No memories found among the cross-project rows."
 			}
-		} else {
+		} else if projectID != "" {
 			emptyText = "No memories found for this project."
 		}
+		// For an unresolved project (projectID == "") the empty census is suppressed:
+		// the not-registered sentence below is the only thing the answer carries.
 		if emptyText != "" {
 			parts = append(parts, responsePart{text: emptyText})
 		}
@@ -5131,9 +5133,15 @@ func (s *Server) buildProjectContext(ctx context.Context, projectID, asked strin
 	// this one does not ask what filled the block above.
 	if projectID == "" && askedName != "" {
 		// One blank line before the sentence: a row already ends in a newline.
-		sep := "\n\n"
-		if n := len(parts); n > 0 && strings.HasSuffix(parts[n-1].text, "\n") {
-			sep = "\n"
+		// When no parts were added (unresolved project with no cross-project rows)
+		// the sentence is the whole answer, with no leading blank line.
+		sep := ""
+		if n := len(parts); n > 0 {
+			if strings.HasSuffix(parts[n-1].text, "\n") {
+				sep = "\n"
+			} else {
+				sep = "\n\n"
+			}
 		}
 		parts = append(parts, responsePart{text: sep + projectNotRegistered(askedName)})
 	}
