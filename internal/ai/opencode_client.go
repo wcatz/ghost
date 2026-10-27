@@ -122,19 +122,7 @@ func (c *OpenCodeClient) run(ctx context.Context, prompt string) (_ string, err 
 		// success. opencode writes the declined shape as it begins to shut
 		// down, so a deadline or cancellation that lands after the answer text
 		// leaves a stream the salvage below would accept — while the run was
-		// killed, not answered. The salvage is for a run that exited on its own
-		// after a declined tool use, and the context being done is what tells
-		// the two apart.
-		if ctx.Err() == nil {
-			if text, ok := salvageDeclinedToolRun(stdout.String()); ok {
-				return text, nil
-			}
-		}
-		// The cause is attached because Wait reports only the kill ("signal:
-		// killed"), never the context error, so a cut would otherwise be
-		// indistinguishable from a run that failed on its own terms. A cut at
-		// the client default is named by explainDefaultBound, which reads the
-		// timer's cause.
+		// killed, not answered.
 		if cause := ctx.Err(); cause != nil {
 			return "", fmt.Errorf("opencode run: %w: %s: %w", err, harnessFailureOutput(stdout.String(), stderr.String()), cause)
 		}
