@@ -213,7 +213,66 @@ func TestOverdueMaintenanceProjects_DisabledCooldown(t *testing.T) {
 	if !contains(text, "lifecycle cooldown disabled") {
 		t.Errorf("missing disabled cooldown text: %q", text)
 	}
-	if !contains(text, "have not had lifecycle maintenance") {
-		t.Errorf("missing plural agreement: %q", text)
+	if !contains(text, "has not had lifecycle maintenance") {
+		t.Errorf("missing singular agreement: %q", text)
+	}
+	if contains(text, "have not had lifecycle maintenance") {
+		t.Errorf("singular case must not use plural: %q", text)
+	}
+}
+
+func TestOverdueMaintenanceProjects_WordingSingularAndPlural(t *testing.T) {
+	now := time.Now()
+
+	// disabled cooldown, singular
+	single := []OverdueProject{{ID: "a", Name: "a", Count: 1, HasLastRun: false, MinInterval: 0}}
+	text, ok := FormatOverdueMaintenance(single, now)
+	if !ok {
+		t.Fatalf("FormatOverdueMaintenance returned not ok")
+	}
+	if !contains(text, "**Maintenance overdue:** 1 project") {
+		t.Fatalf("missing singular header: %q", text)
+	}
+	if !contains(text, "has not had lifecycle maintenance with the lifecycle cooldown disabled") {
+		t.Fatalf("missing singular disabled wording: %q", text)
+	}
+
+	// disabled cooldown, plural
+	plural := []OverdueProject{
+		{ID: "a", Name: "a", Count: 1, HasLastRun: false, MinInterval: 0},
+		{ID: "b", Name: "b", Count: 2, HasLastRun: false, MinInterval: 0},
+	}
+	text, ok = FormatOverdueMaintenance(plural, now)
+	if !ok {
+		t.Fatalf("FormatOverdueMaintenance returned not ok")
+	}
+	if !contains(text, "**Maintenance overdue:** 2 projects") {
+		t.Fatalf("missing plural header: %q", text)
+	}
+	if !contains(text, "have not had lifecycle maintenance with the lifecycle cooldown disabled") {
+		t.Fatalf("missing plural disabled wording: %q", text)
+	}
+
+	// interval, singular
+	single2 := []OverdueProject{{ID: "a", Name: "a", Count: 1, HasLastRun: false, MinInterval: 30 * time.Minute}}
+	text, ok = FormatOverdueMaintenance(single2, now)
+	if !ok {
+		t.Fatalf("FormatOverdueMaintenance returned not ok")
+	}
+	if !contains(text, "has not had lifecycle maintenance within 30m0s") {
+		t.Fatalf("missing singular interval wording: %q", text)
+	}
+
+	// interval, plural
+	plural2 := []OverdueProject{
+		{ID: "a", Name: "a", Count: 1, HasLastRun: false, MinInterval: 30 * time.Minute},
+		{ID: "b", Name: "b", Count: 2, HasLastRun: false, MinInterval: 30 * time.Minute},
+	}
+	text, ok = FormatOverdueMaintenance(plural2, now)
+	if !ok {
+		t.Fatalf("FormatOverdueMaintenance returned not ok")
+	}
+	if !contains(text, "have not had lifecycle maintenance within 30m0s") {
+		t.Fatalf("missing plural interval wording: %q", text)
 	}
 }
