@@ -431,3 +431,82 @@ func writeTempFile(t *testing.T, dir, name, content string) {
 		t.Fatal(err)
 	}
 }
+
+func TestImport_PreskipBoundedFallsThroughToTransaction(t *testing.T) {
+	// Make the pre-skip window tiny so that a duplicate below the window
+	// is not caught by the pre-read. The write path must still enforce
+	// SkipExactContent inside the transaction and must not create a
+	// duplicate row; the file must be counted as skipped.
+	orig := preSkipWindow
+	preSkipWindow = 2
+	t.Cleanup(func() { preSkipWindow = orig })
+
+	claudeDir := t.TempDir()
+	memDir := filepath.Join(claudeDir, "memory")
+	if err := os.MkdirAll(memDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	dup := "This exact memory content appears again and again to test bounded preskip behavior here."
+	writeTempFile(t, memDir, "dup_below.md", `---
+name: Dup below window
+description: Duplicate below pre-skip window
+type: reference
+---
+`+dup+"\n")
+
+	// Seed more existing rows than the window so the duplicate we will
+	// import falls below the pre-read window.
+	db, err := memory.OpenDB(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	store := memory.NewStore(db, logger)
+
+	ctx := context.Background()
+	projectID := "test-project-bounded"
+	if err := store.EnsureProject(ctx, projectID, "/tmp/test", "test"); err != nil {
+		t.Fatal(err)
+	}
+	// Create 3 existing memories (window is 2).
+	if _, _, _, err := store.UpsertWithOptions(ctx, projectID, "fact", "Existing memory one has enough content to satisfy minimum length here.", source, 0.7, importTags, memory.UpsertOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := store.UpsertWithOptions(ctx, projectID, "fact", "Existing memory two has enough content to satisfy minimum length here.", source, 0.7, importTags, memory.UpsertOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	parsedDup := "Dup below window — Duplicate below pre-skip window\n\n" + strings.TrimSpace(dup)
+	if _, _, _, err := store.UpsertWithOptions(ctx, projectID, "fact", parsedDup, source, 0.7, importTags, memory.UpsertOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	before, err := store.CountMemories(ctx, projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before != 3 {
+		t.Fatalf("before = %d, want 3", before)
+	}
+
+	imported, refused, failed, notRegular, err := importFromDir(ctx, store, projectID, memDir, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(refused) != 0 || len(failed) != 0 || len(notRegular) != 0 {
+		t.Fatalf("unexpected slices: refused=%v failed=%v notRegular=%v", refused, failed, notRegular)
+	}
+	if imported != 0 {
+		t.Fatalf("imported = %d, want 0 (duplicate below window must be skipped by transaction)", imported)
+	}
+
+	after, err := store.CountMemories(ctx, projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after != before {
+		t.Fatalf("count changed: before=%d after=%d (duplicate row created)", before, after)
+	}
+}
