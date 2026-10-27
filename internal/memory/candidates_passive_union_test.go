@@ -168,7 +168,7 @@ func TestPassiveUnionKeyScanReadsDoNotGrowWithTheGlobalBucket(t *testing.T) {
 	pol := unionPassivePolicy(OrderDecay, 45)
 
 	pages := map[int]int{}
-	for _, tail := range []int{1000, 2000} {
+	for _, tail := range []int{1000, 5000} {
 		st := unionScanFixture(t, 20, 500, projHigh, globalHigh, tail)
 		p, rows, kept := unpinnedScanPagerReads(t, st, pol, now)
 		pages[tail] = p
@@ -179,7 +179,7 @@ func TestPassiveUnionKeyScanReadsDoNotGrowWithTheGlobalBucket(t *testing.T) {
 			t.Errorf("tail %d: the scan was handed %d rows for a %d-row window over %d+%d high rows; it must stop at the window",
 				tail, rows, pol.OverFetch, projHigh, globalHigh)
 		}
-		if tail != 2000 {
+		if tail != 5000 {
 			continue
 		}
 		// The two buckets read on their own, under the same order and window.
@@ -196,10 +196,10 @@ func TestPassiveUnionKeyScanReadsDoNotGrowWithTheGlobalBucket(t *testing.T) {
 				"A read that includes globals must cost about the two buckets, not a sort of both", up, pp, gp)
 		}
 	}
-	t.Logf("unpinned scan pages: 1,000-row global tail %d, 2,000-row global tail %d", pages[1000], pages[2000])
-	if pages[2000] > pages[1000]*3/2+32 {
-		t.Errorf("the unpinned union scan read %d pages at a 2,000-row global tail and %d at 1,000; "+
-			"the tail is below the window and must not be read", pages[2000], pages[1000])
+	t.Logf("unpinned scan pages: 1,000-row global tail %d, 5,000-row global tail %d", pages[1000], pages[5000])
+	if pages[5000] > pages[1000]*3/2+32 {
+		t.Errorf("the unpinned union scan read %d pages at a 5,000-row global tail and %d at 1,000; "+
+			"the tail is below the window and must not be read", pages[5000], pages[1000])
 	}
 }
 
