@@ -2920,7 +2920,7 @@ func (s *Server) registerTools() {
 			case existsErr != nil:
 				text = "Project lookup failed — unable to determine whether it is registered."
 			case !exists:
-				text = fmt.Sprintf("Project %s is not registered with Ghost yet — nothing has ever been saved for it.", memory.ProjectArg("project_id", asked))
+				text = fmt.Sprintf("Project %s is not registered with Ghost yet — nothing has ever been saved for it.", recallProjectPrefaceName(asked))
 			case args.Category != "" && args.Retention != "":
 				text = fmt.Sprintf("No memories found in category %q with retention %q for this project.", args.Category, args.Retention)
 			case args.Category != "":
