@@ -213,4 +213,7 @@ func TestOverdueMaintenanceProjects_DisabledCooldown(t *testing.T) {
 	if !contains(text, "lifecycle cooldown disabled") {
 		t.Errorf("missing disabled cooldown text: %q", text)
 	}
+	if !contains(text, "have not had lifecycle maintenance") {
+		t.Errorf("missing plural agreement: %q", text)
+	}
 }
