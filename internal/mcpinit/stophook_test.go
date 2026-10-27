@@ -91,7 +91,7 @@ func TestRunStop(t *testing.T) {
 	t.Run("blocks when tools ran but nothing saved", func(t *testing.T) {
 		path := writeTranscript(t, lineUser, lineToolBash, lineText)
 		out := runStopHook(t, stopInput(t, path, false))
-		if !strings.Contains(out, `"decision":"approve"`) {
+		if !strings.Contains(out, `"additionalContext"`) {
 			t.Errorf("expected block decision, got %q", out)
 		}
 		if !strings.Contains(out, "ghost_memory_save") {
@@ -116,7 +116,7 @@ func TestRunStop(t *testing.T) {
 	t.Run("tool name in prose does not count as a save", func(t *testing.T) {
 		path := writeTranscript(t, lineToolBash, lineText)
 		out := runStopHook(t, stopInput(t, path, false))
-		if !strings.Contains(out, `"decision":"approve"`) {
+		if !strings.Contains(out, `"additionalContext"`) {
 			t.Errorf("prose mention must not suppress the nudge, got %q", out)
 		}
 	})
@@ -162,7 +162,7 @@ func TestRunHostEvent_NativeClaudePayloadCompletesEnvelope(t *testing.T) {
 	isolatedHome(t)
 	path := writeTranscript(t, lineUser, lineToolBash, lineText)
 	out := runStopHook(t, nativeStopInput(path))
-	if !strings.Contains(out, `"decision":"approve"`) {
+	if !strings.Contains(out, `"additionalContext"`) {
 		t.Errorf("native payload should complete its envelope and block, got %q", out)
 	}
 }
@@ -196,7 +196,7 @@ func TestRunStop_SweepsTransientTempTranscript(t *testing.T) {
 	// opencode now receives the nudge on stdout (its plugin re-presents it as a
 	// non-blocking reminder); the key invariant here is that the transient
 	// transcript dir is still swept after the hook runs.
-	if !strings.Contains(out.String(), `"decision":"approve"`) {
+	if !strings.Contains(out.String(), `"additionalContext"`) {
 		t.Errorf("expected nudge block decision on stdout, got %q", out.String())
 	}
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
@@ -413,7 +413,7 @@ func TestRunHostEvent_NudgeEmittedForAllHosts(t *testing.T) {
 
 	var out, errBuf bytes.Buffer
 	RunHostEvent("stop", "opencode", strings.NewReader(input), &out, &errBuf)
-	if !strings.Contains(out.String(), `"decision":"approve"`) {
+	if !strings.Contains(out.String(), `"additionalContext"`) {
 		t.Errorf("nudge must emit block decision on stdout, got %q", out.String())
 	}
 	if errBuf.Len() != 0 {
@@ -804,7 +804,7 @@ func TestRunStop_OpencodeV2Transcript(t *testing.T) {
 				fmt.Sprintf(`{"session_id":"oc2","transcript_path":%q,"cwd":"/repo","stop_hook_active":false}`, path))
 			var out bytes.Buffer
 			RunHostEvent("stop", "opencode", strings.NewReader(input), &out, io.Discard)
-			if got := strings.Contains(out.String(), `"decision":"approve"`); got != tc.wantNudge {
+			if got := strings.Contains(out.String(), `"additionalContext"`); got != tc.wantNudge {
 				t.Errorf("nudge emitted = %v, want %v (stdout %q)", got, tc.wantNudge, out.String())
 			}
 			if _, err := os.Stat(dir); !os.IsNotExist(err) {

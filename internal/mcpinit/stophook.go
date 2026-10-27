@@ -30,7 +30,7 @@ import (
 // reminder, never as a failure. (Hosts that cannot honor a block — opencode —
 // re-present it through their own channel; Claude/Codex/Goose show it as a
 // normal system note, not an error.)
-const stopReminder = `{"decision":"approve","reason":"Reminder: this session used tools but saved nothing to Ghost. If you learned anything worth keeping — commands, configs, gotchas, decisions — save it with ghost_memory_save before moving on."}`
+const stopReminder = `{"hookSpecificOutput":{"hookEventName":"Stop","additionalContext":"Reminder: this turn used tools but saved nothing to Ghost. If the user corrected you, a root cause was found, or a choice was made for a reason, save that rule and its reason with ghost_memory_save (ghost_decision_record for a choice between alternatives). Do not save what the repository already states."}}`
 
 // RunHostEvent is the contract-v1 entrypoint for every host lifecycle event:
 //
@@ -113,7 +113,7 @@ func openTranscript(path string) (*os.File, error) {
 
 // runStop executes the stop/session-end handler: opt-in lifecycle spawns, then
 // — only on stop events (nudge=true) — the save-nudge reminder. The nudge is a
-// non-blocking {"decision":"approve"} emitted for every host that reaches the
+// non-blocking hookSpecificOutput.additionalContext emitted for every host that reaches the
 // nudge path, so no host surfaces it as a Stop hook error. opencode's plugin
 // re-presents it through its own log channel; claude/codex/goose show it as a
 // plain system note. session-end (nudge=false) never scans the transcript and
@@ -168,13 +168,133 @@ func runStop(p hostevent.Payload, stdout io.Writer, stderr io.Writer, nudge bool
 		logFailOpen(stderr, "scan transcript", err)
 		return
 	}
-	if res.ToolCalls == 0 || res.GhostSaves > 0 {
+	if res.ToolCalls == 0 {
+		writeLastSeenGhostSaves(p.SessionID, res.GhostSaves)
 		return
 	}
-	// The reminder fires for every host that reaches here, but as a non-blocking
-	// "approve" so hosts never present it as a Stop hook error. opencode's plugin
-	// captures this same stdout and re-presents it through its own log channel.
+	// Gate on "no Ghost save since this session's previous stop", not on the
+	// session having no saves at all: a correction made after an earlier save
+	// must still be reminded. The last-seen count is kept per session id in
+	// the lifecycle marker directory.
+	lastSeen := readLastSeenGhostSaves(p.SessionID)
+	writeLastSeenGhostSaves(p.SessionID, res.GhostSaves)
+	if res.GhostSaves > lastSeen {
+		return
+	}
+	// The reminder fires for every host that reaches here, through the
+	// documented non-blocking channel (hookSpecificOutput.additionalContext) so
+	// hosts never present it as a Stop hook error. opencode's plugin captures
+	// this same stdout and re-presents it through its own log channel.
 	_, _ = fmt.Fprintln(stdout, stopReminder)
+}
+
+// stopSaveMarkerPrefix is the stem of the per-session file that remembers how
+// many Ghost saves a session had at its last stop. It lives beside the other
+// lifecycle markers in the data directory and is named by a digest of the
+// session id, never by the id itself (the id is free text from the host).
+const (
+	stopSaveMarkerPrefix = "stop-saves-"
+	stopSaveMarkerSuffix = ".count"
+)
+
+// stopSaveMarkerPath returns the marker's path for a session, or "" when there
+// is no marker to be had: no session id, or a data directory this process may
+// not resolve.
+func stopSaveMarkerPath(sessionID string) string {
+	if strings.TrimSpace(sessionID) == "" {
+		return ""
+	}
+	dataDir, err := config.DataDirPath()
+	if err != nil || dataDir == "" {
+		return ""
+	}
+	return filepath.Join(dataDir, stopSaveMarkerPrefix+markerStem(sessionID)+stopSaveMarkerSuffix)
+}
+
+// readLastSeenGhostSaves returns the Ghost save count recorded at this
+// session's previous stop, or 0 when none has been recorded.
+func readLastSeenGhostSaves(sessionID string) int {
+	path := stopSaveMarkerPath(sessionID)
+	if path == "" {
+		return 0
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return 0
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
+}
+
+// writeLastSeenGhostSaves records the Ghost save count seen at this stop. It
+// creates the data directory when absent so the gate can persist; a refused
+// or unwritable directory fails open and the gate degrades to the session
+// having no earlier saves (the same answer as before this feature).
+func writeLastSeenGhostSaves(sessionID string, count int) {
+	path := stopSaveMarkerPath(sessionID)
+	if path == "" {
+		return
+	}
+	dir := filepath.Dir(path)
+	info, err := os.Stat(dir)
+	if err != nil || !info.IsDir() {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return
+		}
+	}
+	if count < 0 {
+		count = 0
+	}
+	sweepStopSaveMarkers(dir, time.Now())
+	// Atomic write so a reader never sees a torn count.
+	tmp, err := os.CreateTemp(dir, stopSaveMarkerPrefix+"*.tmp")
+	if err != nil {
+		return
+	}
+	tmpPath := tmp.Name()
+	if _, err := tmp.Write([]byte(strconv.Itoa(count))); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+		return
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return
+	}
+	_ = os.Chmod(tmpPath, 0o600)
+	if err := os.Rename(tmpPath, path); err != nil {
+		_ = os.Remove(tmpPath)
+	}
+}
+
+// stopSaveMarkerMaxAge is the sweep horizon for the per-session save gate.
+// A session is not long-lived; a marker older than this is left from a
+// finished session and is deleted the next time any session writes its gate.
+const stopSaveMarkerMaxAge = 7 * 24 * time.Hour
+
+// sweepStopSaveMarkers deletes this feature's markers older than the horizon.
+// It only ever touches regular files with its own prefix and suffix.
+func sweepStopSaveMarkers(dir string, now time.Time) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasPrefix(name, stopSaveMarkerPrefix) || !strings.HasSuffix(name, stopSaveMarkerSuffix) {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil || !info.Mode().IsRegular() {
+			continue
+		}
+		if now.Sub(info.ModTime()) > stopSaveMarkerMaxAge {
+			_ = os.Remove(filepath.Join(dir, name))
+		}
+	}
 }
 
 // scanAuditSignals reads the transcript for what the agent DID with what Ghost
