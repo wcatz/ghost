@@ -147,7 +147,7 @@ func TestProjectContextAsOfRendersTheHistoricalBlock(t *testing.T) {
 		t.Errorf("a future as_of did not return the memory:\n%s", out)
 	}
 	// The closing instruction is about the present, and this block is not.
-	if strings.Contains(out, "Save new discoveries with ghost_memory_save") {
+	if strings.Contains(out, "Save to Ghost as it happens") {
 		t.Errorf("the historical block ends with the session instruction, which aims the reader at the present:\n%s", out)
 	}
 	if !strings.Contains(out, "are not versioned") {
