@@ -162,10 +162,7 @@ func applyReflection(ctx context.Context, store reflectionApplier, projectID str
 	// the drop count, is what separates that from an all-dropped round that
 	// still changed the corpus: the latter took a snapshot the operator can
 	// restore, so it is a replace and must be reported as one.
-	applied := true
-	if projectDropped.Total()+globalDropped.Total() == len(projectRows)+len(globalRows) && deleted == 0 {
-		applied = false
-	}
+	applied := !(projectDropped.Total()+globalDropped.Total() == len(projectRows)+len(globalRows) && deleted == 0)
 	return reflectionApplied{
 		KeptProject:       keptProject,
 		KeptGlobal:        keptCrossProject,
