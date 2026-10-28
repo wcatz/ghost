@@ -12,28 +12,11 @@ import (
 	"github.com/wcatz/ghost/internal/memory"
 )
 
-// sessionDisplayBytes and globalsDisplayBytes are the per-item PREVIEW budgets of
-// the rendered block, applied here rather than through the slice's ClampBytes
-// because the two are not the same operation.
-//
-// ClampBytes cuts an item to exactly its budget on a rune boundary and stops. A
-// preview has to SAY that it was cut, so the block appends an ellipsis and every
-// shortened line reads as a shortening — a line that is merely short is a claim
-// about the memory, and one silently cut short is a lie about it. The stored row
-// is untouched either way: this is display truncation only, and
-// ghost_memories_list reads the full content back.
-//
-// The assembler's clamp is also the wrong owner for a mechanical reason: a caller
-// cannot tell a row the clamp shortened from one that happened to be exactly its
-// budget, and the ellipsis needs that distinction to be answerable. So the byte
-// cap stays with the renderer that has to render the difference.
-//
-// The two numbers are the caps' own arithmetic, and the reasoning is theirs: the
-// bucket with more items spends fewer bytes on each, so the two sections stay
-// comparable in size rather than one of them dominating the block.
+// sessionDisplayBytes and globalsDisplayBytes alias memory's preview budgets;
+// see memory.SessionProjectDisplayBytes / SessionGlobalDisplayBytes for rationale.
 const (
-	sessionDisplayBytes = 200
-	globalsDisplayBytes = 300
+	sessionDisplayBytes = memory.SessionProjectDisplayBytes
+	globalsDisplayBytes = memory.SessionGlobalDisplayBytes
 )
 
 // sessionStartByteCap is the byte cap on the WHOLE session-start block, as

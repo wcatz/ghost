@@ -2184,6 +2184,64 @@ func purgeErasedText(lead string, outcome memory.PurgeOutcome) string {
 // ghost_health renders; the count line carries the total.
 const maxHealthPinnedContradictions = 20
 
+// maxHealthPinnedOverflow bounds how many projects' pinned-overflow entries
+// ghost_health renders, and maxHealthPinnedOverflowCutIDs how many cut ids it
+// names per project. The heading carries the true total. The listed ids are the
+// lowest-ranked pinned rows by importance (most at risk of being cut), not the
+// exact rows a future block pass would drop.
+const maxHealthPinnedOverflow = 20
+const maxHealthPinnedOverflowCutIDs = 5
+
+// pinnedOverflowNotice returns a one-line warning when the project's pinned
+// set exceeds the session-start bucket cap. Empty when it fits, or when the
+// store cannot answer. The listed ids are the lowest-ranked pinned rows by
+// importance (most at risk of being cut), not the exact rows the block drops.
+// It applies the configured session scope (Injection.SessionScope) like the
+// passive/session surfaces.
+func (s *Server) pinnedOverflowNotice(ctx context.Context, projectID string) string {
+	ms, ok := s.store.(*memory.Store)
+	if !ok {
+		return ""
+	}
+	scope := config.LoadForHook().Injection.SessionScope
+	ov, err := ms.PinnedOverflow(ctx, projectID, time.Now(), scope)
+	if err != nil || ov == nil || !ov.Exceeded() {
+		return ""
+	}
+	// Render cut ids through the token guard so a token-shaped id is withheld.
+	cut := ""
+	if len(ov.CutIDs) > 0 {
+		ids := ov.CutIDs
+		if len(ids) > maxHealthPinnedOverflowCutIDs {
+			ids = ids[:maxHealthPinnedOverflowCutIDs]
+		}
+		rendered := make([]string, 0, len(ids))
+		for _, id := range ids {
+			rendered = append(rendered, memory.RefusalArg("memory_id", id))
+		}
+		cut = fmt.Sprintf(" — lowest-ranked by importance (most at risk of being cut): %s", strings.Join(rendered, ", "))
+		if len(ov.CutIDs) > maxHealthPinnedOverflowCutIDs {
+			cut += fmt.Sprintf(" and %d more", len(ov.CutIDs)-maxHealthPinnedOverflowCutIDs)
+		}
+	}
+	return fmt.Sprintf("— %d pinned (cap %d)%s.", ov.Count, ov.Cap, cut)
+}
+
+func (s *Server) pinnedOverflowsForHealth(ctx context.Context, read *diagnosticRead) ([]memory.PinnedOverflow, error) {
+	// Prefer the diagnostic view when available, so the health report answers
+	// from one snapshot.
+	var ms *memory.Store
+	if read != nil && read.store != nil {
+		ms = read.store
+	} else if store, ok := s.store.(*memory.Store); ok {
+		ms = store
+	} else {
+		return nil, nil
+	}
+	scope := config.LoadForHook().Injection.SessionScope
+	return ms.PinnedOverflows(ctx, time.Now(), scope)
+}
+
 func (s *Server) registerTools() {
 	// ghost_memory_search — search memories by keyword or semantic query.
 	type searchArgs struct {
@@ -2453,7 +2511,7 @@ func (s *Server) registerTools() {
 		Importance any  `json:"importance,omitempty" jsonschema:"Importance score, a number 0.0-1.0 (e.g. 0.7). Default 0.7"`
 		Tags       any  `json:"tags,omitempty" jsonschema:"Optional tags as an array of strings (e.g. [\"a\",\"b\"])"`
 		Scope      any  `json:"scope,omitempty" jsonschema:"Where this memory applies, as an object of string values — e.g. {\"environment\": \"production\", \"component\": \"api\"}. At most 16 keys, keys up to 64 bytes and values up to 128 bytes; a token-shaped key or value is refused. Omit for knowledge that applies everywhere. Retrieval can then exclude a memory scoped elsewhere instead of guessing from its wording."`
-		Pin        bool `json:"pin,omitempty" jsonschema:"Set true to exempt this memory from ghost reflect consolidation, and to guarantee it a slot on every passive context surface (session start, ghost_project_context, the project and global resources) ahead of ranking, unless its validity window has closed or its scope contradicts the session (an as_of reading replays the past and reserves nothing). Use for non-negotiable rules, security constraints and core invariants a rewrite must not absorb. Costs nothing else; omit it for ordinary knowledge."`
+		Pin        bool `json:"pin,omitempty" jsonschema:"Set true to exempt this memory from ghost reflect consolidation, and to guarantee it a slot on every passive context surface (session start, ghost_project_context, the project and global resources) ahead of ranking, unless its validity window has closed or its scope contradicts the session (an as_of reading replays the past and reserves nothing). The guarantee is bounded by the bucket cap (15 for a project, 8 for _global): pins beyond that are ranked among themselves and the lowest-ranked by importance are the ones most at risk of being cut from the block (reported for awareness, not a promise of which specific rows the block drops). Use for non-negotiable rules, security constraints and core invariants a rewrite must not absorb. Costs nothing else; omit it for ordinary knowledge."`
 		validityArgs
 		Retention string `json:"retention,omitempty" jsonschema:"How long this memory is wanted: session (true of this conversation only \u2014 Ghost derives an expiry, and 'ghost prune' is the only thing that removes one, never automatically), project (the default: persists until resolved), or persistent (keep-forever: exempt from consolidation, supersede, resolve and pruning, and nothing automatic can rewrite it). Use session for an observation that is about now; use persistent for a decision or rule the user would be annoyed to lose. An unknown value is refused. On a near-duplicate save the tier RAISES the existing row and never lowers it."`
 	}
@@ -2582,6 +2640,9 @@ func (s *Server) registerTools() {
 			msg += " — pinned, so consolidation will not rewrite it"
 			if duplicateOf != "" {
 				msg += fmt.Sprintf(" (the existing memory %s it folded into is pinned too)", assemble.Token(duplicateOf))
+			}
+			if note := s.pinnedOverflowNotice(ctx, args.ProjectID); note != "" {
+				msg += " " + note
 			}
 		}
 		// And the same for the fields a fold hands the target, for the same reason:
@@ -4112,6 +4173,47 @@ func (s *Server) registerTools() {
 
 		s.writeNearDuplicateBlock(ctx, &sb, read.store, projects)
 
+		// Pinned rows that exceed the session-start bucket (#1831): count beyond
+		// the cap the pin guarantee is bounded by. The section is report-only like
+		// the contradictions block above, and a failed read is reported rather than
+		// dropped, so absence means "nothing exceeds". Listed ids are the
+		// lowest-ranked pinned rows by importance (most at risk of being cut), not
+		// the exact rows the block drops.
+		if overflows, oerr := s.pinnedOverflowsForHealth(ctx, read); oerr != nil {
+			fmt.Fprintf(&sb, "**Pinned rows that exceed the session-start bucket:** could not be read: %v\n", oerr)
+		} else if len(overflows) > 0 {
+			totalOverflow := len(overflows)
+			if totalOverflow > maxHealthPinnedOverflow {
+				overflows = overflows[:maxHealthPinnedOverflow]
+			}
+			fmt.Fprintf(&sb, "\n**Pinned rows that exceed the session-start bucket:** %d project(s) — pinned rows exceed the cap\n", totalOverflow)
+			for _, ov := range overflows {
+				cut := ov.CutIDs
+				moreCut := 0
+				if len(cut) > maxHealthPinnedOverflowCutIDs {
+					moreCut = len(cut) - maxHealthPinnedOverflowCutIDs
+					cut = cut[:maxHealthPinnedOverflowCutIDs]
+				}
+				rendered := make([]string, 0, len(cut))
+				for _, id := range cut {
+					rendered = append(rendered, memory.RefusalArg("memory_id", id))
+				}
+				cutStr := strings.Join(rendered, ", ")
+				if moreCut > 0 {
+					cutStr += fmt.Sprintf(" and %d more", moreCut)
+				}
+				if cutStr == "" {
+					cutStr = "none listed"
+				}
+				fmt.Fprintf(&sb, "- **%s** (%s): %d pinned (cap %d) — lowest-ranked by importance, most at risk of being cut: %s\n",
+					assemble.Label(ov.ProjectID), shortID(ov.ProjectID), ov.Count, ov.Cap, cutStr)
+			}
+			if more := totalOverflow - len(overflows); more > 0 {
+				fmt.Fprintf(&sb, "  ... and %d more\n", more)
+			}
+			sb.WriteString("\n")
+		}
+
 		// History growth (#729), additive: everything above keeps its name and
 		// its meaning, and this is the one block that says how fast
 		// memory_history is filling and how much of that is version rows that
@@ -4544,7 +4646,7 @@ func (s *Server) registerTools() {
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name:        "ghost_memory_pin",
 		Title:       "Pin/Unpin Memory",
-		Description: "Pin or unpin a memory. Requires project_id to verify ownership — you cannot pin memories from other projects. A pinned memory is guaranteed a slot on every passive surface (session start, ghost_project_context, the project and global resources), whatever its importance or age, ahead of ranking; it is still withheld when its validity window has closed, its scope contradicts the session or it is resolved. If pinned memories outnumber a surface's cap, the best-ranked of them are shown and the block says how many were cut. This is the present reading: an as_of reading replays the rows as they stood and does not reserve slots. Pinned memories survive reflection pruning. Pin non-negotiable rules, security constraints, or core architectural invariants.",
+		Description: "Pin or unpin a memory. Requires project_id to verify ownership — you cannot pin memories from other projects. A pinned memory is guaranteed a slot on every passive surface (session start, ghost_project_context, the project and global resources), whatever its importance or age, ahead of ranking; it is still withheld when its validity window has closed, its scope contradicts the session or it is resolved. The guarantee is bounded by the bucket cap (15 for a project, 8 for _global): if pinned memories outnumber the cap, the best-ranked are shown and the block says how many were cut. This is the present reading: an as_of reading replays the rows as they stood and does not reserve slots. Pinned memories survive reflection pruning. Pin non-negotiable rules, security constraints, or core architectural invariants.",
 		Annotations: &mcp.ToolAnnotations{
 			DestructiveHint: boolPtr(false),
 			IdempotentHint:  true,
@@ -4582,8 +4684,14 @@ func (s *Server) registerTools() {
 		if !args.Pinned {
 			action = "unpinned"
 		}
+		msg := fmt.Sprintf("Memory %s.", action)
+		if args.Pinned {
+			if note := s.pinnedOverflowNotice(ctx, resolvedProjectID); note != "" {
+				msg += " " + note
+			}
+		}
 		return &mcp.CallToolResult{
-			Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("Memory %s.", action)}},
+			Content: []mcp.Content{&mcp.TextContent{Text: msg}},
 		}, nil, nil
 	})
 

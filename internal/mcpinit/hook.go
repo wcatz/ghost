@@ -1094,9 +1094,8 @@ func historicalSessionItems(rows []memory.AsOfRow, projectID string, scope map[s
 	return out, withheld, rankedOut
 }
 
-// globalsCap is lower than the project-memories cap (sessionMemoriesCap)
-// since globals compete for attention across every project, not just one.
-const globalsCap = 8
+// globalsCap aliases memory.SessionGlobalCap; see there for rationale.
+const globalsCap = memory.SessionGlobalCap
 
 // globalsDemotionThreshold is lower than memory.DefaultDemotionThreshold
 // (0.90): a live near-duplicate pair of global preferences was observed
@@ -1104,11 +1103,8 @@ const globalsCap = 8
 // second pass at demotion the way project memories do via config override.
 const globalsDemotionThreshold = 0.85
 
-// sessionMemoriesCap is the session-start context cap. It is deliberately
-// smaller than the historical 25-memory context and independent of the
-// caller-supplied limit used by Store.GetTopMemories; the ranking below keeps
-// the session digest bounded while preserving the most useful memories.
-const sessionMemoriesCap = 15
+// sessionMemoriesCap aliases memory.SessionProjectCap; see there for rationale.
+const sessionMemoriesCap = memory.SessionProjectCap
 
 // sessionMemory is loadSessionContext's own memory shape — a local struct
 // rather than memory.Memory because this function deliberately queries its
