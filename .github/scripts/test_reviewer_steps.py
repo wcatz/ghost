@@ -811,7 +811,7 @@ if __name__ == "__main__":
             _write(os.path.join(runner, "free-probe-failure.txt"), "")
             _write(os.path.join(runner, "free-review-failure.txt"), "")
             _write(os.path.join(runner, "paid-review-failure.txt"),
-                   "the model run timed out\n")
+                   "unknown provider failure\n")
             _write(os.path.join(runner, "free-review-validation.txt"), "")
             _write(os.path.join(runner, "paid-review-validation.txt"), "")
             _write(os.path.join(runner, "model-acted.txt"), "")
@@ -838,6 +838,7 @@ if __name__ == "__main__":
             self.assertNotIn("did not answer", result.stdout)
             self.assertNotIn("did not answer", result.stderr)
             self.assertEqual(classification_of(out), "unavailable")
+            self.assertEqual(cause_of(out), review_outcome.CAUSE_TIMEOUT)
 
 
 if __name__ == "__main__":

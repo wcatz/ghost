@@ -376,6 +376,11 @@ jobs:
           fi
           mv .base-scripts/.github/scripts "${RUNNER_TEMP}/base-scripts"
           rm -rf .base-scripts
+          helper_accepts() {
+            local script="$1"
+            local flag="$2"
+            python3 -I "$script" --help 2>/dev/null | grep -q -- "$flag"
+          }
           gh pr checkout "$PR_NUMBER"
           # gh pr checkout fetches at fetch-depth 1; the prior reviewed
           # commit is not present in a shallow clone, so the incremental
@@ -752,6 +757,11 @@ jobs:
             candidates=("${capped_candidates[@]}")
             notice "free candidate list capped at ${MAX_CANDIDATES} models to reserve retry and paid-fallback time"
           fi
+          helper_accepts() {
+            local script="$1"
+            local flag="$2"
+            python3 -I "$script" --help 2>/dev/null | grep -q -- "$flag"
+          }
           notice "review model candidates: ${#candidates[@]} (catalog free ids: $(wc -l < "$free_catalog"))"
           selected_model=
           probe_dir="$RUNNER_TEMP/reviewer-model-probe"
@@ -813,7 +823,7 @@ jobs:
               --events "$probe_out" --stderr "$probe_err"
               --marker "${RUNNER_TEMP}/model-acted.txt"
             )
-            if "${acted_args[0]}" -I "${acted_args[1]}" --help 2>/dev/null | grep -q -- '--exit-status'; then
+            if helper_accepts "${RUNNER_TEMP}/base-scripts/model_acted.py" '--exit-status'; then
               acted_args+=(--exit-status "$probe_status")
             fi
             "${acted_args[@]}" 2> "${RUNNER_TEMP}/model-acted-probe.txt" >/dev/null \
@@ -975,10 +985,20 @@ jobs:
               # nothing: a stream that does not parse counts as acted,
               # so the rule fails closed. The exit status tells the
               # rule whether the run's own timeout killed it (124).
-              python3 -I "${RUNNER_TEMP}/base-scripts/model_acted.py" \
-                --events model-reply.txt --stderr model-stderr.txt \
-                --marker "${RUNNER_TEMP}/model-acted.txt" \
-                --exit-status "${free_status}" 2> "${RUNNER_TEMP}/model-acted-free.txt" >/dev/null \
+              helper_accepts() {
+                local script="$1"
+                local flag="$2"
+                python3 -I "$script" --help 2>/dev/null | grep -q -- "$flag"
+              }
+              free_acted_args=(
+                python3 -I "${RUNNER_TEMP}/base-scripts/model_acted.py"
+                --events model-reply.txt --stderr model-stderr.txt
+                --marker "${RUNNER_TEMP}/model-acted.txt"
+              )
+              if helper_accepts "${RUNNER_TEMP}/base-scripts/model_acted.py" '--exit-status'; then
+                free_acted_args+=(--exit-status "${free_status}")
+              fi
+              "${free_acted_args[@]}" 2> "${RUNNER_TEMP}/model-acted-free.txt" >/dev/null \
                 || { printf 'unknown\n' >> "${RUNNER_TEMP}/model-acted.txt"; \
                      echo "::warning::the review model rule could not be consulted"; }
               sed -n 's/^model-acted: /::notice::review model evidence: /p' \
@@ -1155,12 +1175,17 @@ jobs:
           # the process's own stderr. A reason may classify an outage
           # only when the model produced nothing: a stream that does
           # not parse counts as acted, so the rule fails closed.
+          helper_accepts() {
+            local script="$1"
+            local flag="$2"
+            python3 -I "$script" --help 2>/dev/null | grep -q -- "$flag"
+          }
           acted_args=(
             python3 -I "${RUNNER_TEMP}/base-scripts/model_acted.py"
             --events model-reply.txt --stderr model-stderr.txt
             --marker "${RUNNER_TEMP}/model-acted.txt"
           )
-          if "${acted_args[0]}" -I "${acted_args[1]}" --help 2>/dev/null | grep -q -- '--exit-status'; then
+          if helper_accepts "${RUNNER_TEMP}/base-scripts/model_acted.py" '--exit-status'; then
             acted_args+=(--exit-status "${paid_status}")
           fi
           "${acted_args[@]}" 2> "${RUNNER_TEMP}/model-acted-paid.txt" >/dev/null \
@@ -1214,6 +1239,11 @@ jobs:
           PAID_TIMED_OUT: ${{ steps.paid_review.outputs.paid_timed_out }}
         run: |
           set +e
+          helper_accepts() {
+            local script="$1"
+            local flag="$2"
+            python3 -I "$script" --help 2>/dev/null | grep -q -- "$flag"
+          }
           # WHY THE DECISION IS NOT IN THIS SHELL: the rule is what the
           # review-gate is allowed to do with a run that produced no
           # result, and a rule that lives only in a workflow cannot be
@@ -1261,7 +1291,7 @@ jobs:
               --free-agent-fatal "${FREE_AGENT_FATAL}"
               --paid-agent-fatal "${PAID_AGENT_FATAL}"
             )
-            if "${outcome_args[0]}" -I "${outcome_args[1]}" --help 2>/dev/null | grep -q -- '--paid-timed-out'; then
+            if helper_accepts "${RUNNER_TEMP}/base-scripts/review_outcome.py" '--paid-timed-out'; then
               outcome_args+=(--paid-timed-out "${PAID_TIMED_OUT}")
             fi
             report="$("${outcome_args[@]}" 2>/dev/null)"
