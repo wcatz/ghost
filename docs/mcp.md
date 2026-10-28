@@ -162,8 +162,7 @@ is not currently held. The line names the retry for each project
 run (`never` when none), rendered through the same label and token guards;
 `ghost mcp status` prints the same projects as `! maintenance overdue:` with
 the same counts, so the two diagnostics cannot disagree. A project with no
-consolidatable memories is never overdue, and a read that cannot be made is a
-missing diagnostic, not a failed check.
+consolidatable memories is never overdue. A project above the consolidation input limit is not listed as overdue (it is listed under the Reflect over-bound line with `ghost resolve <project> --apply` or `ghost prune --project <project> --apply`). A read that cannot be made is a missing diagnostic, not a failed check.
 
 ### Retrieval health
 
