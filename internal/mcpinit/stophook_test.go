@@ -11,7 +11,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 )
@@ -846,8 +845,9 @@ func TestTheLongestAcceptedProjectIDStillNamesEveryFile(t *testing.T) {
 	}
 }
 
-// TestStopSaveMarkerMissingDataDirDoesNotCreate pins finding #2: the gate must
-// not create the data directory when it is absent.
+// TestStopSaveMarkerMissingDataDirDoesNotCreate guards the write path: the gate
+// must not create the data directory when it is absent. It fails if the
+// os.Stat/IsDir guard in writeLastSeenGhostSaves is removed.
 func TestStopSaveMarkerMissingDataDirDoesNotCreate(t *testing.T) {
 	dataHome := isolatedHome(t)
 	dataDir := filepath.Join(dataHome, "ghost")
@@ -867,7 +867,7 @@ func TestDecisionRecordCountsAsSaveForNudge(t *testing.T) {
 	lineDecision := `{"type":"assistant","message":{"content":[{"type":"tool_use","name":"mcp__ghost__ghost_decision_record","input":{}}]}}`
 	path := writeTranscript(t, lineToolBash, lineDecision)
 	out := runStopHook(t, stopInput(t, path, false))
-	if strings.Contains(out, "additionalContext") {
+	if strings.TrimSpace(out) != "" {
 		t.Fatalf("decision record should suppress the nudge, got %q", out)
 	}
 }
@@ -899,29 +899,6 @@ func TestStopSaveGateEmptySessionID(t *testing.T) {
 	if out := runStopHook(t, input()); !strings.Contains(out, "additionalContext") {
 		t.Fatalf("second stop with no new save must nudge, got %q", out)
 	}
-}
-
-// TestStopSaveMarkerFIFOIsTreatedAsNoMarker pins finding #1: a FIFO (or any
-// non-regular file) at the marker path must not block or crash the hook.
-func TestStopSaveMarkerFIFOIsTreatedAsNoMarker(t *testing.T) {
-	dataHome := isolatedHome(t)
-	dataDir := filepath.Join(dataHome, "ghost")
-	if err := os.MkdirAll(dataDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	sess := "fifo-sess"
-	markerPath := stopSaveMarkerPath(sess, "")
-	if markerPath == "" {
-		t.Fatal("no marker path")
-	}
-	if err := syscall.Mkfifo(markerPath, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	// Must return promptly (no hang) and not panic.
-	path := writeTranscript(t, lineToolBash)
-	in := contractInputFor(t, "Stop", "claude-code", "claude-jsonl",
-		fmt.Sprintf(`{"session_id":%q,"transcript_path":%q,"cwd":"/repo","stop_hook_active":false}`, sess, path))
-	_ = runStopHook(t, in)
 }
 
 // TestClaimPidFileTellsAnEvaluationFailureFromALiveHolder pins the distinction

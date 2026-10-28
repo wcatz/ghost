@@ -192,7 +192,8 @@ func runStop(p hostevent.Payload, stdout io.Writer, stderr io.Writer, nudge bool
 // stopSaveMarkerPrefix is the stem of the per-session file that remembers how
 // many Ghost saves a session had at its last stop. It lives beside the other
 // lifecycle markers in the data directory and is named by a digest of the
-// session id, never by the id itself (the id is free text from the host).
+// session id when present, or of the transcript path when the id is empty
+// (the id is free text from the host).
 const (
 	stopSaveMarkerPrefix = "stop-saves-"
 	stopSaveMarkerSuffix = ".count"
