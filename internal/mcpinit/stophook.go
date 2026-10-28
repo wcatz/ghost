@@ -170,15 +170,15 @@ func runStop(p hostevent.Payload, stdout io.Writer, stderr io.Writer, nudge bool
 		return
 	}
 	if res.ToolCalls == 0 {
-		writeLastSeenGhostSaves(p.SessionID, res.GhostSaves)
+		writeLastSeenGhostSaves(p.SessionID, p.TranscriptPath, res.GhostSaves)
 		return
 	}
 	// Gate on "no Ghost save since this session's previous stop", not on the
 	// session having no saves at all: a correction made after an earlier save
 	// must still be reminded. The last-seen count is kept per session id in
 	// the lifecycle marker directory.
-	lastSeen := readLastSeenGhostSaves(p.SessionID)
-	writeLastSeenGhostSaves(p.SessionID, res.GhostSaves)
+	lastSeen := readLastSeenGhostSaves(p.SessionID, p.TranscriptPath)
+	writeLastSeenGhostSaves(p.SessionID, p.TranscriptPath, res.GhostSaves)
 	if res.GhostSaves > lastSeen {
 		return
 	}
@@ -199,17 +199,25 @@ const (
 )
 
 // stopSaveMarkerPath returns the marker's path for a session, or "" when there
-// is no marker to be had: no session id, or a data directory this process may
-// not resolve.
-func stopSaveMarkerPath(sessionID string) string {
-	if strings.TrimSpace(sessionID) == "" {
+// is no marker to be had: no session id and no transcript path, or a data
+// directory this process may not resolve. When the session id is absent the
+// transcript path's digest is used as the stable key, so a session without an
+// id still gets a per-transcript gate instead of silently never being
+// reminded. If neither is available there is no stable key and the gate falls
+// back to the pre-feature "never saved" answer (lastSeen == 0).
+func stopSaveMarkerPath(sessionID, transcriptPath string) string {
+	key := strings.TrimSpace(sessionID)
+	if key == "" {
+		key = strings.TrimSpace(transcriptPath)
+	}
+	if key == "" {
 		return ""
 	}
 	dataDir, err := config.DataDirPath()
 	if err != nil || dataDir == "" {
 		return ""
 	}
-	return filepath.Join(dataDir, stopSaveMarkerPrefix+markerStem(sessionID)+stopSaveMarkerSuffix)
+	return filepath.Join(dataDir, stopSaveMarkerPrefix+markerStem(key)+stopSaveMarkerSuffix)
 }
 
 // readLastSeenGhostSaves returns the Ghost save count recorded at this
@@ -217,8 +225,8 @@ func stopSaveMarkerPath(sessionID string) string {
 // marker through openMarker so a FIFO, directory or symlink at the path
 // cannot block or crash the hook, and reads only a bounded amount: the file
 // is a decimal count.
-func readLastSeenGhostSaves(sessionID string) int {
-	path := stopSaveMarkerPath(sessionID)
+func readLastSeenGhostSaves(sessionID, transcriptPath string) int {
+	path := stopSaveMarkerPath(sessionID, transcriptPath)
 	if path == "" {
 		return 0
 	}
@@ -242,8 +250,8 @@ func readLastSeenGhostSaves(sessionID string) int {
 // writes only when the data directory already exists; a missing or unwritable
 // directory fails open and the gate degrades to the session having no earlier
 // saves (the same answer as before this feature).
-func writeLastSeenGhostSaves(sessionID string, count int) {
-	path := stopSaveMarkerPath(sessionID)
+func writeLastSeenGhostSaves(sessionID, transcriptPath string, count int) {
+	path := stopSaveMarkerPath(sessionID, transcriptPath)
 	if path == "" {
 		return
 	}
