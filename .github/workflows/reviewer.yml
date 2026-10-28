@@ -376,6 +376,12 @@ jobs:
           fi
           mv .base-scripts/.github/scripts "${RUNNER_TEMP}/base-scripts"
           rm -rf .base-scripts
+          # helper_accepts is defined identically in each run: step (separate shell).
+          helper_accepts() {
+            local script="$1"
+            local flag="$2"
+            python3 -I "$script" --help 2>/dev/null | grep -q -- "$flag"
+          }
           gh pr checkout "$PR_NUMBER"
           # gh pr checkout fetches at fetch-depth 1; the prior reviewed
           # commit is not present in a shallow clone, so the incremental
@@ -752,6 +758,11 @@ jobs:
             candidates=("${capped_candidates[@]}")
             notice "free candidate list capped at ${MAX_CANDIDATES} models to reserve retry and paid-fallback time"
           fi
+          helper_accepts() {
+            local script="$1"
+            local flag="$2"
+            python3 -I "$script" --help 2>/dev/null | grep -q -- "$flag"
+          }
           notice "review model candidates: ${#candidates[@]} (catalog free ids: $(wc -l < "$free_catalog"))"
           selected_model=
           probe_dir="$RUNNER_TEMP/reviewer-model-probe"
@@ -799,17 +810,28 @@ jobs:
               printf 'agent_fatal=true\n' >> "$GITHUB_OUTPUT"
               fail "ghost-reviewer agent did not register; refusing to select a model with the default (write-capable) tool set"
             fi
+            if [ "$probe_status" -eq 124 ]; then
+              reason="the model run timed out"
+            fi
             [ -n "$reason" ] || reason="probe exited ${probe_status} without a valid JSON event stream"
             printf '%s: %s\n' "$model" "$reason" >> "$probe_failure_file"
             # Whether the model acted is ONE tested rule, and it is read
             # from the TRUSTED copy of the scripts: the probe's event
             # stream AND the process's own stderr. A reason may
             # classify an outage only when the model produced nothing.
-            python3 -I "${RUNNER_TEMP}/base-scripts/model_acted.py" \
-              --events "$probe_out" --stderr "$probe_err" \
-              --marker "${RUNNER_TEMP}/model-acted.txt" >/dev/null 2>&1 \
+            acted_args=(
+              python3 -I "${RUNNER_TEMP}/base-scripts/model_acted.py"
+              --events "$probe_out" --stderr "$probe_err"
+              --marker "${RUNNER_TEMP}/model-acted.txt"
+            )
+            if helper_accepts "${RUNNER_TEMP}/base-scripts/model_acted.py" '--exit-status'; then
+              acted_args+=(--exit-status "$probe_status")
+            fi
+            "${acted_args[@]}" 2> "${RUNNER_TEMP}/model-acted-probe.txt" >/dev/null \
               || { printf 'unknown\n' >> "${RUNNER_TEMP}/model-acted.txt"; \
                    echo "::warning::the review model rule could not be consulted"; }
+            sed -n 's/^model-acted: /::notice::review model evidence: /p' \
+              "${RUNNER_TEMP}/model-acted-probe.txt" | sed 's/%/%25/g' || true
             # The reason is provider output and it is not printed: the
             # classification reads it, and the log says which model was
             # skipped.
@@ -962,19 +984,41 @@ jobs:
               # stream AND the process's own stderr. A reason may
               # classify an outage only when the model produced
               # nothing: a stream that does not parse counts as acted,
-              # so the rule fails closed.
-              python3 -I "${RUNNER_TEMP}/base-scripts/model_acted.py" \
-                --events model-reply.txt --stderr model-stderr.txt \
-                --marker "${RUNNER_TEMP}/model-acted.txt" >/dev/null 2>&1 \
+              # so the rule fails closed. The exit status tells the
+              # rule whether the run's own timeout killed it (124).
+              helper_accepts() {
+                local script="$1"
+                local flag="$2"
+                python3 -I "$script" --help 2>/dev/null | grep -q -- "$flag"
+              }
+              free_acted_args=(
+                python3 -I "${RUNNER_TEMP}/base-scripts/model_acted.py"
+                --events model-reply.txt --stderr model-stderr.txt
+                --marker "${RUNNER_TEMP}/model-acted.txt"
+              )
+              if helper_accepts "${RUNNER_TEMP}/base-scripts/model_acted.py" '--exit-status'; then
+                free_acted_args+=(--exit-status "${free_status}")
+              fi
+              "${free_acted_args[@]}" 2> "${RUNNER_TEMP}/model-acted-free.txt" >/dev/null \
                 || { printf 'unknown\n' >> "${RUNNER_TEMP}/model-acted.txt"; \
                      echo "::warning::the review model rule could not be consulted"; }
+              sed -n 's/^model-acted: /::notice::review model evidence: /p' \
+                "${RUNNER_TEMP}/model-acted-free.txt" | sed 's/%/%25/g' || true
 
-              free_failure_reason=$(
-                {
-                  jq -r 'select(.type == "error") | (.error.data.message // .error.message // .error.name // tostring)' model-reply.txt 2>/dev/null || true
-                  cat model-stderr.txt 2>/dev/null || true
-                } | tr -d '\r' | grep -v '^[[:space:]]*$' | head -c 400 | tr '\n' ' ' || true
-              )
+              # When the run's own timeout killed it, the reason is the
+              # clock, not the provider. The workflow writes a FIXED
+              # reason for this, because the shutdown shape opencode
+              # leaves behind is not provider output.
+              if [ "${free_status}" -eq 124 ]; then
+                free_failure_reason="the model run timed out"
+              else
+                free_failure_reason=$(
+                  {
+                    jq -r 'select(.type == "error") | (.error.data.message // .error.message // .error.name // tostring)' model-reply.txt 2>/dev/null || true
+                    cat model-stderr.txt 2>/dev/null || true
+                  } | tr -d '\r' | grep -v '^[[:space:]]*$' | head -c 400 | tr '\n' ' ' || true
+                )
+              fi
               # The MODEL's own document is kept apart from the reason.
               # The validation error quotes values the model chose, so a
               # reason that carried it would be text a model wrote - and a
@@ -1109,7 +1153,7 @@ jobs:
             timeout --foreground "${paid_timeout}s" opencode run --standalone \
             --agent ghost-reviewer -m "$PAID_MODEL" --format json \
             "$REVIEW_PROMPT" > model-reply.txt 2> model-stderr.txt || paid_status=$?
-
+          printf 'paid_timed_out=%s\n' "$([ "$paid_status" -eq 124 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
           valid_reply=0
           if [ "$paid_status" -eq 0 ] && [ -s model-reply.txt ] \
              && jq -s -e 'length > 0 and all(.[]; .type != "error")' \
@@ -1132,18 +1176,35 @@ jobs:
           # the process's own stderr. A reason may classify an outage
           # only when the model produced nothing: a stream that does
           # not parse counts as acted, so the rule fails closed.
-          python3 -I "${RUNNER_TEMP}/base-scripts/model_acted.py" \
-            --events model-reply.txt --stderr model-stderr.txt \
-            --marker "${RUNNER_TEMP}/model-acted.txt" >/dev/null 2>&1 \
+          helper_accepts() {
+            local script="$1"
+            local flag="$2"
+            python3 -I "$script" --help 2>/dev/null | grep -q -- "$flag"
+          }
+          acted_args=(
+            python3 -I "${RUNNER_TEMP}/base-scripts/model_acted.py"
+            --events model-reply.txt --stderr model-stderr.txt
+            --marker "${RUNNER_TEMP}/model-acted.txt"
+          )
+          if helper_accepts "${RUNNER_TEMP}/base-scripts/model_acted.py" '--exit-status'; then
+            acted_args+=(--exit-status "${paid_status}")
+          fi
+          "${acted_args[@]}" 2> "${RUNNER_TEMP}/model-acted-paid.txt" >/dev/null \
             || { printf 'unknown\n' >> "${RUNNER_TEMP}/model-acted.txt"; \
                  echo "::warning::the review model rule could not be consulted"; }
+          sed -n 's/^model-acted: /::notice::review model evidence: /p' \
+            "${RUNNER_TEMP}/model-acted-paid.txt" | sed 's/%/%25/g' || true
 
-          reason=$(
-            {
-              jq -r 'select(.type == "error") | (.error.data.message // .error.message // .error.name // tostring)' model-reply.txt 2>/dev/null || true
-              cat model-stderr.txt 2>/dev/null || true
-            } | tr -d '\r' | grep -v '^[[:space:]]*$' | head -c 400 | tr '\n' ' ' || true
-          )
+          if [ "${paid_status}" -eq 124 ]; then
+            reason="the model run timed out"
+          else
+            reason=$(
+              {
+                jq -r 'select(.type == "error") | (.error.data.message // .error.message // .error.name // tostring)' model-reply.txt 2>/dev/null || true
+                cat model-stderr.txt 2>/dev/null || true
+              } | tr -d '\r' | grep -v '^[[:space:]]*$' | head -c 400 | tr '\n' ' ' || true
+            )
+          fi
           # The reason is the PROVIDER's words only: the opencode
           # process's own error events and its stderr. The model's own
           # document is kept apart, because a reason that quoted it would
@@ -1176,8 +1237,15 @@ jobs:
           SELECT_AGENT_FATAL: ${{ steps.select_model.outputs.agent_fatal }}
           FREE_AGENT_FATAL: ${{ steps.free_review.outputs.agent_fatal }}
           PAID_AGENT_FATAL: ${{ steps.paid_review.outputs.paid_agent_fatal }}
+          PAID_TIMED_OUT: ${{ steps.paid_review.outputs.paid_timed_out }}
         run: |
           set +e
+          # helper_accepts is defined identically in each run: step (separate shell).
+          helper_accepts() {
+            local script="$1"
+            local flag="$2"
+            python3 -I "$script" --help 2>/dev/null | grep -q -- "$flag"
+          }
           # WHY THE DECISION IS NOT IN THIS SHELL: the rule is what the
           # review-gate is allowed to do with a run that produced no
           # result, and a rule that lives only in a workflow cannot be
@@ -1211,18 +1279,24 @@ jobs:
             *unknown*) rule_unknown=1 ;;
           esac
           if [ -f "${RUNNER_TEMP}/base-scripts/review_outcome.py" ]; then
-            report="$(python3 -I "${RUNNER_TEMP}/base-scripts/review_outcome.py" \
-              --free-status "${FREE_STATUS}" \
-              --paid-status "${PAID_STATUS}" \
-              --free-failures "${RUNNER_TEMP}/free-probe-failure.txt" \
-              --free-failures "${RUNNER_TEMP}/free-review-failure.txt" \
-              --paid-reason "${RUNNER_TEMP}/paid-review-failure.txt" \
-              --free-validation "${RUNNER_TEMP}/free-review-validation.txt" \
-              --paid-validation "${RUNNER_TEMP}/paid-review-validation.txt" \
-              --model-acted "${model_acted}" \
-              --select-agent-fatal "${SELECT_AGENT_FATAL}" \
-              --free-agent-fatal "${FREE_AGENT_FATAL}" \
-              --paid-agent-fatal "${PAID_AGENT_FATAL}" 2>/dev/null)"
+            outcome_args=(
+              python3 -I "${RUNNER_TEMP}/base-scripts/review_outcome.py"
+              --free-status "${FREE_STATUS}"
+              --paid-status "${PAID_STATUS}"
+              --free-failures "${RUNNER_TEMP}/free-probe-failure.txt"
+              --free-failures "${RUNNER_TEMP}/free-review-failure.txt"
+              --paid-reason "${RUNNER_TEMP}/paid-review-failure.txt"
+              --free-validation "${RUNNER_TEMP}/free-review-validation.txt"
+              --paid-validation "${RUNNER_TEMP}/paid-review-validation.txt"
+              --model-acted "${model_acted}"
+              --select-agent-fatal "${SELECT_AGENT_FATAL}"
+              --free-agent-fatal "${FREE_AGENT_FATAL}"
+              --paid-agent-fatal "${PAID_AGENT_FATAL}"
+            )
+            if helper_accepts "${RUNNER_TEMP}/base-scripts/review_outcome.py" '--paid-timed-out'; then
+              outcome_args+=(--paid-timed-out "${PAID_TIMED_OUT}")
+            fi
+            report="$("${outcome_args[@]}" 2>/dev/null)"
             outcome="$(printf '%s' "$report" | jq -r '.outcome // empty' 2>/dev/null)"
             reported="$(printf '%s' "$report" | jq -r '.cause // empty' 2>/dev/null)"
             case "${outcome}" in

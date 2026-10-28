@@ -497,5 +497,734 @@ class TestACallSite(unittest.TestCase):
             self.assertEqual(classification_of(output), "unavailable")
 
 
+class TestTheGitHubOutputWrites(unittest.TestCase):
+    """Every printf that writes to GITHUB_OUTPUT must end with a real newline.
+
+    A single-quoted format with ``\\\\n`` reaches printf as a literal
+    backslash and n, so the next write is appended to the same line:
+    ``paid_timed_out=false\\npaid_status=success``. The file then has one
+    line, ``paid_timed_out`` carries ``false\\npaid_status=success``, and
+    ``paid_status`` is never set. The regression keeps the three places
+    that ask the rule and the paid timeout flag on their own lines.
+    """
+
+    def test_no_single_quoted_printf_uses_a_double_escaped_newline(self):
+        workflow = open(workflow_path(), encoding="utf-8").read()
+        bad = []
+        for lineno, line in enumerate(workflow.splitlines(), 1):
+            if "GITHUB_OUTPUT" in line and "printf" in line and "'" in line:
+                # A single-quoted format ends with \n; \\n inside the quotes
+                # is a literal \n that does not terminate the GITHUB_OUTPUT
+                # line. The correct form is '...%s\n' with one backslash.
+                if "\\\\n" in line:
+                    bad.append((lineno, line.strip()))
+        self.assertEqual(
+            bad, [],
+            "a GITHUB_OUTPUT printf still uses \\\\n inside single quotes: %r"
+            % bad,
+        )
+
+    def test_a_timed_out_flag_and_its_status_are_two_lines(self):
+        # The exact bug: the paid step wrote paid_timed_out and paid_status
+        # to the same GITHUB_OUTPUT file, and a \\n merged them.
+        with tempfile.TemporaryDirectory() as folder:
+            output = os.path.join(folder, "github-output")
+            open(output, "w", encoding="utf-8").close()
+            good = (
+                "paid_status=0\n"
+                "printf 'paid_timed_out=%s\\n' "
+                "\"$([ \"$paid_status\" -eq 124 ] && echo true || echo false)\" "
+                ">> \"$GITHUB_OUTPUT\"\n"
+                "printf 'paid_status=success\\n' >> \"$GITHUB_OUTPUT\"\n"
+            )
+            bad = (
+                "paid_status=0\n"
+                "printf 'paid_timed_out=%s\\\\n' "
+                "\"$([ \"$paid_status\" -eq 124 ] && echo true || echo false)\" "
+                ">> \"$GITHUB_OUTPUT\"\n"
+                "printf 'paid_status=success\\n' >> \"$GITHUB_OUTPUT\"\n"
+            )
+            for snippet, want_lines in ((good, 2), (bad, 1)):
+                script = os.path.join(folder, "probe.sh")
+                with open(script, "w", encoding="utf-8") as handle:
+                    handle.write(snippet)
+                env = dict(os.environ, GITHUB_OUTPUT=output)
+                open(output, "w", encoding="utf-8").close()
+                subprocess.run(["bash", script], env=env, check=True)
+                with open(output, encoding="utf-8") as handle:
+                    lines = [l for l in handle.read().splitlines() if l]
+                self.assertEqual(
+                    len(lines), want_lines,
+                    "snippet %r produced %r, want %d lines" % (snippet, lines, want_lines),
+                )
+            # The workflow on disk must be the good shape.
+            with open(output, "w", encoding="utf-8") as handle:
+                handle.write("")
+            # Run a tiny slice of the real paid step's two writes.
+            # The paid_status is 0, so paid_timed_out must be false on its
+            # own line and paid_status on the next.
+            workflow = open(workflow_path(), encoding="utf-8").read()
+            # Find the paid_timed_out line the workflow has today.
+            found = [l for l in workflow.splitlines() if "paid_timed_out" in l and "GITHUB_OUTPUT" in l]
+            self.assertTrue(found, "the workflow has no paid_timed_out GITHUB_OUTPUT line")
+            script = os.path.join(folder, "real.sh")
+            with open(script, "w", encoding="utf-8") as handle:
+                handle.write("paid_status=0\n")
+                handle.write(found[0].strip() + "\n")
+                handle.write("printf 'paid_status=success\\n' >> \"$GITHUB_OUTPUT\"\n")
+            env = dict(os.environ, GITHUB_OUTPUT=output)
+            open(output, "w", encoding="utf-8").close()
+            subprocess.run(["bash", script], env=env, check=True)
+            with open(output, encoding="utf-8") as handle:
+                content = handle.read()
+            self.assertIn("paid_timed_out=false\n", content)
+            self.assertIn("paid_status=success\n", content)
+            self.assertEqual(len([l for l in content.splitlines() if l]), 2)
+
+
+class TestTheClassifyStepCompatibility(unittest.TestCase):
+    """The classify step must stay compatible with a base helper.
+
+    The helper comes from the default branch, so a PR that adds flags to
+    it cannot assume the base copy has them. The classify step builds
+    the argument list and only passes --paid-timed-out when the helper
+    accepts it. A helper without the flag must still produce a valid
+    outcome rather than \"did not answer\".
+    """
+
+    def _step_shell(self):
+        return step_shell("Classify the review result")
+
+    def _make_base_helper(self, folder, with_paid_timed_out=False):
+        scripts = os.path.join(folder, "base-scripts")
+        os.makedirs(scripts)
+        if with_paid_timed_out:
+            shutil.copyfile(script_path("review_outcome.py"),
+                            os.path.join(scripts, "review_outcome.py"))
+            return os.path.join(scripts, "review_outcome.py")
+        # A helper that looks like main's helper: ends at --paid-agent-fatal
+        helper = os.path.join(scripts, "review_outcome.py")
+        _write(helper, """#!/usr/bin/env python3
+import argparse, json, sys
+OUTCOME_SUCCESS = "success"
+OUTCOME_UNAVAILABLE = "unavailable"
+OUTCOME_FAILURE = "failure"
+CAUSE_FREE_UNREACHABLE = "free models unreachable"
+CAUSE_PAID_USAGE_LIMIT = "paid fallback usage limit"
+CAUSE_NO_RESULT = "no valid free or paid review result was produced"
+CAUSE_FREE_RESULT = "a review result was produced by the free path"
+CAUSE_PAID_RESULT = "a review result was produced by the paid fallback"
+CAUSE_AGENT_MISSING = "the reviewer agent did not register"
+CAUSE_FREE_STEP_FATAL = "the free review step could not run"
+CAUSE_TIMEOUT = "the review models timed out"
+CAUSE_MODEL_ACTED = "the model acted on the pull request"
+CAUSE_MODEL_ANSWERED = "a model answered with a document nobody can use"
+MAX_CAUSE = 200
+
+class Decision:
+    def __init__(self, outcome, cause):
+        self.outcome = outcome
+        self.cause = cause
+
+def parse_failures(text):
+    failures = []
+    for line in str(text or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        model, separator, reason = line.partition(": ")
+        if not separator:
+            model, reason = "", line
+        failures.append((model, reason))
+    return failures
+
+def one_line(text, limit=MAX_CAUSE):
+    collapsed = " ".join(str(text or "").split())
+    if len(collapsed) > limit:
+        collapsed = collapsed[:limit].rstrip() + "..."
+    return collapsed
+
+def model_answered(text):
+    lowered = str(text or "").lower()
+    if not lowered:
+        return False
+    markers = ("validation failed", "reply validation failed", "unparseable",
+              "could not parse", "invalid findings", "unusable findings",
+              "no valid findings", "findings document", "verdict",
+              "severity must be", "summary must be", "no json object")
+    return any(marker in lowered for marker in markers)
+
+def is_timeout(reason):
+    return "the model run timed out" in str(reason or "").lower()
+
+def is_outage(reason):
+    text = str(reason or "").lower()
+    if not text:
+        return False
+    if model_answered(text):
+        return False
+    if "the model run timed out" in text:
+        return True
+    patterns = ("go usage limit exceeded", "rate limit exceeded", "too many requests",
+               "http 429", "the socket connection was closed unexpectedly", "socket hang up",
+               "connection reset by peer", "connection refused", "connection closed",
+               "broken pipe", "econnreset", "econnrefused", "econnaborted", "etimedout")
+    return any(pattern in text for pattern in patterns)
+
+def is_usage_limit(reason):
+    return "go usage limit exceeded" in str(reason or "").lower()
+
+def decide(free_status, free_failures, paid_status, paid_reason,
+           free_validation="", paid_validation="", model_acted=False,
+           select_agent_fatal=False, free_agent_fatal=False,
+           paid_agent_fatal=False):
+    free_status = str(free_status or "").strip()
+    paid_status = str(paid_status or "").strip()
+    paid_reason = str(paid_reason or "")
+    free_validation = str(free_validation or "")
+    paid_validation = str(paid_validation or "")
+    free_failures = list(free_failures or [])
+    if free_status == "success":
+        return Decision(OUTCOME_SUCCESS, CAUSE_FREE_RESULT)
+    if paid_status == "success":
+        return Decision(OUTCOME_SUCCESS, CAUSE_PAID_RESULT)
+    if model_acted:
+        return Decision(OUTCOME_FAILURE, CAUSE_MODEL_ACTED)
+    if free_validation.strip() or paid_validation.strip():
+        return Decision(OUTCOME_FAILURE, CAUSE_MODEL_ANSWERED)
+    reported = [paid_reason] + [reason for _model, reason in free_failures]
+    if any(model_answered(text) for text in reported):
+        return Decision(OUTCOME_FAILURE, CAUSE_MODEL_ANSWERED)
+    if select_agent_fatal or free_agent_fatal or paid_agent_fatal:
+        return Decision(OUTCOME_FAILURE, CAUSE_AGENT_MISSING)
+    if paid_status != "success" and is_usage_limit(paid_reason):
+        return Decision(OUTCOME_UNAVAILABLE, CAUSE_PAID_USAGE_LIMIT)
+    if free_status == "fatal":
+        return Decision(OUTCOME_FAILURE, CAUSE_FREE_STEP_FATAL)
+    if (paid_status != "success" and free_failures
+            and all(is_outage(reason) for _model, reason in free_failures)):
+        return Decision(OUTCOME_UNAVAILABLE, CAUSE_FREE_UNREACHABLE)
+    if paid_status != "success" and is_timeout(paid_reason):
+        return Decision(OUTCOME_UNAVAILABLE, CAUSE_TIMEOUT)
+    return Decision(OUTCOME_FAILURE, CAUSE_NO_RESULT)
+
+def _read(path):
+    if not path:
+        return ""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            return handle.read()
+    except OSError:
+        return ""
+
+def _flag(value):
+    return str(value or "").strip().lower() in ("true", "1", "yes")
+
+def main(argv):
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--free-status", default="")
+    parser.add_argument("--paid-status", default="")
+    parser.add_argument("--free-failures", action="append", default=[])
+    parser.add_argument("--paid-reason", default="")
+    parser.add_argument("--free-validation", default="")
+    parser.add_argument("--paid-validation", default="")
+    parser.add_argument("--model-acted", default="")
+    parser.add_argument("--select-agent-fatal", default="")
+    parser.add_argument("--free-agent-fatal", default="")
+    parser.add_argument("--paid-agent-fatal", default="")
+    args = parser.parse_args(argv[1:])
+    failures = []
+    for path in args.free_failures:
+        failures.extend(parse_failures(_read(path)))
+    decision = decide(args.free_status, failures, args.paid_status,
+                      _read(args.paid_reason),
+                      free_validation=_read(args.free_validation),
+                      paid_validation=_read(args.paid_validation),
+                      model_acted=_flag(args.model_acted),
+                      select_agent_fatal=_flag(args.select_agent_fatal),
+                      free_agent_fatal=_flag(args.free_agent_fatal),
+                      paid_agent_fatal=_flag(args.paid_agent_fatal))
+    print(json.dumps({"outcome": decision.outcome, "cause": decision.cause}))
+    return 0
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
+""")
+        os.chmod(helper, 0o755)
+        return helper
+
+    def _run_classify_with_helper(self, folder, helper, paid_timed_out=""):
+        runner = os.path.join(folder, "runner-temp")
+        scripts = os.path.join(runner, "base-scripts")
+        os.makedirs(scripts)
+        shutil.copyfile(helper, os.path.join(scripts, "review_outcome.py"))
+        _write(os.path.join(runner, "free-probe-failure.txt"),
+               "opencode/big-pickle: The socket connection was closed unexpectedly\n")
+        _write(os.path.join(runner, "free-review-failure.txt"),
+               "opencode/big-pickle: The socket connection was closed unexpectedly\n")
+        _write(os.path.join(runner, "paid-review-failure.txt"),
+               "the paid model did not answer\n")
+        _write(os.path.join(runner, "free-review-validation.txt"), "")
+        _write(os.path.join(runner, "paid-review-validation.txt"), "")
+        _write(os.path.join(runner, "model-acted.txt"), "")
+        output = os.path.join(folder, "classify-output")
+        _write(output, "")
+        step = os.path.join(folder, "classify.sh")
+        _write(step, self._step_shell())
+        environment = dict(os.environ)
+        environment.update({
+            "HOME": folder,
+            "RUNNER_TEMP": runner,
+            "GITHUB_OUTPUT": output,
+            "FREE_STATUS": "failed",
+            "PAID_STATUS": "success",
+            "SELECT_AGENT_FATAL": "",
+            "FREE_AGENT_FATAL": "",
+            "PAID_AGENT_FATAL": "",
+            "PAID_TIMED_OUT": paid_timed_out,
+        })
+        result = subprocess.run(["bash", step], env=environment,
+                                capture_output=True, text=True, check=False)
+        with open(output, encoding="utf-8") as handle:
+            out = handle.read()
+        return out, result.stdout, result.stderr
+
+    def test_classify_works_with_base_helper_without_paid_timed_out(self):
+        # A helper without --paid-timed-out (like main's helper) must not
+        # cause "did not answer": the step must detect the flag is absent
+        # and skip it.
+        with tempfile.TemporaryDirectory() as folder:
+            helper = self._make_base_helper(folder, with_paid_timed_out=False)
+            output, stdout, stderr = self._run_classify_with_helper(
+                folder, helper, paid_timed_out="false")
+            self.assertNotIn("did not answer", stdout)
+            self.assertNotIn("did not answer", stderr)
+            self.assertEqual(classification_of(output), "success")
+
+    def test_classify_passes_paid_timed_out_when_helper_accepts_it(self):
+        with tempfile.TemporaryDirectory() as folder:
+            helper = self._make_base_helper(folder, with_paid_timed_out=True)
+            runner = os.path.join(folder, "runner-temp")
+            scripts = os.path.join(runner, "base-scripts")
+            os.makedirs(scripts)
+            shutil.copyfile(helper, os.path.join(scripts, "review_outcome.py"))
+            _write(os.path.join(runner, "free-probe-failure.txt"), "")
+            _write(os.path.join(runner, "free-review-failure.txt"), "")
+            _write(os.path.join(runner, "paid-review-failure.txt"),
+                   "unknown provider failure\n")
+            _write(os.path.join(runner, "free-review-validation.txt"), "")
+            _write(os.path.join(runner, "paid-review-validation.txt"), "")
+            _write(os.path.join(runner, "model-acted.txt"), "")
+            output = os.path.join(folder, "classify-output")
+            _write(output, "")
+            step = os.path.join(folder, "classify.sh")
+            _write(step, self._step_shell())
+            environment = dict(os.environ)
+            environment.update({
+                "HOME": folder,
+                "RUNNER_TEMP": runner,
+                "GITHUB_OUTPUT": output,
+                "FREE_STATUS": "failed",
+                "PAID_STATUS": "failed",
+                "SELECT_AGENT_FATAL": "",
+                "FREE_AGENT_FATAL": "",
+                "PAID_AGENT_FATAL": "",
+                "PAID_TIMED_OUT": "true",
+            })
+            result = subprocess.run(["bash", step], env=environment,
+                                    capture_output=True, text=True, check=False)
+            with open(output, encoding="utf-8") as handle:
+                out = handle.read()
+            self.assertNotIn("did not answer", result.stdout)
+            self.assertNotIn("did not answer", result.stderr)
+            self.assertEqual(classification_of(out), "unavailable")
+            self.assertEqual(cause_of(out), review_outcome.CAUSE_TIMEOUT)
+
+
+class TestTheHelperFlagChecks(unittest.TestCase):
+    def test_selection_probe_passes_exit_status_when_helper_accepts_it(self):
+        with tempfile.TemporaryDirectory() as folder:
+            runner = os.path.join(folder, "runner-temp")
+            scripts = os.path.join(runner, "base-scripts")
+            os.makedirs(scripts)
+            shutil.copyfile(script_path("review_outcome.py"), os.path.join(scripts, "review_outcome.py"))
+            helper = os.path.join(scripts, "model_acted.py")
+            argv_log = os.path.join(folder, "model-acted-argv.log")
+            _write(helper, """#!/usr/bin/env python3
+import argparse, sys, os
+parser = argparse.ArgumentParser()
+parser.add_argument('--events', default='')
+parser.add_argument('--stderr', default='')
+parser.add_argument('--marker', default='')
+parser.add_argument('--exit-status', default='')
+args = parser.parse_args(sys.argv[1:])
+log = os.environ.get('MODEL_ACTED_ARGV_LOG')
+if log:
+    with open(log, 'a') as f:
+        f.write(' '.join(sys.argv) + '\\n')
+if args.marker:
+    with open(args.marker, 'a') as f:
+        f.write('acted\\n')
+print('true')
+sys.exit(0)
+""")
+            os.chmod(helper, 0o755)
+            _fake_opencode(folder)
+            stdout_path = os.path.join(folder, "opencode.out")
+            stderr_path = os.path.join(folder, "opencode.err")
+            _write(stdout_path, PROVIDER_ERROR + "\n")
+            _write(stderr_path, "")
+            output = os.path.join(folder, "github-output")
+            _write(output, "")
+            step = os.path.join(folder, "select.sh")
+            _write(step, step_shell("Select review model"))
+            environment = dict(os.environ)
+            environment.update({
+                "HOME": folder,
+                "PATH": folder + os.pathsep + environment.get("PATH", ""),
+                "RUNNER_TEMP": runner,
+                "GITHUB_OUTPUT": output,
+                "MODELS": "opencode/big-pickle",
+                "FAKE_OPENCODE_STDOUT": stdout_path,
+                "FAKE_OPENCODE_STDERR": stderr_path,
+                "FAKE_OPENCODE_STATUS": "1",
+                "MODEL_ACTED_ARGV_LOG": argv_log,
+            })
+            result = subprocess.run(["bash", step], env=environment, capture_output=True, text=True, check=False)
+            with open(argv_log) as f:
+                log = f.read()
+            self.assertIn('--exit-status', log)
+            marker = _read(os.path.join(runner, "model-acted.txt"))
+            self.assertIn('acted', marker)
+
+    def test_selection_probe_does_not_pass_exit_status_when_helper_rejects_it(self):
+        with tempfile.TemporaryDirectory() as folder:
+            runner = os.path.join(folder, "runner-temp")
+            scripts = os.path.join(runner, "base-scripts")
+            os.makedirs(scripts)
+            shutil.copyfile(script_path("review_outcome.py"), os.path.join(scripts, "review_outcome.py"))
+            helper = os.path.join(scripts, "model_acted.py")
+            argv_log = os.path.join(folder, "model-acted-argv.log")
+            _write(helper, """#!/usr/bin/env python3
+import argparse, sys, os
+parser = argparse.ArgumentParser()
+parser.add_argument('--events', default='')
+parser.add_argument('--stderr', default='')
+parser.add_argument('--marker', default='')
+args = parser.parse_args(sys.argv[1:])
+log = os.environ.get('MODEL_ACTED_ARGV_LOG')
+if log:
+    with open(log, 'a') as f:
+        f.write(' '.join(sys.argv) + '\\n')
+if args.marker:
+    with open(args.marker, 'a') as f:
+        f.write('acted\\n')
+print('true')
+sys.exit(0)
+""")
+            os.chmod(helper, 0o755)
+            _fake_opencode(folder)
+            stdout_path = os.path.join(folder, "opencode.out")
+            stderr_path = os.path.join(folder, "opencode.err")
+            _write(stdout_path, PROVIDER_ERROR + "\n")
+            _write(stderr_path, "")
+            output = os.path.join(folder, "github-output")
+            _write(output, "")
+            step = os.path.join(folder, "select.sh")
+            _write(step, step_shell("Select review model"))
+            environment = dict(os.environ)
+            environment.update({
+                "HOME": folder,
+                "PATH": folder + os.pathsep + environment.get("PATH", ""),
+                "RUNNER_TEMP": runner,
+                "GITHUB_OUTPUT": output,
+                "MODELS": "opencode/big-pickle",
+                "FAKE_OPENCODE_STDOUT": stdout_path,
+                "FAKE_OPENCODE_STDERR": stderr_path,
+                "FAKE_OPENCODE_STATUS": "1",
+                "MODEL_ACTED_ARGV_LOG": argv_log,
+            })
+            result = subprocess.run(["bash", step], env=environment, capture_output=True, text=True, check=False)
+            with open(argv_log) as f:
+                log = f.read()
+            self.assertNotIn('--exit-status', log)
+            self.assertIn('acted', _read(os.path.join(runner, "model-acted.txt")))
+
+    def test_free_review_loop_passes_exit_status_when_helper_accepts_it(self):
+        with tempfile.TemporaryDirectory() as folder:
+            runner = os.path.join(folder, "runner-temp")
+            scripts = os.path.join(runner, "base-scripts")
+            os.makedirs(scripts)
+            shutil.copyfile(script_path("review_outcome.py"), os.path.join(scripts, "review_outcome.py"))
+            shutil.copyfile(script_path("review_findings.py"), os.path.join(scripts, "review_findings.py"))
+            helper = os.path.join(scripts, "model_acted.py")
+            argv_log = os.path.join(folder, "model-acted-argv.log")
+            _write(helper, """#!/usr/bin/env python3
+import argparse, sys, os
+parser = argparse.ArgumentParser()
+parser.add_argument('--events', default='')
+parser.add_argument('--stderr', default='')
+parser.add_argument('--marker', default='')
+parser.add_argument('--exit-status', default='')
+args = parser.parse_args(sys.argv[1:])
+log = os.environ.get('MODEL_ACTED_ARGV_LOG')
+if log:
+    with open(log, 'a') as f:
+        f.write(' '.join(sys.argv) + '\\n')
+if args.marker:
+    with open(args.marker, 'a') as f:
+        f.write('acted\\n')
+print('true')
+sys.exit(0)
+""")
+            os.chmod(helper, 0o755)
+            _fake_opencode(folder)
+            _write(os.path.join(runner, "reviewer-prompt.txt"), "review\n")
+            _write(os.path.join(runner, "reviewer-free-models.txt"), "opencode/big-pickle\n")
+            _write(os.path.join(runner, "free-review-failure.txt"), "")
+            _write(os.path.join(runner, "free-review-validation.txt"), "")
+            stdout_path = os.path.join(folder, "opencode.out")
+            stderr_path = os.path.join(folder, "opencode.err")
+            _write(stdout_path, PROVIDER_ERROR + "\n")
+            _write(stderr_path, "")
+            _write(os.path.join(folder, "pr.diff"), "diff --git a/x b/x\n")
+            output = os.path.join(folder, "github-output")
+            _write(output, "")
+            step = os.path.join(folder, "free.sh")
+            _write(step, step_shell("Review with opencode (free)"))
+            environment = dict(os.environ)
+            environment.update({
+                "HOME": folder,
+                "PATH": folder + os.pathsep + environment.get("PATH", ""),
+                "RUNNER_TEMP": runner,
+                "GITHUB_OUTPUT": output,
+                "SELECTED_MODEL": "opencode/big-pickle",
+                "FAKE_OPENCODE_STDOUT": stdout_path,
+                "FAKE_OPENCODE_STDERR": stderr_path,
+                "FAKE_OPENCODE_STATUS": "1",
+                "MODEL_ACTED_ARGV_LOG": argv_log,
+                "CI": "true",
+            })
+            old = os.getcwd()
+            try:
+                os.chdir(folder)
+                result = subprocess.run(["bash", step], env=environment, capture_output=True, text=True, check=False)
+            finally:
+                os.chdir(old)
+            with open(argv_log) as f:
+                log = f.read()
+            self.assertIn('--exit-status', log)
+
+    def test_free_review_loop_does_not_pass_exit_status_when_helper_rejects_it(self):
+        with tempfile.TemporaryDirectory() as folder:
+            runner = os.path.join(folder, "runner-temp")
+            scripts = os.path.join(runner, "base-scripts")
+            os.makedirs(scripts)
+            shutil.copyfile(script_path("review_outcome.py"), os.path.join(scripts, "review_outcome.py"))
+            shutil.copyfile(script_path("review_findings.py"), os.path.join(scripts, "review_findings.py"))
+            helper = os.path.join(scripts, "model_acted.py")
+            argv_log = os.path.join(folder, "model-acted-argv.log")
+            _write(helper, """#!/usr/bin/env python3
+import argparse, sys, os
+parser = argparse.ArgumentParser()
+parser.add_argument('--events', default='')
+parser.add_argument('--stderr', default='')
+parser.add_argument('--marker', default='')
+args = parser.parse_args(sys.argv[1:])
+log = os.environ.get('MODEL_ACTED_ARGV_LOG')
+if log:
+    with open(log, 'a') as f:
+        f.write(' '.join(sys.argv) + '\\n')
+if args.marker:
+    with open(args.marker, 'a') as f:
+        f.write('acted\\n')
+print('true')
+sys.exit(0)
+""")
+            os.chmod(helper, 0o755)
+            _fake_opencode(folder)
+            _write(os.path.join(runner, "reviewer-prompt.txt"), "review\n")
+            _write(os.path.join(runner, "reviewer-free-models.txt"), "opencode/big-pickle\n")
+            _write(os.path.join(runner, "free-review-failure.txt"), "")
+            _write(os.path.join(runner, "free-review-validation.txt"), "")
+            stdout_path = os.path.join(folder, "opencode.out")
+            stderr_path = os.path.join(folder, "opencode.err")
+            _write(stdout_path, PROVIDER_ERROR + "\n")
+            _write(stderr_path, "")
+            _write(os.path.join(folder, "pr.diff"), "diff --git a/x b/x\n")
+            output = os.path.join(folder, "github-output")
+            _write(output, "")
+            step = os.path.join(folder, "free.sh")
+            _write(step, step_shell("Review with opencode (free)"))
+            environment = dict(os.environ)
+            environment.update({
+                "HOME": folder,
+                "PATH": folder + os.pathsep + environment.get("PATH", ""),
+                "RUNNER_TEMP": runner,
+                "GITHUB_OUTPUT": output,
+                "SELECTED_MODEL": "opencode/big-pickle",
+                "FAKE_OPENCODE_STDOUT": stdout_path,
+                "FAKE_OPENCODE_STDERR": stderr_path,
+                "FAKE_OPENCODE_STATUS": "1",
+                "MODEL_ACTED_ARGV_LOG": argv_log,
+                "CI": "true",
+            })
+            old = os.getcwd()
+            try:
+                os.chdir(folder)
+                result = subprocess.run(["bash", step], env=environment, capture_output=True, text=True, check=False)
+            finally:
+                os.chdir(old)
+            with open(argv_log) as f:
+                log = f.read()
+            self.assertNotIn('--exit-status', log)
+
+    def test_paid_fallback_passes_exit_status_when_helper_accepts_it(self):
+        with tempfile.TemporaryDirectory() as folder:
+            runner = os.path.join(folder, "runner-temp")
+            scripts = os.path.join(runner, "base-scripts")
+            os.makedirs(scripts)
+            shutil.copyfile(script_path("review_outcome.py"), os.path.join(scripts, "review_outcome.py"))
+            shutil.copyfile(script_path("review_findings.py"), os.path.join(scripts, "review_findings.py"))
+            helper = os.path.join(scripts, "model_acted.py")
+            argv_log = os.path.join(folder, "model-acted-argv.log")
+            _write(helper, """#!/usr/bin/env python3
+import argparse, sys, os
+parser = argparse.ArgumentParser()
+parser.add_argument('--events', default='')
+parser.add_argument('--stderr', default='')
+parser.add_argument('--marker', default='')
+parser.add_argument('--exit-status', default='')
+args = parser.parse_args(sys.argv[1:])
+log = os.environ.get('MODEL_ACTED_ARGV_LOG')
+if log:
+    with open(log, 'a') as f:
+        f.write(' '.join(sys.argv) + '\\n')
+if args.marker:
+    with open(args.marker, 'a') as f:
+        f.write('acted\\n')
+print('true')
+sys.exit(0)
+""")
+            os.chmod(helper, 0o755)
+            _fake_opencode(folder)
+            _write(os.path.join(runner, "reviewer-prompt.txt"), "review\n")
+            _write(os.path.join(runner, "paid-review-failure.txt"), "")
+            _write(os.path.join(runner, "paid-review-validation.txt"), "")
+            stdout_path = os.path.join(folder, "opencode.out")
+            stderr_path = os.path.join(folder, "opencode.err")
+            _write(stdout_path, PROVIDER_ERROR + "\n")
+            _write(stderr_path, "")
+            _write(os.path.join(folder, "pr.diff"), "diff --git a/x b/x\n")
+            output = os.path.join(folder, "github-output")
+            _write(output, "")
+            step = os.path.join(folder, "paid.sh")
+            _write(step, step_shell("Review with opencode (paid fallback)"))
+            environment = dict(os.environ)
+            environment.update({
+                "HOME": folder,
+                "PATH": folder + os.pathsep + environment.get("PATH", ""),
+                "RUNNER_TEMP": runner,
+                "GITHUB_OUTPUT": output,
+                "OPENCODE_API_KEY": "test",
+                "SELECT_MODEL_OUTCOME": "failure",
+                "PAID_MODEL": "opencode-go/deepseek-v4.1-flash",
+                "FAKE_OPENCODE_STDOUT": stdout_path,
+                "FAKE_OPENCODE_STDERR": stderr_path,
+                "FAKE_OPENCODE_STATUS": "1",
+                "MODEL_ACTED_ARGV_LOG": argv_log,
+                "CI": "true",
+            })
+            old = os.getcwd()
+            try:
+                os.chdir(folder)
+                result = subprocess.run(["bash", step], env=environment, capture_output=True, text=True, check=False)
+            finally:
+                os.chdir(old)
+            if not os.path.exists(argv_log):
+                self.fail("model_acted not called or argv not logged")
+            with open(argv_log) as f:
+                log = f.read()
+            self.assertIn('--exit-status', log)
+
+    def test_paid_fallback_does_not_pass_exit_status_when_helper_rejects_it(self):
+        with tempfile.TemporaryDirectory() as folder:
+            runner = os.path.join(folder, "runner-temp")
+            scripts = os.path.join(runner, "base-scripts")
+            os.makedirs(scripts)
+            shutil.copyfile(script_path("review_outcome.py"), os.path.join(scripts, "review_outcome.py"))
+            shutil.copyfile(script_path("review_findings.py"), os.path.join(scripts, "review_findings.py"))
+            helper = os.path.join(scripts, "model_acted.py")
+            argv_log = os.path.join(folder, "model-acted-argv.log")
+            _write(helper, """#!/usr/bin/env python3
+import argparse, sys, os
+parser = argparse.ArgumentParser()
+parser.add_argument('--events', default='')
+parser.add_argument('--stderr', default='')
+parser.add_argument('--marker', default='')
+args = parser.parse_args(sys.argv[1:])
+log = os.environ.get('MODEL_ACTED_ARGV_LOG')
+if log:
+    with open(log, 'a') as f:
+        f.write(' '.join(sys.argv) + '\\n')
+if args.marker:
+    with open(args.marker, 'a') as f:
+        f.write('acted\\n')
+print('true')
+sys.exit(0)
+""")
+            os.chmod(helper, 0o755)
+            _fake_opencode(folder)
+            _write(os.path.join(runner, "reviewer-prompt.txt"), "review\n")
+            _write(os.path.join(runner, "paid-review-failure.txt"), "")
+            _write(os.path.join(runner, "paid-review-validation.txt"), "")
+            stdout_path = os.path.join(folder, "opencode.out")
+            stderr_path = os.path.join(folder, "opencode.err")
+            _write(stdout_path, PROVIDER_ERROR + "\n")
+            _write(stderr_path, "")
+            _write(os.path.join(folder, "pr.diff"), "diff --git a/x b/x\n")
+            output = os.path.join(folder, "github-output")
+            _write(output, "")
+            step = os.path.join(folder, "paid.sh")
+            _write(step, step_shell("Review with opencode (paid fallback)"))
+            environment = dict(os.environ)
+            environment.update({
+                "HOME": folder,
+                "PATH": folder + os.pathsep + environment.get("PATH", ""),
+                "RUNNER_TEMP": runner,
+                "GITHUB_OUTPUT": output,
+                "OPENCODE_API_KEY": "test",
+                "SELECT_MODEL_OUTCOME": "failure",
+                "PAID_MODEL": "opencode-go/deepseek-v4.1-flash",
+                "FAKE_OPENCODE_STDOUT": stdout_path,
+                "FAKE_OPENCODE_STDERR": stderr_path,
+                "FAKE_OPENCODE_STATUS": "1",
+                "MODEL_ACTED_ARGV_LOG": argv_log,
+                "CI": "true",
+            })
+            old = os.getcwd()
+            try:
+                os.chdir(folder)
+                result = subprocess.run(["bash", step], env=environment, capture_output=True, text=True, check=False)
+            finally:
+                os.chdir(old)
+            if not os.path.exists(argv_log):
+                self.fail("model_acted not called or argv not logged")
+            with open(argv_log) as f:
+                log = f.read()
+            self.assertNotIn('--exit-status', log)
+
+    def test_helper_accepts_definitions_are_identical(self):
+        with open(workflow_path(), encoding='utf-8') as f:
+            content = f.read()
+        import re
+        blocks = re.findall(r'helper_accepts\(\)\s*\{[^{}]*\}', content, re.DOTALL)
+        self.assertTrue(blocks, "no helper_accepts definitions found")
+        self.assertEqual(len(blocks), 5)
+        first = re.sub(r'\s+', ' ', blocks[0])
+        for b in blocks[1:]:
+            self.assertEqual(re.sub(r'\s+', ' ', b), first)
+
+
 if __name__ == "__main__":
     unittest.main()

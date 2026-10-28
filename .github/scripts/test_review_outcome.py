@@ -23,7 +23,8 @@ import tempfile
 import unittest
 
 import review_outcome
-from review_outcome import (CAUSE_FREE_UNREACHABLE, CAUSE_PAID_USAGE_LIMIT,
+from review_outcome import (CAUSE_FREE_UNREACHABLE, CAUSE_MODEL_ACTED,
+                            CAUSE_PAID_USAGE_LIMIT, CAUSE_TIMEOUT,
                             OUTCOME_FAILURE, OUTCOME_SUCCESS,
                             OUTCOME_UNAVAILABLE, decide, parse_failures)
 
@@ -33,6 +34,8 @@ INVALID_DOCUMENT = ("reply validation failed: findings[0].severity must be "
                     "one of blocker|should-fix|nit")
 USAGE_LIMIT = "ERROR: Go usage limit exceeded"
 UNKNOWN_FAILURE = "the free review exited 1 with no provider message"
+# The fixed reason the workflow writes when its own timeout killed a run.
+TIMEOUT = review_outcome.TIMEOUT_REASON
 
 # What a model can write: the provider's own words, inside a document
 # nobody can use.
@@ -117,6 +120,44 @@ class TestAModelThatActed(unittest.TestCase):
                           "failed", "the paid model did not answer")
         self.assertEqual(decision.outcome, OUTCOME_UNAVAILABLE)
         self.assertEqual(decision.cause, CAUSE_FREE_UNREACHABLE)
+
+
+class TestATimedOutRun(unittest.TestCase):
+    """A run its own timeout killed is an outage, not a verdict.
+
+    The workflow writes a FIXED reason for a timeout, because the
+    shutdown shape opencode leaves behind is not the provider saying the
+    models were unreachable. The reason is the run's own clock, and a
+    model that acted or answered before the timeout is still a failure.
+    """
+
+    def test_a_timed_out_free_candidate_is_an_outage(self):
+        decision = decide("failed", [("opencode/big-pickle", TIMEOUT)],
+                          "failed", "the paid model did not answer")
+        self.assertEqual(decision.outcome, OUTCOME_UNAVAILABLE)
+        self.assertEqual(decision.cause, CAUSE_FREE_UNREACHABLE)
+
+    def test_a_timed_out_paid_run_is_unavailable(self):
+        decision = decide("failed", [], "failed", TIMEOUT)
+        self.assertEqual(decision.outcome, OUTCOME_UNAVAILABLE)
+        self.assertEqual(decision.cause, CAUSE_TIMEOUT)
+
+    def test_a_timeout_does_not_beat_a_model_that_answered(self):
+        decision = decide("failed", [("opencode/big-pickle", TIMEOUT)],
+                          "failed", TIMEOUT,
+                          free_validation="reply validation failed: nope")
+        self.assertEqual(decision.outcome, OUTCOME_FAILURE)
+
+    def test_a_timeout_does_not_beat_a_model_that_acted(self):
+        decision = decide("failed", [], "failed", TIMEOUT, model_acted=True)
+        self.assertEqual(decision.outcome, OUTCOME_FAILURE)
+        self.assertEqual(decision.cause, CAUSE_MODEL_ACTED)
+
+    def test_the_timeout_reason_is_not_the_cause_label(self):
+        # The gate title carries a label a reader trusts, never the
+        # reason text the workflow wrote.
+        decision = decide("failed", [], "failed", TIMEOUT)
+        self.assertNotIn(TIMEOUT, decision.cause)
 
 
 class TestAModelThatAnswered(unittest.TestCase):
@@ -336,6 +377,54 @@ class TestTheCommand(unittest.TestCase):
                     "--paid-reason", missing]
             report = self._call(argv)
         self.assertEqual(report["outcome"], OUTCOME_FAILURE)
+
+
+class TestThePaidTimedOutFlag(unittest.TestCase):
+    """The paid timeout flag is exactly true, false, or empty.
+
+    A broken GITHUB_OUTPUT write once merged the flag with the next
+    output, so the flag reached the helper as "false\\npaid_status=success"
+    and the helper silently read it as false while the paid status stayed
+    empty. The helper now fails loudly and names the bad value.
+    """
+
+    def _call_raw(self, value):
+        with tempfile.TemporaryDirectory() as folder:
+            empty = os.path.join(folder, "empty.txt")
+            with open(empty, "w", encoding="utf-8") as handle:
+                handle.write("")
+            argv = ["review_outcome.py", "--free-status", "failed",
+                    "--paid-status", "failed",
+                    "--free-failures", empty, "--paid-reason", empty,
+                    "--paid-timed-out", value]
+            stderr = io.StringIO()
+            with contextlib.redirect_stdout(io.StringIO()), \
+                 contextlib.redirect_stderr(stderr):
+                code = review_outcome.main(argv)
+            return code, stderr.getvalue()
+
+    def test_true_and_false_and_empty_are_accepted(self):
+        for value in ("true", "false", ""):
+            code, _err = self._call_raw(value)
+            self.assertEqual(code, 0, "value %r should be accepted" % value)
+
+    def test_a_bare_word_is_not_accepted(self):
+        for value in ("True", "TRUE", "1", "yes", "false\npaid_status=success"):
+            with self.subTest(value=value):
+                code, err = self._call_raw(value)
+                self.assertNotEqual(code, 0)
+                self.assertIn(repr(value), err)
+
+    def test_the_merged_output_is_rejected(self):
+        # The exact shape a single-quoted printf with \\n left behind:
+        # the file ends up as `paid_timed_out=false\npaid_status=success`
+        # with a literal backslash, so the flag reaches the helper as
+        # `false\npaid_status=success` with a backslash and an n.
+        merged = "false\\npaid_status=success"
+        code, err = self._call_raw(merged)
+        self.assertNotEqual(code, 0)
+        self.assertIn("paid-timed-out", err)
+        self.assertIn(repr(merged), err)
 
 
 if __name__ == "__main__":

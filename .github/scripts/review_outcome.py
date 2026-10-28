@@ -55,6 +55,7 @@ OUTCOME_FAILURE = "failure"
 # happened, never what a provider said about it.
 CAUSE_PAID_USAGE_LIMIT = "paid fallback usage limit"
 CAUSE_FREE_UNREACHABLE = "free models unreachable"
+CAUSE_TIMEOUT = "the review models timed out"
 CAUSE_MODEL_ANSWERED = "a model answered with a document nobody can use"
 CAUSE_MODEL_ACTED = "the model acted on the pull request"
 CAUSE_AGENT_MISSING = "the reviewer agent did not register"
@@ -88,6 +89,11 @@ _ANSWERED_MARKERS = (
     "summary must be",
     "no json object",
 )
+
+# The reason the workflow writes when its own timeout killed a run. It is
+# NOT provider output: it is the run's own clock, and the fixed phrase is
+# the one thing the shutdown shape opencode leaves behind cannot say.
+TIMEOUT_REASON = "the model run timed out"
 
 # The provider's own words for an outage, and nothing looser: a phrase a
 # model could write belongs in _ANSWERED_MARKERS or nowhere, because a
@@ -158,6 +164,11 @@ def model_answered(text):
     return any(marker in lowered for marker in _ANSWERED_MARKERS)
 
 
+def is_timeout(reason):
+    """True when the reason is the workflow's own timeout label."""
+    return TIMEOUT_REASON in str(reason or "").lower()
+
+
 def is_outage(reason):
     """True when the reason names an outage of the model service."""
     text = str(reason or "").lower()
@@ -165,6 +176,8 @@ def is_outage(reason):
         return False
     if model_answered(text):
         return False
+    if TIMEOUT_REASON in text:
+        return True
     return any(pattern in text for pattern in _OUTAGE_PATTERNS)
 
 
@@ -183,7 +196,7 @@ def is_usage_limit(reason):
 def decide(free_status, free_failures, paid_status, paid_reason,
            free_validation="", paid_validation="", model_acted=False,
            select_agent_fatal=False, free_agent_fatal=False,
-           paid_agent_fatal=False):
+           paid_agent_fatal=False, paid_timed_out=False):
     """Classify a review run.
 
     `free_failures` is a list of (model, reason) pairs: every free
@@ -247,6 +260,12 @@ def decide(free_status, free_failures, paid_status, paid_reason,
             and all(is_outage(reason) for _model, reason in free_failures)):
         return Decision(OUTCOME_UNAVAILABLE, CAUSE_FREE_UNREACHABLE)
 
+    # A paid fallback that timed out is an outage: the run's own clock
+    # expired, not the provider. The workflow writes a fixed reason for
+    # this, which the shutdown shape opencode leaves behind cannot say.
+    if paid_status != "success" and (paid_timed_out or is_timeout(paid_reason)):
+        return Decision(OUTCOME_UNAVAILABLE, CAUSE_TIMEOUT)
+
     return Decision(OUTCOME_FAILURE, CAUSE_NO_RESULT)
 
 
@@ -292,7 +311,19 @@ def main(argv):
     parser.add_argument("--select-agent-fatal", default="")
     parser.add_argument("--free-agent-fatal", default="")
     parser.add_argument("--paid-agent-fatal", default="")
+    parser.add_argument("--paid-timed-out", default="",
+                        help="true when the paid fallback was killed by its "
+                             "own timeout")
     args = parser.parse_args(argv[1:])
+
+    raw_paid_timed_out = args.paid_timed_out
+    if raw_paid_timed_out not in ("", "true", "false"):
+        print(
+            "paid-timed-out must be true, false, or empty, "
+            "got %r" % raw_paid_timed_out,
+            file=sys.stderr,
+        )
+        return 2
 
     failures = []
     for path in args.free_failures:
@@ -305,7 +336,8 @@ def main(argv):
                       model_acted=_flag(args.model_acted),
                       select_agent_fatal=_flag(args.select_agent_fatal),
                       free_agent_fatal=_flag(args.free_agent_fatal),
-                      paid_agent_fatal=_flag(args.paid_agent_fatal))
+                      paid_agent_fatal=_flag(args.paid_agent_fatal),
+                      paid_timed_out=(raw_paid_timed_out == "true"))
     print(json.dumps({"outcome": decision.outcome, "cause": decision.cause}))
     return 0
 
