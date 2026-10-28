@@ -64,7 +64,7 @@ func TestReflectKeepsADecisionLinkWhenTheSuccessorIsKept(t *testing.T) {
 	if len(globalMems) != 0 {
 		t.Fatalf("%d candidates are global: %+v", len(globalMems), result.Memories)
 	}
-	if _, _, _, _, _, _, _, _, _, _, err := applyReflection(ctx, store, "proj", projectMems, globalMems, "", false, replacedIDsFor(&result), nil); err != nil {
+	if _, _, _, _, _, _, _, _, _, _, _, err := applyReflection(ctx, store, "proj", projectMems, globalMems, "", false, replacedIDsFor(&result), nil); err != nil {
 		t.Fatalf("applyReflection: %v", err)
 	}
 
@@ -159,7 +159,7 @@ func TestReflectKeepsADroppedRowTheGuardHandedBack(t *testing.T) {
 	if len(globalMems) != 0 {
 		t.Fatalf("%d candidates are global: %+v", len(globalMems), result.Memories)
 	}
-	if _, _, _, _, _, _, _, _, _, _, err := applyReflection(ctx, store, "proj", projectMems, globalMems, "", false, replacedIDsFor(&result), nil); err != nil {
+	if _, _, _, _, _, _, _, _, _, _, _, err := applyReflection(ctx, store, "proj", projectMems, globalMems, "", false, replacedIDsFor(&result), nil); err != nil {
 		t.Fatalf("applyReflection: %v", err)
 	}
 

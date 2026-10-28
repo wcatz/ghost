@@ -2085,8 +2085,7 @@ func runReflect() {
 			Tags:       m.Tags,
 		})
 	}
-	keptProjectMems, keptGlobalMems, preserved, promoted, keptMems, droppedProject, droppedGlobal, deleted, appliedByCategory, applied, err := applyReflection(
-		ctx, store, projectID, projectMems, globalMems, consolidatedSince, parsed.promoteGlobals, replacedIDsFor(&result), fed)
+	keptProjectMems, keptGlobalMems, preserved, promoted, keptMems, droppedProject, droppedGlobal, deleted, appliedByCategory, credDropped, applied, err := applyReflection(ctx, store, projectID, projectMems, globalMems, consolidatedSince, parsed.promoteGlobals, replacedIDsFor(&result), fed)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: save memories: %v\n", err)
 		os.Exit(1)
@@ -2112,6 +2111,7 @@ func runReflect() {
 		sameSecond:    droppedProject.SameSecond + droppedGlobal.SameSecond,
 		overflowed:    droppedProject.Overflow + droppedGlobal.Overflow,
 		overflowLinks: droppedProject.OverflowLinks + droppedGlobal.OverflowLinks,
+		credDropped:   credDropped,
 	}
 	if promoted > 0 {
 		fmt.Printf("Promoted %d/%d global memories\n", promoted, len(globalMems))
@@ -5123,6 +5123,9 @@ type reflectRefusals struct {
 	// overflowLinks is how many decision links those overflowing merges stood
 	// for.
 	overflowLinks int
+	// credDropped is the proposals dropped because they held a token-shaped
+	// value (#1565).
+	credDropped int
 }
 
 // dropped is every refused emission, whatever the reason: the ones whose
@@ -5171,26 +5174,31 @@ func (r reflectRefusals) claimedPhrase() string {
 // and a round with more than one prints the mixed line carrying every count.
 func reportAppliedNothing(w io.Writer, r reflectRefusals) {
 	switch {
-	case r.overflowed > 0 && r.changed == 0 && r.sameSecond == 0 && r.scopeRefused == 0:
+	case r.overflowed > 0 && r.changed == 0 && r.sameSecond == 0 && r.scopeRefused == 0 && r.credDropped == 0:
 		_, _ = fmt.Fprintf(w, "Applied: nothing — every consolidation proposal folded more decision links than one source_ref can hold (%d link(s), %d-byte bound) and was dropped\n", r.overflowLinks, memory.MaxSourceRefLen)
 		_, _ = fmt.Fprintln(w, "  the decisions it merged are left live, each still linked to its own decision; split the merge, or record the memory by hand")
-	case r.scopeRefused > 0 && r.changed == 0 && r.sameSecond == 0 && r.overflowed == 0:
+	case r.scopeRefused > 0 && r.changed == 0 && r.sameSecond == 0 && r.overflowed == 0 && r.credDropped == 0:
 		_, _ = fmt.Fprintln(w, "Applied: nothing — every consolidation proposal merged memories whose scopes disagree, and was refused")
 		_, _ = fmt.Fprintln(w, "  every source is left exactly as it is, under its own scope; merge them by hand under one scope if they really are one fact")
-	case refusalReasons(r.scopeRefused, r.changed, r.sameSecond, r.overflowed) >= 2:
-		// Mixed reasons: each is counted, so neither a scope refusal nor an
+	case refusalReasons(r.scopeRefused, r.changed, r.sameSecond, r.overflowed, r.credDropped) >= 2: // Mixed reasons: each is counted, so neither a scope refusal nor an
 		// overflow is folded into the concurrent-edit line below, and a
 		// concurrent edit is not hidden. Any two of them make a mix; an
 		// overflow beside a concurrent edit is one too, scope refusal or not.
 		// The same-second count is added only when there is one, so a round
 		// without it reads exactly as it always did.
+		line := fmt.Sprintf("Applied: nothing — every consolidation proposal was refused: %d merged memories whose scopes disagree, %d claimed a memory that changed or was deleted while consolidation ran, %d folded more decision links than one source_ref can hold", r.scopeRefused, r.changed, r.overflowed)
 		if r.sameSecond > 0 {
-			_, _ = fmt.Fprintf(w, "Applied: nothing — every consolidation proposal was refused: %d merged memories whose scopes disagree, %d claimed a memory that changed or was deleted while consolidation ran, %d folded more decision links than one source_ref can hold, %d were held back because their memories were written in the same second this pass started\n", r.scopeRefused, r.changed, r.overflowed, r.sameSecond)
-		} else {
-			_, _ = fmt.Fprintf(w, "Applied: nothing — every consolidation proposal was refused: %d merged memories whose scopes disagree, %d claimed a memory that changed or was deleted while consolidation ran, %d folded more decision links than one source_ref can hold\n", r.scopeRefused, r.changed, r.overflowed)
+			line += fmt.Sprintf(", %d were held back because their memories were written in the same second this pass started", r.sameSecond)
 		}
+		if r.credDropped > 0 {
+			line += fmt.Sprintf(", %d held a credential value", r.credDropped)
+		}
+		_, _ = fmt.Fprintln(w, line)
 		_, _ = fmt.Fprintln(w, "  every memory those proposals named is left exactly as it is")
-	case r.sameSecond > 0 && r.changed == 0:
+		if r.credDropped > 0 {
+			_, _ = fmt.Fprintln(w, "  the project is unchanged, so a stored memory holding that value is still there: remove or correct it by hand")
+		}
+	case r.sameSecond > 0 && r.changed == 0 && r.credDropped == 0:
 		_, _ = fmt.Fprintf(w, "Applied: nothing — %d consolidation proposal(s) were held back because their memories were written in the same second this pass started, so none could be written\n", r.sameSecond)
 		_, _ = fmt.Fprintln(w, "  nothing changed: run the pass again to apply them, and those memories are older by then")
 	case r.changed == 0:

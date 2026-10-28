@@ -69,7 +69,7 @@ type reflectionApplier interface {
 // stands has to keep the skip fingerprint unrecorded, and a merge dropped
 // because its decision links do not fit in a source_ref would be re-proposed on
 // every run if it did the same (#1228).
-func applyReflection(ctx context.Context, store reflectionApplier, projectID string, projectMems, globalMems []reflection.ReflectMemory, consolidatedSince string, promoteGlobals bool, replaced map[replacedKey][]string, fed []memory.CorpusRow) (keptProject, keptGlobal []reflection.ReflectMemory, preserved []string, promoted int, keptMems []memory.Memory, projectDropped, globalDropped memory.EmissionDrops, deleted int, appliedByCategory map[string]int, applied bool, err error) {
+func applyReflection(ctx context.Context, store reflectionApplier, projectID string, projectMems, globalMems []reflection.ReflectMemory, consolidatedSince string, promoteGlobals bool, replaced map[replacedKey][]string, fed []memory.CorpusRow) (keptProject, keptGlobal []reflection.ReflectMemory, preserved []string, promoted int, keptMems []memory.Memory, projectDropped, globalDropped memory.EmissionDrops, deleted int, appliedByCategory map[string]int, credDropped int, applied bool, err error) {
 	// Filter FIRST, on the caller's two sets, and leave the fold to the store.
 	//
 	// The order is load-bearing and it was the other way round here first.
@@ -107,11 +107,11 @@ func applyReflection(ctx context.Context, store reflectionApplier, projectID str
 		// above, and saying so here is the point — a removal claim printed before
 		// anyone knows whether a replace runs closes the incident in the
 		// operator's head while the value sits in the database.
-		return keptProject, keptGlobal, nil, 0, nil, memory.EmissionDrops{}, memory.EmissionDrops{}, 0, nil, false, nil
+		return keptProject, keptGlobal, nil, 0, nil, memory.EmissionDrops{}, memory.EmissionDrops{}, 0, nil, 0, false, nil
 	}
 	preserved, promoted, kept, projectDropped, globalDropped, deleted, appliedByCategory, err := store.ApplyReflection(ctx, projectID, projectRows, globalRows, consolidatedSince, promoteGlobals, fed)
 	if err != nil {
-		return keptProject, keptGlobal, nil, 0, nil, memory.EmissionDrops{}, memory.EmissionDrops{}, 0, nil, false, err
+		return keptProject, keptGlobal, nil, 0, nil, memory.EmissionDrops{}, memory.EmissionDrops{}, 0, nil, 0, false, err
 	}
 	// Two things have to be true for a carried-forward row to be gone, and this
 	// note says only what holds. A proposal dropped for holding a credential is
@@ -145,7 +145,7 @@ func applyReflection(ctx context.Context, store reflectionApplier, projectID str
 	if projectDropped.Total()+globalDropped.Total() == len(projectRows)+len(globalRows) && deleted == 0 {
 		applied = false
 	}
-	return keptProject, keptCrossProject, preserved, promoted, kept, projectDropped, globalDropped, deleted, appliedByCategory, applied, nil
+	return keptProject, keptCrossProject, preserved, promoted, kept, projectDropped, globalDropped, deleted, appliedByCategory, credDropped, applied, nil
 }
 
 // displayProposal renders a proposal or a guarded drop for the operator's own
