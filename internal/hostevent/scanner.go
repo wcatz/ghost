@@ -91,6 +91,25 @@ var ghostServerQualifiers = []string{"mcp__ghost__", "ghost_", "ghost.", "mcp__g
 // stop would skip the nudge when nothing was saved to Ghost.
 func isGhostSaveTool(name string) bool { return isGhostTool(name, ghostSaveToolNames) }
 
+// ghostDecisionToolNames are the tools that record a decision between
+// alternatives. They are NOT in ghostSaveToolNames: the audit routes a save's
+// arguments into the restatement bucket, and a decision record's arguments are
+// not a restatement of a memory. They do count as a save for the stop nudge,
+// so the reminder's ghost_decision_record parenthetical does not leave the
+// agent re-nudged after following it. Kept as a separate, nudge-only set so
+// the audit's meaning is unchanged.
+var ghostDecisionToolNames = map[string]bool{
+	"ghost_decision_record": true,
+}
+
+// isGhostNudgeSaveTool reports whether a tool counts as a save for the
+// save-less-stop nudge. It is the union of the real save tools and the
+// decision tools, and is used only by the scanners' GhostSaves count — never
+// by the audit, which keys off isGhostSaveTool alone.
+func isGhostNudgeSaveTool(name string) bool {
+	return isGhostSaveTool(name) || isGhostTool(name, ghostDecisionToolNames)
+}
+
 // ghostUpdateToolNames are the tools that rewrite a memory already stored, whose
 // arguments are the memory's own id and new text. They are kept apart from
 // ghostSaveToolNames because the save-nudge reads that set to ask whether the session
@@ -202,7 +221,7 @@ func ScanClaudeJSONL(r io.Reader) (ScanResult, error) {
 		for _, c := range l.Message.Content {
 			if c.Type == "tool_use" {
 				res.ToolCalls++
-				if isGhostSaveTool(c.Name) {
+				if isGhostNudgeSaveTool(c.Name) {
 					res.GhostSaves++
 				}
 			}
@@ -247,7 +266,7 @@ func ScanCodexRollout(r io.Reader) (ScanResult, error) {
 				flat = *l.Payload.Namespace
 			}
 			flat += l.Payload.Name
-			if isGhostSaveTool(flat) {
+			if isGhostNudgeSaveTool(flat) {
 				res.GhostSaves++
 			}
 		case "local_shell_call":
@@ -289,7 +308,7 @@ func ScanOpencodeMessages(r io.Reader) (ScanResult, error) {
 		for _, p := range l.Parts {
 			if p.Type == "tool" {
 				res.ToolCalls++
-				if isGhostSaveTool(p.Tool) {
+				if isGhostNudgeSaveTool(p.Tool) {
 					res.GhostSaves++
 				}
 			}
@@ -338,12 +357,12 @@ func ScanOpencodeV2Messages(r io.Reader) (ScanResult, error) {
 				continue
 			}
 			res.ToolCalls++
-			if isGhostSaveTool(c.Name) {
+			if isGhostNudgeSaveTool(c.Name) {
 				res.GhostSaves++
 				continue
 			}
 			for _, inner := range c.State.Metadata.ToolCalls {
-				if isGhostSaveTool(inner.Tool) {
+				if isGhostNudgeSaveTool(inner.Tool) {
 					res.GhostSaves++
 				}
 			}
