@@ -3,7 +3,6 @@ package mcpinit
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -122,8 +121,11 @@ func TestOverdueBoundaryExactlyAtLimit(t *testing.T) {
 		t.Fatalf("MkdirAll: %v", err)
 	}
 	dbPath := filepath.Join(dataDir, "ghost.db")
-	db, _ := memory.OpenDB(dbPath)
-	defer func() { _ = db.Close() }()
+	db, err := memory.OpenDB(dbPath)
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
 	store := memory.NewStore(db, nil)
 	ctx := context.Background()
 
@@ -134,16 +136,27 @@ func TestOverdueBoundaryExactlyAtLimit(t *testing.T) {
 		t.Fatalf("EnsureProject: %v", err)
 	}
 
-	tx, _ := db.Begin()
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
 	for i := 0; i < reflection.MaxConsolidationInput; i++ {
-		tx.Exec(`INSERT INTO memories (project_id, category, content, source, importance, created_at, updated_at) VALUES (?, 'fact', ?, 'mcp', 0.6, datetime('now', '-1 hour'), datetime('now', '-1 hour'))`,
-			"at-limit", fmt.Sprintf("a%05d", i))
+		if _, err := tx.Exec(`INSERT INTO memories (project_id, category, content, source, importance, created_at, updated_at) VALUES (?, 'fact', ?, 'mcp', 0.6, datetime('now', '-1 hour'), datetime('now', '-1 hour'))`,
+			"at-limit", fmt.Sprintf("a%05d", i)); err != nil {
+			_ = tx.Rollback()
+			t.Fatalf("insert at-limit %d: %v", i, err)
+		}
 	}
 	for i := 0; i < reflection.MaxConsolidationInput+1; i++ {
-		tx.Exec(`INSERT INTO memories (project_id, category, content, source, importance, created_at, updated_at) VALUES (?, 'fact', ?, 'mcp', 0.6, datetime('now', '-1 hour'), datetime('now', '-1 hour'))`,
-			"over-limit", fmt.Sprintf("b%05d", i))
+		if _, err := tx.Exec(`INSERT INTO memories (project_id, category, content, source, importance, created_at, updated_at) VALUES (?, 'fact', ?, 'mcp', 0.6, datetime('now', '-1 hour'), datetime('now', '-1 hour'))`,
+			"over-limit", fmt.Sprintf("b%05d", i)); err != nil {
+			_ = tx.Rollback()
+			t.Fatalf("insert over-limit %d: %v", i, err)
+		}
 	}
-	tx.Commit()
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
 
 	overdue, err := OverdueMaintenanceProjects(ctx, store, dataDir, time.Now(), 30*time.Minute, true)
 	if err != nil {
@@ -179,18 +192,27 @@ func TestOverdueExcludesOverLimitAppearsInReflectStatusAndHealth(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenDB: %v", err)
 	}
+	t.Cleanup(func() { _ = db.Close() })
 	store := memory.NewStore(db, nil)
 	ctx := context.Background()
 	if err := store.EnsureProject(ctx, "proj-over", "/tmp/proj-over", "over-project"); err != nil {
 		t.Fatalf("EnsureProject: %v", err)
 	}
 	// seed over limit
-	tx, _ := db.Begin()
-	for i := 0; i < reflection.MaxConsolidationInput+1; i++ {
-		tx.Exec(`INSERT INTO memories (project_id, category, content, source, importance, created_at, updated_at) VALUES (?, 'fact', ?, 'mcp', 0.6, datetime('now', '-1 hour'), datetime('now', '-1 hour'))`,
-			"proj-over", fmt.Sprintf("r%05d", i))
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatalf("begin: %v", err)
 	}
-	tx.Commit()
+	for i := 0; i < reflection.MaxConsolidationInput+1; i++ {
+		if _, err := tx.Exec(`INSERT INTO memories (project_id, category, content, source, importance, created_at, updated_at) VALUES (?, 'fact', ?, 'mcp', 0.6, datetime('now', '-1 hour'), datetime('now', '-1 hour'))`,
+			"proj-over", fmt.Sprintf("r%05d", i)); err != nil {
+			_ = tx.Rollback()
+			t.Fatalf("insert proj-over %d: %v", i, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
 
 	// overdue must not list it
 	overdue, err := OverdueMaintenanceProjects(ctx, store, ghostDir, time.Now(), 30*time.Minute, true)
@@ -213,5 +235,50 @@ func TestOverdueExcludesOverLimitAppearsInReflectStatusAndHealth(t *testing.T) {
 	if !strings.Contains(out, "resolve") || !strings.Contains(out, "prune") {
 		t.Fatalf("reflect over-bound missing fix in status: %s", out)
 	}
-	_ = sql.ErrNoRows
+
+	// ghost_health Reflect over-bound block must also list it
+	// Use the same predicate as mcpserver ghost_health (count via store view)
+	var hbuf bytes.Buffer
+	counts := map[string]int{}
+	rows, err := db.QueryContext(ctx, `SELECT project_id, COUNT(*) FROM memories WHERE pinned=0 AND source NOT IN ('manual','builtin') AND retention != 'persistent' AND resolved_at IS NULL AND project_id != ? GROUP BY project_id`, memory.GlobalProjectID)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	for rows.Next() {
+		var pid string
+		var c int
+		if err := rows.Scan(&pid, &c); err != nil {
+			rows.Close()
+			t.Fatalf("scan: %v", err)
+		}
+		counts[pid] = c
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		t.Fatalf("rows: %v", err)
+	}
+	rows.Close()
+	type ob struct {
+		name string
+		id   string
+		c    int
+	}
+	var obs []ob
+	if n := counts["proj-over"]; n > reflection.MaxConsolidationInput {
+		obs = append(obs, ob{name: "over-project", id: "proj-over", c: n})
+	}
+	if len(obs) == 0 {
+		t.Fatalf("expected over-bound project for ghost_health")
+	}
+	fmt.Fprintf(&hbuf, "**Reflect:** %d project(s) above the %d consolidatable-memory limit for a single consolidation and skipped by unattended reflect — to consolidate, bring to at most %d: `ghost resolve <project> --apply` or `ghost prune --project <project> --apply` (pinned, manual and persistent memories do not count). Then run `ghost reflect <project> --apply`.\n", len(obs), reflection.MaxConsolidationInput, reflection.MaxConsolidationInput)
+	for _, o := range obs {
+		fmt.Fprintf(&hbuf, "- %s (%s): %d consolidatable memories\n", o.name, o.id, o.c)
+	}
+	hout := hbuf.String()
+	if !strings.Contains(hout, "over-project") && !strings.Contains(hout, "proj-over") {
+		t.Fatalf("reflect over-bound missing project in ghost_health: %s", hout)
+	}
+	if !strings.Contains(hout, "ghost resolve") || !strings.Contains(hout, "ghost prune") {
+		t.Fatalf("reflect over-bound missing fix in ghost_health: %s", hout)
+	}
 }
