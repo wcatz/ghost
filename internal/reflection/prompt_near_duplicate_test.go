@@ -118,7 +118,6 @@ func areNearDuplicatesLocal(a, b string) bool {
 	return true
 }
 
-
 func TestNearDuplicateHintIsBounded(t *testing.T) {
 	mkPairs := func(n int) [][2]string {
 		out := make([][2]string, n)
@@ -140,7 +139,7 @@ func TestNearDuplicateHintIsBounded(t *testing.T) {
 	over := maxNearDuplicateHintPairs + 4
 	input = ReflectionInput{ProjectName: "proj", NearDuplicatePairs: mkPairs(over)}
 	prompt = BuildReflectionPrompt(input)
-	if got := strings.Count(prompt, "read as duplicates\n")-1; got != maxNearDuplicateHintPairs {
+	if got := strings.Count(prompt, "read as duplicates\n") - 1; got != maxNearDuplicateHintPairs {
 		t.Fatalf("want %d listed pairs, got %d", maxNearDuplicateHintPairs, got)
 	}
 	wantMore := fmt.Sprintf("... and %d more near-duplicate pair(s)", over-maxNearDuplicateHintPairs)
