@@ -969,14 +969,15 @@ func claimPidFileReclaim(pidPath string) (claimed bool, reclaimedAt time.Time, e
 		prior, statErr := priorFile.Stat()
 		if statErr == nil && prior.Mode().IsRegular() {
 			if isAlive(pidPath) {
-				priorFile.Close()
+				_ = priorFile.Close()
 				return false, time.Time{}, nil
 			}
 			reclaimedAt = prior.ModTime()
 		}
-		priorFile.Close()
+		_ = priorFile.Close()
 	} else {
 		// Fall through to the write path; a non-claim path is replaced.
+		_ = openErr
 	}
 	token, haveToken := processStartTime(os.Getpid())
 	if err := atomicWritePID(pidPath, os.Getpid(), token, haveToken); err != nil {

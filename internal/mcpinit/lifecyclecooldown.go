@@ -75,7 +75,7 @@ func unfinishedLifecycleRun(dataDir, projectID string) (time.Time, bool) {
 	if err != nil {
 		return time.Time{}, false
 	}
-	defer claimFile.Close()
+	defer func() { _ = claimFile.Close() }()
 	claim, err := claimFile.Stat()
 	if err != nil || !claim.Mode().IsRegular() {
 		return time.Time{}, false
