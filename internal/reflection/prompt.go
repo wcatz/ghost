@@ -14,7 +14,6 @@ import (
 // 20 matches the existing maxGitCommits cap on git commits in the same prompt.
 const maxNearDuplicateHintPairs = 20
 
-
 // ReflectionInput holds all data fed into the reflection prompt.
 type ReflectionInput struct {
 	ExistingMemories []memory.Memory // all memories (up to 200)
