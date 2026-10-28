@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"syscall"
 	"testing"
 )
@@ -124,5 +125,41 @@ func TestTheStopHookDoesNotBlockOnAFIFOClaim(t *testing.T) {
 	if len(*spawned) != 1 {
 		t.Fatalf("the hook started %d child(ren), want exactly 1: a path that is not a regular file is no claim",
 			len(*spawned))
+	}
+}
+
+// TestClaimPidFileReclaimAndUnfinishedIgnoreSymlinkedClaim: a symlinked claim
+// file must be judged by the file opened (O_NOFOLLOW refuses it). A regular
+// target file holding the live pid of the test process is not reclaimed by
+// mtime and produces no unfinished run.
+func TestClaimPidFileReclaimAndUnfinishedIgnoreSymlinkedClaim(t *testing.T) {
+	dataDir := t.TempDir()
+	target := filepath.Join(dataDir, "target.pid")
+	if err := os.WriteFile(target, []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	link := filepath.Join(dataDir, "lifecycle-p1.pid")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	claimed, reclaimedAt, err := claimPidFileReclaim(link)
+	if err != nil {
+		t.Fatalf("claimPidFileReclaim: %v", err)
+	}
+	if !claimed {
+		t.Fatal("claimPidFileReclaim claimed=false, want true (symlink must be refused so target not treated as existing claim)")
+	}
+	if !reclaimedAt.IsZero() {
+		t.Fatalf("reclaimedAt = %s, want zero time (no reclaim taken from target's mtime)", reclaimedAt)
+	}
+
+	startedAt, unfinished := unfinishedLifecycleRun(dataDir, "p1")
+	if unfinished {
+		t.Fatalf("unfinishedLifecycleRun = true, startedAt=%s, want false (symlink must not be judged via target)", startedAt)
+	}
+	if !startedAt.IsZero() {
+		t.Fatalf("startedAt = %s, want zero time", startedAt)
 	}
 }

@@ -66,11 +66,17 @@ func unfinishedLifecycleRun(dataDir, projectID string) (time.Time, bool) {
 	if !ok {
 		return time.Time{}, false
 	}
-	// Stat before isAlive: the liveness read opens the file, and a FIFO planted
-	// where a claim belongs would block the session start until its writer
-	// appeared. Only a regular file can be a claim.
+	// Open with the same flags as readPIDFile so the file judged is the
+	// file opened: a symlink is refused by O_NOFOLLOW and only a regular
+	// descriptor is considered a claim. The mtime and liveness both come
+	// from that opened descriptor.
 	claimPath := filepath.Join(dataDir, "lifecycle-"+projectID+".pid")
-	claim, err := os.Stat(claimPath)
+	claimFile, err := os.OpenFile(claimPath, markerOpenFlags, 0)
+	if err != nil {
+		return time.Time{}, false
+	}
+	defer claimFile.Close()
+	claim, err := claimFile.Stat()
 	if err != nil || !claim.Mode().IsRegular() {
 		return time.Time{}, false
 	}
