@@ -1132,6 +1132,34 @@ jobs:
           else
             free_failure_reason="no free candidate produced a usable reply"
           fi
+
+          # During a free-model outage the free candidates all failed on a
+          # rate limit or a dropped connection. Spending the paid Go quota
+          # on every such head drains it on retries of the same outage, so
+          # the paid fallback is not invoked then: the run stays pending
+          # and the scheduled retry picks it up when the free tier recovers.
+          free_is_outage=0
+          if [ -s "$failure_file" ]; then
+            if python3 -I - "$RUNNER_TEMP/base-scripts" "$failure_file" <<'PY' >/dev/null 2>&1
+          import sys
+
+          sys.path.insert(0, sys.argv[1])
+          from review_outcome import parse_failures, is_outage
+
+          with open(sys.argv[2], encoding="utf-8", errors="replace") as handle:
+              failures = parse_failures(handle.read())
+          raise SystemExit(0 if failures and all(is_outage(reason)
+                                          for _model, reason in failures) else 1)
+          PY
+            then
+              free_is_outage=1
+            fi
+          fi
+          if [ "$free_is_outage" = 1 ]; then
+            printf 'paid_status=failed\n' >> "$GITHUB_OUTPUT"
+            echo "::notice::free models are unreachable; skipping the paid fallback to preserve the Go quota"
+            exit 0
+          fi
           # The reason is not printed: it is provider output, and the log
           # says which path failed and which model is taking over.
           echo "::warning::the free review path failed: $(workflow_escape "$free_failure_reason"); using paid fallback ${PAID_MODEL}"

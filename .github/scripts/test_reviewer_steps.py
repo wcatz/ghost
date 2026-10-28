@@ -1214,6 +1214,116 @@ sys.exit(0)
                 log = f.read()
             self.assertNotIn('--exit-status', log)
 
+    def test_paid_fallback_skips_when_free_failures_are_all_outages(self):
+        with tempfile.TemporaryDirectory() as folder:
+            runner = os.path.join(folder, "runner-temp")
+            scripts = os.path.join(runner, "base-scripts")
+            os.makedirs(scripts)
+            shutil.copyfile(script_path("review_outcome.py"), os.path.join(scripts, "review_outcome.py"))
+            shutil.copyfile(script_path("review_findings.py"), os.path.join(scripts, "review_findings.py"))
+            _write(os.path.join(runner, "free-review-failure.txt"),
+                   "opencode/ling-3.1-flash-free: rate limit exceeded\n"
+                   "opencode/longcat-2.5-preview-free: connection reset by peer\n")
+            _write(os.path.join(runner, "reviewer-prompt.txt"), "review\n")
+            stdout_path = os.path.join(folder, "opencode.out")
+            stderr_path = os.path.join(folder, "opencode.err")
+            _write(stdout_path, PROVIDER_ERROR + "\n")
+            _write(stderr_path, "")
+            _write(os.path.join(folder, "pr.diff"), "diff --git a/x b/x\n")
+            output = os.path.join(folder, "github-output")
+            _write(output, "")
+            step = os.path.join(folder, "paid.sh")
+            _write(step, step_shell("Review with opencode (paid fallback)"))
+            environment = dict(os.environ)
+            environment.update({
+                "HOME": folder,
+                "PATH": folder + os.pathsep + environment.get("PATH", ""),
+                "RUNNER_TEMP": runner,
+                "GITHUB_OUTPUT": output,
+                "OPENCODE_API_KEY": "test",
+                "SELECT_MODEL_OUTCOME": "failure",
+                "PAID_MODEL": "opencode-go/deepseek-v4.1-flash",
+                "FAKE_OPENCODE_STDOUT": stdout_path,
+                "FAKE_OPENCODE_STDERR": stderr_path,
+                "FAKE_OPENCODE_STATUS": "1",
+                "CI": "true",
+            })
+            old = os.getcwd()
+            try:
+                os.chdir(folder)
+                result = subprocess.run(["bash", step], env=environment, capture_output=True, text=True, check=False)
+            finally:
+                os.chdir(old)
+            with open(output, encoding="utf-8") as handle:
+                out = handle.read()
+            self.assertIn("paid_status=failed", out)
+            self.assertNotIn("review produced by paid fallback", result.stdout)
+            self.assertIn("skipping the paid fallback", result.stdout)
+
+    def test_paid_fallback_does_not_skip_when_free_failures_include_non_outage(self):
+        with tempfile.TemporaryDirectory() as folder:
+            runner = os.path.join(folder, "runner-temp")
+            scripts = os.path.join(runner, "base-scripts")
+            os.makedirs(scripts)
+            shutil.copyfile(script_path("review_outcome.py"), os.path.join(scripts, "review_outcome.py"))
+            shutil.copyfile(script_path("review_findings.py"), os.path.join(scripts, "review_findings.py"))
+            helper = os.path.join(scripts, "model_acted.py")
+            argv_log = os.path.join(folder, "model-acted-argv.log")
+            _write(helper, """#!/usr/bin/env python3
+import argparse, sys, os
+parser = argparse.ArgumentParser()
+parser.add_argument('--events', default='')
+parser.add_argument('--stderr', default='')
+parser.add_argument('--marker', default='')
+parser.add_argument('--exit-status', default='')
+args = parser.parse_args(sys.argv[1:])
+log = os.environ.get('MODEL_ACTED_ARGV_LOG')
+if log:
+    with open(log, 'a') as f:
+        f.write(' '.join(sys.argv) + '\\n')
+if args.marker:
+    with open(args.marker, 'a') as f:
+        f.write('acted\\n')
+print('true')
+sys.exit(0)
+""")
+            os.chmod(helper, 0o755)
+            _write(os.path.join(runner, "free-review-failure.txt"),
+                   "opencode/ling-3.1-flash-free: some other error\n")
+            _write(os.path.join(runner, "reviewer-prompt.txt"), "review\n")
+            stdout_path = os.path.join(folder, "opencode.out")
+            stderr_path = os.path.join(folder, "opencode.err")
+            _write(stdout_path, PROVIDER_ERROR + "\n")
+            _write(stderr_path, "")
+            _write(os.path.join(folder, "pr.diff"), "diff --git a/x b/x\n")
+            output = os.path.join(folder, "github-output")
+            _write(output, "")
+            step = os.path.join(folder, "paid.sh")
+            _write(step, step_shell("Review with opencode (paid fallback)"))
+            environment = dict(os.environ)
+            environment.update({
+                "HOME": folder,
+                "PATH": folder + os.pathsep + environment.get("PATH", ""),
+                "RUNNER_TEMP": runner,
+                "GITHUB_OUTPUT": output,
+                "OPENCODE_API_KEY": "test",
+                "SELECT_MODEL_OUTCOME": "failure",
+                "PAID_MODEL": "opencode-go/deepseek-v4.1-flash",
+                "FAKE_OPENCODE_STDOUT": stdout_path,
+                "FAKE_OPENCODE_STDERR": stderr_path,
+                "FAKE_OPENCODE_STATUS": "1",
+                "MODEL_ACTED_ARGV_LOG": argv_log,
+                "CI": "true",
+            })
+            old = os.getcwd()
+            try:
+                os.chdir(folder)
+                result = subprocess.run(["bash", step], env=environment, capture_output=True, text=True, check=False)
+            finally:
+                os.chdir(old)
+            if not os.path.exists(argv_log):
+                self.fail("model_acted not called or argv not logged")
+
     def test_helper_accepts_definitions_are_identical(self):
         with open(workflow_path(), encoding='utf-8') as f:
             content = f.read()
