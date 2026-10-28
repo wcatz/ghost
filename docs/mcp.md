@@ -154,6 +154,16 @@ token-shaped one — legal because `ghost import` writes an artifact's project i
 verbatim — is withheld behind the guard's placeholder rather than printed, and
 any other one is rendered so it cannot open a data block of its own.
 
+`ghost_health` also reports how many `_global` rows are reflection-written and consolidatable and how
+many near-duplicate clusters they form, with the command that folds them. `_global`
+has no checkout path so no unattended `ghost lifecycle` run ever reaches it, yet
+its rows are injected into every session. The count is reflection-written only because `ghost maintenance consolidate-global` folds only reflection-written, consolidatable rows; other consolidatable `_global` rows (for example `ghost_save_global` rows) are listed under **Near duplicates:** and consolidated by `ghost reflect _global --apply`. The line matches the `ghost maintenance consolidate-global` dry-run: when there are no reflection-written consolidatable rows it prints `_global: %d memories, 0 reflection-written consolidatable`; when there are reflection-written consolidatable rows but no clusters it prints `_global: %d memories, %d reflection-written consolidatable — nothing to fold`; when clusters exist it prints `_global: %d memories, %d reflection-written consolidatable, %d near-duplicate cluster(s) covering %d rows` — and, when at
+least one cluster exists, a `⚠` line names `ghost maintenance
+consolidate-global --apply` as the repair. A read that fails prints `**_global:**
+could not be read: …` rather than nothing. The same line and the same warning
+appear in `ghost mcp status`, so a terminal and an agent reading one store are
+told the same thing about it.
+
 `ghost_health` also reports **maintenance overdue:** projects that hold
 consolidatable memories and have not had lifecycle maintenance within
 `lifecycle.min_interval` (default 30m) or have never had one, and whose claim
@@ -164,6 +174,7 @@ run (`never` when none), rendered through the same label and token guards;
 the same counts, so the two diagnostics cannot disagree. A project with no
 consolidatable memories is never overdue, and a read that cannot be made is a
 missing diagnostic, not a failed check.
+
 
 ### Retrieval health
 

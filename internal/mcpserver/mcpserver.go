@@ -659,6 +659,26 @@ func shortID(id string) string {
 	return assemble.ShortID(id)
 }
 
+// globalConsolidatable is the _global rows the fold may touch: the same
+// consolidatable filter the project and _global folds use (not pinned, not
+// resolved, not persistent, not manual/builtin) and only what reflection wrote.
+// It mirrors cmd/ghost's consolidatable plus the source gate in
+// consolidateGlobal, so a diagnostic and the folder cannot disagree about what a
+// duplicate is.
+func globalConsolidatable(mems []memory.Memory) []memory.Memory {
+	out := make([]memory.Memory, 0, len(mems))
+	for _, m := range mems {
+		if m.ResolvedAt != nil || m.Pinned || memory.RetentionExempt(m) || m.Source == "manual" || m.Source == "builtin" {
+			continue
+		}
+		if m.Source != "reflection" {
+			continue
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
 // tagMaxLen is what one tag may be, in bytes. It is a DISPLAY-scale bound rather
 // than a column claim — the column is unconstrained text — and it is a constant
 // because three different things must agree on it: this writer, the tool
@@ -4123,6 +4143,52 @@ func (s *Server) registerTools() {
 		if growthErr == nil {
 			for _, warn := range growth.Warnings {
 				fmt.Fprintf(&sb, "  ⚠ %s\n", warn.Detail)
+			}
+		}
+
+		// _global consolidation need (#1846): _global has no checkout path so no
+		// unattended run ever reaches it, yet its rows are injected into every
+		// session. The only fold is the manual `ghost maintenance
+		// consolidate-global` command. This block surfaces that backlog as
+		// consolidatable rows and near-duplicate clusters, and names the command
+		// that folds them. It is additive like the block above, and a failed
+		// read is reported rather than dropped.
+		//
+		// It reads through the diagnostic view when the server has one, so the
+		// counts describe the same committed state as the rest of the report and
+		// arrive while a write is in flight (#1738). Only reflection-written rows
+		// that are consolidatable are eligible for consolidate-global; other
+		// consolidatable _global rows (e.g. mcp-saved) may appear as near-duplicate
+		// pairs elsewhere and are consolidated by `ghost reflect _global --apply`.
+		// We label them as reflection-written to avoid contradicting the Near
+		// duplicates block, and we do not claim "no near-duplicate clusters" when
+		// non-reflection consolidatable pairs exist elsewhere.
+		if all, err := read.reader.GetAll(ctx, memory.GlobalProjectID, -1); err != nil {
+			fmt.Fprintf(&sb, "**_global:** could not be read: %v\n", err)
+		} else {
+			live := globalConsolidatable(all)
+			clusters := reflection.PlanGlobalFold(live)
+			switch {
+			case len(live) == 0:
+				if len(clusters) == 0 {
+					fmt.Fprintf(&sb, "**_global:** %d memories, 0 reflection-written consolidatable\n", len(all))
+				} else {
+					folded := 0
+					for _, c := range clusters {
+						folded += len(c.Folded)
+					}
+					fmt.Fprintf(&sb, "**_global:** %d memories, %d reflection-written consolidatable, %d near-duplicate cluster(s) covering %d rows\n", len(all), len(live), len(clusters), folded+len(clusters))
+					fmt.Fprintf(&sb, "  ⚠ %d cluster(s) — run `ghost maintenance consolidate-global --apply` to fold\n", len(clusters))
+				}
+			case len(clusters) == 0:
+				fmt.Fprintf(&sb, "**_global:** %d memories, %d reflection-written consolidatable — nothing to fold\n", len(all), len(live))
+			default:
+				folded := 0
+				for _, c := range clusters {
+					folded += len(c.Folded)
+				}
+				fmt.Fprintf(&sb, "**_global:** %d memories, %d reflection-written consolidatable, %d near-duplicate cluster(s) covering %d rows\n", len(all), len(live), len(clusters), folded+len(clusters))
+				fmt.Fprintf(&sb, "  ⚠ %d cluster(s) — run `ghost maintenance consolidate-global --apply` to fold\n", len(clusters))
 			}
 		}
 
