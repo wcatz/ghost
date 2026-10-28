@@ -39,6 +39,7 @@ type diagnosticReader interface {
 	LinkStats(ctx context.Context) (links, scans int, err error)
 	PinnedRowsWithContradictions(ctx context.Context, limit int) ([]memory.PinnedContradictedRow, int, error)
 	HistoryGrowth(ctx context.Context) (memory.HistoryGrowthResult, error)
+	GetAll(ctx context.Context, projectID string, limit int) ([]memory.Memory, error)
 }
 
 // diagnosticRead is the read surface ONE diagnostic tool call reads through.

@@ -768,6 +768,7 @@ func checkStoreHealth(w io.Writer, check func(ok bool, pass, fail string)) *memo
 		}
 	}
 	reportHistoryGrowth(w, store)
+	reportGlobalConsolidation(w, store)
 	reportOverdueMaintenanceStatus(w, store, dataDir)
 	reportReflectionExclusions(w, store)
 	reportReflectOverBound(w, store)
@@ -912,6 +913,67 @@ func reportHistoryGrowth(w io.Writer, store *memory.Store) {
 	}
 }
 
+// reportGlobalConsolidation prints how many _global rows are consolidatable and
+// how many near-duplicate clusters they form (#1846).
+//
+// _global has no checkout path so no unattended run ever reaches it, yet its
+// rows are injected into every session. This block surfaces that backlog as
+// consolidatable rows and clusters, and names the manual command that folds
+// them, so an operator reading either `ghost mcp status` or `ghost_health` is
+// told the same thing about one store. It is a `-` line when there is nothing
+// to fold and a `!` line when there is, and it never takes the health verdict:
+// a store with duplicates is working as configured and the repair is the fold
+// command, not `ghost mcp init`. A failed read is reported rather than dropped,
+// because an absent line reads as a healthy store.
+func reportGlobalConsolidation(w io.Writer, store *memory.Store) {
+	all, err := store.GetAll(context.Background(), memory.GlobalProjectID, -1)
+	if err != nil {
+		_, _ = fmt.Fprintf(w, "  ! _global: could not be read: %v\n", err)
+		return
+	}
+	live := globalConsolidatable(all)
+	clusters := reflection.PlanGlobalFold(live)
+	switch {
+	case len(live) == 0:
+		if len(clusters) == 0 {
+			_, _ = fmt.Fprintf(w, "  - _global: %d memories, 0 reflection-written consolidatable\n", len(all))
+		} else {
+			folded := 0
+			for _, c := range clusters {
+				folded += len(c.Folded)
+			}
+			_, _ = fmt.Fprintf(w, "  ! _global: %d memories, %d reflection-written consolidatable, %d near-duplicate cluster(s) covering %d rows — run `ghost maintenance consolidate-global --apply` to fold\n", len(all), len(live), len(clusters), folded+len(clusters))
+		}
+	case len(clusters) == 0:
+		_, _ = fmt.Fprintf(w, "  - _global: %d memories, %d reflection-written consolidatable — nothing to fold\n", len(all), len(live))
+	default:
+		folded := 0
+		for _, c := range clusters {
+			folded += len(c.Folded)
+		}
+		_, _ = fmt.Fprintf(w, "  ! _global: %d memories, %d reflection-written consolidatable, %d near-duplicate cluster(s) covering %d rows — run `ghost maintenance consolidate-global --apply` to fold\n", len(all), len(live), len(clusters), folded+len(clusters))
+	}
+}
+
+// globalConsolidatable is the _global rows the fold may touch: the same
+// consolidatable filter the fold uses (not pinned, not resolved, not
+// persistent, not manual/builtin) and only what reflection wrote. It mirrors the
+// filter in cmd/ghost/maintenance.go and internal/mcpserver, so the diagnostic
+// and the folder cannot disagree about what a duplicate is.
+func globalConsolidatable(mems []memory.Memory) []memory.Memory {
+	out := make([]memory.Memory, 0, len(mems))
+	for _, m := range mems {
+		if m.ResolvedAt != nil || m.Pinned || memory.RetentionExempt(m) || m.Source == "manual" || m.Source == "builtin" {
+			continue
+		}
+		if m.Source != "reflection" {
+			continue
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
 // reportOverdueMaintenanceStatus lists projects that have consolidatable
 // memories and have not had lifecycle maintenance within the configured
 // interval. It never fails the run — a read that cannot be made is a
@@ -932,4 +994,5 @@ func reportOverdueMaintenanceStatus(w io.Writer, store *memory.Store, dataDir st
 		return
 	}
 	ReportOverdueMaintenance(w, overdue, time.Now())
+
 }

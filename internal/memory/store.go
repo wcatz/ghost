@@ -5054,7 +5054,7 @@ func (s *Store) GetAll(ctx context.Context, projectID string, limit int) ([]Memo
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.queryDB().QueryContext(ctx, `
 		SELECT `+memoryColumns+`
 		FROM memories
 		WHERE project_id = ?

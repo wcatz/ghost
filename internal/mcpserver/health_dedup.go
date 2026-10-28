@@ -47,14 +47,14 @@ func (s *Server) writeNearDuplicateBlock(ctx context.Context, sb *strings.Builde
 	}
 	if totalPairs == 0 {
 		sb.WriteString("**Near duplicates:** no live near-duplicate pairs\n")
-		sb.WriteString("  _global is not consolidated unattended; run `ghost maintenance consolidate-global --apply` to fold its pairs\n")
+		// Let the _global consolidation block own the pointer when there is something to fold.
 		return
 	}
 	fmt.Fprintf(sb, "**Near duplicates:** %d live near-duplicate pair(s) across %d project(s) — these pairs read as duplicates and each loser costs a candidate slot before it is cut; `ghost reflect <project> --apply` merges them (grounded, drop-guarded)\n", totalPairs, len(stats))
 	if scanCapped {
 		sb.WriteString("  _near-duplicate scan capped at 2000 rows for at least one project; rows beyond the bound were not considered (scan capped/cut)\n")
 	}
-	sb.WriteString("  _global is not consolidated unattended; run `ghost maintenance consolidate-global --apply` to fold its pairs\n")
+	// Do not add _global pointer here; the _global consolidation block owns it when there is something to fold.
 	shownProjects := 0
 	for _, st := range stats {
 		if shownProjects >= maxHealthNearDuplicateProjects {
