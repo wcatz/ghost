@@ -75,3 +75,32 @@ func TestHealthStopsCountingAfterResolve(t *testing.T) {
 		t.Fatalf("resolved pair should not be counted, got %v", pairs)
 	}
 }
+
+// A near-duplicate pair whose id is shaped like a credential must not print the
+// id in full: the pair is counted and the ids go through memory.RefusalArg,
+// the same guard the pinned-contradiction block in the same answer uses.
+func TestHealthWithholdsTokenShapedNearDuplicateID(t *testing.T) {
+	f := newHealthFixture(t)
+	ctx := context.Background()
+	ms := f.srv.store.(*memory.Store)
+	id1, err := ms.CreateWithID(ctx, "abc123", tokenShapedMemoryID, memory.Memory{Category: "fact", Content: "the relay listens on port 2222 in production", Importance: 0.5, Source: "mcp"})
+	if err != nil {
+		t.Fatalf("CreateWithID: %v", err)
+	}
+	if id1 != tokenShapedMemoryID {
+		t.Fatalf("CreateWithID returned %q", id1)
+	}
+	if _, err := ms.Create(ctx, "abc123", memory.Memory{Category: "fact", Content: "relay listens on port 2222", Importance: 0.5, Source: "mcp"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	report := f.health(t)
+	if !strings.Contains(report, "Near duplicates") {
+		t.Fatalf("health does not report near duplicates:\n%s", report)
+	}
+	if strings.Contains(report, tokenShapedMemoryID) {
+		t.Errorf("report printed the token-shaped near-duplicate id in full:\n%s", report)
+	}
+	if !strings.Contains(report, "<memory_id withheld: it holds a GitHub personal access token>") {
+		t.Errorf("report did not withhold the token-shaped near-duplicate id:\n%s", report)
+	}
+}

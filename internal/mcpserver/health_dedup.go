@@ -28,12 +28,16 @@ func (s *Server) writeNearDuplicateBlock(ctx context.Context, sb *strings.Builde
 	}
 	var stats []projStat
 	totalPairs := 0
+	scanCapped := false
 	for _, p := range projects {
-		pairs, err := store.NearDuplicatePairsForProject(ctx, p.ID)
+		pairs, capped, err := store.NearDuplicatePairsForProject(ctx, p.ID)
 		if err != nil {
 			// A failed read is reported rather than dropped; see health pattern.
 			fmt.Fprintf(sb, "**Near duplicates:** could not be read for project %s: %v\n", assemble.Label(p.Name), err)
 			return
+		}
+		if capped {
+			scanCapped = true
 		}
 		if len(pairs) == 0 {
 			continue
@@ -47,6 +51,9 @@ func (s *Server) writeNearDuplicateBlock(ctx context.Context, sb *strings.Builde
 		return
 	}
 	fmt.Fprintf(sb, "**Near duplicates:** %d live near-duplicate pair(s) across %d project(s) — these pairs read as duplicates and each loser costs a candidate slot before it is cut; `ghost reflect <project> --apply` merges them (grounded, drop-guarded)\n", totalPairs, len(stats))
+	if scanCapped {
+		sb.WriteString("  _near-duplicate scan capped at 2000 rows for at least one project; rows beyond the bound were not considered (scan capped/cut)\n")
+	}
 	sb.WriteString("  _global is not consolidated unattended; run `ghost maintenance consolidate-global --apply` to fold its pairs\n")
 	shownProjects := 0
 	for _, st := range stats {
@@ -64,7 +71,7 @@ func (s *Server) writeNearDuplicateBlock(ctx context.Context, sb *strings.Builde
 		}
 		var parts []string
 		for _, pr := range sample {
-			parts = append(parts, fmt.Sprintf("%s and %s", assemble.Token(pr[0]), assemble.Token(pr[1])))
+			parts = append(parts, fmt.Sprintf("%s and %s", memory.RefusalArg("memory_id", pr[0]), memory.RefusalArg("memory_id", pr[1])))
 		}
 		line := fmt.Sprintf("  - %s (%s): %d pair(s): %s", assemble.Label(st.name), assemble.Token(st.id), len(st.pairs), strings.Join(parts, ", "))
 		if more > 0 {
