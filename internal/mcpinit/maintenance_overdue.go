@@ -110,9 +110,9 @@ func FormatOverdueMaintenance(overdue []OverdueProject, now time.Time) (string, 
 	interval := overdue[0].MinInterval
 	if interval <= 0 {
 		if len(overdue) == 1 {
-			fmt.Fprintf(&sb, "**Maintenance overdue:** 1 project has consolidatable memories and has not had lifecycle maintenance with the lifecycle cooldown disabled; run `ghost lifecycle --project <name>` for it:\n")
+			fmt.Fprintf(&sb, "**Maintenance overdue:** 1 project has consolidatable memories and is due for lifecycle maintenance (lifecycle cooldown disabled); run `ghost lifecycle --project <name>` for it:\n")
 		} else {
-			fmt.Fprintf(&sb, "**Maintenance overdue:** %d projects have consolidatable memories and have not had lifecycle maintenance with the lifecycle cooldown disabled; run `ghost lifecycle --project <name>` for each:\n", len(overdue))
+			fmt.Fprintf(&sb, "**Maintenance overdue:** %d projects have consolidatable memories and are due for lifecycle maintenance (lifecycle cooldown disabled); run `ghost lifecycle --project <name>` for each:\n", len(overdue))
 		}
 	} else if len(overdue) == 1 {
 		fmt.Fprintf(&sb, "**Maintenance overdue:** 1 project has consolidatable memories and has not had lifecycle maintenance within %s; run `ghost lifecycle --project <name>` for it:\n", interval)

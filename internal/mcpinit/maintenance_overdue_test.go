@@ -213,11 +213,11 @@ func TestOverdueMaintenanceProjects_DisabledCooldown(t *testing.T) {
 	if !contains(text, "lifecycle cooldown disabled") {
 		t.Errorf("missing disabled cooldown text: %q", text)
 	}
-	if !contains(text, "has not had lifecycle maintenance") {
-		t.Errorf("missing singular agreement: %q", text)
+	if !contains(text, "is due for lifecycle maintenance (lifecycle cooldown disabled)") {
+		t.Errorf("missing due wording: %q", text)
 	}
-	if contains(text, "have not had lifecycle maintenance") {
-		t.Errorf("singular case must not use plural: %q", text)
+	if contains(text, "has not had lifecycle maintenance") || contains(text, "have not had lifecycle maintenance") {
+		t.Errorf("disabled-cooldown header must not claim unmaintained: %q", text)
 	}
 }
 
@@ -233,8 +233,21 @@ func TestOverdueMaintenanceProjects_WordingSingularAndPlural(t *testing.T) {
 	if !contains(text, "**Maintenance overdue:** 1 project") {
 		t.Fatalf("missing singular header: %q", text)
 	}
-	if !contains(text, "has not had lifecycle maintenance with the lifecycle cooldown disabled") {
+	if !contains(text, "is due for lifecycle maintenance (lifecycle cooldown disabled)") {
 		t.Fatalf("missing singular disabled wording: %q", text)
+	}
+	if contains(text, "has not had") || contains(text, "have not had") {
+		t.Fatalf("disabled-cooldown header must not claim unmaintained: %q", text)
+	}
+
+	// disabled cooldown, singular, HasLastRun:true
+	singleRun := []OverdueProject{{ID: "a", Name: "a", Count: 1, HasLastRun: true, MinInterval: 0, LastRun: now}}
+	text, ok = FormatOverdueMaintenance(singleRun, now)
+	if !ok {
+		t.Fatalf("FormatOverdueMaintenance returned not ok")
+	}
+	if contains(text, "has not had") || contains(text, "have not had") {
+		t.Fatalf("disabled-cooldown header must not claim unmaintained: %q", text)
 	}
 
 	// disabled cooldown, plural
@@ -249,8 +262,11 @@ func TestOverdueMaintenanceProjects_WordingSingularAndPlural(t *testing.T) {
 	if !contains(text, "**Maintenance overdue:** 2 projects") {
 		t.Fatalf("missing plural header: %q", text)
 	}
-	if !contains(text, "have not had lifecycle maintenance with the lifecycle cooldown disabled") {
+	if !contains(text, "are due for lifecycle maintenance (lifecycle cooldown disabled)") {
 		t.Fatalf("missing plural disabled wording: %q", text)
+	}
+	if contains(text, "has not had") || contains(text, "have not had") {
+		t.Fatalf("disabled-cooldown header must not claim unmaintained: %q", text)
 	}
 
 	// interval, singular
