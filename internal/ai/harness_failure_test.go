@@ -76,6 +76,39 @@ func TestHarnessFailureOutputTrimsNoise(t *testing.T) {
 	}
 }
 
+// TestHarnessFailureOutputGuardsTokens: a token-shaped string on stdout or
+// stderr must be withheld by the token guard before it reaches the error.
+func TestHarnessFailureOutputGuardsTokens(t *testing.T) {
+	token := "ghp_AbCdEfGhIjKlMnOpQrStUvWxYz1234567890"
+	if got := harnessFailureOutput(token, ""); got == token {
+		t.Errorf("github token was not withheld from stdout: %q", got)
+	}
+	if got := harnessFailureOutput("", token); got == token {
+		t.Errorf("github token was not withheld from stderr: %q", got)
+	}
+	akia := "AKIAIOSFODNN7EXAMPLE"
+	if got := harnessFailureOutput(akia, ""); got == akia {
+		t.Errorf("AKIA key was not withheld from stdout: %q", got)
+	}
+	if got := harnessFailureOutput("", akia); got == akia {
+		t.Errorf("AKIA key was not withheld from stderr: %q", got)
+	}
+}
+
+// TestHarnessFailureOutputGuardsTokensAcrossCut: a token that straddles the
+// tail cut is withheld by checking the full string before truncation.
+func TestHarnessFailureOutputGuardsTokensAcrossCut(t *testing.T) {
+	token := "ghp_AbCdEfGhIjKlMnOpQrStUvWxYz1234567890"
+	pad := strings.Repeat("=", harnessFailureOutputMax)
+	input := pad + token + strings.Repeat("y", 1160)
+	if got := harnessFailureOutput(input, ""); got == tail(input, harnessFailureOutputMax) {
+		t.Errorf("token straddling cut was not withheld: %q", got)
+	}
+	if got := harnessFailureOutput("", input); got == tail(input, harnessFailureOutputMax) {
+		t.Errorf("token straddling cut in stderr was not withheld: %q", got)
+	}
+}
+
 // TestCLIClientReportsAFailureTheChildPutOnStdout is the wiring test the
 // helper alone cannot give: it drives a real subprocess, so it fails if any
 // client stops routing through harnessFailureOutput and goes back to appending

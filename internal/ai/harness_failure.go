@@ -1,6 +1,11 @@
 package ai
 
-import "strings"
+import (
+	"errors"
+	"strings"
+
+	"github.com/wcatz/ghost/internal/memory"
+)
 
 // harnessFailureOutputMax bounds the child output attached to a failure. It
 // travels into the error, then into the failure marker, then into a
@@ -24,11 +29,27 @@ const harnessFailureOutputMax = 1200
 //
 // Output is trimmed and taken from the tail: the error is what comes last,
 // after the events leading up to it.
+//
+// The output is passed through the token guard before it reaches the error or
+// the lifecycle log.
 func harnessFailureOutput(stdout, stderr string) string {
-	if s := strings.TrimSpace(stderr); s != "" {
-		return tail(s, harnessFailureOutputMax)
+	var full string
+	if t := strings.TrimSpace(stderr); t != "" {
+		full = t
+	} else {
+		full = strings.TrimSpace(stdout)
 	}
-	return tail(strings.TrimSpace(stdout), harnessFailureOutputMax)
+	if full == "" {
+		return ""
+	}
+	if refusal := memory.RejectSecret("harness output", full); refusal != nil {
+		var detected *memory.SecretContentError
+		if errors.As(refusal, &detected) {
+			return "<harness output withheld: it holds a " + detected.Format + ">"
+		}
+		return "<harness output withheld: it holds a credential>"
+	}
+	return tail(full, harnessFailureOutputMax)
 }
 
 // tail returns the last n bytes of s, cut back to a character boundary so a
