@@ -1883,13 +1883,14 @@ func runReflect() {
 	}
 
 	input := reflection.ReflectionInput{
-		ExistingMemories:  live,
-		CurrentContext:    currentContext,
-		LastCommits:       lastCommits,
-		ProjectLanguage:   projectLanguage,
-		ProjectName:       projectName,
-		OtherProjectNames: filteredNames,
-		Usefulness:        usefulness,
+		ExistingMemories:   live,
+		CurrentContext:     currentContext,
+		LastCommits:        lastCommits,
+		ProjectLanguage:    projectLanguage,
+		ProjectName:        projectName,
+		OtherProjectNames:  filteredNames,
+		Usefulness:         usefulness,
+		NearDuplicatePairs: memory.NearDuplicatePairs(live),
 		// The prompt tells the model what omitting an input costs, and that is
 		// the other side of this run's --allow-drops: without it an unreferenced
 		// memory is re-added verbatim, with it the memory is deleted.

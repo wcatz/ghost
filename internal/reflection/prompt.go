@@ -7,6 +7,13 @@ import (
 	"github.com/wcatz/ghost/internal/memory"
 )
 
+// maxNearDuplicateHintPairs bounds how many near-duplicate pairs the
+// consolidation prompt lists. Capped at 20: the prompt already carries every
+// memory in the project, and the pair list is quadratic in the worst case, so
+// an unbounded list can push the consolidation input past the model's budget.
+// 20 matches the existing maxGitCommits cap on git commits in the same prompt.
+const maxNearDuplicateHintPairs = 20
+
 // ReflectionInput holds all data fed into the reflection prompt.
 type ReflectionInput struct {
 	ExistingMemories []memory.Memory // all memories (up to 200)
@@ -44,6 +51,12 @@ type ReflectionInput struct {
 	// with no audit history byte-for-byte on the prompt it was built before this
 	// field existed.
 	Usefulness map[string]memory.UsefulnessEvidence
+	// NearDuplicatePairs are the pairs that read as duplicates: each is an
+	// unordered id pair that the store's dedup predicate flagged. Named in the
+	// prompt as "these pairs read as duplicates" so the harness is pointed at
+	// them instead of scanning 1000 rows for them. The merge still goes through
+	// grounding, drop guard and accounting; nothing is merged mechanically.
+	NearDuplicatePairs [][2]string
 }
 
 // ReflectionResult holds the parsed output from a reflection call.
@@ -362,6 +375,28 @@ func BuildReflectionPrompt(input ReflectionInput) string {
 				line += fmt.Sprintf(" [%s]", audit)
 			}
 			sb.WriteString(line + "\n")
+		}
+	}
+
+	if len(input.NearDuplicatePairs) > 0 {
+		sb.WriteString("\n\n## Near-duplicate pairs that read as duplicates\n")
+		sb.WriteString("These pairs read as duplicates under Ghost's text predicate, so the loser costs a candidate slot before it is cut. Prefer merging these pairs; a merge still goes through grounding, drop guard and accounting, and nothing is merged mechanically without you.\n")
+		// The hint is bounded: an unbounded list can push the consolidation
+		// input past the model's budget on a large project. Pairs are kept in
+		// input order (earliest-created first), which is the order
+		// NearDuplicatePairs returns them in; the first maxNearDuplicateHintPairs
+		// are the ones shown, and the remainder is counted rather than printed.
+		pairs := input.NearDuplicatePairs
+		omitted := 0
+		if len(pairs) > maxNearDuplicateHintPairs {
+			omitted = len(pairs) - maxNearDuplicateHintPairs
+			pairs = pairs[:maxNearDuplicateHintPairs]
+		}
+		for _, p := range pairs {
+			fmt.Fprintf(&sb, "- %s and %s read as duplicates\n", p[0], p[1])
+		}
+		if omitted > 0 {
+			fmt.Fprintf(&sb, "  ... and %d more near-duplicate pair(s)\n", omitted)
 		}
 	}
 

@@ -131,19 +131,14 @@ func duplicateClustersWhere(mems []memory.Memory, compatible func(a, b memory.Me
 			if absorbed[j] {
 				continue
 			}
-			sim := jaccard(tokens[i], tokens[j])
-			// Containment only fires on full subsumption (the smaller token set
-			// entirely inside the larger). A lower bar would merge partial
-			// overlaps ("deploy staging" vs "deploy production") that are
-			// distinct facts; Jaccard already handles same-length restatements.
-			if c := containment(tokens[i], tokens[j]); c == 1.0 {
-				sim = 1.0
+			if !memory.AreNearDuplicatesTokens(tokens[i], tokens[j]) {
+				continue
 			}
-			if sim >= 0.5 && !numericConflict(tokens[i], tokens[j]) &&
-				compatibleWithAll(compatible, mems, cluster, j) {
-				absorbed[j] = true
-				cluster = append(cluster, j)
+			if !compatibleWithAll(compatible, mems, cluster, j) {
+				continue
 			}
+			absorbed[j] = true
+			cluster = append(cluster, j)
 		}
 		clusters = append(clusters, cluster)
 	}

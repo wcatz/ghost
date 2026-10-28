@@ -1802,7 +1802,7 @@ When automatic lifecycle work is enabled, the Stop hook may spawn:
 ghost lifecycle <project>
 ```
 
-This is an internal integration command rather than the normal way to start maintenance. It runs enabled phases in order—`reflect`, `resolve`, then `supersede`—and logs progress to the Ghost data directory. Each phase is bounded by the lifecycle timeout configured in `docs/configuration.md`.
+This is an internal integration command rather than the normal way to start maintenance. It runs enabled phases in order—`reflect`, `resolve`, then `supersede`—for the session's project only; `_global` is not consolidated unattended (run `ghost maintenance consolidate-global --apply` or `ghost reflect _global --apply` by hand) and `ghost_health` reports its live near-duplicate pairs. Each phase is bounded by the lifecycle timeout configured in `docs/configuration.md`.
 
 When the Stop hook spawns it for a turn, it also passes `--signals <path>`, the audit sidecar holding the memory ids and token fingerprints of what the agent wrote this session. The command compares those against what retrieval admitted, records a verdict per kept memory, prints the figures to the log and deletes the file. The flag is never typed by hand: a run without it judges nothing, and a sidecar that cannot be read costs the audit and nothing else.
 
