@@ -837,7 +837,7 @@ func reportOverdueMaintenanceStatus(w io.Writer, store *memory.Store, dataDir st
 	}
 	cfg := config.LoadForHook()
 	minInterval := cfg.Lifecycle.MinIntervalDuration()
-	overdue, err := OverdueMaintenanceProjects(context.Background(), store, dataDir, time.Now(), minInterval, cfg.Reflection.AutoReflect || cfg.Reflection.AutoResolve || cfg.Reflection.AutoSupersede)
+	overdue, err := OverdueMaintenanceProjects(context.Background(), store, dataDir, time.Now(), minInterval, cfg.Reflection.ConsolidationEnabled())
 	if err != nil || len(overdue) == 0 {
 		return
 	}

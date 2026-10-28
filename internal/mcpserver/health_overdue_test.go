@@ -56,7 +56,7 @@ func TestHealthListsOverdueMaintenance(t *testing.T) {
 	}
 	// Ensure the diagnostic read reports overdue.
 	cfg := config.LoadForHook()
-	overdue, err := mcpinit.OverdueMaintenanceProjects(ctx, store, dataDir, time.Now(), cfg.Lifecycle.MinIntervalDuration(), cfg.Reflection.AutoReflect || cfg.Reflection.AutoResolve || cfg.Reflection.AutoSupersede)
+	overdue, err := mcpinit.OverdueMaintenanceProjects(ctx, store, dataDir, time.Now(), cfg.Lifecycle.MinIntervalDuration(), cfg.Reflection.ConsolidationEnabled())
 	if err != nil {
 		t.Fatalf("Overdue: %v", err)
 	}
