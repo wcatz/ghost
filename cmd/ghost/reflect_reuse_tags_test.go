@@ -69,7 +69,7 @@ func TestAReflectReuseChangesTagsWithoutChangingAnyRecordedColumn(t *testing.T) 
 	if len(result.Memories) != 1 {
 		t.Fatalf("the tier emitted %d memories, want 1 (the pair is one fact)", len(result.Memories))
 	}
-	if _, _, _, _, _, _, _, _, _, _, err := applyReflection(ctx, s, project, result.Memories, nil, consolidatedSince, false, replacedIDsFor(&result), nil); err != nil {
+	if _, _, _, _, _, _, _, _, _, _, _, err := applyReflection(ctx, s, project, result.Memories, nil, consolidatedSince, false, replacedIDsFor(&result), nil); err != nil {
 		t.Fatalf("applyReflection: %v", err)
 	}
 
@@ -148,7 +148,7 @@ func TestAReflectEmissionNeverCarriesAScope(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CurrentTimestamp: %v", err)
 	}
-	if _, _, _, _, _, _, _, _, _, _, err := applyReflection(ctx, s, project, emission, nil, consolidatedSince, false, nil, nil); err != nil {
+	if _, _, _, _, _, _, _, _, _, _, _, err := applyReflection(ctx, s, project, emission, nil, consolidatedSince, false, nil, nil); err != nil {
 		t.Fatalf("applyReflection: %v", err)
 	}
 	if got := mustMemory(t, s, id).Scope; len(got) != 1 || got["environment"] != "staging" {

@@ -21,7 +21,7 @@ func TestPartialDropIsNotCountedAsConsolidated(t *testing.T) {
 	credential := "ghp_" + strings.Repeat("a1B2c3D4e5F6", 3) + "AbCd"
 	f := &fakeReflectionApplier{}
 
-	keptProject, keptGlobal, _, _, _, _, _, _, _, applied, err := applyReflection(
+	keptProject, keptGlobal, _, _, _, _, _, _, _, _, applied, err := applyReflection(
 		context.Background(), f, "p1",
 		projectMemories("the relay listens on 2222", "the deploy token is "+credential),
 		nil, "since", false, nil, nil)
