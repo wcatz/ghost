@@ -761,7 +761,16 @@ func readLifecycleFailure(projectID, projectName string) *lifecycleFailureMarker
 		// folded punctuation). Passing over it, rather than returning it for
 		// the alert to suppress, lets this project's own legacy marker after
 		// it still be found.
-		if c.checkProject && m.Project != "" && m.Project != projectID && m.Project != projectName {
+		//
+		// The shared legacy file can hold another project's failure too, and
+		// the same pass-over applies: returning it here would let
+		// markerAlertProject reject it and end the read before the
+		// unfinished-run branch below (and any candidate after it) is reached,
+		// hiding a coordinator killed for this project. A legacy marker
+		// recording this project, or one with no project, is returned as
+		// before.
+		isLegacy := c.name == legacyMarkerFile
+		if (c.checkProject || isLegacy) && m.Project != "" && m.Project != projectID && m.Project != projectName {
 			continue
 		}
 		if at, err := time.Parse(time.RFC3339, m.At); err == nil && markerSilent(at, now) {
