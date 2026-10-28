@@ -173,7 +173,7 @@ func TestStatusGlobalMCPSourceDoesNotContradictNearDuplicates(t *testing.T) {
 	reportGlobalConsolidation(&buf, store)
 	text := buf.String()
 	if !strings.Contains(text, "_global:") && !strings.Contains(text, "_global ") {
-		// allow
+		t.Fatalf("_global line missing:\n%s", text)
 	}
 	if !strings.Contains(text, "reflection-written consolidatable") {
 		t.Fatalf("_global line not labelled reflection-written:\n%s", text)
