@@ -376,6 +376,7 @@ jobs:
           fi
           mv .base-scripts/.github/scripts "${RUNNER_TEMP}/base-scripts"
           rm -rf .base-scripts
+          # helper_accepts is defined identically in each run: step (separate shell).
           helper_accepts() {
             local script="$1"
             local flag="$2"
@@ -1239,6 +1240,7 @@ jobs:
           PAID_TIMED_OUT: ${{ steps.paid_review.outputs.paid_timed_out }}
         run: |
           set +e
+          # helper_accepts is defined identically in each run: step (separate shell).
           helper_accepts() {
             local script="$1"
             local flag="$2"
