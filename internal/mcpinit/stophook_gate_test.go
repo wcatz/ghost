@@ -1,6 +1,7 @@
 package mcpinit
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -17,7 +18,7 @@ func TestStopReminderPerSessionGate(t *testing.T) {
 	// First stop: tools plus one Ghost save -> no nudge, and the gate records 1.
 	path1 := writeTranscript(t, lineToolBash, lineGhostSave)
 	in1 := contractInputFor(t, "Stop", "claude-code", "claude-jsonl",
-		`{"session_id":"`+sess+`","transcript_path":"`+path1+`","cwd":"/repo","stop_hook_active":false}`)
+		fmt.Sprintf(`{"session_id":%q,"transcript_path":%q,"cwd":"/repo","stop_hook_active":false}`, sess, path1))
 	out1 := runStopHookWithInput(t, in1)
 	if strings.Contains(out1, "additionalContext") {
 		t.Fatalf("first stop with a save must not nudge, got %q", out1)
@@ -27,7 +28,7 @@ func TestStopReminderPerSessionGate(t *testing.T) {
 	// save) -> must nudge because no new save since the previous stop.
 	path2 := writeTranscript(t, lineToolBash, lineGhostSave, lineToolBash)
 	in2 := contractInputFor(t, "Stop", "claude-code", "claude-jsonl",
-		`{"session_id":"`+sess+`","transcript_path":"`+path2+`","cwd":"/repo","stop_hook_active":false}`)
+		fmt.Sprintf(`{"session_id":%q,"transcript_path":%q,"cwd":"/repo","stop_hook_active":false}`, sess, path2))
 	out2 := runStopHookWithInput(t, in2)
 	if !strings.Contains(out2, "additionalContext") {
 		t.Fatalf("second stop with no new save must nudge, got %q", out2)
@@ -36,7 +37,7 @@ func TestStopReminderPerSessionGate(t *testing.T) {
 	// Third stop: same session, now a second Ghost save -> must not nudge.
 	path3 := writeTranscript(t, lineToolBash, lineGhostSave, lineToolBash, lineGhostSave)
 	in3 := contractInputFor(t, "Stop", "claude-code", "claude-jsonl",
-		`{"session_id":"`+sess+`","transcript_path":"`+path3+`","cwd":"/repo","stop_hook_active":false}`)
+		fmt.Sprintf(`{"session_id":%q,"transcript_path":%q,"cwd":"/repo","stop_hook_active":false}`, sess, path3))
 	out3 := runStopHookWithInput(t, in3)
 	if strings.Contains(out3, "additionalContext") {
 		t.Fatalf("third stop with a new save must not nudge, got %q", out3)
