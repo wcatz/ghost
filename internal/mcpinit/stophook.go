@@ -961,18 +961,21 @@ func claimPidFileReclaim(pidPath string) (claimed bool, reclaimedAt time.Time, e
 	}
 	defer unlockFile(lockFile) //nolint:errcheck
 
-	// Stat before the liveness read so a FIFO or directory where the claim
-	// belongs is answered without opening it: isAlive's read would block on a
-	// FIFO forever, and neither shape can be a claim.
-	if prior, statErr := os.Stat(pidPath); statErr == nil {
-		if !prior.Mode().IsRegular() {
-			// Fall through to the write, which decides whether this path can be
-			// replaced; nothing is reclaimed because nothing here was a claim.
-		} else if isAlive(pidPath) {
-			return false, time.Time{}, nil
-		} else {
+	// Open with the same flags as readPIDFile so the file judged is the
+	// file opened: a symlink is refused by O_NOFOLLOW and only a regular
+	// descriptor is considered a claim. The mtime and liveness both come
+	// from that opened descriptor.
+	// Fall through to the write path; a non-claim path is replaced.
+	if priorFile, err := os.OpenFile(pidPath, markerOpenFlags, 0); err == nil {
+		prior, statErr := priorFile.Stat()
+		if statErr == nil && prior.Mode().IsRegular() {
+			if isAlive(pidPath) {
+				_ = priorFile.Close()
+				return false, time.Time{}, nil
+			}
 			reclaimedAt = prior.ModTime()
 		}
+		_ = priorFile.Close()
 	}
 	token, haveToken := processStartTime(os.Getpid())
 	if err := atomicWritePID(pidPath, os.Getpid(), token, haveToken); err != nil {
