@@ -123,7 +123,7 @@ func TestRunReflectApplyKeepsARowsTheConsolidatorCarriedThrough(t *testing.T) {
 	if len(globalMems) != 0 {
 		t.Fatalf("the merge is project-scoped, but %d candidates are global: %+v", len(globalMems), result.Memories)
 	}
-	if _, _, _, _, _, _, _, _, _, _, _, err := applyReflection(ctx, store, "proj", projectMems, globalMems, "", false, nil, nil); err != nil {
+	if _, err := applyReflection(ctx, store, "proj", projectMems, globalMems, "", false, nil, nil); err != nil {
 		t.Fatalf("applyReflection: %v", err)
 	}
 
@@ -209,10 +209,12 @@ func TestMergeCandidateReachesGlobalUnderPromoteGlobals(t *testing.T) {
 		t.Fatalf("the passed-through row did not stay project-scoped: %+v", projectMems)
 	}
 
-	_, _, _, promoted, kept, _, _, _, _, _, _, err := applyReflection(ctx, store, "proj", projectMems, globalMems, "", true, nil, nil)
+	resk, err := applyReflection(ctx, store, "proj", projectMems, globalMems, "", true, nil, nil)
 	if err != nil {
 		t.Fatalf("applyReflection: %v", err)
 	}
+	promoted := resk.Promoted
+	kept := resk.KeptMems
 	if promoted != 1 || len(kept) != 0 {
 		t.Fatalf("promotion = (%d, %d kept), want (1, 0)", promoted, len(kept))
 	}

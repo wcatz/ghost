@@ -2087,11 +2087,22 @@ func runReflect() {
 			Tags:       m.Tags,
 		})
 	}
-	keptProjectMems, keptGlobalMems, preserved, promoted, keptMems, droppedProject, droppedGlobal, deleted, appliedByCategory, credDropped, applied, err := applyReflection(ctx, store, projectID, projectMems, globalMems, consolidatedSince, parsed.promoteGlobals, replacedIDsFor(&result), fed)
+	appliedRes, err := applyReflection(ctx, store, projectID, projectMems, globalMems, consolidatedSince, parsed.promoteGlobals, replacedIDsFor(&result), fed)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: save memories: %v\n", err)
 		os.Exit(1)
 	}
+	keptProjectMems := appliedRes.KeptProject
+	keptGlobalMems := appliedRes.KeptGlobal
+	preserved := appliedRes.Preserved
+	promoted := appliedRes.Promoted
+	keptMems := appliedRes.KeptMems
+	droppedProject := appliedRes.ProjectDropped
+	droppedGlobal := appliedRes.GlobalDropped
+	deleted := appliedRes.Deleted
+	appliedByCategory := appliedRes.AppliedByCategory
+	credDropped := appliedRes.CredDropped
+	applied := appliedRes.Applied
 	// The store's refusals split by reason, and every report below reads one of
 	// the two separately. A drop the corpus guard made claims a row that moved,
 	// so the report names that row and suppresses the skip fingerprint; an

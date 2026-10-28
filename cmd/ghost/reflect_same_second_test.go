@@ -77,8 +77,13 @@ func TestReflectASameSecondSaveIsHeldBackAndCountedApartFromAConcurrentChange(t 
 
 	// The window stamp IS the row's own second: the row was written in the
 	// second the pass started, which is the case under test.
-	_, _, preserved, _, _, projectDropped, globalDropped, deleted, _, _, applied, err := applyReflection(
+	res, err := applyReflection(
 		ctx, s, project, fixture.proposal, nil, fixture.stored.CreatedAt, false, nil, fixture.fed)
+	preserved := res.Preserved
+	projectDropped := res.ProjectDropped
+	globalDropped := res.GlobalDropped
+	deleted := res.Deleted
+	applied := res.Applied
 	if err != nil {
 		t.Fatalf("applyReflection: %v", err)
 	}
@@ -131,8 +136,13 @@ func TestReflectTheSameProposalAppliesWhenTheRowIsOlderThanTheWindow(t *testing.
 	if err != nil {
 		t.Fatalf("CurrentTimestamp: %v", err)
 	}
-	_, _, preserved, _, _, projectDropped, _, deleted, appliedByCategory, _, applied, err := applyReflection(
+	res, err := applyReflection(
 		ctx, s, project, fixture.proposal, nil, consolidatedSince, false, nil, fixture.fed)
+	preserved := res.Preserved
+	projectDropped := res.ProjectDropped
+	deleted := res.Deleted
+	appliedByCategory := res.AppliedByCategory
+	applied := res.Applied
 	if err != nil {
 		t.Fatalf("applyReflection: %v", err)
 	}
@@ -176,8 +186,12 @@ func TestReflectARowEditedDuringThePassIsStillAConcurrentChange(t *testing.T) {
 		t.Fatalf("UpdateMemory: %v", err)
 	}
 
-	_, _, preserved, _, _, projectDropped, globalDropped, _, _, _, applied, err := applyReflection(
+	res, err := applyReflection(
 		ctx, s, project, fixture.proposal, nil, fixture.stored.CreatedAt, false, nil, fixture.fed)
+	preserved := res.Preserved
+	projectDropped := res.ProjectDropped
+	globalDropped := res.GlobalDropped
+	applied := res.Applied
 	if err != nil {
 		t.Fatalf("applyReflection: %v", err)
 	}

@@ -59,12 +59,14 @@ func globals(contents ...string) []reflection.ReflectMemory {
 // memories.
 func TestApplyReflectionAlwaysReachesPromotionWithoutProjectMemories(t *testing.T) {
 	f := &fakeReflectionApplier{resultPromoted: 1}
-	_, _, preserved, promoted, kept, _, _, _, _, _, _, err := applyReflection(
+	res, err := applyReflection(
 		context.Background(), f, "p1", nil, globals("global"), "since", true, nil, nil)
-
 	if err != nil {
 		t.Fatalf("applyReflection: %v", err)
 	}
+	preserved := res.Preserved
+	promoted := res.Promoted
+	kept := res.KeptMems
 	if f.calls != 1 {
 		t.Fatalf("applier calls = %d, want 1", f.calls)
 	}
@@ -90,10 +92,8 @@ func TestApplyReflectionForwardsBothHalvesSeparately(t *testing.T) {
 	for _, promote := range []bool{false, true} {
 		t.Run(fmt.Sprintf("promote=%t", promote), func(t *testing.T) {
 			f := &fakeReflectionApplier{}
-			_, _, _, _, _, _, _, _, _, _, _, err := applyReflection(
-				context.Background(), f, "p1", projectMemories("project"), globals("global"), "since", promote, nil, nil)
-
-			if err != nil {
+			if _, err := applyReflection(
+				context.Background(), f, "p1", projectMemories("project"), globals("global"), "since", promote, nil, nil); err != nil {
 				t.Fatalf("applyReflection: %v", err)
 			}
 			if len(f.projectMems) != 1 || len(f.globalMems) != 1 {
@@ -109,8 +109,7 @@ func TestApplyReflectionForwardsBothHalvesSeparately(t *testing.T) {
 func TestApplyReflectionPropagatesStoreFailure(t *testing.T) {
 	want := errors.New("transaction failed")
 	f := &fakeReflectionApplier{err: want}
-	_, _, _, _, _, _, _, _, _, _, _, err := applyReflection(context.Background(), f, "p1", projectMemories("x"), nil, "", true, nil, nil)
-	if !errors.Is(err, want) {
+	if _, err := applyReflection(context.Background(), f, "p1", projectMemories("x"), nil, "", true, nil, nil); !errors.Is(err, want) {
 		t.Fatalf("error = %v, want %v", err, want)
 	}
 }
@@ -129,9 +128,9 @@ func TestApplyReflectionCoversPromotionMatrix(t *testing.T) {
 					if fail {
 						f.err = errors.New("injected apply failure")
 					}
-					_, _, _, _, _, _, _, _, _, _, _, err := applyReflection(context.Background(), f, "p1", project, globals("global"), "", promote, nil, nil)
-					if (err != nil) != fail {
-						t.Fatalf("error = %v, want error=%t", err, fail)
+					_, err2 := applyReflection(context.Background(), f, "p1", project, globals("global"), "", promote, nil, nil)
+					if (err2 != nil) != fail {
+						t.Fatalf("error = %v, want error=%t", err2, fail)
 					}
 					if f.calls != 1 {
 						t.Fatalf("applier calls = %d, want 1", f.calls)
@@ -285,7 +284,9 @@ func TestApplyReflectionKeepsCrossProjectCandidatesWhenPromotionOff(t *testing.T
 		t.Fatalf("Create: %v", err)
 	}
 
-	_, _, _, promoted, kept, _, _, _, _, _, _, err := applyReflection(ctx, store, "proj", projectMemories("a consolidated project fact"), globals("prefer running the linter before pushing"), "", false, nil, nil)
+	res, err := applyReflection(ctx, store, "proj", projectMemories("a consolidated project fact"), globals("prefer running the linter before pushing"), "", false, nil, nil)
+	promoted := res.Promoted
+	kept := res.KeptMems
 
 	if err != nil {
 		t.Fatalf("applyReflection: %v", err)
@@ -326,11 +327,16 @@ func TestApplyReflectionKeepsCrossProjectCandidatesWhenPromotionOff(t *testing.T
 func TestApplyReflectionReportsAnAllDroppedRoundAsNothingWritten(t *testing.T) {
 	t.Run("every emission refused is applied=false", func(t *testing.T) {
 		f := &fakeReflectionApplier{resultProjectDropped: memory.EmissionDrops{Changed: 2}}
-		keptProject, keptGlobal, _, _, _, projectDropped, globalDropped, _, _, _, applied, err := applyReflection(
+		res, err := applyReflection(
 			context.Background(), f, "p1", projectMemories("a", "b"), nil, "", false, nil, nil)
 		if err != nil {
 			t.Fatalf("applyReflection: %v", err)
 		}
+		keptProject := res.KeptProject
+		keptGlobal := res.KeptGlobal
+		projectDropped := res.ProjectDropped
+		globalDropped := res.GlobalDropped
+		applied := res.Applied
 		if applied {
 			t.Error("applied = true, want false: the store refused every emission, so nothing was written")
 		}
@@ -347,11 +353,17 @@ func TestApplyReflectionReportsAnAllDroppedRoundAsNothingWritten(t *testing.T) {
 
 	t.Run("a partial refusal stays applied with the count", func(t *testing.T) {
 		f := &fakeReflectionApplier{resultProjectDropped: memory.EmissionDrops{Changed: 1}}
-		_, _, preserved, promoted, kept, projectDropped, globalDropped, _, _, _, applied, err := applyReflection(
+		res, err := applyReflection(
 			context.Background(), f, "p1", projectMemories("a", "b"), nil, "", false, nil, nil)
 		if err != nil {
 			t.Fatalf("applyReflection: %v", err)
 		}
+		preserved := res.Preserved
+		promoted := res.Promoted
+		kept := res.KeptMems
+		projectDropped := res.ProjectDropped
+		globalDropped := res.GlobalDropped
+		applied := res.Applied
 		if !applied {
 			t.Error("applied = false, want true: one of two emissions was written, so the round did write")
 		}
@@ -365,11 +377,14 @@ func TestApplyReflectionReportsAnAllDroppedRoundAsNothingWritten(t *testing.T) {
 
 	t.Run("an all-dropped global half alone is applied=false", func(t *testing.T) {
 		f := &fakeReflectionApplier{resultGlobalDropped: memory.EmissionDrops{Changed: 1}}
-		_, _, _, _, _, projectDropped, globalDropped, _, _, _, applied, err := applyReflection(
+		res, err := applyReflection(
 			context.Background(), f, "p1", nil, globals("g"), "", true, nil, nil)
 		if err != nil {
 			t.Fatalf("applyReflection: %v", err)
 		}
+		projectDropped := res.ProjectDropped
+		globalDropped := res.GlobalDropped
+		applied := res.Applied
 		if applied {
 			t.Error("applied = true, want false: the only emission was a global candidate the store refused")
 		}
@@ -387,11 +402,18 @@ func TestApplyReflectionReportsAnAllDroppedRoundAsNothingWritten(t *testing.T) {
 	// this round".
 	t.Run("an all-dropped round that still deletes rows is applied with the delete count", func(t *testing.T) {
 		f := &fakeReflectionApplier{resultProjectDropped: memory.EmissionDrops{Changed: 2}, resultDeleted: 1}
-		keptProject, keptGlobal, _, _, _, projectDropped, globalDropped, deleted, appliedByCategory, _, applied, err := applyReflection(
+		res, err := applyReflection(
 			context.Background(), f, "p1", projectMemories("a", "b"), nil, "", false, nil, nil)
 		if err != nil {
 			t.Fatalf("applyReflection: %v", err)
 		}
+		keptProject := res.KeptProject
+		keptGlobal := res.KeptGlobal
+		projectDropped := res.ProjectDropped
+		globalDropped := res.GlobalDropped
+		deleted := res.Deleted
+		appliedByCategory := res.AppliedByCategory
+		applied := res.Applied
 		if !applied {
 			t.Error("applied = false, want true: the store deleted an unclaimed candidate, so the round changed the corpus and its snapshot must be offered for restore")
 		}
@@ -474,11 +496,21 @@ func TestApplyReflectionAllDroppedWithOmittedRowReportsReplaceAndRestore(t *test
 		t.Fatalf("UpdateMemory claimed row: %v", err)
 	}
 
-	keptProject, keptGlobal, preserved, promoted, keptMems, projectDropped, globalDropped, deleted, appliedByCategory, _, applied, err := applyReflection(
+	res, err := applyReflection(
 		ctx, store, "p1", []reflection.ReflectMemory{{Category: "gotcha", Content: "the claimed row"}}, nil, "", false, nil, fed)
 	if err != nil {
 		t.Fatalf("applyReflection: %v", err)
 	}
+	keptProject := res.KeptProject
+	keptGlobal := res.KeptGlobal
+	preserved := res.Preserved
+	promoted := res.Promoted
+	keptMems := res.KeptMems
+	projectDropped := res.ProjectDropped
+	globalDropped := res.GlobalDropped
+	deleted := res.Deleted
+	appliedByCategory := res.AppliedByCategory
+	applied := res.Applied
 
 	if !applied {
 		t.Error("applied = false, want true: the replace deleted the omitted row, so the round changed the corpus and its snapshot must be offered for restore")
@@ -564,11 +596,19 @@ func TestWriteAppliedReportStatesRemovedRowsOfAllRefusedRound(t *testing.T) {
 		t.Fatalf("UpdateMemory alpha: %v", err)
 	}
 	projectMems := []reflection.ReflectMemory{{Category: "fact", Content: "keep alpha"}}
-	keptProject, keptGlobal, _, promoted, keptMems, _, globalDropped, deleted, byCategory, _, applied, err := applyReflection(
+	res, err := applyReflection(
 		ctx, store, "p1", projectMems, nil, "", false, nil, fed)
 	if err != nil {
 		t.Fatalf("applyReflection: %v", err)
 	}
+	keptProject := res.KeptProject
+	keptGlobal := res.KeptGlobal
+	promoted := res.Promoted
+	keptMems := res.KeptMems
+	globalDropped := res.GlobalDropped
+	deleted := res.Deleted
+	byCategory := res.AppliedByCategory
+	applied := res.Applied
 	if deleted != 2 {
 		t.Fatalf("deleted = %d, want 2 (beta and gamma)", deleted)
 	}
