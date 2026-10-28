@@ -1,6 +1,7 @@
 package mcpserver
 
 import (
+	"fmt"
 	"regexp"
 	"strings"
 )
@@ -200,4 +201,46 @@ func repoFactHint(content, category string) string {
 		return repoFactAdvisory
 	}
 	return ""
+}
+
+// LongMemoryThreshold is the byte length above which a save draws the length
+// advisory (#1832). Session start fits only 15 project rows and 8 _global rows
+// inside 9000 bytes, so a long row costs other rows their slot; the advisory
+// guides the agent to split the note instead of refusing it.
+const LongMemoryThreshold = 800
+
+const longMemoryAdvisoryFormat = " — ADVISORY: this memory is %d bytes (over the %d-byte threshold). Session start shows only ~300 chars of each memory, so only a fraction would appear. Save one rule and its reason per memory and split the rest into separate memories. Stored anyway."
+
+// longMemoryHint returns the length advisory when content exceeds
+// LongMemoryThreshold, or "" otherwise. It never refuses a save.
+func longMemoryHint(content string) string {
+	if len(content) <= LongMemoryThreshold {
+		return ""
+	}
+	return fmt.Sprintf(longMemoryAdvisoryFormat, len(content), LongMemoryThreshold)
+}
+
+// datedStatusRE matches a memory that opens with a calendar date — the narrow
+// heuristic for the global-status advisory (#1832). The content is trimmed of
+// leading whitespace and must start with YYYY-MM-DD at column 0; a dated
+// preference attributed to a person ("Wayne, 2026-10-16: ...") does not start
+// with the date and so does not match. The check is documented as narrow so
+// it does not fire on such preferences.
+var datedStatusRE = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}\b`)
+
+const globalStatusAdvisory = " — ADVISORY: this dated status line will be injected into every project's session start. Save it to its project instead, or set valid_until so it expires. Stored anyway — Ghost guides saves, it never refuses one on a heuristic."
+
+// globalStatusHint returns the global-status advisory when content opens with
+// a date and validUntil is absent, or "" otherwise. It applies to
+// ghost_save_global and ghost_memory_promote into _global; it never refuses a
+// save.
+func globalStatusHint(content string, validUntil *string) string {
+	if validUntil != nil && strings.TrimSpace(*validUntil) != "" {
+		return ""
+	}
+	trimmed := strings.TrimLeft(content, " \t\r\n")
+	if !datedStatusRE.MatchString(trimmed) {
+		return ""
+	}
+	return globalStatusAdvisory
 }
