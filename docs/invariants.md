@@ -479,6 +479,8 @@ blamed on it. Pinned by `TestHarnessCallWithoutDeadlineKeepsTheDefault`,
 `TestHarnessCallKeepsTheCallersDeadline` (all four clients, with a shortened
 default) and `TestConsolidationContextZeroLiftsTheClientDefault`.
 
+**Usefulness demotion is never a boost and never hides a memory.** `internal/memory.Candidate` carries `UsefulnessEvidence` (contradicted, superseded_in_session and flagged counts, read per project through `UsefulnessByMemory` on the same snapshot as the rows) and `internal/assemble` records it in `Trace.Signals.Usefulness` at stage provenance. A memory with two or more `contradicted` verdicts is moved behind the rows with fewer, inside `runProvenance` — after validity and predicates but before conflicts — so a doubtful memory still answers when nothing cleaner matched. A single `contradicted` is evidence for the reader, not a reordering, and `flagged` and `superseded_in_session` never demote; no `used` or `ignored` count is read at all, which keeps the popularity loop closed. Pinned by `TestRepeatedContradictionIsDemotedBehindClean`, `TestSingleContradictionIsNotDemoted` and `TestFlaggedAloneDoesNotDemote`.
+
 **A harness child in its own group means the command that spawns it owns the
 reach.** The child no longer shares the spawner's process group, so a signal
 aimed at that group (the lifecycle phase deadline, or a terminal Ctrl-C on a

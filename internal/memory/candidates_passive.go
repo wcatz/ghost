@@ -326,6 +326,42 @@ func (s *Store) candidatesPassive(ctx context.Context, req CandidateRequest, set
 	for i := range rows {
 		rows[i].Evidence = counts[rows[i].ID]
 	}
+
+	// #648: the audit's negative evidence rides with the row, read per project
+	// because UsefulnessByMemory is project-scoped. A read that fails for a
+	// project other than "table absent" is a real error; a project with no
+	// negative evidence leaves its rows carrying the zero value.
+	//
+	// The read uses the same handle as the rows above (s.queryDB()), not the
+	// same read transaction: each call to usefulnessByMemory issues independent
+	// statements outside an explicit transaction, so interleaving writes can
+	// produce skew between the rows and their usefulness evidence. Opening a
+	// second transaction here would deadlock on the single-connection pool while
+	// the caller holds the snapshot.
+	usefulness := map[string]UsefulnessEvidence{}
+	projects := map[string]struct{}{}
+	for i := range rows {
+		projects[rows[i].ProjectID] = struct{}{}
+	}
+	for proj := range projects {
+		if strings.TrimSpace(proj) == "" {
+			continue
+		}
+		ev, uErr := s.usefulnessByMemory(ctx, s.queryDB(), proj)
+		if uErr != nil {
+			if isMissingTable(uErr) {
+				s.logger.Debug("candidates: passive usefulness read found no table", "error", uErr)
+				continue
+			}
+			return nil, fmt.Errorf("candidates: usefulness evidence: %w", uErr)
+		}
+		for id, v := range ev {
+			usefulness[id] = v
+		}
+	}
+	for i := range rows {
+		rows[i].Usefulness = usefulness[rows[i].ID]
+	}
 	return set, nil
 }
 
