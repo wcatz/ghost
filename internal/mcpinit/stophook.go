@@ -25,12 +25,13 @@ import (
 )
 
 // stopReminder is emitted (as hook JSON) when a tool-using session ends
-// without a single Ghost save. It is a non-blocking "approve" so no host
-// renders it as a Stop hook error — the message is surfaced as a plain
-// reminder, never as a failure. (Hosts that cannot honor a block — opencode —
-// re-present it through their own channel; Claude/Codex/Goose show it as a
-// normal system note, not an error.)
-const stopReminder = `{"decision":"approve","reason":"Reminder: this session used tools but saved nothing to Ghost. If you learned anything worth keeping — commands, configs, gotchas, decisions — save it with ghost_memory_save before moving on."}`
+// without a single Ghost save. It uses the Stop contract's non-blocking
+// context channel (hookSpecificOutput.additionalContext with hookEventName
+// "Stop") so no host renders it as a Stop hook error — the message is
+// surfaced as a plain reminder, never as a failure. (Hosts that cannot honor
+// a block — opencode — re-present it through their own channel;
+// Claude/Codex/Goose show it as a normal system note, not an error.)
+const stopReminder = `{"hookSpecificOutput":{"hookEventName":"Stop","additionalContext":"Reminder: this turn used tools but saved nothing to Ghost. If the user corrected you, a root cause was found, or a choice was made for a reason, save that rule and its reason with ghost_memory_save (ghost_decision_record for a choice between alternatives). Do not save what the repository already states."}}`
 
 // RunHostEvent is the contract-v1 entrypoint for every host lifecycle event:
 //
@@ -113,7 +114,7 @@ func openTranscript(path string) (*os.File, error) {
 
 // runStop executes the stop/session-end handler: opt-in lifecycle spawns, then
 // — only on stop events (nudge=true) — the save-nudge reminder. The nudge is a
-// non-blocking {"decision":"approve"} emitted for every host that reaches the
+// non-blocking hookSpecificOutput.additionalContext emitted for every host that reaches the
 // nudge path, so no host surfaces it as a Stop hook error. opencode's plugin
 // re-presents it through its own log channel; claude/codex/goose show it as a
 // plain system note. session-end (nudge=false) never scans the transcript and
@@ -168,13 +169,152 @@ func runStop(p hostevent.Payload, stdout io.Writer, stderr io.Writer, nudge bool
 		logFailOpen(stderr, "scan transcript", err)
 		return
 	}
-	if res.ToolCalls == 0 || res.GhostSaves > 0 {
+	if res.ToolCalls == 0 {
+		writeLastSeenGhostSaves(p.SessionID, p.TranscriptPath, res.GhostSaves)
 		return
 	}
-	// The reminder fires for every host that reaches here, but as a non-blocking
-	// "approve" so hosts never present it as a Stop hook error. opencode's plugin
-	// captures this same stdout and re-presents it through its own log channel.
+	// Gate on "no Ghost save since this session's previous stop", not on the
+	// session having no saves at all: a correction made after an earlier save
+	// must still be reminded. The last-seen count is kept per session id in
+	// the lifecycle marker directory.
+	lastSeen := readLastSeenGhostSaves(p.SessionID, p.TranscriptPath)
+	writeLastSeenGhostSaves(p.SessionID, p.TranscriptPath, res.GhostSaves)
+	if res.GhostSaves > lastSeen {
+		return
+	}
+	// The reminder fires for every host that reaches here, through the
+	// documented non-blocking channel (hookSpecificOutput.additionalContext) so
+	// hosts never present it as a Stop hook error. opencode's plugin captures
+	// this same stdout and re-presents it through its own log channel.
 	_, _ = fmt.Fprintln(stdout, stopReminder)
+}
+
+// stopSaveMarkerPrefix is the stem of the per-session file that remembers how
+// many Ghost saves a session had at its last stop. It lives beside the other
+// lifecycle markers in the data directory and is named by a digest of the
+// session id when present, or of the transcript path when the id is empty
+// (the id is free text from the host).
+const (
+	stopSaveMarkerPrefix = "stop-saves-"
+	stopSaveMarkerSuffix = ".count"
+)
+
+// stopSaveMarkerPath returns the marker's path for a session, or "" when there
+// is no marker to be had: no session id and no transcript path, or a data
+// directory this process may not resolve. When the session id is absent the
+// transcript path's digest is used as the stable key, so a session without an
+// id still gets a per-transcript gate instead of silently never being
+// reminded. If neither is available there is no stable key and the gate falls
+// back to the pre-feature "never saved" answer (lastSeen == 0).
+func stopSaveMarkerPath(sessionID, transcriptPath string) string {
+	key := strings.TrimSpace(sessionID)
+	if key == "" {
+		key = strings.TrimSpace(transcriptPath)
+	}
+	if key == "" {
+		return ""
+	}
+	dataDir, err := config.DataDirPath()
+	if err != nil || dataDir == "" {
+		return ""
+	}
+	return filepath.Join(dataDir, stopSaveMarkerPrefix+markerStem(key)+stopSaveMarkerSuffix)
+}
+
+// readLastSeenGhostSaves returns the Ghost save count recorded at this
+// session's previous stop, or 0 when none has been recorded. It opens the
+// marker through openMarker so a FIFO, directory or symlink at the path
+// cannot block or crash the hook, and reads only a bounded amount: the file
+// is a decimal count.
+func readLastSeenGhostSaves(sessionID, transcriptPath string) int {
+	path := stopSaveMarkerPath(sessionID, transcriptPath)
+	if path == "" {
+		return 0
+	}
+	f, err := openMarker(path)
+	if err != nil {
+		return 0
+	}
+	defer f.Close() //nolint:errcheck
+	b, err := io.ReadAll(io.LimitReader(f, 64))
+	if err != nil {
+		return 0
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
+}
+
+// writeLastSeenGhostSaves records the Ghost save count seen at this stop. It
+// writes only when the data directory already exists; a missing or unwritable
+// directory fails open and the gate degrades to the session having no earlier
+// saves (the same answer as before this feature).
+func writeLastSeenGhostSaves(sessionID, transcriptPath string, count int) {
+	path := stopSaveMarkerPath(sessionID, transcriptPath)
+	if path == "" {
+		return
+	}
+	dir := filepath.Dir(path)
+	info, err := os.Stat(dir)
+	if err != nil || !info.IsDir() {
+		// The data directory must already exist: creating it here would leave a
+		// phantom directory (and a .count file) on every tool-using stop on a
+		// machine with no store, and would write into a developer's real data
+		// directory during tests. Degrade to the pre-feature answer instead.
+		return
+	}
+	if count < 0 {
+		count = 0
+	}
+	sweepStopSaveMarkers(dir, time.Now())
+	// Atomic write so a reader never sees a torn count.
+	tmp, err := os.CreateTemp(dir, stopSaveMarkerPrefix+"*.tmp")
+	if err != nil {
+		return
+	}
+	tmpPath := tmp.Name()
+	if _, err := tmp.Write([]byte(strconv.Itoa(count))); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+		return
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return
+	}
+	_ = os.Chmod(tmpPath, 0o600)
+	if err := os.Rename(tmpPath, path); err != nil {
+		_ = os.Remove(tmpPath)
+	}
+}
+
+// stopSaveMarkerMaxAge is the sweep horizon for the per-session save gate.
+// A session is not long-lived; a marker older than this is left from a
+// finished session and is deleted the next time any session writes its gate.
+const stopSaveMarkerMaxAge = 7 * 24 * time.Hour
+
+// sweepStopSaveMarkers deletes this feature's markers older than the horizon.
+// It only ever touches regular files with its own prefix and suffix.
+func sweepStopSaveMarkers(dir string, now time.Time) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasPrefix(name, stopSaveMarkerPrefix) || !strings.HasSuffix(name, stopSaveMarkerSuffix) {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil || !info.Mode().IsRegular() {
+			continue
+		}
+		if now.Sub(info.ModTime()) > stopSaveMarkerMaxAge {
+			_ = os.Remove(filepath.Join(dir, name))
+		}
+	}
 }
 
 // scanAuditSignals reads the transcript for what the agent DID with what Ghost

@@ -319,22 +319,21 @@ func TestHookStop(t *testing.T) {
 			r := s.mustRunStdin(stopPayload(host, s.work, transcript, format),
 				"hook", "stop", "--source", host)
 			mustContain(t, "stop nudge (host "+host+")", r.stdout, "ghost_memory_save")
-			// It is a non-blocking approve, not a block: a host that rendered it
-			// as a Stop failure would make every turn look broken. The decision
-			// is JSON, so it is parsed rather than pattern-matched.
+			// It is delivered through the documented non-blocking channel
+			// (hookSpecificOutput.additionalContext), not as a block: a host that
+			// rendered it as a Stop failure would make every turn look broken.
+			// The decision is JSON, so it is parsed rather than pattern-matched.
 			var decision struct {
-				Decision string `json:"decision"`
-				Reason   string `json:"reason"`
+				HookSpecificOutput struct {
+					AdditionalContext string `json:"additionalContext"`
+				} `json:"hookSpecificOutput"`
 			}
 			line := strings.TrimSpace(strings.SplitN(strings.TrimSpace(r.stdout), "\n", 2)[0])
 			if err := jsonUnmarshal([]byte(line), &decision); err != nil {
 				t.Fatalf("the stop reminder is not JSON: %v\n%s", err, line)
 			}
-			if decision.Decision != "approve" {
-				t.Fatalf("the stop reminder is a %q, want a non-blocking approve: %s", decision.Decision, line)
-			}
-			if !strings.Contains(decision.Reason, "ghost_memory_save") {
-				t.Fatalf("the reminder does not name the tool to use: %q", decision.Reason)
+			if !strings.Contains(decision.HookSpecificOutput.AdditionalContext, "ghost_memory_save") {
+				t.Fatalf("the reminder does not name the tool to use: %q", decision.HookSpecificOutput.AdditionalContext)
 			}
 		})
 	}
