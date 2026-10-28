@@ -2,6 +2,8 @@ package mcpinit
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -12,7 +14,10 @@ import (
 // isolatedHome: first with count 1 gives no nudge, second with same count 1
 // and tools run must nudge, third with count 2 must not.
 func TestStopReminderPerSessionGate(t *testing.T) {
-	isolatedHome(t)
+	dataHome := isolatedHome(t)
+	if err := os.MkdirAll(filepath.Join(dataHome, "ghost"), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	sess := "gate-sess-xyz"
 
 	// First stop: tools plus one Ghost save -> no nudge, and the gate records 1.
