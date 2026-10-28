@@ -872,6 +872,35 @@ func TestDecisionRecordCountsAsSaveForNudge(t *testing.T) {
 	}
 }
 
+// TestStopSaveGateEmptySessionID nudges on a second stop with no new save pins
+// finding #3: when no session id is available the gate keys on the transcript
+// path instead of degrading to "never reminded".
+func TestStopSaveGateEmptySessionID(t *testing.T) {
+	dataHome := isolatedHome(t)
+	if err := os.MkdirAll(filepath.Join(dataHome, "ghost"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	transcriptPath := filepath.Join(t.TempDir(), "transcript.jsonl")
+	if err := os.WriteFile(transcriptPath, []byte(lineToolBash+"\n"+lineGhostSave+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	input := func() string {
+		return contractInputFor(t, "Stop", "claude-code", "claude-jsonl",
+			fmt.Sprintf(`{"session_id":"","transcript_path":%q,"cwd":"/repo","stop_hook_active":false}`, transcriptPath))
+	}
+	// First stop records one save.
+	if out := runStopHook(t, input()); strings.Contains(out, "additionalContext") {
+		t.Fatalf("first stop with a save must not nudge, got %q", out)
+	}
+	// Second stop: same transcript, no new save -> must nudge.
+	if err := os.WriteFile(transcriptPath, []byte(lineToolBash+"\n"+lineGhostSave+"\n"+lineToolBash+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if out := runStopHook(t, input()); !strings.Contains(out, "additionalContext") {
+		t.Fatalf("second stop with no new save must nudge, got %q", out)
+	}
+}
+
 // TestStopSaveMarkerFIFOIsTreatedAsNoMarker pins finding #1: a FIFO (or any
 // non-regular file) at the marker path must not block or crash the hook.
 func TestStopSaveMarkerFIFOIsTreatedAsNoMarker(t *testing.T) {
@@ -881,7 +910,7 @@ func TestStopSaveMarkerFIFOIsTreatedAsNoMarker(t *testing.T) {
 		t.Fatal(err)
 	}
 	sess := "fifo-sess"
-	markerPath := stopSaveMarkerPath(sess)
+	markerPath := stopSaveMarkerPath(sess, "")
 	if markerPath == "" {
 		t.Fatal("no marker path")
 	}
