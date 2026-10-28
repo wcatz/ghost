@@ -1608,6 +1608,7 @@ func (s *Server) applyMemoryUpdate(ctx context.Context, req *mcp.CallToolRequest
 		if args.Category != "" {
 			category = args.Category
 		}
+		msg += longMemoryHint(*content)
 		msg += repoFactHint(*content, category)
 	}
 	if truncated {
@@ -1656,7 +1657,11 @@ func (s *Server) promoteMemory(ctx context.Context, projectID, memoryID string) 
 	// project's rows reach.
 	s.notifyMemoryRow(ctx, resolvedProjectID)
 	s.notifyMemoryRow(ctx, memory.GlobalProjectID)
-	return fmt.Sprintf("Memory promoted to global scope (id: %s).", assemble.Token(memoryID)), nil
+	msg := fmt.Sprintf("Memory promoted to global scope (id: %s).", assemble.Token(memoryID))
+	msg += longMemoryHint(mems[0].Content)
+	msg += repoFactHint(mems[0].Content, mems[0].Category)
+	msg += globalStatusHint(mems[0].Content, mems[0].ValidUntil)
+	return msg, nil
 }
 
 // withdrawSupersedesLink is the handler behind ghost_link_withdraw. It is the
@@ -2583,6 +2588,7 @@ func (s *Server) registerTools() {
 				msg += fmt.Sprintf(" (the existing memory %s it folded into is at least that tier too)", assemble.Token(duplicateOf))
 			}
 		}
+		msg += longMemoryHint(args.Content)
 		msg += repoFactHint(args.Content, args.Category)
 		if truncated {
 			msg += truncationWarning("content", memoryTruncationAdvice)
@@ -3265,7 +3271,9 @@ func (s *Server) registerTools() {
 				msg += fmt.Sprintf(" (the existing memory %s it folded into is at least that tier too)", assemble.Token(duplicateOf))
 			}
 		}
+		msg += longMemoryHint(args.Content)
 		msg += repoFactHint(args.Content, args.Category)
+		msg += globalStatusHint(args.Content, fields.Validity.ValidUntil)
 		if globalTruncated {
 			msg += truncationWarning("content", memoryTruncationAdvice)
 		}
