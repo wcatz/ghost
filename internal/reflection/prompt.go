@@ -221,6 +221,12 @@ type ReflectMemory struct {
 // field — a reader who found the rule here without this sentence would "fix" the
 // asymmetry by mirroring Usefulness and silently break the gate for every audited
 // project.
+// maxNearDuplicateHintPairs bounds how many near-duplicate pairs the
+// consolidation prompt lists. It reuses maxGitCommits, the existing cap on how
+// many git commits the same prompt carries, so the hint cannot outrun the
+// input the model already reads.
+const maxNearDuplicateHintPairs = maxGitCommits
+
 func BuildReflectionPrompt(input ReflectionInput) string {
 	var sb strings.Builder
 
@@ -374,8 +380,22 @@ func BuildReflectionPrompt(input ReflectionInput) string {
 	if len(input.NearDuplicatePairs) > 0 {
 		sb.WriteString("\n\n## Near-duplicate pairs that read as duplicates\n")
 		sb.WriteString("These pairs read as duplicates under Ghost's text predicate, so the loser costs a candidate slot before it is cut. Prefer merging these pairs; a merge still goes through grounding, drop guard and accounting, and nothing is merged mechanically without you.\n")
-		for _, p := range input.NearDuplicatePairs {
+		// The hint is bounded: an unbounded list can push the consolidation
+		// input past the model's budget on a large project. Pairs are kept in
+		// input order (earliest-created first), which is the order
+		// NearDuplicatePairs returns them in; the first maxNearDuplicateHintPairs
+		// are the ones shown, and the remainder is counted rather than printed.
+		pairs := input.NearDuplicatePairs
+		omitted := 0
+		if len(pairs) > maxNearDuplicateHintPairs {
+			omitted = len(pairs) - maxNearDuplicateHintPairs
+			pairs = pairs[:maxNearDuplicateHintPairs]
+		}
+		for _, p := range pairs {
 			fmt.Fprintf(&sb, "- %s and %s read as duplicates\n", p[0], p[1])
+		}
+		if omitted > 0 {
+			fmt.Fprintf(&sb, "  ... and %d more near-duplicate pair(s)\n", omitted)
 		}
 	}
 

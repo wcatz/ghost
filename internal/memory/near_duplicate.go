@@ -12,13 +12,21 @@ import (
 // (maxConsolidationInput in cmd/ghost): above it a scan would be quadratic
 // in both time and token work, so the scan stops at the bound and reports
 // that it was capped.
-const maxNearDuplicateScanRows = 2000
+// maxNearDuplicateScanRows bounds how many consolidatable rows a single
+// near-duplicate scan considers. It is defined as MaxConsolidationInput below
+// rather than as a second literal: the scan's bound is the same number as the
+// consolidation input bound, and keeping one definition means a change to the
+// bound moves both. memory cannot import cmd/ghost (cmd imports memory), so
+// the value is mirrored here; see MaxConsolidationInput.
+const maxNearDuplicateScanRows = MaxConsolidationInput
 
 // MaxNearDuplicateScanRows is the exported name for maxNearDuplicateScanRows.
 const MaxNearDuplicateScanRows = maxNearDuplicateScanRows
 
-// MaxConsolidationInput mirrors cmd/ghost's consolidation input bound so
-// internal callers can reuse the same number without importing cmd.
+// MaxConsolidationInput mirrors cmd/ghost's consolidation input bound
+// (maxConsolidationInput, 2000). memory cannot import cmd/ghost — the
+// dependency runs cmd -> memory — so the value is mirrored here instead of
+// referenced. A comment in cmd/ghost/lifecycle.go names this mirror.
 const MaxConsolidationInput = 2000
 
 // dedupStopwords mirrors reflection's stopwords so the two predicates cannot drift.

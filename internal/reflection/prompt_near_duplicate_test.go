@@ -2,6 +2,7 @@ package reflection
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -115,4 +116,35 @@ func areNearDuplicatesLocal(a, b string) bool {
 		return false
 	}
 	return true
+}
+
+
+func TestNearDuplicateHintIsBounded(t *testing.T) {
+	mkPairs := func(n int) [][2]string {
+		out := make([][2]string, n)
+		for i := 0; i < n; i++ {
+			out[i] = [2]string{fmt.Sprintf("ID%032d", i), fmt.Sprintf("ID%032d", i+1000)}
+		}
+		return out
+	}
+	// Fewer than the cap: every pair is listed, no "more" line.
+	input := ReflectionInput{ProjectName: "proj", NearDuplicatePairs: mkPairs(3)}
+	prompt := BuildReflectionPrompt(input)
+	if strings.Count(prompt, "read as duplicates\n") != 4 {
+		t.Fatalf("want 3 listed pairs, got %d", strings.Count(prompt, "read as duplicates\n")-1)
+	}
+	if strings.Contains(prompt, "more near-duplicate pair") {
+		t.Fatalf("no overflow line expected for fewer-than-cap input:\n%s", prompt)
+	}
+	// More than the cap: exactly the cap is listed, plus one "N more" line.
+	over := maxNearDuplicateHintPairs + 4
+	input = ReflectionInput{ProjectName: "proj", NearDuplicatePairs: mkPairs(over)}
+	prompt = BuildReflectionPrompt(input)
+	if got := strings.Count(prompt, "read as duplicates\n")-1; got != maxNearDuplicateHintPairs {
+		t.Fatalf("want %d listed pairs, got %d", maxNearDuplicateHintPairs, got)
+	}
+	wantMore := fmt.Sprintf("... and %d more near-duplicate pair(s)", over-maxNearDuplicateHintPairs)
+	if !strings.Contains(prompt, wantMore) {
+		t.Fatalf("overflow line %q missing:\n%s", wantMore, prompt)
+	}
 }
