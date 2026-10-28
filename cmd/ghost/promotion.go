@@ -22,6 +22,21 @@ type reflectionApplier interface {
 	ApplyReflection(ctx context.Context, projectID string, projectMems, globalMems []memory.Memory, consolidatedSince string, promoteGlobals bool, fed []memory.CorpusRow) (preserved []string, promoted int, keptMems []memory.Memory, projectDropped, globalDropped memory.EmissionDrops, deleted int, appliedByCategory map[string]int, err error)
 }
 
+// reflectionApplied holds the result of applying reflection proposals.
+type reflectionApplied struct {
+	KeptProject       []reflection.ReflectMemory
+	KeptGlobal        []reflection.ReflectMemory
+	Preserved         []string
+	Promoted          int
+	KeptMems          []memory.Memory
+	ProjectDropped    memory.EmissionDrops
+	GlobalDropped     memory.EmissionDrops
+	Deleted           int
+	AppliedByCategory map[string]int
+	CredDropped       int
+	Applied           bool
+}
+
 // applyReflection converts reflection proposals to store rows and always
 // invokes the store apply boundary. Promotion is not nested under a
 // project-memory guard: a result containing only cross-project candidates is
@@ -69,7 +84,7 @@ type reflectionApplier interface {
 // stands has to keep the skip fingerprint unrecorded, and a merge dropped
 // because its decision links do not fit in a source_ref would be re-proposed on
 // every run if it did the same (#1228).
-func applyReflection(ctx context.Context, store reflectionApplier, projectID string, projectMems, globalMems []reflection.ReflectMemory, consolidatedSince string, promoteGlobals bool, replaced map[replacedKey][]string, fed []memory.CorpusRow) (keptProject, keptGlobal []reflection.ReflectMemory, preserved []string, promoted int, keptMems []memory.Memory, projectDropped, globalDropped memory.EmissionDrops, deleted int, appliedByCategory map[string]int, credDropped int, applied bool, err error) {
+func applyReflection(ctx context.Context, store reflectionApplier, projectID string, projectMems, globalMems []reflection.ReflectMemory, consolidatedSince string, promoteGlobals bool, replaced map[replacedKey][]string, fed []memory.CorpusRow) (reflectionApplied, error) {
 	// Filter FIRST, on the caller's two sets, and leave the fold to the store.
 	//
 	// The order is load-bearing and it was the other way round here first.
@@ -107,11 +122,17 @@ func applyReflection(ctx context.Context, store reflectionApplier, projectID str
 		// above, and saying so here is the point — a removal claim printed before
 		// anyone knows whether a replace runs closes the incident in the
 		// operator's head while the value sits in the database.
-		return keptProject, keptGlobal, nil, 0, nil, memory.EmissionDrops{}, memory.EmissionDrops{}, 0, nil, 0, false, nil
+		return reflectionApplied{
+			KeptProject: keptProject,
+			KeptGlobal:  keptCrossProject,
+		}, nil
 	}
 	preserved, promoted, kept, projectDropped, globalDropped, deleted, appliedByCategory, err := store.ApplyReflection(ctx, projectID, projectRows, globalRows, consolidatedSince, promoteGlobals, fed)
 	if err != nil {
-		return keptProject, keptGlobal, nil, 0, nil, memory.EmissionDrops{}, memory.EmissionDrops{}, 0, nil, 0, false, err
+		return reflectionApplied{
+			KeptProject: keptProject,
+			KeptGlobal:  keptCrossProject,
+		}, err
 	}
 	// Two things have to be true for a carried-forward row to be gone, and this
 	// note says only what holds. A proposal dropped for holding a credential is
@@ -141,11 +162,23 @@ func applyReflection(ctx context.Context, store reflectionApplier, projectID str
 	// the drop count, is what separates that from an all-dropped round that
 	// still changed the corpus: the latter took a snapshot the operator can
 	// restore, so it is a replace and must be reported as one.
-	applied = true
+	applied := true
 	if projectDropped.Total()+globalDropped.Total() == len(projectRows)+len(globalRows) && deleted == 0 {
 		applied = false
 	}
-	return keptProject, keptCrossProject, preserved, promoted, kept, projectDropped, globalDropped, deleted, appliedByCategory, credDropped, applied, nil
+	return reflectionApplied{
+		KeptProject:       keptProject,
+		KeptGlobal:        keptCrossProject,
+		Preserved:         preserved,
+		Promoted:          promoted,
+		KeptMems:          kept,
+		ProjectDropped:    projectDropped,
+		GlobalDropped:     globalDropped,
+		Deleted:           deleted,
+		AppliedByCategory: appliedByCategory,
+		CredDropped:       credDropped,
+		Applied:           applied,
+	}, nil
 }
 
 // displayProposal renders a proposal or a guarded drop for the operator's own

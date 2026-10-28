@@ -27,7 +27,7 @@ import (
 func TestCrossProjectCandidatesSurviveTheDropAndStayDiscoverable(t *testing.T) {
 	f := &fakeReflectionApplier{}
 
-	keptProject, keptGlobal, _, _, _, _, _, _, _, _, applied, err := applyReflection(
+	res, err := applyReflection(
 		context.Background(), f, "p1",
 		projectMemories("the relay listens on 2222"),
 		globals("tabs, not spaces, in every repository we touch"),
@@ -36,14 +36,14 @@ func TestCrossProjectCandidatesSurviveTheDropAndStayDiscoverable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("applyReflection: %v", err)
 	}
-	if !applied {
+	if !res.Applied {
 		t.Fatal("applied = false, want true")
 	}
-	if len(keptGlobal) == 0 {
+	if len(res.KeptGlobal) == 0 {
 		t.Error("keptGlobal is empty, so the --promote-globals hint and the cross-project count are both unreachable")
 	}
-	if len(keptProject) != 1 || !strings.Contains(keptProject[0].Content, "2222") {
-		t.Errorf("the returned project set is not the one project proposal: %+v", keptProject)
+	if len(res.KeptProject) != 1 || !strings.Contains(res.KeptProject[0].Content, "2222") {
+		t.Errorf("the returned project set is not the one project proposal: %+v", res.KeptProject)
 	}
 	// The fold for the WRITE happens inside the store now (#1051): the wrapper
 	// forwards both halves intact so the store's corpus guard can attribute its
@@ -72,7 +72,7 @@ func TestCredentialAmongCrossProjectCandidatesIsNotPromoted(t *testing.T) {
 	credential := "ghp_" + strings.Repeat("a1B2c3D4e5F6", 3) + "AbCd"
 	f := &fakeReflectionApplier{}
 
-	keptProject, keptGlobal, _, _, _, _, _, _, _, _, _, err := applyReflection(
+	res3, err := applyReflection(
 		context.Background(), f, "p1",
 		projectMemories("the relay listens on 2222"),
 		globals("the deploy token is "+credential),
@@ -81,15 +81,15 @@ func TestCredentialAmongCrossProjectCandidatesIsNotPromoted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("applyReflection: %v", err)
 	}
-	if len(keptGlobal) != 0 {
-		t.Errorf("keptGlobal holds %d candidates, want 0: %+v", len(keptGlobal), keptGlobal)
+	if len(res3.KeptGlobal) != 0 {
+		t.Errorf("keptGlobal holds %d candidates, want 0: %+v", len(res3.KeptGlobal), res3.KeptGlobal)
 	}
 	// What the store actually received is the assertion: a global row written
 	// here is replayed into every project on every save.
 	if len(f.globalMems) != 0 {
 		t.Errorf("%d candidate(s) were written to _global, want 0 — a global row is replayed into every project: %+v", len(f.globalMems), f.globalMems)
 	}
-	if len(keptProject) != 1 || !strings.Contains(keptProject[0].Content, "2222") {
-		t.Errorf("the surviving project set is not the one clean memory: %+v", keptProject)
+	if len(res3.KeptProject) != 1 || !strings.Contains(res3.KeptProject[0].Content, "2222") {
+		t.Errorf("the surviving project set is not the one clean memory: %+v", res3.KeptProject)
 	}
 }

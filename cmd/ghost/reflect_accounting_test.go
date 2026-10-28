@@ -406,7 +406,9 @@ func TestReflectSummaryListsAScopeRefusedMergeAsTheApplyRefusesIt(t *testing.T) 
 	// a scope refusal, its sources are both still there under their own scopes,
 	// and the agreeing merge consumed its two.
 	projectMems, globalMems := splitByScope(result.Memories)
-	_, _, _, _, _, projectDropped, globalDropped, _, _, _, _, err := applyReflection(ctx, store, project, projectMems, globalMems, "", false, replacedIDsFor(&result), nil)
+	res, err := applyReflection(ctx, store, project, projectMems, globalMems, "", false, replacedIDsFor(&result), nil)
+	projectDropped := res.ProjectDropped
+	globalDropped := res.GlobalDropped
 	if err != nil {
 		t.Fatalf("applyReflection: %v", err)
 	}
@@ -612,7 +614,7 @@ func storeRound(t *testing.T, project string, seeded []seedRow, reply func(ids [
 
 	out.section = accountingSection(t, input, result, guarded, false, false)
 	projectMems, globalMems := splitByScope(result.Memories)
-	if _, _, _, _, _, _, _, _, _, _, _, err := applyReflection(ctx, store, project, projectMems, globalMems, "", false, nil, nil); err != nil {
+	if _, err := applyReflection(ctx, store, project, projectMems, globalMems, "", false, nil, nil); err != nil {
 		t.Fatalf("applyReflection: %v", err)
 	}
 	after, err := store.GetAll(ctx, project, -1)
