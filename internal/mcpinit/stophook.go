@@ -25,11 +25,12 @@ import (
 )
 
 // stopReminder is emitted (as hook JSON) when a tool-using session ends
-// without a single Ghost save. It is a non-blocking "approve" so no host
-// renders it as a Stop hook error — the message is surfaced as a plain
-// reminder, never as a failure. (Hosts that cannot honor a block — opencode —
-// re-present it through their own channel; Claude/Codex/Goose show it as a
-// normal system note, not an error.)
+// without a single Ghost save. It uses the Stop contract's non-blocking
+// context channel (hookSpecificOutput.additionalContext with hookEventName
+// "Stop") so no host renders it as a Stop hook error — the message is
+// surfaced as a plain reminder, never as a failure. (Hosts that cannot honor
+// a block — opencode — re-present it through their own channel;
+// Claude/Codex/Goose show it as a normal system note, not an error.)
 const stopReminder = `{"hookSpecificOutput":{"hookEventName":"Stop","additionalContext":"Reminder: this turn used tools but saved nothing to Ghost. If the user corrected you, a root cause was found, or a choice was made for a reason, save that rule and its reason with ghost_memory_save (ghost_decision_record for a choice between alternatives). Do not save what the repository already states."}}`
 
 // RunHostEvent is the contract-v1 entrypoint for every host lifecycle event:
@@ -212,13 +213,21 @@ func stopSaveMarkerPath(sessionID string) string {
 }
 
 // readLastSeenGhostSaves returns the Ghost save count recorded at this
-// session's previous stop, or 0 when none has been recorded.
+// session's previous stop, or 0 when none has been recorded. It opens the
+// marker through openMarker so a FIFO, directory or symlink at the path
+// cannot block or crash the hook, and reads only a bounded amount: the file
+// is a decimal count.
 func readLastSeenGhostSaves(sessionID string) int {
 	path := stopSaveMarkerPath(sessionID)
 	if path == "" {
 		return 0
 	}
-	b, err := os.ReadFile(path)
+	f, err := openMarker(path)
+	if err != nil {
+		return 0
+	}
+	defer f.Close() //nolint:errcheck
+	b, err := io.ReadAll(io.LimitReader(f, 64))
 	if err != nil {
 		return 0
 	}
@@ -230,9 +239,9 @@ func readLastSeenGhostSaves(sessionID string) int {
 }
 
 // writeLastSeenGhostSaves records the Ghost save count seen at this stop. It
-// creates the data directory when absent so the gate can persist; a refused
-// or unwritable directory fails open and the gate degrades to the session
-// having no earlier saves (the same answer as before this feature).
+// writes only when the data directory already exists; a missing or unwritable
+// directory fails open and the gate degrades to the session having no earlier
+// saves (the same answer as before this feature).
 func writeLastSeenGhostSaves(sessionID string, count int) {
 	path := stopSaveMarkerPath(sessionID)
 	if path == "" {
@@ -241,9 +250,11 @@ func writeLastSeenGhostSaves(sessionID string, count int) {
 	dir := filepath.Dir(path)
 	info, err := os.Stat(dir)
 	if err != nil || !info.IsDir() {
-		if err := os.MkdirAll(dir, 0o700); err != nil {
-			return
-		}
+		// The data directory must already exist: creating it here would leave a
+		// phantom directory (and a .count file) on every tool-using stop on a
+		// machine with no store, and would write into a developer's real data
+		// directory during tests. Degrade to the pre-feature answer instead.
+		return
 	}
 	if count < 0 {
 		count = 0
