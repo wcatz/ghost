@@ -166,22 +166,18 @@ func TestHealthGlobalMCPSourceDoesNotContradictNearDuplicates(t *testing.T) {
 	if !strings.Contains(text, "**Near duplicates:**") {
 		t.Fatalf("ghost_health missing Near duplicates section:\n%s", text)
 	}
-	if !strings.Contains(text, "_global") {
-		// The Near duplicates block may list _global pair
+	// Near duplicates must list the _global pair
+	if !strings.Contains(text, "_global") || !strings.Contains(text, "pair") {
+		t.Fatalf("ghost_health missing _global pair in Near duplicates:\n%s", text)
 	}
-	// The _global consolidation line must not claim zero consolidatable or no clusters
-	// while Near duplicates lists a _global pair.
-	if strings.Contains(text, "**_global:**") {
-		idx := strings.Index(text, "**_global:**")
-		end := idx + 300
-		if end > len(text) {
-			end = len(text)
-		}
-		section := text[idx:end]
-		if strings.Contains(section, "0 consolidatable") && strings.Contains(section, "no near-duplicate clusters") {
-			if strings.Contains(text, "_global") && strings.Contains(text, "pair") {
-				t.Fatalf("_global line contradicts Near duplicates:\n%s", text)
-			}
-		}
+	// The _global consolidation line must be present and labelled reflection-written
+	if !strings.Contains(text, "**_global:**") {
+		t.Fatalf("ghost_health missing _global section:\n%s", text)
+	}
+	if !strings.Contains(text, "reflection-written consolidatable") {
+		t.Fatalf("ghost_health _global line not labelled reflection-written:\n%s", text)
+	}
+	if strings.Contains(text, "no near-duplicate clusters") {
+		t.Fatalf("ghost_health must not claim no near-duplicate clusters when Near duplicates lists _global pairs:\n%s", text)
 	}
 }

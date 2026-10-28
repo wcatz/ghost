@@ -164,11 +164,21 @@ func TestStatusGlobalMCPSourceDoesNotContradictNearDuplicates(t *testing.T) {
 		_ = db.Close()
 		t.Fatalf("create global2: %v", err)
 	}
-	defer db.Close()
+	t.Cleanup(func() {
+		if err := db.Close(); err != nil {
+			t.Errorf("close db: %v", err)
+		}
+	})
 	var buf strings.Builder
 	reportGlobalConsolidation(&buf, store)
 	text := buf.String()
-	if strings.Contains(text, "0 reflection-written consolidatable") && strings.Contains(text, "no near-duplicate clusters") {
-		t.Fatalf("_global line contradicts Near duplicates logic:\n%s", text)
+	if !strings.Contains(text, "_global:") && !strings.Contains(text, "_global ") {
+		// allow
+	}
+	if !strings.Contains(text, "reflection-written consolidatable") {
+		t.Fatalf("_global line not labelled reflection-written:\n%s", text)
+	}
+	if strings.Contains(text, "no near-duplicate clusters") {
+		t.Fatalf("_global line must not claim no near-duplicate clusters when pairs exist:\n%s", text)
 	}
 }
