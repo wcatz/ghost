@@ -965,7 +965,8 @@ func claimPidFileReclaim(pidPath string) (claimed bool, reclaimedAt time.Time, e
 	// file opened: a symlink is refused by O_NOFOLLOW and only a regular
 	// descriptor is considered a claim. The mtime and liveness both come
 	// from that opened descriptor.
-	if priorFile, openErr := os.OpenFile(pidPath, markerOpenFlags, 0); openErr == nil {
+	// Fall through to the write path; a non-claim path is replaced.
+	if priorFile, err := os.OpenFile(pidPath, markerOpenFlags, 0); err == nil {
 		prior, statErr := priorFile.Stat()
 		if statErr == nil && prior.Mode().IsRegular() {
 			if isAlive(pidPath) {
@@ -975,9 +976,6 @@ func claimPidFileReclaim(pidPath string) (claimed bool, reclaimedAt time.Time, e
 			reclaimedAt = prior.ModTime()
 		}
 		_ = priorFile.Close()
-	} else {
-		// Fall through to the write path; a non-claim path is replaced.
-		_ = openErr
 	}
 	token, haveToken := processStartTime(os.Getpid())
 	if err := atomicWritePID(pidPath, os.Getpid(), token, haveToken); err != nil {
