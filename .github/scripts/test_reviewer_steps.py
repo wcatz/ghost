@@ -841,5 +841,115 @@ if __name__ == "__main__":
             self.assertEqual(cause_of(out), review_outcome.CAUSE_TIMEOUT)
 
 
+class TestTheHelperFlagChecks(unittest.TestCase):
+    def test_selection_probe_passes_exit_status_when_helper_accepts_it(self):
+        with tempfile.TemporaryDirectory() as folder:
+            runner = os.path.join(folder, "runner-temp")
+            scripts = os.path.join(runner, "base-scripts")
+            os.makedirs(scripts)
+            shutil.copyfile(script_path("review_outcome.py"), os.path.join(scripts, "review_outcome.py"))
+            helper = os.path.join(scripts, "model_acted.py")
+            argv_log = os.path.join(folder, "model-acted-argv.log")
+            _write(helper, """#!/usr/bin/env python3
+import argparse, sys, os
+parser = argparse.ArgumentParser()
+parser.add_argument('--events', default='')
+parser.add_argument('--stderr', default='')
+parser.add_argument('--marker', default='')
+parser.add_argument('--exit-status', default='')
+args = parser.parse_args(sys.argv[1:])
+log = os.environ.get('MODEL_ACTED_ARGV_LOG')
+if log:
+    with open(log, 'a') as f:
+        f.write(' '.join(sys.argv) + '\\n')
+if args.marker:
+    with open(args.marker, 'a') as f:
+        f.write('acted\\n')
+print('true')
+sys.exit(0)
+""")
+            os.chmod(helper, 0o755)
+            _fake_opencode(folder)
+            stdout_path = os.path.join(folder, "opencode.out")
+            stderr_path = os.path.join(folder, "opencode.err")
+            _write(stdout_path, PROVIDER_ERROR + "\n")
+            _write(stderr_path, "")
+            output = os.path.join(folder, "github-output")
+            _write(output, "")
+            step = os.path.join(folder, "select.sh")
+            _write(step, step_shell("Select review model"))
+            environment = dict(os.environ)
+            environment.update({
+                "HOME": folder,
+                "PATH": folder + os.pathsep + environment.get("PATH", ""),
+                "RUNNER_TEMP": runner,
+                "GITHUB_OUTPUT": output,
+                "MODELS": "opencode/big-pickle",
+                "FAKE_OPENCODE_STDOUT": stdout_path,
+                "FAKE_OPENCODE_STDERR": stderr_path,
+                "FAKE_OPENCODE_STATUS": "1",
+                "MODEL_ACTED_ARGV_LOG": argv_log,
+            })
+            result = subprocess.run(["bash", step], env=environment, capture_output=True, text=True, check=False)
+            with open(argv_log) as f:
+                log = f.read()
+            self.assertIn('--exit-status', log)
+            marker = _read(os.path.join(runner, "model-acted.txt"))
+            self.assertIn('acted', marker)
+
+    def test_selection_probe_does_not_pass_exit_status_when_helper_rejects_it(self):
+        with tempfile.TemporaryDirectory() as folder:
+            runner = os.path.join(folder, "runner-temp")
+            scripts = os.path.join(runner, "base-scripts")
+            os.makedirs(scripts)
+            shutil.copyfile(script_path("review_outcome.py"), os.path.join(scripts, "review_outcome.py"))
+            helper = os.path.join(scripts, "model_acted.py")
+            argv_log = os.path.join(folder, "model-acted-argv.log")
+            _write(helper, """#!/usr/bin/env python3
+import argparse, sys, os
+parser = argparse.ArgumentParser()
+parser.add_argument('--events', default='')
+parser.add_argument('--stderr', default='')
+parser.add_argument('--marker', default='')
+args = parser.parse_args(sys.argv[1:])
+log = os.environ.get('MODEL_ACTED_ARGV_LOG')
+if log:
+    with open(log, 'a') as f:
+        f.write(' '.join(sys.argv) + '\\n')
+if args.marker:
+    with open(args.marker, 'a') as f:
+        f.write('acted\\n')
+print('true')
+sys.exit(0)
+""")
+            os.chmod(helper, 0o755)
+            _fake_opencode(folder)
+            stdout_path = os.path.join(folder, "opencode.out")
+            stderr_path = os.path.join(folder, "opencode.err")
+            _write(stdout_path, PROVIDER_ERROR + "\n")
+            _write(stderr_path, "")
+            output = os.path.join(folder, "github-output")
+            _write(output, "")
+            step = os.path.join(folder, "select.sh")
+            _write(step, step_shell("Select review model"))
+            environment = dict(os.environ)
+            environment.update({
+                "HOME": folder,
+                "PATH": folder + os.pathsep + environment.get("PATH", ""),
+                "RUNNER_TEMP": runner,
+                "GITHUB_OUTPUT": output,
+                "MODELS": "opencode/big-pickle",
+                "FAKE_OPENCODE_STDOUT": stdout_path,
+                "FAKE_OPENCODE_STDERR": stderr_path,
+                "FAKE_OPENCODE_STATUS": "1",
+                "MODEL_ACTED_ARGV_LOG": argv_log,
+            })
+            result = subprocess.run(["bash", step], env=environment, capture_output=True, text=True, check=False)
+            with open(argv_log) as f:
+                log = f.read()
+            self.assertNotIn('--exit-status', log)
+            self.assertIn('acted', _read(os.path.join(runner, "model-acted.txt")))
+
+
 if __name__ == "__main__":
     unittest.main()
