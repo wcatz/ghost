@@ -10,6 +10,7 @@ import (
 
 	"github.com/wcatz/ghost/internal/assemble"
 	"github.com/wcatz/ghost/internal/memory"
+	"github.com/wcatz/ghost/internal/reflection"
 )
 
 // OverdueProject is one project whose maintenance is overdue: it holds
@@ -64,6 +65,9 @@ func OverdueMaintenanceProjects(ctx context.Context, store *memory.Store, dataDi
 		}
 		n := counts[p.ID]
 		if n == 0 {
+			continue
+		}
+		if n > reflection.MaxConsolidationInput {
 			continue
 		}
 		pidPath := filepath.Join(dataDir, "lifecycle-"+p.ID+".pid")
