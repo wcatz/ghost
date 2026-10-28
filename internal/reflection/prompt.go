@@ -7,6 +7,14 @@ import (
 	"github.com/wcatz/ghost/internal/memory"
 )
 
+// maxNearDuplicateHintPairs bounds how many near-duplicate pairs the
+// consolidation prompt lists. Capped at 20: the prompt already carries every
+// memory in the project, and the pair list is quadratic in the worst case, so
+// an unbounded list can push the consolidation input past the model's budget.
+// 20 matches the existing maxGitCommits cap on git commits in the same prompt.
+const maxNearDuplicateHintPairs = 20
+
+
 // ReflectionInput holds all data fed into the reflection prompt.
 type ReflectionInput struct {
 	ExistingMemories []memory.Memory // all memories (up to 200)
@@ -221,12 +229,6 @@ type ReflectMemory struct {
 // field — a reader who found the rule here without this sentence would "fix" the
 // asymmetry by mirroring Usefulness and silently break the gate for every audited
 // project.
-// maxNearDuplicateHintPairs bounds how many near-duplicate pairs the
-// consolidation prompt lists. It reuses maxGitCommits, the existing cap on how
-// many git commits the same prompt carries, so the hint cannot outrun the
-// input the model already reads.
-const maxNearDuplicateHintPairs = maxGitCommits
-
 func BuildReflectionPrompt(input ReflectionInput) string {
 	var sb strings.Builder
 

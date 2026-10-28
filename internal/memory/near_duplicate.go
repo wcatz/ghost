@@ -204,6 +204,11 @@ func (s *Store) NearDuplicatePairsForProject(ctx context.Context, projectID stri
 			return out, truncated, err
 		}
 		for j := i + 1; j < len(live); j++ {
+			if j%64 == 0 {
+				if err := ctx.Err(); err != nil {
+					return out, truncated, err
+				}
+			}
 			if !AreNearDuplicatesTokens(tokens[i], tokens[j]) {
 				continue
 			}
