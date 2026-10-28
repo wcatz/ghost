@@ -351,6 +351,14 @@ type ReflectionConfig struct {
 	LifecycleTimeoutMinutes int `koanf:"lifecycle_timeout_minutes"`
 }
 
+// ConsolidationEnabled reports whether any automatic lifecycle consolidation
+// phase is configured. When none of AutoReflect, AutoResolve or AutoSupersede
+// is set, automatic consolidation is disabled and no retry of overdue
+// maintenance is useful.
+func (c ReflectionConfig) ConsolidationEnabled() bool {
+	return c.AutoReflect || c.AutoResolve || c.AutoSupersede
+}
+
 const (
 	// DefaultLifecycleTimeoutMinutes is the compiled value of
 	// reflection.lifecycle_timeout_minutes, and what a negative value falls

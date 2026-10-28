@@ -9358,6 +9358,42 @@ func (s *Store) CountMemories(ctx context.Context, projectID string) (int, error
 	return count, err
 }
 
+// ConsolidatableCounts reports how many consolidatable memories each project
+// holds. A memory is consolidatable when reflection may rewrite it: not pinned,
+// not manual or builtin, not persistent, and not resolved. _global is never
+// counted, because no lifecycle pass runs for it. One GROUP BY, so the cost
+// does not grow with the project count the caller is about to iterate over.
+func (s *Store) ConsolidatableCounts(ctx context.Context) (map[string]int, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	rows, err := s.queryDB().QueryContext(ctx, `
+		SELECT project_id, COUNT(*)
+		FROM memories
+		WHERE project_id != '_global'
+		  AND pinned = 0
+		  AND source NOT IN ('manual', 'builtin')
+		  AND retention != 'persistent'
+		  AND resolved_at IS NULL
+		GROUP BY project_id
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	out := make(map[string]int)
+	for rows.Next() {
+		var id string
+		var n int
+		if err := rows.Scan(&id, &n); err != nil {
+			return nil, err
+		}
+		out[id] = n
+	}
+	return out, rows.Err()
+}
+
 // CountActiveMemories counts the project's memories that pass the one predicate
 // every retrieval window binds regardless of caller: `resolved_at IS NULL`. It is
 // not CountMemories with a filter applied for tidiness — the two answer different

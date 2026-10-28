@@ -26,6 +26,7 @@ import (
 	"github.com/wcatz/ghost/internal/claudeimport"
 	"github.com/wcatz/ghost/internal/config"
 	"github.com/wcatz/ghost/internal/followup"
+	"github.com/wcatz/ghost/internal/mcpinit"
 	"github.com/wcatz/ghost/internal/memory"
 	"github.com/wcatz/ghost/internal/provider"
 	"github.com/wcatz/ghost/internal/repo"
@@ -4112,6 +4113,49 @@ func (s *Server) registerTools() {
 			for _, warn := range growth.Warnings {
 				fmt.Fprintf(&sb, "  ⚠ %s\n", warn.Detail)
 			}
+		}
+
+		// Maintenance overdue (#1847): projects that hold consolidatable
+		// memories and have not had a lifecycle run within the configured
+		// interval. The figures are the same data the status diagnostic
+		// reports, so both surfaces cannot disagree.
+		var overdueParts []string
+		if read.store != nil {
+			dataDir, derr := config.DataDirPath()
+			if derr != nil {
+				overdueParts = append(overdueParts, "\n**Maintenance overdue:** could not be read: "+derr.Error()+"\n\n")
+			} else {
+				cfg := config.LoadForHook()
+				overdue, oerr := mcpinit.OverdueMaintenanceProjects(ctx, read.store, dataDir, time.Now(), cfg.Lifecycle.MinIntervalDuration(), cfg.Reflection.ConsolidationEnabled())
+				if oerr != nil {
+					overdueParts = append(overdueParts, "\n**Maintenance overdue:** could not be read: "+oerr.Error()+"\n\n")
+				} else if len(overdue) > 0 {
+					if text, ok := mcpinit.FormatOverdueMaintenance(overdue, time.Now()); ok {
+						// Cap to avoid unbounded framing growth; capResponseParts
+						// will trim cuttable parts.
+						lines := strings.Split(strings.TrimRight(text, "\n"), "\n")
+						if len(lines) > 0 {
+							var ob strings.Builder
+							ob.WriteString("\n")
+							ob.WriteString(lines[0])
+							ob.WriteString("\n")
+							max := 20
+							for i := 1; i < len(lines) && i <= max; i++ {
+								ob.WriteString(lines[i])
+								ob.WriteString("\n")
+							}
+							if len(lines)-1 > max {
+								fmt.Fprintf(&ob, "... and %d more\n", len(lines)-1-max)
+							}
+							ob.WriteString("\n")
+							overdueParts = append(overdueParts, ob.String())
+						}
+					}
+				}
+			}
+		}
+		for _, op := range overdueParts {
+			sb.WriteString(op)
 		}
 
 		// Retrieval figures (#646), additive like the block above: what was
