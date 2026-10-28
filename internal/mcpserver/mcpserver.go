@@ -29,6 +29,7 @@ import (
 	"github.com/wcatz/ghost/internal/mcpinit"
 	"github.com/wcatz/ghost/internal/memory"
 	"github.com/wcatz/ghost/internal/provider"
+	"github.com/wcatz/ghost/internal/reflection"
 	"github.com/wcatz/ghost/internal/repo"
 	"github.com/wcatz/ghost/internal/resolve"
 	"github.com/wcatz/ghost/internal/supersede"
@@ -4122,6 +4123,47 @@ func (s *Server) registerTools() {
 		if growthErr == nil {
 			for _, warn := range growth.Warnings {
 				fmt.Fprintf(&sb, "  ⚠ %s\n", warn.Detail)
+			}
+		}
+
+		// Reflect over-bound projects (#1848): a project above the per-run
+		// consolidation bound is skipped by the unattended lifecycle with no
+		// failure marker, so health is the one place it is surfaced. The bound
+		// and the count are the same predicate the lifecycle's consolidationBound
+		// checks, and the manual remediation is the command that does not skip.
+		type overBoundProject struct {
+			name  string
+			id    string
+			count int
+		}
+		var overBound []overBoundProject
+		for _, p := range projects {
+			n, err := read.reader.CountConsolidatableMemories(ctx, p.ID)
+			if err != nil {
+				nm := p.Name
+				if ph, ok := memory.TokenGuardPlaceholder("project", nm); ok {
+					nm = ph
+				} else {
+					nm = assemble.Label(nm)
+				}
+				fmt.Fprintf(&sb, "**Reflect:** project %s (%s) consolidatable count could not be read\n", nm, shortID(p.ID))
+				continue
+			}
+			if n > reflection.MaxConsolidationInput {
+				overBound = append(overBound, overBoundProject{name: p.Name, id: p.ID, count: n})
+			}
+		}
+		if len(overBound) > 0 {
+			fmt.Fprintf(&sb, "**Reflect:** %d project(s) above the %d consolidatable-memory limit for a single consolidation and skipped by unattended reflect — to consolidate, bring to at most %d: `ghost resolve <project> --apply` or `ghost prune --project <project> --apply` (pinned, manual and persistent memories do not count). Then run `ghost reflect <project> --apply`.\n",
+				len(overBound), reflection.MaxConsolidationInput, reflection.MaxConsolidationInput)
+			for _, o := range overBound {
+				nm := o.name
+				if ph, ok := memory.TokenGuardPlaceholder("project", nm); ok {
+					nm = ph
+				} else {
+					nm = assemble.Label(nm)
+				}
+				fmt.Fprintf(&sb, "  - %s (%s): %d consolidatable memories\n", nm, shortID(o.id), o.count)
 			}
 		}
 

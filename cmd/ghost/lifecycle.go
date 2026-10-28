@@ -1357,7 +1357,9 @@ func reflectMaySkip(skipUnchanged, apply, promoteGlobals, allowDrops bool, store
 // harness tier is sent all of it as text, and the SQLite floor compares every
 // pair (measured on a raw-SQL-seeded store: 1.8s at 2000 rows, 43s at 10000),
 // so above the bound a run would either overrun the model's context or stall.
-const maxConsolidationInput = 2000
+// The value is re-exported from reflection.MaxConsolidationInput; this alias
+// stays so the many call sites in this package keep their current name.
+const maxConsolidationInput = reflection.MaxConsolidationInput
 
 // consolidationBound decides what `ghost reflect` does with a consolidatable
 // set of n memories. At or below maxConsolidationInput it returns "" and the

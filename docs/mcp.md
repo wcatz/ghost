@@ -110,6 +110,8 @@ an agent looking at one store are told the same thing about it — and an agent 
 sees the restatement share rising has the same number the operator sees on the
 command line. A store with no history prints `no version rows recorded yet`.
 
+**Reflect** lists projects above the 2000 consolidatable-memory limit for a single consolidation and skipped by unattended `ghost lifecycle`. The line names the bound, the count per project, and the manual `ghost reflect <project> --apply` after shrinking with `ghost resolve <project> --apply` or `ghost prune --project <project> --apply` (pinned, manual and persistent memories do not count); a failed count is reported as `consolidatable count could not be read`. The same figures and remediation are reported by `ghost mcp status`; the line format differs (`ghost_health` prints `**Reflect:** ...`, `ghost mcp status` prints `  ! reflect: ...`).
+
 **Every other figure the tool prints follows the same rule.** Embedding
 coverage, the memory-link figures and each project's count are reads like the one
 above, and a read that fails is reported under its own name rather than dropped:

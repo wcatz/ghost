@@ -9432,6 +9432,23 @@ func (s *Store) CountActiveMemories(ctx context.Context, projectID string) (int,
 	return count, err
 }
 
+// CountConsolidatableMemories counts the project\'s memories that `ghost reflect`
+// would rewrite: non-resolved, unpinned, non-manual/non-builtin and not
+// persistent-tier rows. It mirrors the consolidatable predicate in
+// cmd/ghost/lifecycle.go, and is what the unattended reflect bound is measured
+// against — the count that decides whether the phase is skipped, and the count
+// the health diagnostics report as over the bound.
+func (s *Store) CountConsolidatableMemories(ctx context.Context, projectID string) (int, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var count int
+	err := s.queryDB().QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM memories WHERE project_id = ? AND `+replaceableRowSQL,
+		projectID).Scan(&count)
+	return count, err
+}
+
 // IncrementInteraction increments the interaction count and returns the new value.
 func (s *Store) IncrementInteraction(ctx context.Context, projectID string) (int, error) {
 	s.mu.Lock()

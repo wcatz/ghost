@@ -10,6 +10,12 @@ import (
 	"github.com/wcatz/ghost/internal/memory"
 )
 
+// MaxConsolidationInput is the most consolidatable memories one `ghost reflect`
+// rewrites. Every tier rewrites its whole input at once: a harness tier is sent
+// the whole set as text and the SQLite floor compares every pair, so above the
+// bound a run would either overrun the model's context or stall.
+const MaxConsolidationInput = 2000
+
 // InputSignature fingerprints the consolidation input so an unchanged corpus
 // can skip a full-corpus LLM call (ghost reflect --skip-unchanged). Each line
 // carries the fields BuildReflectionPrompt renders — category, importance (at

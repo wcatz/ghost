@@ -17,6 +17,7 @@ import (
 	"github.com/wcatz/ghost/internal/config"
 	"github.com/wcatz/ghost/internal/embedding"
 	"github.com/wcatz/ghost/internal/memory"
+	"github.com/wcatz/ghost/internal/reflection"
 )
 
 // Status checks the health of the Ghost ↔ Claude Code integration. The
@@ -769,6 +770,7 @@ func checkStoreHealth(w io.Writer, check func(ok bool, pass, fail string)) *memo
 	reportHistoryGrowth(w, store)
 	reportOverdueMaintenanceStatus(w, store, dataDir)
 	reportReflectionExclusions(w, store)
+	reportReflectOverBound(w, store)
 	return store
 }
 
@@ -800,6 +802,62 @@ func reportReflectionExclusions(w io.Writer, store *memory.Store) {
 		_, _ = fmt.Fprintf(w, "  - %s (%s): %d memories — %d frozen (%.0f%% excluded from consolidation: pinned %d, persistent %d, manual %d, builtin %d, resolved %d; %d consolidatable)\n",
 			assemble.Label(p.Name), assemble.Token(p.ID), st.Total, st.Frozen, pct,
 			st.Pinned, st.Persistent, st.Manual, st.Builtin, st.Resolved, st.Consolidatable)
+	}
+}
+
+// reportReflectOverBound prints projects above the consolidation input bound
+// (#1848). A project above the bound is skipped by the unattended lifecycle
+// with no failure marker, so this is the one place it is surfaced on the CLI.
+// The bound and the count are the same predicate the lifecycle's
+// consolidationBound checks, and the manual remediation is the command that
+// does not skip. It is a `!` line for a store that has one and no line for a
+// store that has none, the same shape reportHistoryGrowth uses: the health
+// verdict is about wiring, and a project that grew past the bound is not wiring
+// that `ghost mcp init` repairs, so it never fails the run. A store that
+// opened cleanly and then cannot be read is reported in place, like the blocks
+// around it.
+func reportReflectOverBound(w io.Writer, store *memory.Store) {
+	ctx := context.Background()
+	projects, err := store.ListProjects(ctx)
+	if err != nil {
+		_, _ = fmt.Fprintf(w, "  ! reflect: could not list projects: %v\n", err)
+		return
+	}
+	type over struct {
+		name  string
+		id    string
+		count int
+	}
+	var overs []over
+	for _, p := range projects {
+		n, err := store.CountConsolidatableMemories(ctx, p.ID)
+		if err != nil {
+			nm := p.Name
+			if ph, ok := memory.TokenGuardPlaceholder("project", nm); ok {
+				nm = ph
+			} else {
+				nm = assemble.Label(nm)
+			}
+			_, _ = fmt.Fprintf(w, "  ! reflect: project %s (%s) consolidatable count could not be read\n", nm, assemble.Token(p.ID))
+			continue
+		}
+		if n > reflection.MaxConsolidationInput {
+			overs = append(overs, over{name: p.Name, id: p.ID, count: n})
+		}
+	}
+	if len(overs) == 0 {
+		return
+	}
+	_, _ = fmt.Fprintf(w, "  ! reflect: %d project(s) above the %d consolidatable-memory limit for a single consolidation and skipped by unattended reflect — to consolidate, bring to at most %d: `ghost resolve <project> --apply` or `ghost prune --project <project> --apply` (pinned, manual and persistent memories do not count). Then run `ghost reflect <project> --apply`.\n",
+		len(overs), reflection.MaxConsolidationInput, reflection.MaxConsolidationInput)
+	for _, o := range overs {
+		nm := o.name
+		if ph, ok := memory.TokenGuardPlaceholder("project", nm); ok {
+			nm = ph
+		} else {
+			nm = assemble.Label(nm)
+		}
+		_, _ = fmt.Fprintf(w, "    - %s (%s): %d consolidatable memories\n", nm, assemble.Token(o.id), o.count)
 	}
 }
 
