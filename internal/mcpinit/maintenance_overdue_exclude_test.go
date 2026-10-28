@@ -179,8 +179,8 @@ func TestOverdueBoundaryExactlyAtLimit(t *testing.T) {
 	}
 }
 
-func TestOverdueExcludesOverLimitAppearsInReflectStatusAndHealth(t *testing.T) {
-	// Over-limit project missing from overdue must appear in reflect over-bound blocks
+func TestOverdueExcludedOverLimitStillInStatusReflectBlock(t *testing.T) {
+	// Over-limit project missing from overdue must appear in reflect over-bound status block
 	statusEnv(t)
 	dataHome := os.Getenv("XDG_DATA_HOME")
 	ghostDir := filepath.Join(dataHome, "ghost")
@@ -234,51 +234,5 @@ func TestOverdueExcludesOverLimitAppearsInReflectStatusAndHealth(t *testing.T) {
 	}
 	if !strings.Contains(out, "resolve") || !strings.Contains(out, "prune") {
 		t.Fatalf("reflect over-bound missing fix in status: %s", out)
-	}
-
-	// ghost_health Reflect over-bound block must also list it
-	// Use the same predicate as mcpserver ghost_health (count via store view)
-	var hbuf bytes.Buffer
-	counts := map[string]int{}
-	rows, err := db.QueryContext(ctx, `SELECT project_id, COUNT(*) FROM memories WHERE pinned=0 AND source NOT IN ('manual','builtin') AND retention != 'persistent' AND resolved_at IS NULL AND project_id != ? GROUP BY project_id`, memory.GlobalProjectID)
-	if err != nil {
-		t.Fatalf("query: %v", err)
-	}
-	for rows.Next() {
-		var pid string
-		var c int
-		if err := rows.Scan(&pid, &c); err != nil {
-			rows.Close()
-			t.Fatalf("scan: %v", err)
-		}
-		counts[pid] = c
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		t.Fatalf("rows: %v", err)
-	}
-	rows.Close()
-	type ob struct {
-		name string
-		id   string
-		c    int
-	}
-	var obs []ob
-	if n := counts["proj-over"]; n > reflection.MaxConsolidationInput {
-		obs = append(obs, ob{name: "over-project", id: "proj-over", c: n})
-	}
-	if len(obs) == 0 {
-		t.Fatalf("expected over-bound project for ghost_health")
-	}
-	fmt.Fprintf(&hbuf, "**Reflect:** %d project(s) above the %d consolidatable-memory limit for a single consolidation and skipped by unattended reflect — to consolidate, bring to at most %d: `ghost resolve <project> --apply` or `ghost prune --project <project> --apply` (pinned, manual and persistent memories do not count). Then run `ghost reflect <project> --apply`.\n", len(obs), reflection.MaxConsolidationInput, reflection.MaxConsolidationInput)
-	for _, o := range obs {
-		fmt.Fprintf(&hbuf, "- %s (%s): %d consolidatable memories\n", o.name, o.id, o.c)
-	}
-	hout := hbuf.String()
-	if !strings.Contains(hout, "over-project") && !strings.Contains(hout, "proj-over") {
-		t.Fatalf("reflect over-bound missing project in ghost_health: %s", hout)
-	}
-	if !strings.Contains(hout, "ghost resolve") || !strings.Contains(hout, "ghost prune") {
-		t.Fatalf("reflect over-bound missing fix in ghost_health: %s", hout)
 	}
 }
