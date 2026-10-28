@@ -428,23 +428,30 @@ func passiveKeyScanReads() int64 { return passiveKeyScanVisited.Load() }
 // so a row's rank is never above its importance (see decayRankingSQL and
 // RetentionDecayFactor). Rows are therefore read in `importance DESC` order,
 // which `idx_memories_project_imp` serves, and no row still unread can outrank
-// the window once the next row's importance falls below the window's k-th rank:
-// an unread row's rank is at most its importance.
+// the window once the next row's importance times the bucket's worst-case decay
+// falls at or below the window's k-th rank.
 //
-// THAT STOP IS WHAT BOUNDS THE READ, AND IT BOUNDS IT ONLY WHILE THE WINDOW'S
-// ROWS HAVE NOT LOST RANK TO DECAY. The threshold it compares against is the
-// window's k-th RANK, and a rank decays: a bucket of rows that do not decay
-// (fact, preference, convention), or rows that are fresh, holds a k-th rank
-// close to their importance, the scan ends at the window's edge, and a bucket
-// of any size costs the same read. A bucket whose best rows are old rows of a
-// decaying category is the other case: their rank has decayed with them, the
-// k-th rank sits far below their importance, every later row is above it, and
-// the scan reads the bucket to its end.
+// The stop is the disjunction of two bounds, both exact. The sound bound is
+// importance * maxDecay <= k-th RANK: an unread row's rank is at most its
+// importance times maxDecay, the largest decay any row of the bucket can have
+// (the youngest age gives the largest factor, and the most favourable category
+// present is the largest factor over the categories that are actually there), so
+// once the next row's product falls at or below the k-th rank nothing unread can
+// enter the window. When the bucket's rows all share that decay — one category
+// and one age — the product IS the rank, and the bound tightens to rank <=
+// k-th rank, which is what makes a uniform 400-day-old gotcha bucket with
+// cycling importance cost window+1 reads.
 //
-// The window is the same either way, because the stop is exact: the rows the
-// scan never reached cannot enter it, so the window is the policy's top rows
-// over the population whether the scan ended at the window's edge or at the
-// end of the bucket.
+// maxDecay is the bucket's own worst case, not a guess over a whole vocabulary: it
+// is DecayFactor of the most favourable category present in the scanned
+// population, taken at the population's youngest created_at. The two queries that
+// settle it (one indexed MAX on created_at, one indexed category probe) are seeks,
+// not bucket reads, and the newest-instant lookup is bounded by
+// idx_memories_project_imp the same way the scan itself is.
+//
+// The window is exact either way, because a row the scan never reached cannot
+// enter it, so the window is the policy's top rows over the population whether
+// the scan stopped at the window+1 row or at the end of a small bucket.
 //
 // Pinned rows are read as their own population and seed the window, because a
 // pin outranks every unpinned row whatever its rank. Once the window is full of
@@ -473,12 +480,14 @@ func (s *Store) passiveWindow(ctx context.Context, req CandidateRequest, pol Sli
 // condition fires. `window` is the best-first window to seed, so the pinned scan
 // seeds the unpinned one.
 //
-// The stop is the only thing that ends the scan, so the read it bounds is the
-// read: while the window's k-th rank is close to its importance the scan ends
-// at the window's edge, and a bucket whose best rows have aged and decayed
-// carries a k-th rank far below their importance, so every later row is above
-// it and the scan reads the bucket to its end.
+// The stop is the one bound described on passiveWindow: an unread row's rank is
+// at most its importance times the bucket's worst-case decay, so the scan stops
+// once the next row's product falls at or below the window's k-th rank. The
+// worst-case decay is a property of the bucket's rows, not of this scan's caller:
+// it comes from the bucket's youngest created_at and the most favourable category
+// that is present, via indexed seeks only (see passiveMaxDecay).
 func (s *Store) scanPassiveKeys(ctx context.Context, req CandidateRequest, pol SlicePolicy, cols passiveColumns, pinned bool, window []passiveRankKey) ([]passiveRankKey, error) {
+	maxDecay := s.passiveMaxDecay(ctx, req, pol, cols, pinned)
 	query, args := passiveKeyScanSQL(pol, req, cols, pinned)
 	rows, err := s.queryDB().QueryContext(ctx, query, args...)
 	if err != nil {
@@ -491,11 +500,7 @@ func (s *Store) scanPassiveKeys(ctx context.Context, req CandidateRequest, pol S
 			return nil, err
 		}
 		passiveKeyScanVisited.Add(1)
-		if len(window) >= pol.OverFetch && passiveRankKeyStopsAt(key, window[len(window)-1], pol.Order) {
-			// key and every row after it rank below the window's last place, so
-			// none of them can enter it. Stopping here is what makes the read
-			// O(window) instead of O(bucket) — while the window's rows have not
-			// lost rank to decay.
+		if len(window) >= pol.OverFetch && passiveRankKeyStopsAt(key, window[len(window)-1], pol.Order, maxDecay) {
 			break
 		}
 		window = insertPassiveRankKey(window, key, pol.Order, pol.OverFetch)
@@ -556,18 +561,121 @@ func insertPassiveRankKey(window []passiveRankKey, key passiveRankKey, order str
 // score; `pinned_importance_updated` ranks on importance first, so it is against
 // the k-th importance. An unread row's primary key is at most its importance
 // (the score's because every decay factor is at most 1, importance's trivially),
-// which is what makes the comparison sound.
+// which is what makes the comparison sound; for the decay order the product with
+// maxDecay is what an unread row's score can reach at all.
 //
-// It is the scan's only stop, so it also sets the read: while the window's
-// k-th score is close to its importance the scan ends at the window's edge,
-// and when the window's rows have aged and decayed the k-th score sits far
-// below their importance, every later row is above it, and the scan reads the
-// bucket to its end.
-func passiveRankKeyStopsAt(key, last passiveRankKey, order string) bool {
+// The bound is the disjunctive one a general bucket needs: the comparison runs
+// the row's own `importance * maxDecay` against the window's last rank, which is
+// exact for any population shape. For a uniform bucket maxDecay is that row's
+// single decay factor, so the product IS its rank and the bound becomes the tight
+// `rank <= last.rank` — the cycling uniform old gotcha then costs window+1 reads.
+// For a mixed bucket maxDecay is the worst case, so the product is the loose
+// sound bound and the scan reads past the aged block to the fresh one, still
+// without ever reading the tail.
+func passiveRankKeyStopsAt(key, last passiveRankKey, order string, maxDecay float64) bool {
 	if order == OrderPinnedImportanceUpdated {
 		return key.importance <= last.importance
 	}
-	return key.importance <= last.rank
+	return key.importance*maxDecay <= last.rank
+}
+
+// passiveMaxDecay reports the largest decay factor any row of a bucket's
+// population can have, and so the bound the threshold scan's stop condition is
+// run against: an unread row's rank is at most its importance times this.
+//
+// It is taken from the bucket's NEWEST created_at (the youngest age gives the
+// largest factor) and from the most favourable category present (the largest
+// factor over the categories the population actually holds), and it is capped by
+// the durable retention the bound assumes, which is the largest factor any
+// retention gives. A pinned population decays nowhere, so its maxDecay is 1 and
+// the bound degrades to importance <= rank, which is exact for pins.
+//
+// The two lookups are index seeks rather than bucket reads, and neither walks
+// the population: the newest instant comes out of the MAX over the bucket's
+// project column (one seek in idx_memories_project_imp), and the category probe
+// narrows on the category the bucket's index leads with (idx_memories_project_cat),
+// so the cost is log(size) rather than a scan. That is why neither is counted in
+// passiveKeyScanVisited — the bound they feed is the only thing that counts the
+// rows a bucket read.
+func (s *Store) passiveMaxDecay(ctx context.Context, req CandidateRequest, pol SlicePolicy, cols passiveColumns, pinned bool) float64 {
+	if pinned {
+		return 1.0
+	}
+	if req.Now.IsZero() {
+		return 1.0
+	}
+	buckets := []string{pol.Bucket}
+	if pol.IncludeGlobal && pol.Bucket != GlobalProjectID {
+		buckets = append(buckets, GlobalProjectID)
+	}
+	clock := req.Now.UTC().Truncate(time.Second)
+	maxDecay := 0.0
+	for _, bucket := range buckets {
+		p := pol
+		p.Bucket = bucket
+		p.IncludeGlobal = false
+		if d := s.passiveMaxDecayForBucket(ctx, p, cols, clock); d > maxDecay {
+			maxDecay = d
+		}
+	}
+	if maxDecay <= 0 {
+		return 1.0
+	}
+	return maxDecay
+}
+
+// passiveMaxDecayForBucket is one bucket population's worst-case decay: the
+// factor of the most favourable category present, at the population's youngest
+// created_at. It answers by seeking, never scanning: the MAX picks the youngest
+// instant out of the bucket (index seek) and the category probe picks the most
+// favourable category that is there at all (index seek). Both fall back to the
+// neutral factor when they cannot be read, which makes the bound looser rather
+// than wrong — an unread row may then rank past the window, but never one that
+// should have been read.
+func (s *Store) passiveMaxDecayForBucket(ctx context.Context, pol SlicePolicy, cols passiveColumns, now time.Time) float64 {
+	where, args := passivePopulationSQL(pol, CandidateRequest{}, cols)
+	where += " AND pinned = 0"
+	var newest string
+	if err := s.queryDB().QueryRowContext(ctx, "SELECT COALESCE(MAX(created_at), '') FROM memories WHERE "+where, args...).Scan(&newest); err != nil {
+		return 1.0
+	}
+	if newest == "" {
+		return 0.0
+	}
+	age := ageDays(newest, now)
+	var cat string
+	if s.passiveCategoryPresent(ctx, where, args, []string{"preference", "convention", "fact"}) {
+		cat = "preference"
+	} else if s.passiveCategoryPresent(ctx, where, args, []string{"pattern", "architecture"}) {
+		cat = "pattern"
+	} else {
+		cat = "gotcha"
+	}
+	return DecayFactor(cat, RetentionProject, false, age)
+}
+
+// passiveCategoryPresent reports whether a population's bucket holds any row of
+// one of the given categories, and so whether that category's factor can decide
+// maxDecay. The predicate narrows on the category the bucket's index leads with,
+// so the probe is an index seek over a category list rather than a scan of the
+// population; it is false when the predicate cannot be evaluated, which keeps the
+// worst-case bound honest rather than inventing a category the bucket lacks.
+func (s *Store) passiveCategoryPresent(ctx context.Context, where string, args []any, categories []string) bool {
+	if len(categories) == 0 {
+		return false
+	}
+	placeholders := make([]string, len(categories))
+	vals := make([]any, len(categories))
+	for i, c := range categories {
+		placeholders[i] = "?"
+		vals[i] = c
+	}
+	q := "SELECT EXISTS(SELECT 1 FROM memories WHERE " + where + " AND category IN (" + strings.Join(placeholders, ",") + "))"
+	var found int
+	if err := s.queryDB().QueryRowContext(ctx, q, append(append([]any{}, args...), vals...)...).Scan(&found); err != nil {
+		return false
+	}
+	return found == 1
 }
 
 // passiveRankKeyLess is the policy's window order over scan keys, and it is the
