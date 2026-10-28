@@ -44,6 +44,8 @@ const (
 
 var importTags = []string{"claude-code", "auto-import"}
 
+var preSkipWindow = 100000
+
 // categoryMap converts Claude Code memory types to Ghost categories.
 var categoryMap = map[string]string{
 	"feedback":  "preference",
@@ -377,7 +379,9 @@ func Import(ctx context.Context, store provider.MemoryStore, projectID, projectP
 // near-duplicate lookups, so it holds across handles: two clients that reach
 // first contact together cannot both store a file (#1234). The GetAll pre-read
 // below is only a cheap skip that saves a write transaction per file already
-// present; it does not decide anything on its own.
+// present; it does not decide anything on its own. With more than the read
+// window of memories, a duplicate below the window is not pre-skipped and falls
+// through to the in-transaction check — the skip is partial.
 //
 // The two callers gate differently, and the difference is deliberate.
 // ghost_project_context imports only on FIRST CONTACT, when the project holds no
@@ -410,7 +414,7 @@ func importFromDir(ctx context.Context, store provider.MemoryStore, projectID, d
 		return 0, nil, nil, nil, fmt.Errorf("read claude memory dir: %w", err)
 	}
 
-	existing, err := store.GetAll(ctx, projectID, 100000)
+	existing, err := store.GetAll(ctx, projectID, preSkipWindow)
 	if err != nil {
 		logger.Warn("claude import: could not load existing content for dedup guard", "error", err)
 	}
