@@ -545,3 +545,260 @@ func TestRunBOMSettingsRoundTrip(t *testing.T) {
 		}
 	})
 }
+
+// TestRun_SettingsMergePreservesUserTextAndKeyOrder verifies that the
+// settings.json merge preserves user text with &&, <, > and non-alphabetical
+// key order, and that a second run is a byte-for-byte no-op.
+func TestRun_SettingsMergePreservesUserTextAndKeyOrder(t *testing.T) {
+	home, _ := installEnv(t)
+	path := writeSettings(t, home,
+		`{"Zeta":1,"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"echo a && cat <x >y"}]}]},"permissions":{"allow":["Bash(a && b)"],"deny":["Bash(rm -rf /)"]},"Alpha":2}`)
+
+	var out bytes.Buffer
+	if err := Run(&out, false); err != nil {
+		t.Fatalf("Run first: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := string(data)
+	t.Logf("first run output:\n%s", first)
+
+	// Verify user content preserved exactly
+	if !strings.Contains(first, "echo a && cat <x >y") {
+		t.Errorf("user hook command escaped/lost")
+	}
+	if !strings.Contains(first, "Bash(a && b)") {
+		t.Errorf("user permission escaped/lost")
+	}
+	if !strings.Contains(first, "Bash(rm -rf /)") {
+		t.Errorf("user deny escaped/lost")
+	}
+	// Verify top-level key order: Zeta, hooks, permissions, Alpha
+	iZeta := strings.Index(first, "\"Zeta\"")
+	iHooks := strings.Index(first, "\"hooks\"")
+	iPerms := strings.Index(first, "\"permissions\"")
+	iAlpha := strings.Index(first, "\"Alpha\"")
+	if iZeta >= iHooks || iHooks >= iPerms || iPerms >= iAlpha {
+		t.Errorf("top-level key order changed: want Zeta < hooks < permissions < Alpha")
+	}
+	// Verify permissions key order: allow, deny
+	iAllow := strings.Index(first, "\"allow\"")
+	iDeny := strings.Index(first, "\"deny\"")
+	if iAllow >= iDeny {
+		t.Errorf("permissions key order changed: want allow < deny")
+	}
+	// Verify hooks event order: PreToolUse (ghost's SessionStart added after)
+	iPreToolUse := strings.Index(first, "\"PreToolUse\"")
+	iSessionStart := strings.Index(first, "\"SessionStart\"")
+	if iPreToolUse >= iSessionStart {
+		t.Errorf("hooks event order changed: want PreToolUse < SessionStart")
+	}
+
+	// Second run - must be byte-for-byte identical
+	var secondOut bytes.Buffer
+	if err := Run(&secondOut, false); err != nil {
+		t.Fatalf("Run second: %v", err)
+	}
+	data2, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := string(data2)
+	if first != second {
+		t.Errorf("second run changed bytes:\nfirst:\n%s\nsecond:\n%s", first, second)
+	}
+}
+
+// TestRun_SettingsMergePreservesEscapedPermission verifies that a permission
+// the user wrote with escapes (\u0026, \u0041) keeps those exact bytes.
+func TestRun_SettingsMergePreservesEscapedPermission(t *testing.T) {
+	home, _ := installEnv(t)
+	// Seed with the escaped form of & in the permission value.
+	path := writeSettings(t, home,
+		`{"Zeta":1,"permissions":{"allow":["Bash(a \u0026 b)","Bash(\u0041)"]},"Alpha":2}`)
+
+	var out bytes.Buffer
+	if err := Run(&out, false); err != nil {
+		t.Fatalf("Run first: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := string(data)
+	t.Logf("first run output:\n%s", first)
+
+	// The escape is kept as written, not decoded and not double-escaped.
+	// \u0041 is an escape the JSON encoder never writes, so a decode and
+	// re-encode of the entry would show up as a plain A.
+	if !strings.Contains(first, `Bash(a \u0026 b)`) || !strings.Contains(first, `Bash(\u0041)`) {
+		t.Errorf("escaped permission lost or double-escaped: %s", first)
+	}
+
+	// Second run - must be byte-for-byte identical
+	var secondOut bytes.Buffer
+	if err := Run(&secondOut, false); err != nil {
+		t.Fatalf("Run second: %v", err)
+	}
+	data2, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := string(data2)
+	if first != second {
+		t.Errorf("second run changed bytes:\nfirst:\n%s\nsecond:\n%s", first, second)
+	}
+}
+
+// TestRun_SettingsMergeNoAllowKeyOrder verifies that when permissions has no
+// allow key (or allow is null), the other keys keep their order and allow
+// is appended at the end.
+func TestRun_SettingsMergeNoAllowKeyOrder(t *testing.T) {
+	home, _ := installEnv(t)
+	// Seed with permissions having zeta, deny, but no allow.
+	path := writeSettings(t, home,
+		`{"Zeta":1,"permissions":{"zeta":[1],"deny":["Bash(rm -rf /)"]},"Alpha":2}`)
+
+	var out bytes.Buffer
+	if err := Run(&out, false); err != nil {
+		t.Fatalf("Run first: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := string(data)
+	t.Logf("first run output:\n%s", first)
+
+	// Verify top-level key order: Zeta, permissions, Alpha
+	iZeta := strings.Index(first, "\"Zeta\"")
+	iPerms := strings.Index(first, "\"permissions\"")
+	iAlpha := strings.Index(first, "\"Alpha\"")
+	if iZeta >= iPerms || iPerms >= iAlpha {
+		t.Errorf("top-level key order changed: want Zeta < permissions < Alpha")
+	}
+
+	// Verify permissions key order: zeta, deny, allow (allow appended at end)
+	iZetaP := strings.Index(first, "\"zeta\"")
+	iDeny := strings.Index(first, "\"deny\"")
+	iAllow := strings.Index(first, "\"allow\"")
+	if iZetaP >= iDeny || iDeny >= iAllow {
+		t.Errorf("permissions key order changed: want zeta < deny < allow")
+	}
+
+	// Second run - must be byte-for-byte identical
+	var secondOut bytes.Buffer
+	if err := Run(&secondOut, false); err != nil {
+		t.Fatalf("Run second: %v", err)
+	}
+	data2, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := string(data2)
+	if first != second {
+		t.Errorf("second run changed bytes:\nfirst:\n%s\nsecond:\n%s", first, second)
+	}
+}
+
+// TestRun_SettingsMergeNullAllowKeyOrder verifies that when permissions.allow
+// is explicitly null, the other keys keep their order and allow is appended.
+func TestRun_SettingsMergeNullAllowKeyOrder(t *testing.T) {
+	home, _ := installEnv(t)
+	// Seed with permissions having zeta, deny, and allow: null.
+	path := writeSettings(t, home,
+		`{"Zeta":1,"permissions":{"zeta":[1],"deny":["Bash(rm -rf /)"],"allow":null},"Alpha":2}`)
+
+	var out bytes.Buffer
+	if err := Run(&out, false); err != nil {
+		t.Fatalf("Run first: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := string(data)
+	t.Logf("first run output:\n%s", first)
+
+	// Verify top-level key order: Zeta, permissions, Alpha
+	iZeta := strings.Index(first, "\"Zeta\"")
+	iPerms := strings.Index(first, "\"permissions\"")
+	iAlpha := strings.Index(first, "\"Alpha\"")
+	if iZeta >= iPerms || iPerms >= iAlpha {
+		t.Errorf("top-level key order changed: want Zeta < permissions < Alpha")
+	}
+
+	// Verify permissions key order: zeta, deny, allow (allow appended at end)
+	iZetaP := strings.Index(first, "\"zeta\"")
+	iDeny := strings.Index(first, "\"deny\"")
+	iAllow := strings.Index(first, "\"allow\"")
+	if iZetaP >= iDeny || iDeny >= iAllow {
+		t.Errorf("permissions key order changed: want zeta < deny < allow")
+	}
+
+	// Second run - must be byte-for-byte identical
+	var secondOut bytes.Buffer
+	if err := Run(&secondOut, false); err != nil {
+		t.Fatalf("Run second: %v", err)
+	}
+	data2, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := string(data2)
+	if first != second {
+		t.Errorf("second run changed bytes:\nfirst:\n%s\nsecond:\n%s", first, second)
+	}
+}
+
+// TestRun_SettingsMergePreservesSpecialCharsInKeys verifies that top-level
+// and nested keys containing < or & are preserved without escaping.
+func TestRun_SettingsMergePreservesSpecialCharsInKeys(t *testing.T) {
+	home, _ := installEnv(t)
+	// Seed with keys containing < and & at top level, inside hooks, and in permissions.
+	path := writeSettings(t, home,
+		`{"k<":1,"hooks":{"Pre<&":[{"hooks":[{"type":"command","command":"echo hi"}]}]},"permissions":{"allow&":["Bash(a && b)"]},"Alpha":2}`)
+
+	var out bytes.Buffer
+	if err := Run(&out, false); err != nil {
+		t.Fatalf("Run first: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := string(data)
+	t.Logf("first run output:\n%s", first)
+
+	// Verify keys with < and & are preserved without escaping
+	if !strings.Contains(first, "\"k<\"") {
+		t.Errorf("top-level key with < escaped: %s", first)
+	}
+	if !strings.Contains(first, "\"Pre<&\"") {
+		t.Errorf("key inside hooks with < or & escaped: %s", first)
+	}
+	if !strings.Contains(first, "\"allow&\"") {
+		t.Errorf("permissions key with & escaped: %s", first)
+	}
+
+	// Second run - must be byte-for-byte identical
+	var secondOut bytes.Buffer
+	if err := Run(&secondOut, false); err != nil {
+		t.Fatalf("Run second: %v", err)
+	}
+	data2, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := string(data2)
+	if first != second {
+		t.Errorf("second run changed bytes:\nfirst:\n%s\nsecond:\n%s", first, second)
+	}
+}
