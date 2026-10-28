@@ -168,6 +168,8 @@ threshold it tripped against:
 | per-memory cap | some memory reaches its 50-version cap **within 14 days** at its own 24-hour rate — the soonest memory, measured against what *it* wrote rather than the store-wide rate. Reaching the cap starts trimming that memory's oldest versions, which may be the only record of what it said first. |
 | store cap | the table reaches 20 000 rows **within 14 days** at the store's 24-hour rate. The store cap trims the **oldest rows in the table**, not the noisiest ones, so what disappears when the table fills is the oldest real change — and on a store that has been retiring memories, it is a deleted memory's frozen history, which no repair can reach. |
 
+Reflect over-bound projects are reported as one `! reflect:` line when any project is above the 2000 consolidatable-memory limit for a single consolidation and skipped by unattended `ghost lifecycle`. The line names the bound, the count per project, and the manual `ghost reflect <project> --apply` after shrinking with `ghost resolve <project> --apply` or `ghost prune --project <project> --apply` (pinned, manual and persistent memories do not count); a failed count is reported as `consolidatable count could not be read`. The same figures and remediation are reported by `ghost_health`; the line format differs (`ghost mcp status` prints `  ! reflect: ...`, `ghost_health` prints `**Reflect:** ...`). It never changes the exit code, the same rule history findings follow.
+
 **A finding is a `!` line, not a failed check.** It never changes the exit code and
 never brings back the `Run \`ghost mcp init\` to fix issues.` footer, because the
 verdict above is about **wiring** — whether the memory features are reachable at

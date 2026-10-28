@@ -19,8 +19,10 @@ package mcpserver
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/wcatz/ghost/internal/memory"
+	"github.com/wcatz/ghost/internal/provider"
 )
 
 // diagnosticReader is the read surface the diagnostic tools use.
@@ -32,6 +34,7 @@ import (
 type diagnosticReader interface {
 	ListProjects(ctx context.Context) ([]memory.Project, error)
 	CountMemories(ctx context.Context, projectID string) (int, error)
+	CountConsolidatableMemories(ctx context.Context, projectID string) (int, error)
 	EmbeddingStats(ctx context.Context) (embedded, stale, total int, err error)
 	LinkStats(ctx context.Context) (links, scans int, err error)
 	PinnedRowsWithContradictions(ctx context.Context, limit int) ([]memory.PinnedContradictedRow, int, error)
@@ -91,16 +94,16 @@ func (s *Server) openDiagnosticRead(ctx context.Context) *diagnosticRead {
 	store, ok := s.store.(*memory.Store)
 	if !ok {
 		reporter, _ := s.store.(storeVersionReporter)
-		return &diagnosticRead{reader: s.store, reporter: reporter}
+		return &diagnosticRead{reader: diagnosticStore{s.store}, reporter: reporter}
 	}
 	read, err := store.BeginDiagnosticRead(ctx)
 	if err != nil {
 		s.logger.Warn("diagnostic read unavailable; this report waits for an in-flight write", "error", err)
-		return &diagnosticRead{reader: s.store, store: store, reporter: store}
+		return &diagnosticRead{reader: store, store: store, reporter: store}
 	}
 	if read == nil {
 		// No read handle: the store's own reads are the only ones there are.
-		return &diagnosticRead{reader: s.store, store: store, reporter: store}
+		return &diagnosticRead{reader: store, store: store, reporter: store}
 	}
 	view := read.Store()
 	return &diagnosticRead{
@@ -109,4 +112,18 @@ func (s *Server) openDiagnosticRead(ctx context.Context) *diagnosticRead {
 		reporter: view,
 		release:  func() { _ = read.Close() },
 	}
+}
+
+// diagnosticStore adapts a provider.MemoryStore to diagnosticReader for the
+// fallback path where the server's store is not a *memory.Store (a test double
+// or a store built without a read handle). CountConsolidatableMemories is the
+// one diagnostic reader method that is not on provider.MemoryStore, so it is
+// implemented here by delegating to a non-*memory.Store test double and
+// reporting an unreadable count otherwise.
+type diagnosticStore struct {
+	provider.MemoryStore
+}
+
+func (d diagnosticStore) CountConsolidatableMemories(ctx context.Context, projectID string) (int, error) {
+	return 0, fmt.Errorf("consolidatable count could not be read: store is not a *memory.Store")
 }
