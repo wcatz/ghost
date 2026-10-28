@@ -324,7 +324,18 @@ func SelectCandidates(ctx context.Context, store vectorStore, projectID string, 
 			}
 			other, ok := byID[n.MemoryID]
 			if !ok {
-				continue // e.g. a _global neighbor not in this project's set
+				fetched, err := store.GetByIDs(ctx, []string{n.MemoryID})
+				if err != nil {
+					return sel, fmt.Errorf("load neighbor %s: %w", memory.RefusalArg("memory_id", n.MemoryID), err)
+				}
+				if len(fetched) == 0 {
+					continue
+				}
+				other = fetched[0]
+				if other.ProjectID != projectID {
+					continue // e.g. a _global neighbor not in this project's set
+				}
+				byID[other.ID] = other
 			}
 			// The persistent-tier refusal, asked here and not after the
 			// classification: a pair with a keep-forever endpoint is not a pair
