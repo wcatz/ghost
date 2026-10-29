@@ -1114,7 +1114,7 @@ func TestAnExportThatLeftACharacterBrokenScopeOutGivesTheCleanScopeAdvice(t *tes
 	if !strings.Contains(report, assemble.Token("m-charscope")) {
 		t.Errorf("the report does not name the record it left out:\n%s", report)
 	}
-	if !strings.Contains(report, "re-save it with a scope containing no blank, NUL, control or line-separator characters") {
+	if !strings.Contains(report, "re-save it with a scope containing no blank, NUL, control, FORMAT or line-separator characters") {
 		t.Errorf("the report does not give the clean-scope advice:\n%s", report)
 	}
 	for _, bad := range []string{"under an id this build accepts", "shorter scope", "forged"} {
@@ -1138,7 +1138,7 @@ func TestAnExportWithBoundAndCharacterScopeRefusalsGivesBothPieces(t *testing.T)
 	var summary, warn strings.Builder
 	err := runExportCore(context.Background(), store, &summary, &warn, path, "")
 	report := summary.String() + warn.String() + fmtErr(err)
-	for _, want := range []string{"a shorter scope", "containing no blank, NUL, control or line-separator characters"} {
+	for _, want := range []string{"a shorter scope", "containing no blank, NUL, control, FORMAT or line-separator characters"} {
 		if !strings.Contains(report, want) {
 			t.Errorf("the report lacks %q:\n%s", want, report)
 		}
