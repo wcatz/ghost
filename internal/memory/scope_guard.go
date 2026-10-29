@@ -146,8 +146,9 @@ func checkScope(scope map[string]string) error {
 }
 
 // validateScopeKeyValue refuses a scope key or value that is blank, carries a NUL
-// byte, is not valid UTF-8, contains a control character, or contains a line
-// separator (U+2028, U+2029) or next line (U+0085). The field is the caller's
+// byte, is not valid UTF-8, contains a control character, an invisible Unicode
+// FORMAT character (category Cf), or contains a line separator (U+2028, U+2029)
+// or next line (U+0085). The field is the caller's
 // name for the argument (e.g. "scope_key[0]" or "scope[environment]") so the
 // refusal is actionable without quoting the offending text. For value errors,
 // key is the original (unrendered) scope key so the export can screen it for
@@ -167,9 +168,13 @@ func validateScopeKeyValue(field, value, key string) error {
 	if strings.IndexByte(value, 0) >= 0 {
 		return &ScopeKeyValueError{Field: field, Reason: "a NUL byte", Key: key}
 	}
-	// Control characters and line separators (U+2028 LS, U+2029 PS, U+0085 NEL).
+	// Control characters, line separators (U+2028 LS, U+2029 PS, U+0085 NEL)
+	// and invisible Unicode FORMAT characters (category Cf, e.g. U+200B): these
+	// carry no width of their own, so a key or value mixing them with ordinary
+	// text hides a spelling from a reader. The whole-of-category predicate is
+	// shared with the tag write boundary and the blank-text check.
 	for _, r := range value {
-		if unicode.IsControl(r) || r == 0x2028 || r == 0x2029 {
+		if unicode.IsControl(r) || r == 0x2028 || r == 0x2029 || IsFormatRune(r) {
 			return &ScopeKeyValueError{Field: field, Reason: "a control character or line separator", Key: key}
 		}
 	}

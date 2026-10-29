@@ -473,3 +473,75 @@ func TestACharacterRefusalNeverPrintsATokenShapedKey(t *testing.T) {
 		})
 	}
 }
+
+// TestScopeRejectsInvisibleFormatCharactersMixedIn covers the #1888 regression:
+// an invisible Unicode format rune (category Cf, e.g. U+200B) mixed into a key
+// or a value must be refused on every writer.
+func TestScopeRejectsInvisibleFormatCharactersMixedIn(t *testing.T) {
+	ctx := context.Background()
+	cases := []struct {
+		name  string
+		scope map[string]string
+	}{
+		{"key with trailing zero-width", map[string]string{"env\u200b": "prod"}},
+		{"key with leading zero-width", map[string]string{"\u200benv": "prod"}},
+		{"value with trailing zero-width", map[string]string{"env": "prod\u200b"}},
+		{"value with leading zero-width", map[string]string{"env": "\u200bprod"}},
+	}
+	for _, tc := range cases {
+		t.Run("checkScope/"+tc.name, func(t *testing.T) {
+			err := checkScope(tc.scope)
+			if err == nil {
+				t.Fatal("checkScope accepted a scope with an invisible format character")
+			}
+			if !strings.Contains(err.Error(), "control character or line separator") {
+				t.Fatalf("checkScope refused for unexpected reason: %v", err)
+			}
+			var b *ScopeKeyValueError
+			if !errors.As(err, &b) {
+				t.Fatalf("checkScope refused as %T, want *ScopeKeyValueError", err)
+			}
+		})
+		t.Run("create/"+tc.name, func(t *testing.T) {
+			s := testStore(t)
+			_, err := s.Create(ctx, testProject, Memory{Category: "fact", Content: "deploy notes", Source: "mcp", Scope: tc.scope})
+			if err == nil {
+				t.Fatal("Create accepted a scope with an invisible format character")
+			}
+			if n := countAllMemories(t, s); n != 0 {
+				t.Errorf("%d row(s) stored after a refused create", n)
+			}
+		})
+		t.Run("upsert/"+tc.name, func(t *testing.T) {
+			s := testStore(t)
+			_, _, _, err := s.UpsertWithOptions(ctx, testProject, "fact", "deploy notes for alpha", "mcp", 0.5, nil,
+				UpsertOptions{Scope: tc.scope})
+			if err == nil {
+				t.Fatal("UpsertWithOptions accepted a scope with an invisible format character")
+			}
+			if n := countAllMemories(t, s); n != 0 {
+				t.Errorf("%d row(s) stored after a refused upsert", n)
+			}
+		})
+		t.Run("import/"+tc.name, func(t *testing.T) {
+			s := portableTestStore(t)
+			if err := s.EnsureProject(ctx, "p1", "/src/p1", "p1"); err != nil {
+				t.Fatalf("EnsureProject: %v", err)
+			}
+			pm := PortableMemory{ID: "M1", ProjectID: "p1", Category: "fact", Content: "an artifact's claim", Source: "mcp", Scope: tc.scope}
+			importErr := CheckImportedMemory(pm)
+			if importErr == nil {
+				t.Fatal("CheckImportedMemory accepted a scope with an invisible format character")
+			}
+			for _, apply := range []bool{false, true} {
+				_, _, _, err := s.ImportMemory(ctx, pm, ImportOptions{Apply: apply, TrustProvenance: true})
+				if err == nil {
+					t.Fatalf("ImportMemory accepted a scope with an invisible format character (apply=%v)", apply)
+				}
+			}
+			if n := countAllMemories(t, s); n != 0 {
+				t.Errorf("%d row(s) stored after a refused import", n)
+			}
+		})
+	}
+}
