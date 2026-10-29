@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -158,10 +159,10 @@ func (s *Store) resolveTaskID(ctx context.Context, idOrPrefix string) (string, e
 //
 // Completing is idempotent (#1143): a task that is already done keeps the
 // completed_at it got when it became done (the rule UpdateTask follows, #1040),
-// and a blank (empty or whitespace-only) notes argument never overwrites stored
-// notes; a non-blank one replaces them. Both are decided inside the single
-// UPDATE, against the row as it stands when the write lands, so a concurrent
-// edit cannot interleave.
+// and a blank (empty or whitespace-only, trimmed by Unicode rules) notes
+// argument never overwrites stored notes; a non-blank one replaces them. Both
+// are decided inside the single UPDATE, against the row as it stands when the
+// write lands, so a concurrent edit cannot interleave.
 //
 // The note is guarded on its UNCLAMPED text and THEN clamped to MaxContentLen
 // (#1238). The guard is first so a credential-shaped value past the cap is
@@ -194,13 +195,33 @@ func (s *Store) CompleteTask(ctx context.Context, taskID, notes string) (bool, e
 		return false, err
 	}
 
+	if strings.TrimSpace(notes) == "" {
+		res, err := s.execGuardedWrite(ctx, "complete-task", `
+			UPDATE tasks SET status = 'done',
+				completed_at = CASE WHEN status = 'done' AND completed_at IS NOT NULL THEN completed_at ELSE datetime('now') END,
+				updated_at = datetime('now')
+			WHERE id = ?
+		`, id)
+		if err != nil {
+			return false, fmt.Errorf("complete task: %w", err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return false, fmt.Errorf("complete task: rows affected: %w", err)
+		}
+		if n == 0 {
+			return false, fmt.Errorf("complete task: task %s was deleted before the write landed", RefusalArg("task_id", id))
+		}
+		return clamped, nil
+	}
+
 	res, err := s.execGuardedWrite(ctx, "complete-task", `
 		UPDATE tasks SET status = 'done',
-			notes = CASE WHEN ? = '' OR trim(?) = '' THEN notes ELSE ? END,
+			notes = ?,
 			completed_at = CASE WHEN status = 'done' AND completed_at IS NOT NULL THEN completed_at ELSE datetime('now') END,
 			updated_at = datetime('now')
 		WHERE id = ?
-	`, notes, notes, notes, id)
+	`, notes, id)
 	if err != nil {
 		return false, fmt.Errorf("complete task: %w", err)
 	}
