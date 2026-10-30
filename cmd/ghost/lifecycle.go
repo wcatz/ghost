@@ -1769,7 +1769,11 @@ func runReflect() {
 		fmt.Println("DRY RUN (use --apply to save results)")
 		fmt.Println()
 	}
-	fmt.Printf("Project:      %s (%s)\n", assemble.Label(projectName), assemble.Token(projectID))
+	renderedProjectID := assemble.Token(projectID)
+	if placeholder, withheld := memory.TokenGuardPlaceholder("project", projectID); withheld {
+		renderedProjectID = placeholder
+	}
+	fmt.Printf("Project:      %s (%s)\n", assemble.Label(projectName), renderedProjectID)
 	fmt.Printf("Consolidator: %s\n", consolidator.Name())
 
 	// Captured BEFORE fetching the consolidation input, then handed to
