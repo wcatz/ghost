@@ -51,6 +51,11 @@ verbatim, so dash-prefixed names work.
                     by a stop hook.
 `
 
+// lifecycleExecutable is os.Executable, a var so a test can force the
+// "locate ghost binary" failure branch without touching the process's own
+// executable.
+var lifecycleExecutable = os.Executable
+
 // runLifecycle runs the enabled auto-consolidation phases for one project, in
 // order, inside a single process: reflect (which rewrites memories), then
 // resolve (which stamps resolved_at), then supersede (which links memories).
@@ -143,10 +148,10 @@ func runLifecycle() int {
 		}
 		return 1
 	}
-	exe, err := os.Executable()
+	exe, err := lifecycleExecutable()
 	if err != nil {
 		lifecycleLogf(projectName, "error: locate ghost binary: %v", err)
-		os.Exit(1)
+		return 1
 	}
 
 	// Consolidation is only worth an unattended write when a real LLM tier is
