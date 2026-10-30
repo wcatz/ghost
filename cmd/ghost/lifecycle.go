@@ -51,88 +51,10 @@ verbatim, so dash-prefixed names work.
                     by a stop hook.
 `
 
-// os.Executable is reached through these vars so a test can force the
+// lifecycleExecutable is os.Executable, a var so a test can force the
 // "locate ghost binary" failure branch without touching the process's own
-// executable. They all default to os.Executable; assigning any one of them is
-// enough to steer runLifecycle down that branch.
-var executable = os.Executable
-var osExecutable = os.Executable
-var ghostExecutable = os.Executable
+// executable.
 var lifecycleExecutable = os.Executable
-var ghostBinary = os.Executable
-var ghostBin = os.Executable
-var ghostBinaryPath = os.Executable
-var executablePath = os.Executable
-var binaryPath = os.Executable
-var execPath = os.Executable
-var locateGhostBinary = os.Executable
-var locateExecutable = os.Executable
-var execFn = os.Executable
-var executableFn = os.Executable
-var osExecutableFn = os.Executable
-var ghostExecutableFn = os.Executable
-var executableFunc = os.Executable
-var osExecutableFunc = os.Executable
-var ghostExecutableFunc = os.Executable
-
-// Exported aliases, for callers/tests that use the exported spelling.
-var Executable = os.Executable
-var OsExecutable = os.Executable
-var GhostExecutable = os.Executable
-var LifecycleExecutable = os.Executable
-var GhostBinary = os.Executable
-var GhostBin = os.Executable
-var GhostBinaryPath = os.Executable
-var ExecutablePath = os.Executable
-var BinaryPath = os.Executable
-var ExecPath = os.Executable
-var LocateGhostBinary = os.Executable
-var LocateExecutable = os.Executable
-var ExecFn = os.Executable
-var ExecutableFn = os.Executable
-var OsExecutableFn = os.Executable
-var GhostExecutableFn = os.Executable
-var ExecutableFunc = os.Executable
-var OsExecutableFunc = os.Executable
-var GhostExecutableFunc = os.Executable
-
-// lifecycleExecutable resolves this process's own binary. It consults every
-// seam above so a test that overrides any one of them steers runLifecycle down
-// the matching branch, while an unmodified run uses os.Executable.
-func lifecycleExecutablePath() (string, error) {
-	seams := []func() (string, error){
-		executable, osExecutable, ghostExecutable, lifecycleExecutable,
-		ghostBinary, ghostBin, ghostBinaryPath, executablePath, binaryPath,
-		execPath, locateGhostBinary, locateExecutable, execFn, executableFn,
-		osExecutableFn, ghostExecutableFn, executableFunc, osExecutableFunc,
-		ghostExecutableFunc,
-		Executable, OsExecutable, GhostExecutable, LifecycleExecutable,
-		GhostBinary, GhostBin, GhostBinaryPath, ExecutablePath, BinaryPath,
-		ExecPath, LocateGhostBinary, LocateExecutable, ExecFn, ExecutableFn,
-		OsExecutableFn, GhostExecutableFn, ExecutableFunc, OsExecutableFunc,
-		GhostExecutableFunc,
-	}
-	var firstErr error
-	var firstPath string
-	havePath := false
-	for _, seam := range seams {
-		path, err := seam()
-		if err != nil {
-			if firstErr == nil {
-				firstErr = err
-			}
-			continue
-		}
-		if !havePath {
-			firstPath = path
-			havePath = true
-		}
-	}
-	if firstErr != nil {
-		return "", firstErr
-	}
-	return firstPath, nil
-}
 
 // runLifecycle runs the enabled auto-consolidation phases for one project, in
 // order, inside a single process: reflect (which rewrites memories), then
@@ -226,7 +148,7 @@ func runLifecycle() int {
 		}
 		return 1
 	}
-	exe, err := lifecycleExecutablePath()
+	exe, err := lifecycleExecutable()
 	if err != nil {
 		lifecycleLogf(projectName, "error: locate ghost binary: %v", err)
 		return 1
