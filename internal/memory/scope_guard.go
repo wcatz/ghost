@@ -83,12 +83,14 @@ func (e *ScopeKeyValueError) Error() string {
 // which half they apply.
 //
 // The bounds run first and quote nothing, so an over-long value that is also a
-// token is refused for its length and never printed. The character rules run
-// second, naming a key by position and a value by its (already bounded) key,
-// so a refusal never carries the offending text. The guard then names a key by
-// position and a pair by its (already guarded, already shape-safe) key. Keys are
-// walked in sorted order so the field a caller is told about does not change
-// between two identical calls.
+// token is refused for its length and never printed. The character rules (blank,
+// NUL, invalid UTF-8, control, line-break) run second, naming a key by position
+// and a value by its (already bounded) key, so a refusal never carries the
+// offending text. The token guard then runs over every key and every key=value
+// pair. Invisible Unicode FORMAT characters are refused last, after the token
+// guard, so a credential-shaped value carrying one is refused as a credential
+// rather than as a character. Keys are walked in sorted order so the field a
+// caller is told about does not change between two identical calls.
 //
 // An empty or nil scope is no scope and passes.
 func checkScope(scope map[string]string) error {
@@ -142,13 +144,38 @@ func checkScope(scope map[string]string) error {
 			return err
 		}
 	}
+	// Invisible Unicode FORMAT characters (category Cf) are refused last, after
+	// the token guard, so a credential-shaped value carrying one is refused as
+	// a credential — the same refusal the value gets without the character —
+	// rather than as a character. A value holding nothing but such characters
+	// is already refused as blank above.
+	for i, k := range keys {
+		if containsFormatRune(k) {
+			return &ScopeKeyValueError{Field: fmt.Sprintf("scope_key[%d]", i), Reason: "an invisible Unicode FORMAT character", Key: ""}
+		}
+	}
+	for _, k := range keys {
+		if containsFormatRune(scope[k]) {
+			return &ScopeKeyValueError{Field: fmt.Sprintf("scope[%s]", SafeToken(k)), Reason: "an invisible Unicode FORMAT character", Key: k}
+		}
+	}
 	return nil
 }
 
+func containsFormatRune(s string) bool {
+	for _, r := range s {
+		if IsFormatRune(r) {
+			return true
+		}
+	}
+	return false
+}
+
 // validateScopeKeyValue refuses a scope key or value that is blank, carries a NUL
-// byte, is not valid UTF-8, contains a control character, an invisible Unicode
-// FORMAT character (category Cf), or contains a line separator (U+2028, U+2029)
-// or next line (U+0085). The field is the caller's
+// byte, is not valid UTF-8, or contains a control character or a line separator
+// (U+2028, U+2029) or next line (U+0085). Invisible Unicode FORMAT characters
+// (category Cf) are refused separately, in checkScope, after the token guard.
+// The field is the caller's
 // name for the argument (e.g. "scope_key[0]" or "scope[environment]") so the
 // refusal is actionable without quoting the offending text. For value errors,
 // key is the original (unrendered) scope key so the export can screen it for
@@ -168,13 +195,14 @@ func validateScopeKeyValue(field, value, key string) error {
 	if strings.IndexByte(value, 0) >= 0 {
 		return &ScopeKeyValueError{Field: field, Reason: "a NUL byte", Key: key}
 	}
-	// Control characters, line separators (U+2028 LS, U+2029 PS, U+0085 NEL)
-	// and invisible Unicode FORMAT characters (category Cf, e.g. U+200B): these
-	// carry no width of their own, so a key or value mixing them with ordinary
-	// text hides a spelling from a reader. The whole-of-category predicate is
-	// shared with the tag write boundary and the blank-text check.
+	// Control characters and line separators (U+2028 LS, U+2029 PS, U+0085
+	// NEL): these carry no width of their own, so a key or value mixing them
+	// with ordinary text hides a spelling from a reader. Invisible Unicode
+	// FORMAT characters (category Cf, e.g. U+200B) are refused separately,
+	// in checkScope, after the token guard, so that a credential-shaped value
+	// carrying one is still refused as a credential rather than as a character.
 	for _, r := range value {
-		if unicode.IsControl(r) || r == 0x2028 || r == 0x2029 || IsFormatRune(r) {
+		if unicode.IsControl(r) || r == 0x2028 || r == 0x2029 {
 			return &ScopeKeyValueError{Field: field, Reason: "a control character or line separator", Key: key}
 		}
 	}

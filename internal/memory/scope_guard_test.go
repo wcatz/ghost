@@ -430,14 +430,17 @@ func TestScopeAcceptsValidKeysAndValues(t *testing.T) {
 func TestScopeRefusalOrderNeverPrintsAToken(t *testing.T) {
 	tok := scopeToken()
 	cases := []struct {
-		name  string
-		scope map[string]string
-		want  string
+		name       string
+		scope      map[string]string
+		want       string
+		wantSecret bool
 	}{
-		{"over-long token value with a control character", map[string]string{"k": tok + strings.Repeat("x", MaxScopeValueLen) + "\n"}, "a scope value must be at most"},
-		{"over-long token key with a control character", map[string]string{tok + strings.Repeat("x", MaxScopeKeyLen) + "\n": "v"}, "a scope key must be at most"},
-		{"token value with a control character", map[string]string{"k": tok + "\n"}, "scope[k] must not be a control character"},
-		{"token key with a control character", map[string]string{tok + "\n": "v"}, "scope_key[0] must not be a control character"},
+		{"over-long token value with a control character", map[string]string{"k": tok + strings.Repeat("x", MaxScopeValueLen) + "\n"}, "a scope value must be at most", false},
+		{"over-long token key with a control character", map[string]string{tok + strings.Repeat("x", MaxScopeKeyLen) + "\n": "v"}, "a scope key must be at most", false},
+		{"token value with a control character", map[string]string{"k": tok + "\n"}, "scope[k] must not be a control character", false},
+		{"token key with a control character", map[string]string{tok + "\n": "v"}, "scope_key[0] must not be a control character", false},
+		{"token value with a format character", map[string]string{"k": tok + "\u200b"}, "refusing to store credential-shaped content", true},
+		{"token key with a format character", map[string]string{tok + "\u200b": "v"}, "refusing to store credential-shaped content", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -446,7 +449,11 @@ func TestScopeRefusalOrderNeverPrintsAToken(t *testing.T) {
 				t.Fatalf("err = %v, want it to contain %q", err, tc.want)
 			}
 			var secretErr *SecretContentError
-			if errors.As(err, &secretErr) {
+			if tc.wantSecret {
+				if !errors.As(err, &secretErr) {
+					t.Errorf("not refused by the token guard, so the format character rule ran first: %v", err)
+				}
+			} else if errors.As(err, &secretErr) {
 				t.Errorf("refused by the token guard, so the character rules did not run first: %v", err)
 			}
 			if strings.Contains(err.Error(), tok) || strings.Contains(err.Error(), tok[:12]) {
@@ -494,7 +501,7 @@ func TestScopeRejectsInvisibleFormatCharactersMixedIn(t *testing.T) {
 			if err == nil {
 				t.Fatal("checkScope accepted a scope with an invisible format character")
 			}
-			if !strings.Contains(err.Error(), "control character or line separator") {
+			if !strings.Contains(err.Error(), "an invisible Unicode FORMAT character") {
 				t.Fatalf("checkScope refused for unexpected reason: %v", err)
 			}
 			var b *ScopeKeyValueError
