@@ -494,7 +494,7 @@ func TestScopeRejectsInvisibleFormatCharactersMixedIn(t *testing.T) {
 			if err == nil {
 				t.Fatal("checkScope accepted a scope with an invisible format character")
 			}
-			if !strings.Contains(err.Error(), "control character or line separator") {
+			if !strings.Contains(err.Error(), "an invisible Unicode FORMAT character") {
 				t.Fatalf("checkScope refused for unexpected reason: %v", err)
 			}
 			var b *ScopeKeyValueError

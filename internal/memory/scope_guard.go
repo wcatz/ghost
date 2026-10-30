@@ -142,7 +142,31 @@ func checkScope(scope map[string]string) error {
 			return err
 		}
 	}
+	// Invisible Unicode FORMAT characters (category Cf) are refused last, after
+	// the token guard, so a credential-shaped value carrying one is refused as
+	// a credential — the same refusal the value gets without the character —
+	// rather than as a character. A value holding nothing but such characters
+	// is already refused as blank above.
+	for i, k := range keys {
+		if containsFormatRune(k) {
+			return &ScopeKeyValueError{Field: fmt.Sprintf("scope_key[%d]", i), Reason: "an invisible Unicode FORMAT character", Key: ""}
+		}
+	}
+	for _, k := range keys {
+		if containsFormatRune(scope[k]) {
+			return &ScopeKeyValueError{Field: fmt.Sprintf("scope[%s]", SafeToken(k)), Reason: "an invisible Unicode FORMAT character", Key: k}
+		}
+	}
 	return nil
+}
+
+func containsFormatRune(s string) bool {
+	for _, r := range s {
+		if IsFormatRune(r) {
+			return true
+		}
+	}
+	return false
 }
 
 // validateScopeKeyValue refuses a scope key or value that is blank, carries a NUL
@@ -168,13 +192,14 @@ func validateScopeKeyValue(field, value, key string) error {
 	if strings.IndexByte(value, 0) >= 0 {
 		return &ScopeKeyValueError{Field: field, Reason: "a NUL byte", Key: key}
 	}
-	// Control characters, line separators (U+2028 LS, U+2029 PS, U+0085 NEL)
-	// and invisible Unicode FORMAT characters (category Cf, e.g. U+200B): these
-	// carry no width of their own, so a key or value mixing them with ordinary
-	// text hides a spelling from a reader. The whole-of-category predicate is
-	// shared with the tag write boundary and the blank-text check.
+	// Control characters and line separators (U+2028 LS, U+2029 PS, U+0085
+	// NEL): these carry no width of their own, so a key or value mixing them
+	// with ordinary text hides a spelling from a reader. Invisible Unicode
+	// FORMAT characters (category Cf, e.g. U+200B) are refused separately,
+	// below, so that a credential-shaped value carrying one is still refused
+	// as a credential rather than as a character.
 	for _, r := range value {
-		if unicode.IsControl(r) || r == 0x2028 || r == 0x2029 || IsFormatRune(r) {
+		if unicode.IsControl(r) || r == 0x2028 || r == 0x2029 {
 			return &ScopeKeyValueError{Field: field, Reason: "a control character or line separator", Key: key}
 		}
 	}
