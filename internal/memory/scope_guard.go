@@ -199,8 +199,8 @@ func validateScopeKeyValue(field, value, key string) error {
 	// NEL): these carry no width of their own, so a key or value mixing them
 	// with ordinary text hides a spelling from a reader. Invisible Unicode
 	// FORMAT characters (category Cf, e.g. U+200B) are refused separately,
-	// below, so that a credential-shaped value carrying one is still refused
-	// as a credential rather than as a character.
+	// in checkScope, after the token guard, so that a credential-shaped value
+	// carrying one is still refused as a credential rather than as a character.
 	for _, r := range value {
 		if unicode.IsControl(r) || r == 0x2028 || r == 0x2029 {
 			return &ScopeKeyValueError{Field: field, Reason: "a control character or line separator", Key: key}
