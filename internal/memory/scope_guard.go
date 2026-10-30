@@ -83,12 +83,14 @@ func (e *ScopeKeyValueError) Error() string {
 // which half they apply.
 //
 // The bounds run first and quote nothing, so an over-long value that is also a
-// token is refused for its length and never printed. The character rules run
-// second, naming a key by position and a value by its (already bounded) key,
-// so a refusal never carries the offending text. The guard then names a key by
-// position and a pair by its (already guarded, already shape-safe) key. Keys are
-// walked in sorted order so the field a caller is told about does not change
-// between two identical calls.
+// token is refused for its length and never printed. The character rules (blank,
+// NUL, invalid UTF-8, control, line-break) run second, naming a key by position
+// and a value by its (already bounded) key, so a refusal never carries the
+// offending text. The token guard then runs over every key and every key=value
+// pair. Invisible Unicode FORMAT characters are refused last, after the token
+// guard, so a credential-shaped value carrying one is refused as a credential
+// rather than as a character. Keys are walked in sorted order so the field a
+// caller is told about does not change between two identical calls.
 //
 // An empty or nil scope is no scope and passes.
 func checkScope(scope map[string]string) error {
@@ -170,9 +172,10 @@ func containsFormatRune(s string) bool {
 }
 
 // validateScopeKeyValue refuses a scope key or value that is blank, carries a NUL
-// byte, is not valid UTF-8, contains a control character, an invisible Unicode
-// FORMAT character (category Cf), or contains a line separator (U+2028, U+2029)
-// or next line (U+0085). The field is the caller's
+// byte, is not valid UTF-8, or contains a control character or a line separator
+// (U+2028, U+2029) or next line (U+0085). Invisible Unicode FORMAT characters
+// (category Cf) are refused separately, in checkScope, after the token guard.
+// The field is the caller's
 // name for the argument (e.g. "scope_key[0]" or "scope[environment]") so the
 // refusal is actionable without quoting the offending text. For value errors,
 // key is the original (unrendered) scope key so the export can screen it for
