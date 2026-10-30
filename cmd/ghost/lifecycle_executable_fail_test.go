@@ -31,7 +31,11 @@ func TestI1894LifecycleExecutableFailureReleasesClaim(t *testing.T) {
 	if err := store.EnsureProject(t.Context(), "proj", root, "proj"); err != nil {
 		t.Fatal(err)
 	}
-	store.Close()
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Errorf("store.Close: %v", err)
+		}
+	})
 
 	t.Setenv("XDG_DATA_HOME", data)
 	t.Setenv("XDG_CONFIG_HOME", cfg)
