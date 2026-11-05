@@ -1,10 +1,6 @@
 package main
 
 import (
-	"context"
-	"database/sql"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -80,71 +76,25 @@ func TestDisplayProposalCoversEveryFlaggedShape(t *testing.T) {
 
 func rep(s string, n int) string { return strings.Repeat(s, n) }
 
-// TestRunReflectProjectHeaderRedactsTokenShapedProjectID drives runReflect
-// with a project id shaped like a GitHub personal access token and asserts
-// the phase header withholds it rather than printing it verbatim.
-func TestRunReflectProjectHeaderRedactsTokenShapedProjectID(t *testing.T) {
-	dataHome := isolatedLifecycleEnv(t)
-	ctx := context.Background()
-	const projectName = "reflect-project"
+// TestReflectProjectHeaderRedactsTokenShapedProjectID asserts the reflect
+// phase header withholds a project id shaped like a GitHub personal access
+// token rather than printing it verbatim (#1895), and still renders an
+// ordinary id as-is.
+func TestReflectProjectHeaderRedactsTokenShapedProjectID(t *testing.T) {
 	cred := reflectCredential()
-
-	if err := os.MkdirAll(filepath.Join(dataHome, "ghost"), 0o700); err != nil {
-		t.Fatalf("mkdir data dir: %v", err)
-	}
-	db, err := sql.Open("sqlite", filepath.Join(dataHome, "ghost", "ghost.db"))
-	if err != nil {
-		t.Fatalf("open db: %v", err)
-	}
-	defer db.Close() //nolint:errcheck
-	if _, err := db.Exec(`CREATE TABLE projects (
-    id TEXT PRIMARY KEY,
-    path TEXT NOT NULL UNIQUE,
-    name TEXT NOT NULL,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-)`); err != nil {
-		t.Fatalf("create projects: %v", err)
-	}
-	if _, err := db.Exec(`CREATE TABLE memories (
-    id TEXT PRIMARY KEY DEFAULT (hex(randomblob(16))),
-    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-    category TEXT NOT NULL DEFAULT 'fact',
-    content TEXT NOT NULL,
-    source TEXT NOT NULL DEFAULT 'mcp',
-    importance REAL NOT NULL DEFAULT 0.5,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-    scope TEXT NOT NULL DEFAULT '',
-    pinned INTEGER NOT NULL DEFAULT 0,
-    resolved_at TEXT
-)`); err != nil {
-		t.Fatalf("create memories: %v", err)
-	}
-	if _, err := db.Exec(`INSERT INTO projects (id, path, name) VALUES (?, ?, ?)`, cred, "/tmp/"+projectName, projectName); err != nil {
-		t.Fatalf("insert project: %v", err)
-	}
-	if _, err := db.Exec(`INSERT INTO memories (project_id, category, content, source, importance) VALUES (?, 'fact', 'keep', 'mcp', 0.5)`, cred); err != nil {
-		t.Fatalf("insert memory: %v", err)
-	}
-	if err := db.Close(); err != nil {
-		t.Fatalf("close db: %v", err)
-	}
-
-	out := captureStderr(t, func() {
-		orig := os.Args
-		os.Args = []string{orig[0], "reflect", cred, "--tier", "sqlite"}
-		defer func() { os.Args = orig }()
-		runReflect()
-	})
+	out := reflectProjectHeader("reflect-project", cred)
 	if strings.Contains(out, cred) {
-		t.Fatalf("project header printed verbatim credential:\n%s", out)
+		t.Fatalf("project header printed verbatim credential: %q", out)
 	}
 	if !strings.Contains(out, "<project withheld: it holds a GitHub personal access token>") {
-		t.Fatalf("project header missing withheld rendering:\n%s", out)
+		t.Fatalf("project header missing withheld rendering: %q", out)
 	}
-	if !strings.Contains(out, "Project:") {
-		t.Fatalf("project header not printed:\n%s", out)
+	if !strings.HasPrefix(out, "Project:      reflect-project (") {
+		t.Fatalf("project header lost its label: %q", out)
 	}
-	_ = ctx
+
+	plain := reflectProjectHeader("ghost", "6bdc098af7f5")
+	if want := "Project:      ghost (6bdc098af7f5)"; plain != want {
+		t.Fatalf("plain header = %q, want %q", plain, want)
+	}
 }
