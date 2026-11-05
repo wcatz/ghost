@@ -1610,6 +1610,18 @@ var reflectWindowStamp = func(ctx context.Context, s *memory.Store) (string, err
 // runReflect manually triggers memory consolidation for a project.
 // Defaults to dry-run (preview only). Use --apply to save results.
 // Use --restore to undo the last consolidation from snapshot.
+// reflectProjectHeader renders the reflect phase's "Project:" line. The id
+// consults the secret detector first, because assemble.Token only escapes
+// line-breaking characters and this line reaches the append-only lifecycle
+// log on the detached `ghost lifecycle` path (#1895).
+func reflectProjectHeader(projectName, projectID string) string {
+	renderedProjectID := assemble.Token(projectID)
+	if placeholder, withheld := memory.TokenGuardPlaceholder("project", projectID); withheld {
+		renderedProjectID = placeholder
+	}
+	return fmt.Sprintf("Project:      %s (%s)", assemble.Label(projectName), renderedProjectID)
+}
+
 func runReflect() {
 	parsed, parseErr := parseReflectArgs(os.Args[2:])
 	if parseErr != nil {
@@ -1774,7 +1786,7 @@ func runReflect() {
 		fmt.Println("DRY RUN (use --apply to save results)")
 		fmt.Println()
 	}
-	fmt.Printf("Project:      %s (%s)\n", assemble.Label(projectName), assemble.Token(projectID))
+	fmt.Println(reflectProjectHeader(projectName, projectID))
 	fmt.Printf("Consolidator: %s\n", consolidator.Name())
 
 	// Captured BEFORE fetching the consolidation input, then handed to
