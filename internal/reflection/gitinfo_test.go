@@ -102,7 +102,7 @@ func TestCollectGitContextCommits(t *testing.T) {
 	}
 	runGit(t, dir, "add", ".")
 	runGit(t, dir, "-c", "user.email=test@example.com", "-c", "user.name=Test",
-		"commit", "-q", "-m", "add module file")
+		"-c", "commit.gpgsign=false", "commit", "-q", "-m", "add module file")
 
 	commits, language := CollectGitContext(dir)
 	if language != "Go" {
@@ -155,9 +155,9 @@ func TestCollectGitContextIgnoresInheritedGitLocationVariables(t *testing.T) {
 		runGit(t, dir, "init", "-q")
 	}
 	runGit(t, target, "-c", "user.email=test@example.com", "-c", "user.name=Test",
-		"commit", "-q", "--allow-empty", "-m", "the target's own subject")
+		"-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "the target's own subject")
 	runGit(t, other, "-c", "user.email=test@example.com", "-c", "user.name=Test",
-		"commit", "-q", "--allow-empty", "-m", "the other repository's subject")
+		"-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "the other repository's subject")
 
 	t.Setenv("GIT_DIR", filepath.Join(other, ".git"))
 	t.Setenv("GIT_WORK_TREE", other)
