@@ -3,6 +3,8 @@ package mcpserver
 import (
 	"context"
 	"fmt"
+	"io"
+	"log/slog"
 	"regexp"
 	"strings"
 	"testing"
@@ -36,7 +38,7 @@ func seedPinned(t *testing.T, s *memory.Store, project string, n int, contentLen
 
 func TestPinOverflowAtCapReportsNone(t *testing.T) {
 	store := testStore(t)
-	srv := New(store, nil, "test")
+	srv := New(store, slog.New(slog.NewTextHandler(io.Discard, nil)), "test")
 	session := connectedClient(t, srv)
 	ctx := context.Background()
 
@@ -59,7 +61,7 @@ func TestPinOverflowAtCapReportsNone(t *testing.T) {
 
 func TestPinOverflowCapPlusOneReportsOverflow(t *testing.T) {
 	store := testStore(t)
-	srv := New(store, nil, "test")
+	srv := New(store, slog.New(slog.NewTextHandler(io.Discard, nil)), "test")
 	session := connectedClient(t, srv)
 	ctx := context.Background()
 	// Create cap pinned
@@ -101,7 +103,7 @@ func TestPinOverflowCapPlusOneReportsOverflow(t *testing.T) {
 	}
 	// Also test save with pin=true
 	store2 := testStore(t)
-	srv2 := New(store2, nil, "test")
+	srv2 := New(store2, slog.New(slog.NewTextHandler(io.Discard, nil)), "test")
 	session2 := connectedClient(t, srv2)
 	for i := 0; i < memory.PinnedProjectCap; i++ {
 		seedPinned(t, store2, "abc123", 1, 10, 0.7)
@@ -124,7 +126,7 @@ func TestPinOverflowCapPlusOneReportsOverflow(t *testing.T) {
 	}
 	// Check exact cap reports none for health
 	store3 := testStore(t)
-	srv3 := New(store3, nil, "test")
+	srv3 := New(store3, slog.New(slog.NewTextHandler(io.Discard, nil)), "test")
 	for i := 0; i < memory.PinnedProjectCap; i++ {
 		seedPinned(t, store3, "abc123", 1, 10, 0.7)
 	}
@@ -134,7 +136,7 @@ func TestPinOverflowCapPlusOneReportsOverflow(t *testing.T) {
 	}
 	// _global at cap
 	store4 := testStore(t)
-	srv4 := New(store4, nil, "test")
+	srv4 := New(store4, slog.New(slog.NewTextHandler(io.Discard, nil)), "test")
 	for i := 0; i < memory.PinnedGlobalCap; i++ {
 		seedPinned(t, store4, "_global", 1, 10, 0.7)
 	}
@@ -143,7 +145,7 @@ func TestPinOverflowCapPlusOneReportsOverflow(t *testing.T) {
 		t.Fatalf("health for _global at cap should report none, got:\n%s", report4)
 	}
 	store5 := testStore(t)
-	srv5 := New(store5, nil, "test")
+	srv5 := New(store5, slog.New(slog.NewTextHandler(io.Discard, nil)), "test")
 	for i := 0; i < memory.PinnedGlobalCap+1; i++ {
 		seedPinned(t, store5, "_global", 1, 10, 0.7)
 	}
@@ -155,7 +157,7 @@ func TestPinOverflowCapPlusOneReportsOverflow(t *testing.T) {
 
 func TestPinByteOverflowWithFewLongPins(t *testing.T) {
 	store := testStore(t)
-	srv := New(store, nil, "test")
+	srv := New(store, slog.New(slog.NewTextHandler(io.Discard, nil)), "test")
 	session := connectedClient(t, srv)
 	ctx := context.Background()
 	// 3 long pins each 1500 bytes under cap; byte-only overflow not reported
