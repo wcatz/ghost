@@ -21,6 +21,12 @@ func setHarnessProcessGroup(cmd *exec.Cmd) {
 	procgroup.SetGroup(cmd)
 }
 
+// sweepHarnessProcessGroup has nothing to reach on Windows. There is no
+// portable process group to ask about or signal, and Wait has already reaped
+// the direct child; a helper that held the pipes was bounded by WaitDelay and
+// cannot be signalled here, exactly as on the Cancel path.
+func sweepHarnessProcessGroup(_ *exec.Cmd) {}
+
 // terminateHarnessProcess kills the direct child. There is no portable way to
 // signal a grandchild on Windows, so this is the same kill exec.CommandContext
 // would have used by default; WaitDelay is what bounds a grandchild that keeps

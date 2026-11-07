@@ -387,7 +387,7 @@ func (r openCodeCleanupRunner) run(ctx context.Context, args []string) ([]byte, 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	err := cmd.Run()
+	err := runHarnessCommand(cmd)
 	if cctx.Err() == context.DeadlineExceeded {
 		return nil, fmt.Errorf("opencode %s: timed out after %s", strings.Join(args, " "), sessionCommandTimeout)
 	}

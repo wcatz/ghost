@@ -204,6 +204,68 @@ func TestHarnessWaitDelayBoundsAPipeHoldingGrandchild(t *testing.T) {
 	}
 }
 
+// runHarnessToCompletion runs a fake harness through the funnel-built command
+// to the end of the call, with stdout bound to a buffer as the clients do. The
+// fakes below do not exit until their helper has recorded its pid, so the pid
+// file is readable once Run returns without a sleep in the test.
+func runHarnessToCompletion(t *testing.T, ctx context.Context, bin string) error {
+	t.Helper()
+	cmd, release, err := harnessCommand(ctx, bin, nil, os.Environ(), harnessGoose)
+	if err != nil {
+		t.Fatalf("harnessCommand: %v", err)
+	}
+	defer release()
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	return runHarnessCommand(cmd)
+}
+
+// TestHarnessCleanExitSweepsTheProcessGroup covers a call that returns
+// successfully while a helper it started is still running: the harness sends
+// the helper's stdio to the null device and exits 0, so Run returns nil and the
+// helper no longer holds anything the caller waits on. Nothing else would end
+// it, so the group is swept after Wait returns — the same check and escalation
+// the Cancel path uses — rather than only on the cancellation path.
+func TestHarnessCleanExitSweepsTheProcessGroup(t *testing.T) {
+	bin, pidFile := writeGrandchildHarness(t, "sh -c 'echo $$ > \"$HARNESS_GRANDCHILD_PID\"; exec sleep 30' >/dev/null 2>&1 &\nwhile [ ! -s \"$HARNESS_GRANDCHILD_PID\" ]; do sleep 0.01; done\n")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	err := runHarnessToCompletion(t, ctx, bin)
+	helper := waitForRecordedPid(t, pidFile)
+	defer killGrandchild(t, helper)
+
+	if err != nil {
+		t.Fatalf("a harness that exited 0 was reported as a failed call: %v", err)
+	}
+	if err := waitGone(helper, 3*time.Second); err != nil {
+		t.Errorf("a helper (pid %d) the harness left behind survived a clean exit (%v): the group must be swept after Wait returns, not only on cancel", helper, err)
+	}
+}
+
+// TestHarnessWaitDelaySweepsTheProcessGroup covers the helper the backstop
+// releases but cannot end: it holds the harness's stdout pipe and ignores
+// SIGTERM, so WaitDelay expires, Wait closes the pipe and returns ErrWaitDelay,
+// and the helper is still running. The post-Wait sweep is what ends it, and the
+// error the call reports stays the WaitDelay error the caller saw before.
+func TestHarnessWaitDelaySweepsTheProcessGroup(t *testing.T) {
+	bin, pidFile := writeGrandchildHarness(t, "sh -c 'trap \"\" TERM; echo $$ > \"$HARNESS_GRANDCHILD_PID\"; exec sleep 30' &\nwhile [ ! -s \"$HARNESS_GRANDCHILD_PID\" ]; do sleep 0.01; done\n")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	err := runHarnessToCompletion(t, ctx, bin)
+	helper := waitForRecordedPid(t, pidFile)
+	defer killGrandchild(t, helper)
+
+	if !errors.Is(err, exec.ErrWaitDelay) {
+		t.Errorf("the call returned %v, want the WaitDelay error a helper holding the stdout pipe produces", err)
+	}
+	if err := waitGone(helper, 3*time.Second); err != nil {
+		t.Errorf("a helper (pid %d) that ignored SIGTERM survived WaitDelay expiry (%v): the group is swept after Wait returns too", helper, err)
+	}
+}
+
 // TestOpenCodeCleanupRunnerBoundsAPipeHoldingHelper covers the one harness
 // child that is NOT built by harnessCommand. The cleanup runner builds its own
 // command, because it must reach the user's own opencode store rather than the

@@ -59,6 +59,18 @@ func terminateHarnessProcess(cmd *exec.Cmd) error {
 	return nil
 }
 
+// sweepHarnessProcessGroup ends a helper a harness left in its group after
+// Wait returned. It asks whether the group is inhabited first, exactly as the
+// phase escalation does, so an empty group is never signalled: its id names
+// nothing in this run and could already have been reused. When it is
+// inhabited, the grace-then-kill escalation is the Cancel path's own.
+func sweepHarnessProcessGroup(cmd *exec.Cmd) {
+	if !procgroup.GroupInhabited(cmd) {
+		return
+	}
+	_ = terminateHarnessProcess(cmd)
+}
+
 // waitForHarnessGroup polls until cmd's process group is empty, reporting
 // whether it emptied within the bound. The last poll decides: a group that is
 // still inhabited when the bound is up is reported as such rather than as
