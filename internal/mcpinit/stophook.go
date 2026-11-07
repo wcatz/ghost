@@ -676,6 +676,11 @@ func spawnLifecycleIfConfigured(cwd, source string, signals func() *audit.Signal
 	if !safeProjectIDComponent(projectID) {
 		slog.Warn("lifecycle spawn: refusing a project id that is not a safe filename component",
 			"project_id", memory.RefusalArg("project id", projectID))
+		// The warning above goes to the host's stderr, which the editor owns
+		// and nobody later reads. Without a failure marker this project was
+		// refused on every turn with no durable record at all, so the next
+		// session start could not tell that its consolidation never ran.
+		recordSpawnFailure(projectID, cfg, errors.New(UnsafeProjectIDError), stderr)
 		return
 	}
 	// Best-effort fast path: skip spawning when a lifecycle is visibly running.
