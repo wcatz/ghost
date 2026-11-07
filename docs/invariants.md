@@ -512,10 +512,16 @@ failure would let the mechanical tier run and, with `--apply`, rewrite the
 corpus and exit 0 for a command the operator stopped. So
 `TieredConsolidator.Consolidate` (`internal/reflection/consolidator.go`)
 returns the context error after EVERY tier rather than falling through, and
-`runReflect` checks the context after the consolidation and before it applies,
-which covers a bare mechanical selection that never consults the context at
-all. Pinned by `TestTieredConsolidatorDoesNotFallThroughACancelledCaller` and
-`TestTieredConsolidatorRefusesAMechanicalResultFromACancelledCaller`. The
+`runReflect` checks the CONSOLIDATION context — the child that carries
+`reflection.consolidation_timeout_minutes`, not the maintenance context it
+derives from — after the consolidation and before it applies, which covers a
+bare mechanical selection that never consults the context at all and refuses a
+result that outlived its deadline instead of applying it and reporting success.
+Pinned by `TestTieredConsolidatorDoesNotFallThroughACancelledCaller`,
+`TestTieredConsolidatorRefusesAMechanicalResultFromACancelledCaller`,
+`TestReflectRefusesAConsolidationPastItsDeadline`,
+`TestReflectAppliesAConsolidationInsideItsDeadline` and
+`TestReflectRefusesACancelledConsolidation`. The
 lifecycle watchdog's phase-group sweep stays as the backstop for a phase that
 does not wind down. This is why the phase-group invariant above now says the
 phase's group does not contain the harnesses.
