@@ -151,7 +151,9 @@ type opencodeBinaryID struct {
 // majorVersion returns the major version of c.binary via `--version`, cached
 // per binary identity. An unresolvable binary or failed probe is not cached
 // and reports 0, which keeps the V1 invocation — the behavior Ghost had before
-// V2 existed.
+// V2 existed. An answer that parses no major version is not cached either: it
+// is unreadable output rather than a version, so the next call asks again
+// instead of pinning a V2 binary to the V1 argv for the life of the process.
 func (c *OpenCodeClient) majorVersion(ctx context.Context) int {
 	path, err := exec.LookPath(c.binary)
 	if err != nil {
@@ -177,6 +179,9 @@ func (c *OpenCodeClient) majorVersion(ctx context.Context) int {
 		return 0
 	}
 	major := OpencodeMajorVersion(string(out))
+	if major <= 0 {
+		return 0 // an unparseable answer is not an answer, so do not cache it
+	}
 	opencodeMajors.Store(id, major)
 	return major
 }
