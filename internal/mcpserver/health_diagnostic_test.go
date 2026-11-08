@@ -15,6 +15,7 @@ package mcpserver
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -134,7 +135,9 @@ func holdTheStoreLocked(t *testing.T, store *memory.Store, db *sql.DB, path stri
 	done := startTheBlockedWrite(t, store, db)
 	return func() {
 		releaseBlock()
-		<-done
+		if err := <-done; err != nil {
+			t.Errorf("the blocked project delete failed once the lock was released: %v", err)
+		}
 	}
 }
 
@@ -226,7 +229,10 @@ func TestHealthShowsTheNewerStoreWarningWhileAWriteIsInFlight(t *testing.T) {
 	done := startTheBlockedWrite(t, store, db)
 	defer func() {
 		releaseBlock()
-		<-done
+		// The store is newer than this build, so the delete must be refused.
+		if err := <-done; !errors.Is(err, memory.ErrStoreNewer) {
+			t.Errorf("the blocked project delete on a newer store: got %v, want a store-newer refusal", err)
+		}
 	}()
 
 	session := connectedClient(t, srv)
