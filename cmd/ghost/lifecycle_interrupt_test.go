@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"testing"
 	"time"
 )
@@ -83,16 +82,17 @@ func TestTheInterruptRecordNamesOnlyAStartedPhase(t *testing.T) {
 	}
 }
 
-// TestTheSweepIsAwaitedOnlyForAnInterruptedRun pins the three ways the wait
-// after the phase loop ends, and the one way it must not.
+// TestTheSweepWaitEndsOnTheSweepOrTheBackstop pins the ways the per-phase
+// wait for the escalation ends, and the one case that must not start it.
 //
-// The escalation's sweep has to land before the coordinator releases the
-// per-project claim and exits, so a signalled run waits for it. A run no signal
-// stopped owes nothing — the run that just succeeded must not be delayed by a
-// phase's escalation — and a run in which no phase ever launched one has
-// nothing to await. The bound is a backstop, so a sweep that never returns must
-// not hang the exit.
-func TestTheSweepIsAwaitedOnlyForAnInterruptedRun(t *testing.T) {
+// The escalation's sweep has to land before the coordinator goes on — on a
+// deadline exactly as on a signal, because the next phase must not start
+// beside a member of the previous phase's group that is still running. A
+// phase that ended on its own ends its watchdog at once, so waiting for it
+// costs a moment. Only a phase that never launched an escalation has
+// nothing to await. The bound is a backstop, so a sweep that never returns
+// must not hang the coordinator.
+func TestTheSweepWaitEndsOnTheSweepOrTheBackstop(t *testing.T) {
 	closed := func() <-chan time.Time { c := make(chan time.Time); close(c); return c }
 	never := make(chan time.Time)
 	// within counts the calls, so a branch that must not start the backstop can
@@ -101,28 +101,15 @@ func TestTheSweepIsAwaitedOnlyForAnInterruptedRun(t *testing.T) {
 		return func(time.Duration) <-chan time.Time { *calls++; return ch }
 	}
 
-	t.Run("a run no signal stopped does not wait", func(t *testing.T) {
-		done := make(chan struct{}) // would block forever if awaited
+	t.Run("a phase that never launched an escalation does not wait", func(t *testing.T) {
 		calls := 0
-		awaitPhaseSweep(context.Background(), done, newClock(never, &calls))
-		if calls != 0 {
-			t.Errorf("the backstop clock was started %d time(s) for a run no signal stopped", calls)
-		}
-	})
-
-	t.Run("a run that never launched an escalation does not wait", func(t *testing.T) {
-		root, stop := context.WithCancel(context.Background())
-		stop()
-		calls := 0
-		awaitPhaseSweep(root, nil, newClock(never, &calls))
+		awaitPhaseSweep(nil, newClock(never, &calls))
 		if calls != 0 {
 			t.Errorf("the backstop clock was started %d time(s) with no escalation to await", calls)
 		}
 	})
 
-	t.Run("an interrupted run returns when the sweep does", func(t *testing.T) {
-		root, stop := context.WithCancel(context.Background())
-		stop()
+	t.Run("the wait returns when the sweep does", func(t *testing.T) {
 		done := make(chan struct{})
 		close(done)
 		returned := make(chan struct{})
@@ -133,7 +120,7 @@ func TestTheSweepIsAwaitedOnlyForAnInterruptedRun(t *testing.T) {
 			// be caught rather than passing for the wrong reason. (A select
 			// evaluates every operand up front, so the clock is consulted
 			// either way; what matters is which case commits.)
-			awaitPhaseSweep(root, done, func(time.Duration) <-chan time.Time { return never })
+			awaitPhaseSweep(done, func(time.Duration) <-chan time.Time { return never })
 		}()
 		select {
 		case <-returned:
@@ -142,13 +129,11 @@ func TestTheSweepIsAwaitedOnlyForAnInterruptedRun(t *testing.T) {
 		}
 	})
 
-	t.Run("an interrupted run gives up at the backstop", func(t *testing.T) {
-		root, stop := context.WithCancel(context.Background())
-		stop()
+	t.Run("the wait gives up at the backstop", func(t *testing.T) {
 		calls := 0
 		// The sweep never returns; the bound is what must end the wait, or a
-		// wedged escalation would hang the coordinator's exit.
-		awaitPhaseSweep(root, make(chan struct{}), newClock(closed(), &calls))
+		// wedged escalation would hang the coordinator.
+		awaitPhaseSweep(make(chan struct{}), newClock(closed(), &calls))
 		if calls != 1 {
 			t.Errorf("the backstop clock was started %d time(s), want exactly 1", calls)
 		}

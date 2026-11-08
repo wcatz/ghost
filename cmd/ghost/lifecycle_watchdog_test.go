@@ -30,6 +30,18 @@ const phaseExitsOnTerm = "trap 'exit 0' TERM; while :; do sleep 0.05; done"
 // escalation is the only thing that ends the group.
 const phaseIgnoresTerm = "trap '' TERM; while :; do sleep 0.05; done"
 
+// phaseExitsLeavingHelper is a phase that takes the deadline's SIGTERM and
+// exits, while a helper it started in its own group ignores that signal and
+// stays behind. cmd.Wait returns once the phase is reaped, with the group
+// still inhabited by the helper.
+func phaseExitsLeavingHelper(helperPidFile string) string {
+	return fmt.Sprintf(
+		"trap 'exit 0' TERM; "+
+			"(trap '' TERM; i=0; while [ $i -lt 2400 ]; do sleep 0.05; i=$((i + 1)); done) </dev/null >/dev/null 2>&1 & "+
+			"echo $! > %[1]s.tmp && mv %[1]s.tmp %[1]s; "+
+			"i=0; while [ $i -lt 2400 ]; do sleep 0.05; i=$((i + 1)); done", helperPidFile)
+}
+
 // phaseWithSweptHarness is the script for the process layout a real phase has,
 // and for the member of the phase's group a re-check on the phase process alone
 // would skip.
@@ -634,5 +646,76 @@ func TestThePhaseGroupIsSweptWhenTheTestAbortsBeforeTheEscalation(t *testing.T) 
 	// is already empty here is one this test would call swept without a sweep.
 	if !phaseGroupInhabited(cmd) {
 		t.Fatal("the phase's group was empty before the sweep; this case is not covered")
+	}
+}
+
+// TestTheSweepIsAwaitedAfterAPhaseTimeout is the deadline half of the wait
+// for the escalation. A phase that takes the deadline's SIGTERM and exits
+// still leaves a helper in its group that ignored it: cmd.Wait returns with
+// the group inhabited and the watchdog still in its grace period. The
+// coordinator must wait for that watchdog before it starts the next phase or
+// exits, so the helper is swept rather than left beside the next phase (or
+// with no sweep at all, if the remaining phases finish first). That wait is
+// owed on a deadline exactly as it is on a signal, so it must not depend on
+// the coordinator's root context having been cancelled.
+func TestTheSweepIsAwaitedAfterAPhaseTimeout(t *testing.T) {
+	const (
+		timeout = 500 * time.Millisecond
+		grace   = 2 * time.Second
+	)
+	helperPidFile := filepath.Join(t.TempDir(), "helper.pid")
+	ctx, cancel, cmd := newPhaseCmd(timeout, phaseExitsLeavingHelper(helperPidFile))
+	defer cancel()
+	registerPhaseSweep(t, cmd, helperPidFile)
+
+	var attempts atomic.Int64
+	phaseDone := make(chan struct{})
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start the phase: %v", err)
+	}
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		defer close(done)
+		phaseWatchdog(context.Background(), ctx, phaseDone, cmd, realEscalation(grace, &attempts))
+	}()
+
+	// The helper is recorded before the deadline lands, so the group is
+	// inhabited when the phase is reaped.
+	readPid(t, helperPidFile)
+
+	if runErr := cmd.Wait(); runErr == nil {
+		t.Fatal("the phase exited on its own instead of taking the deadline's SIGTERM")
+	}
+	close(phaseDone)
+	cancel()
+
+	// The precondition the issue describes: the phase is reaped, the group
+	// is still inhabited, and the watchdog has not yet fired its kill.
+	if !phaseGroupInhabited(cmd) {
+		t.Fatal("the phase's group was empty after cmd.Wait; this case is not covered")
+	}
+	if n := attempts.Load(); n != 0 {
+		t.Fatalf("the escalation fired %d time(s) before the sweep was awaited; this case is not covered", n)
+	}
+
+	// No signal reached the coordinator. Awaiting the sweep must still
+	// hold until the watchdog kills the helper at the end of the grace
+	// period, not return at once.
+	start := time.Now()
+	awaitPhaseSweep(done, time.After)
+	elapsed := time.Since(start)
+
+	wg.Wait()
+	if n := attempts.Load(); n != 1 {
+		t.Errorf("the escalation fired %d time(s), want exactly 1", n)
+	}
+	if err := waitGroupEmpty(cmd, 3*time.Second); err != nil {
+		t.Errorf("the phase's group was still inhabited after the sweep was awaited: %v", err)
+	}
+	if elapsed < grace/2 {
+		t.Errorf("the sweep wait returned after %s, before the grace period was up: it did not wait for the watchdog", elapsed)
 	}
 }
