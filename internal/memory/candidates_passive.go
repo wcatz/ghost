@@ -458,8 +458,9 @@ func passiveKeyScanReads() int64 { return passiveKeyScanVisited.Load() }
 // pinned rows nothing unpinned can enter it, so the second scan is skipped.
 //
 // The window holds KEYS, not rows: the scan reads only the columns the rank
-// needs, and the full rows are hydrated once, for the window's k rows, so the
-// bucket's content is never read at all.
+// needs, and the full rows are hydrated once, for the window's k rows. Only a
+// dated flag is derived in SQL for the rank; the bucket's content is never
+// carried into Go.
 func (s *Store) passiveWindow(ctx context.Context, req CandidateRequest, pol SlicePolicy, cols passiveColumns) ([]Memory, error) {
 	pinned, err := s.scanPassiveKeys(ctx, req, pol, cols, true, nil)
 	if err != nil {
@@ -519,12 +520,14 @@ func (s *Store) scanPassiveKeys(ctx context.Context, req CandidateRequest, pol S
 func scanPassiveRankKey(rows *sql.Rows, now time.Time) (passiveRankKey, error) {
 	var key passiveRankKey
 	var pinned int
-	if err := rows.Scan(&key.id, &key.importance, &pinned, &key.category, &key.content, &key.createdAt, &key.updatedAt, &key.retention); err != nil {
+	var dated int
+	if err := rows.Scan(&key.id, &key.importance, &pinned, &key.category, &dated, &key.createdAt, &key.updatedAt, &key.retention); err != nil {
 		return key, fmt.Errorf("scan passive key: %w", err)
 	}
 	key.pinned = pinned == 1
+	key.dated = dated == 1
 	clock := now.UTC().Truncate(time.Second)
-	key.rank = key.importance * DecayFactor(key.category, key.content, key.retention, key.pinned, ageDays(key.createdAt, clock))
+	key.rank = key.importance * decayFactorDated(key.category, key.dated, key.retention, key.pinned, ageDays(key.createdAt, clock))
 	return key, nil
 }
 
@@ -723,15 +726,16 @@ func passiveRankKeyLess(a, b passiveRankKey, order string) bool {
 }
 
 // passiveRankKey is one row's rank facts, read by the threshold scan before the
-// row is hydrated. It carries content because the rank's category-aware decay
-// treats a dated fact differently from a timeless one, and it holds importance
-// as the double the column stores so the tie it breaks is the engine's.
+// row is hydrated. It carries a dated flag, derived in SQL, because the rank's
+// category-aware decay treats a dated fact differently from a timeless one, and
+// it holds importance as the double the column stores so the tie it breaks is
+// the engine's. The bucket's content is never carried into Go here.
 type passiveRankKey struct {
 	id         string
 	pinned     bool
 	importance float64
 	category   string
-	content    string
+	dated      bool
 	createdAt  string
 	updatedAt  string
 	retention  string
@@ -829,7 +833,7 @@ func passiveKeyScanSQL(pol SlicePolicy, req CandidateRequest, cols passiveColumn
 			args = append(args, stamp, stamp)
 		}
 		return fmt.Sprintf(`
-		SELECT id, importance, pinned, category, content, created_at, updated_at, %s
+		SELECT id, importance, pinned, category, (category = 'fact' AND content GLOB '*[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]*') AS dated, created_at, updated_at, %s
 		FROM memories
 		WHERE %s`, retention, where), args
 	}

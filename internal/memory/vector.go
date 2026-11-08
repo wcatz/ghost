@@ -720,10 +720,19 @@ func ContentCarriesDate(content string) bool {
 // the age it is being scored against is the same age. A row that ranks as
 // conversation-scoped should read that way in the one number that ranks it.
 func DecayFactor(category, content, retention string, pinned bool, ageDays float64) float64 {
+	return decayFactorDated(category, ContentCarriesDate(content), retention, pinned, ageDays)
+}
+
+// decayFactorDated is DecayFactor with the dated-fact classification already
+// decided. It is the one implementation of the rule the passive threshold scan
+// shares with every other rank: the scan derives whether a fact carries a
+// calendar date in SQL and passes the flag here, so the Go and SQL rules stay
+// one rule and the scan never carries row content into Go.
+func decayFactorDated(category string, dated bool, retention string, pinned bool, ageDays float64) float64 {
 	if pinned {
 		return 1.0
 	}
-	return categoryDecay(category, content, ageDays) * RetentionDecayFactor(retention, pinned, ageDays)
+	return categoryDecayDated(category, dated, ageDays) * RetentionDecayFactor(retention, pinned, ageDays)
 }
 
 // categoryDecay is the category-and-age half of DecayFactor, split out because
@@ -731,11 +740,18 @@ func DecayFactor(category, content, retention string, pinned bool, ageDays float
 // session row is never worth more than half a durable one, whatever its
 // category, and the floors are per-category.
 func categoryDecay(category, content string, ageDays float64) float64 {
+	return categoryDecayDated(category, ContentCarriesDate(content), ageDays)
+}
+
+// categoryDecayDated is categoryDecay with the dated-fact classification
+// already decided. dated means the row is a fact whose content carries a
+// calendar date (the same shape DecayRankingSQL tests with GLOB).
+func categoryDecayDated(category string, dated bool, ageDays float64) float64 {
 	switch category {
 	case "preference", "convention":
 		return 1.0
 	case "fact":
-		if !ContentCarriesDate(content) {
+		if !dated {
 			return 1.0
 		}
 		return math.Max(0.3, 1.0/(1.0+ageDays/45.0))
