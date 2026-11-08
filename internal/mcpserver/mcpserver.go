@@ -659,6 +659,26 @@ func shortID(id string) string {
 	return assemble.ShortID(id)
 }
 
+// healthProjectLabel renders a stored project name for a health-report
+// maintenance line: a token-shaped name is withheld behind the guard
+// placeholder, any other name is escaped by assemble.Label.
+func healthProjectLabel(name string) string {
+	if placeholder, withheld := memory.TokenGuardPlaceholder("project", name); withheld {
+		return placeholder
+	}
+	return assemble.Label(name)
+}
+
+// healthProjectID renders a stored project id for a health-report
+// maintenance line: a token-shaped id is withheld behind the guard
+// placeholder, any other id is shortened by shortID.
+func healthProjectID(id string) string {
+	if placeholder, withheld := memory.TokenGuardPlaceholder("project", id); withheld {
+		return placeholder
+	}
+	return shortID(id)
+}
+
 // globalConsolidatable is the _global rows the fold may touch: the same
 // consolidatable filter the project and _global folds use (not pinned, not
 // resolved, not persistent, not manual/builtin) and only what reflection wrote.
@@ -4055,7 +4075,7 @@ func (s *Server) registerTools() {
 				// pinned, history and retrieval blocks follow.
 				uncountedProjects++
 				projectRows = append(projectRows, fmt.Sprintf("- **%s** (%s): count could not be read: %v\n",
-					assemble.Label(p.Name), shortID(p.ID), err))
+					healthProjectLabel(p.Name), healthProjectID(p.ID), err))
 				continue
 			}
 			totalMemories += count
@@ -4067,7 +4087,7 @@ func (s *Server) registerTools() {
 			// newline in one put a second entry on a health report a human reads
 			// (#791).
 			row := fmt.Sprintf("- **%s** (%s): %d memories\n",
-				assemble.Label(p.Name), shortID(p.ID), count)
+				healthProjectLabel(p.Name), healthProjectID(p.ID), count)
 			// Frozen-row share: reflect never consolidates pinned, persistent,
 			// manual, builtin or resolved rows. A project whose rows are mostly
 			// frozen looks maintained while nothing can shrink it (#1849).
@@ -4308,13 +4328,7 @@ func (s *Server) registerTools() {
 		for _, p := range projects {
 			n, err := read.reader.CountConsolidatableMemories(ctx, p.ID)
 			if err != nil {
-				nm := p.Name
-				if ph, ok := memory.TokenGuardPlaceholder("project", nm); ok {
-					nm = ph
-				} else {
-					nm = assemble.Label(nm)
-				}
-				fmt.Fprintf(&sb, "**Reflect:** project %s (%s) consolidatable count could not be read\n", nm, shortID(p.ID))
+				fmt.Fprintf(&sb, "**Reflect:** project %s (%s) consolidatable count could not be read\n", healthProjectLabel(p.Name), healthProjectID(p.ID))
 				continue
 			}
 			if n > reflection.MaxConsolidationInput {
@@ -4325,13 +4339,7 @@ func (s *Server) registerTools() {
 			fmt.Fprintf(&sb, "**Reflect:** %d project(s) above the %d consolidatable-memory limit for a single consolidation and skipped by unattended reflect — to consolidate, bring to at most %d: `ghost resolve <project> --apply` or `ghost prune --project <project> --apply` (pinned, manual and persistent memories do not count). Then run `ghost reflect <project> --apply`.\n",
 				len(overBound), reflection.MaxConsolidationInput, reflection.MaxConsolidationInput)
 			for _, o := range overBound {
-				nm := o.name
-				if ph, ok := memory.TokenGuardPlaceholder("project", nm); ok {
-					nm = ph
-				} else {
-					nm = assemble.Label(nm)
-				}
-				fmt.Fprintf(&sb, "  - %s (%s): %d consolidatable memories\n", nm, shortID(o.id), o.count)
+				fmt.Fprintf(&sb, "  - %s (%s): %d consolidatable memories\n", healthProjectLabel(o.name), healthProjectID(o.id), o.count)
 			}
 		}
 

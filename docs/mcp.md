@@ -110,7 +110,7 @@ an agent looking at one store are told the same thing about it — and an agent 
 sees the restatement share rising has the same number the operator sees on the
 command line. A store with no history prints `no version rows recorded yet`.
 
-**Reflect** lists projects above the 2000 consolidatable-memory limit for a single consolidation and skipped by unattended `ghost lifecycle`. The line names the bound, the count per project, and the manual `ghost reflect <project> --apply` after shrinking with `ghost resolve <project> --apply` or `ghost prune --project <project> --apply` (pinned, manual and persistent memories do not count); a failed count is reported as `consolidatable count could not be read`. The same figures and remediation are reported by `ghost mcp status`; the line format differs (`ghost_health` prints `**Reflect:** ...`, `ghost mcp status` prints `  ! reflect: ...`).
+**Reflect** lists projects above the 2000 consolidatable-memory limit for a single consolidation and skipped by unattended `ghost lifecycle`. The line names the bound, the count per project, and the manual `ghost reflect <project> --apply` after shrinking with `ghost resolve <project> --apply` or `ghost prune --project <project> --apply` (pinned, manual and persistent memories do not count); a failed count is reported as `consolidatable count could not be read`. The same figures and remediation are reported by `ghost mcp status`; the line format differs (`ghost_health` prints `**Reflect:** ...`, `ghost mcp status` prints `  ! reflect: ...`). A token-shaped project name or id is withheld behind the guard placeholder; an ordinary one prints unchanged.
 
 **Every other figure the tool prints follows the same rule.** Embedding
 coverage, the memory-link figures and each project's count are reads like the one
@@ -125,7 +125,7 @@ could not count is not a project with no memories. `ghost_list_projects` names
 the failure the same way, since a `0` there is a figure an agent acts on when
 choosing where to save.
 
-Each project's bullet also carries its consolidation exclusion: `N frozen (M% excluded from consolidation: pinned A, persistent B, manual C, builtin D, resolved E; K consolidatable)`. Pinned, persistent, manual, builtin and resolved rows are never consolidated by reflect (`replaceableRowSQL` and `memory.IsConsolidatable`), so a project whose rows are mostly frozen looks maintained while nothing can shrink it. The per-project line discloses the share of live rows reflect cannot touch and why; a failed read prints `consolidation exclusion could not be read: …` rather than nothing.
+Each project's bullet also carries its consolidation exclusion: `N frozen (M% excluded from consolidation: pinned A, persistent B, manual C, builtin D, resolved E; K consolidatable)`. Pinned, persistent, manual, builtin and resolved rows are never consolidated by reflect (`replaceableRowSQL` and `memory.IsConsolidatable`), so a project whose rows are mostly frozen looks maintained while nothing can shrink it. The per-project line discloses the share of live rows reflect cannot touch and why; a failed read prints `consolidation exclusion could not be read: …` rather than nothing. A token-shaped project name or id on the line is withheld behind the guard placeholder; an ordinary one prints unchanged.
 
 **The two diagnostic tools do not wait for a write in flight.** `ghost_health`
 and `ghost_list_projects` read the store through its read-only handle, in ONE
@@ -169,7 +169,7 @@ consolidatable memories and have not had lifecycle maintenance within
 `lifecycle.min_interval` (default 30m) or have never had one, and whose claim
 is not currently held. The line names the retry for each project
 (`ghost lifecycle --project <name>`) with the count and the age of the last
-run (`never` when none), rendered through the same label and token guards;
+run (`never` when none), rendered with token-shaped project values withheld behind the guard placeholder (ordinary values print unchanged);
 `ghost mcp status` prints the same projects as `! maintenance overdue:` with
 the same counts, so the two diagnostics cannot disagree. A project with no
 consolidatable memories is never overdue. A project whose id is not a safe filename component has consolidatable memories but cannot have lifecycle bookkeeping keyed on it, so it is reported separately under `**Cannot be maintained unattended:**` (status: `! cannot be maintained unattended:`) with its count, its id and the reason, and without the retry that cannot help it; the stop hook records the same refusal as a per-project failure marker. A project above the consolidation input limit is not listed as overdue (it is listed under the Reflect over-bound line with `ghost resolve <project> --apply` or `ghost prune --project <project> --apply`). A read that cannot be made is a missing diagnostic, not a failed check.
