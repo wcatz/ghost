@@ -232,27 +232,89 @@ func (s *Store) createLinkTx(ctx context.Context, sourceID, targetID, relation s
 	return true, nil
 }
 
+// capRelatedDegreeSQL invalidates the weakest live 'related' links touching a
+// memory so its live degree stays within MaxRelatedDegree, keeping the
+// strongest links. Each endpoint is searched through its own partial index
+// (idx_links_source / idx_links_target) rather than an OR scan.
+const capRelatedDegreeSQL = `
+WITH touching AS (
+  SELECT rowid, strength, created_at FROM memory_links
+  WHERE relation = 'related' AND invalidated_at IS NULL AND source_id = ?1
+  UNION ALL
+  SELECT rowid, strength, created_at FROM memory_links
+  WHERE relation = 'related' AND invalidated_at IS NULL AND target_id = ?1
+),
+keepers AS (
+  SELECT rowid FROM touching
+  ORDER BY strength DESC, created_at, rowid
+  LIMIT ?2
+)
+UPDATE memory_links
+SET invalidated_at = datetime('now')
+WHERE relation = 'related'
+  AND invalidated_at IS NULL
+  AND rowid IN (SELECT rowid FROM touching)
+  AND rowid NOT IN (SELECT rowid FROM keepers)
+`
+
 // capRelatedDegreeTx invalidates the weakest live 'related' links touching
 // memoryID so its live 'related' degree does not exceed MaxRelatedDegree,
 // keeping the strongest links. It runs inside the caller's transaction.
 func capRelatedDegreeTx(ctx context.Context, tx *sql.Tx, memoryID string) error {
-	_, err := tx.ExecContext(ctx, `
-		UPDATE memory_links
-		SET invalidated_at = datetime('now')
-		WHERE relation = 'related'
-		  AND invalidated_at IS NULL
-		  AND (source_id = ? OR target_id = ?)
-		  AND rowid NOT IN (
-		    SELECT rowid FROM memory_links
-		    WHERE relation = 'related'
-		      AND invalidated_at IS NULL
-		      AND (source_id = ? OR target_id = ?)
-		    ORDER BY strength DESC, created_at, rowid
-		    LIMIT ?
-		  )
-	`, memoryID, memoryID, memoryID, memoryID, MaxRelatedDegree)
-	if err != nil {
+	if _, err := tx.ExecContext(ctx, capRelatedDegreeSQL, memoryID, MaxRelatedDegree); err != nil {
 		return fmt.Errorf("cap related degree: %w", err)
+	}
+	return nil
+}
+
+// TrimOverCapRelatedDegrees finds memories whose live 'related' degree exceeds
+// MaxRelatedDegree and caps them, keeping the strongest links and invalidating
+// the rest. It repairs rows that accumulated links before the cap existed.
+func (s *Store) TrimOverCapRelatedDegrees(ctx context.Context) error {
+	s.mu.RLock()
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id FROM (
+		  SELECT source_id AS id FROM memory_links
+		  WHERE relation = 'related' AND invalidated_at IS NULL
+		  UNION ALL
+		  SELECT target_id AS id FROM memory_links
+		  WHERE relation = 'related' AND invalidated_at IS NULL
+		)
+		GROUP BY id
+		HAVING COUNT(*) > ?
+	`, MaxRelatedDegree)
+	if err != nil {
+		s.mu.RUnlock()
+		return fmt.Errorf("find over-cap related degrees: %w", err)
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			s.mu.RUnlock()
+			return err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		s.mu.RUnlock()
+		return err
+	}
+	_ = rows.Close()
+	s.mu.RUnlock()
+
+	for _, id := range ids {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		s.mu.Lock()
+		_, err := s.execGuardedWrite(ctx, "trim-related-degree", capRelatedDegreeSQL, id, MaxRelatedDegree)
+		s.mu.Unlock()
+		if err != nil {
+			return fmt.Errorf("trim related degree %s: %w", id, err)
+		}
 	}
 	return nil
 }

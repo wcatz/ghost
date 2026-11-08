@@ -2,9 +2,11 @@ package linking
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -293,4 +295,114 @@ func TestRun_SurvivesPanicInTickerSweep(t *testing.T) {
 
 	cancel()
 	<-done
+}
+
+func TestSweepOnceTrimsExistingOverCapRelatedDegree(t *testing.T) {
+	dir, err := os.MkdirTemp("/srv/m2-oc/ghost/tmp-i1955", "cap-sweep")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	dbPath := filepath.Join(dir, "ghost.db")
+
+	db, err := memory.OpenDB(dbPath)
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	s := memory.NewStore(db, logger)
+	ctx := context.Background()
+	if err := s.EnsureProject(ctx, testProject, "/srv/m2-oc/ghost/tmp-i1955/cap-sweep-project", "test"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+
+	hub, err := s.Create(ctx, testProject, memory.Memory{
+		Category: "fact", Content: "hub", Source: "manual", Importance: 0.7,
+	})
+	if err != nil {
+		t.Fatalf("Create hub: %v", err)
+	}
+	others := make([]string, memory.MaxRelatedDegree+10)
+	for i := range others {
+		others[i], err = s.Create(ctx, testProject, memory.Memory{
+			Category: "fact", Content: fmt.Sprintf("neighbor %d", i), Source: "manual", Importance: 0.7,
+		})
+		if err != nil {
+			t.Fatalf("Create neighbor %d: %v", i, err)
+		}
+	}
+
+	seed, err := sql.Open("sqlite", dbPath+"?_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)")
+	if err != nil {
+		t.Fatalf("sql.Open seed: %v", err)
+	}
+	for i, other := range others {
+		src, tgt := hub, other
+		if src > tgt {
+			src, tgt = tgt, src
+		}
+		strength := 0.99 - float32(i)*0.001
+		if _, err := seed.Exec(`
+			INSERT INTO memory_links (source_id, target_id, relation, strength, source)
+			VALUES (?, ?, 'related', ?, 'auto')
+		`, src, tgt, strength); err != nil {
+			_ = seed.Close()
+			t.Fatalf("seed link %d: %v", i, err)
+		}
+	}
+	if err := seed.Close(); err != nil {
+		t.Fatalf("close seed: %v", err)
+	}
+
+	w := NewWorker(s, logger, time.Minute, 0.70)
+	w.SweepOnce(ctx)
+
+	links, err := s.GetLinks(ctx, hub)
+	if err != nil {
+		t.Fatalf("GetLinks: %v", err)
+	}
+	kept := map[string]bool{}
+	live := 0
+	for _, l := range links {
+		if l.Relation != "related" {
+			continue
+		}
+		live++
+		other := l.SourceID
+		if other == hub {
+			other = l.TargetID
+		}
+		kept[other] = true
+	}
+	if live != memory.MaxRelatedDegree {
+		t.Fatalf("live related degree = %d, want %d", live, memory.MaxRelatedDegree)
+	}
+	for i := 0; i < memory.MaxRelatedDegree; i++ {
+		if !kept[others[i]] {
+			t.Errorf("strong link to neighbor %d was invalidated", i)
+		}
+	}
+	for i := memory.MaxRelatedDegree; i < len(others); i++ {
+		if kept[others[i]] {
+			t.Errorf("weak link to neighbor %d survived", i)
+		}
+	}
+
+	check, err := sql.Open("sqlite", dbPath+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatalf("sql.Open check: %v", err)
+	}
+	defer func() { _ = check.Close() }()
+	var invalidated int
+	if err := check.QueryRow(`
+		SELECT COUNT(*) FROM memory_links
+		WHERE relation = 'related' AND invalidated_at IS NOT NULL
+		  AND (source_id = ? OR target_id = ?)
+	`, hub, hub).Scan(&invalidated); err != nil {
+		t.Fatalf("count invalidated: %v", err)
+	}
+	if invalidated != 10 {
+		t.Fatalf("invalidated = %d, want 10", invalidated)
+	}
 }

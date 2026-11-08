@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -437,5 +438,111 @@ func TestCreateLinkCapsRelatedDegreeOnBothEndpoints(t *testing.T) {
 	}
 	if got := liveRelatedDegree(t, s, a); got != MaxRelatedDegree {
 		t.Fatalf("a degree = %d, want %d", got, MaxRelatedDegree)
+	}
+}
+
+func TestCapRelatedDegreePlanUsesIndexes(t *testing.T) {
+	s := testStore(t)
+	rows, err := s.db.QueryContext(context.Background(),
+		"EXPLAIN QUERY PLAN "+capRelatedDegreeSQL,
+		"00000000000000000000000000000000", MaxRelatedDegree)
+	if err != nil {
+		t.Fatalf("explain: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var plan []string
+	for rows.Next() {
+		var id, parent, unused int
+		var detail string
+		if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		plan = append(plan, detail)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("rows: %v", err)
+	}
+	if len(plan) == 0 {
+		t.Fatal("empty plan")
+	}
+	for _, d := range plan {
+		if strings.Contains(d, "SCAN memory_links") {
+			t.Errorf("cap plan scans memory_links: %q\n%s", d, strings.Join(plan, "\n"))
+		}
+	}
+	var sawSource, sawTarget bool
+	for _, d := range plan {
+		sawSource = sawSource || strings.Contains(d, "idx_links_source")
+		sawTarget = sawTarget || strings.Contains(d, "idx_links_target")
+	}
+	if !sawSource || !sawTarget {
+		t.Errorf("cap plan does not use both link indexes (source %v, target %v):\n%s", sawSource, sawTarget, strings.Join(plan, "\n"))
+	}
+}
+
+func TestTrimOverCapRelatedDegrees(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	hub := makeMemory(t, s, "over-cap hub")
+	others := make([]string, MaxRelatedDegree+10)
+	for i := range others {
+		others[i] = makeMemory(t, s, fmt.Sprintf("trim neighbor %d", i))
+		src, tgt := hub, others[i]
+		if src > tgt {
+			src, tgt = tgt, src
+		}
+		strength := 0.99 - float32(i)*0.001
+		if _, err := s.db.ExecContext(ctx, `
+			INSERT INTO memory_links (source_id, target_id, relation, strength, source)
+			VALUES (?, ?, 'related', ?, 'auto')
+		`, src, tgt, strength); err != nil {
+			t.Fatalf("seed link %d: %v", i, err)
+		}
+	}
+	if got := liveRelatedDegree(t, s, hub); got != MaxRelatedDegree+10 {
+		t.Fatalf("seeded degree = %d, want %d", got, MaxRelatedDegree+10)
+	}
+	if err := s.TrimOverCapRelatedDegrees(ctx); err != nil {
+		t.Fatalf("TrimOverCapRelatedDegrees: %v", err)
+	}
+	if got := liveRelatedDegree(t, s, hub); got != MaxRelatedDegree {
+		t.Fatalf("trimmed degree = %d, want %d", got, MaxRelatedDegree)
+	}
+	links, err := s.GetLinks(ctx, hub)
+	if err != nil {
+		t.Fatalf("GetLinks: %v", err)
+	}
+	kept := map[string]bool{}
+	for _, l := range links {
+		if l.Relation != "related" {
+			continue
+		}
+		other := l.SourceID
+		if other == hub {
+			other = l.TargetID
+		}
+		kept[other] = true
+	}
+	for i := 0; i < MaxRelatedDegree; i++ {
+		if !kept[others[i]] {
+			t.Errorf("strong link to trim neighbor %d was invalidated", i)
+		}
+	}
+	for i := MaxRelatedDegree; i < len(others); i++ {
+		if kept[others[i]] {
+			t.Errorf("weak link to trim neighbor %d survived", i)
+		}
+	}
+	var invalidated int
+	row := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM memory_links
+		WHERE relation = 'related' AND invalidated_at IS NOT NULL
+		  AND (source_id = ? OR target_id = ?)
+	`, hub, hub)
+	if err := row.Scan(&invalidated); err != nil {
+		t.Fatalf("count invalidated: %v", err)
+	}
+	if invalidated != 10 {
+		t.Fatalf("invalidated = %d, want 10", invalidated)
 	}
 }
