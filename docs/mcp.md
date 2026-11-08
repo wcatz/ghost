@@ -684,11 +684,13 @@ listing can name. The refusal names the field and never the value, because an
 invalid-UTF-8 or NUL-bearing argument is exactly the caller text this codebase
 keeps out of its answers. A `ghost_memory_update` that is refused leaves the
 stored content byte-identical to what it was — a refused edit is not a partial
-write. The rule is a write-boundary rule and lives beside `validateTags`, not in
-the import predicates: `CheckImportedMemory`, `CheckImportedTask` and
-`CheckImportedDecision` still accept a blank `content`, `title`, `decision` or
-`rationale` from an artifact, because an import is another way to reach the same
-table and must not be the way around a store's existing rows.
+write. The rule is a write-boundary rule and lives beside `validateTags`. On the
+import predicates, `CheckImportedMemory` still accepts a blank `content` from an
+artifact, while `CheckImportedTask` and `CheckImportedDecision` refuse a blank
+required field (`title`; `title`, `decision`, `rationale`). `ghost export` asks
+the same predicates, so an existing stored task or decision with a blank
+required field is named and left out of the artifact. An import is another way
+to reach the same table and must not be the way around a store's existing rows.
 
 **A stamp and a rating are refused by the save tool's rules, on the evidence records too.** A memory's own `valid_from`, `valid_until`, `verified_at` and `confidence` are read the way `ghost_memory_save` reads them: RFC 3339 or a bare date, stored in the layout every reader parses, and a rating from 0 to 1. The same kinds of value live on each of a memory's `evidence` records — `observed_at`, `verified_at` and `confidence` — and they are read by the same rules, because they are the same kinds of claim: a stamp is a moment a reader interprets, and a rating outside 0 to 1 is a broken scale rather than a low belief. `ghost import` refuses a stamp no accepted form reads and a rating outside 0 to 1 by name, with the record's position in the list (`evidence[0].verified_at`), in a dry run and an apply alike. The rule is not tidiness: the support summary counts a record carrying a verification stamp as a verification whatever its kind, so an unreadable stamp or a rating of 99 would have the memory reported as supported by verified observations on the strength of values the save path would never have written. `ghost export` asks the same predicate, so a stored row holding one is named and left out of the artifact rather than carried into every later round trip.
 

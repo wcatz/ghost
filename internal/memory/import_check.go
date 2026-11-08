@@ -531,7 +531,7 @@ func CheckImportedTask(t Task) error {
 	if t.ProjectID == "" {
 		return fmt.Errorf("project_id is required")
 	}
-	if t.Title == "" {
+	if strings.TrimSpace(t.Title) == "" {
 		return fmt.Errorf("title is required")
 	}
 	if !validTaskStatuses[t.Status] {
@@ -614,13 +614,13 @@ func CheckImportedDecision(d Decision) error {
 	if d.ProjectID == "" {
 		return fmt.Errorf("project_id is required")
 	}
-	if d.Title == "" {
+	if strings.TrimSpace(d.Title) == "" {
 		return fmt.Errorf("title is required")
 	}
-	if d.Decision == "" {
+	if strings.TrimSpace(d.Decision) == "" {
 		return fmt.Errorf("decision is required")
 	}
-	if d.Rationale == "" {
+	if strings.TrimSpace(d.Rationale) == "" {
 		return fmt.Errorf("rationale is required")
 	}
 	if !validDecisionStatuses[d.Status] {
