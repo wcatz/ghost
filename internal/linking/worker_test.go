@@ -196,6 +196,69 @@ func (p *panicOnceStore) MarkLinkScanned(ctx context.Context, memoryID string, s
 	return err
 }
 
+// TestSweepOnceCapsRelatedDegree: scanning many spokes that each find the same
+// hub must not let the hub accumulate unbounded inbound related links. The
+// weakest links are invalidated so total live related degree stays at K.
+func TestSweepOnceCapsRelatedDegree(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	dim := memory.MaxRelatedDegree + 15
+	hubVec := make([]float32, dim)
+	hubVec[0] = 1
+	hub := addEmbedded(t, s, "hub", hubVec)
+
+	nSpokes := memory.MaxRelatedDegree + 5
+	spokes := make([]string, nSpokes)
+	for i := 0; i < nSpokes; i++ {
+		v := make([]float32, dim)
+		v[0] = 0.8
+		v[i+1] = 0.6
+		spokes[i] = addEmbedded(t, s, fmt.Sprintf("spoke %d", i), v)
+	}
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	w := NewWorker(s, logger, time.Minute, 0.70)
+	// One sweep processes up to batchSize unscanned memories; all fit.
+	w.SweepOnce(ctx)
+	// Drain any remaining unscanned (e.g. if hub/spokes split across batches).
+	w.SweepOnce(ctx)
+
+	links, err := s.GetLinks(ctx, hub)
+	if err != nil {
+		t.Fatalf("GetLinks(hub): %v", err)
+	}
+	related := 0
+	for _, l := range links {
+		if l.Relation == "related" {
+			related++
+		}
+	}
+	if related > memory.MaxRelatedDegree {
+		t.Fatalf("hub live related degree = %d, want <= %d", related, memory.MaxRelatedDegree)
+	}
+	if related == 0 {
+		t.Fatal("hub has no related links; sweep did not link spokes")
+	}
+	// Spokes only relate to hub (mutual spoke cosine 0.64 < 0.70), so no spoke
+	// can exceed the cap either.
+	for _, id := range spokes {
+		ls, err := s.GetLinks(ctx, id)
+		if err != nil {
+			t.Fatalf("GetLinks(spoke): %v", err)
+		}
+		n := 0
+		for _, l := range ls {
+			if l.Relation == "related" {
+				n++
+			}
+		}
+		if n > memory.MaxRelatedDegree {
+			t.Fatalf("spoke %s live related degree = %d, want <= %d", id, n, memory.MaxRelatedDegree)
+		}
+	}
+}
+
 // TestRun_SurvivesPanicInTickerSweep proves Run's ticker branch keeps firing
 // after a panic inside SweepOnce (via ListProjects). Before the fix, the
 // first tick's panic is unrecovered anywhere in the goroutine's call stack,

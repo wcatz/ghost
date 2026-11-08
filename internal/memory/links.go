@@ -21,6 +21,12 @@ type Link struct {
 	InvalidatedAt *string
 }
 
+// MaxRelatedDegree is the largest number of live 'related' links any one
+// memory may have. When inserting a link would exceed it for either endpoint,
+// the weakest live 'related' links touching that endpoint are invalidated (not
+// deleted) so the graph keeps its history and the degree stays within the cap.
+const MaxRelatedDegree = 20
+
 // symmetricRelations are stored in normalized (min, max) ID order so A→B and
 // B→A collapse to one row.
 var symmetricRelations = map[string]bool{"related": true}
@@ -122,12 +128,11 @@ func (s *Store) createLink(ctx context.Context, sourceID, targetID, relation str
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// A 'supersedes' edge, and every guarded write, takes the explicit
-	// transaction: the first because its history row has to share one with the
-	// edge, the second because the reverse-edge check has to share one with the
-	// insert. Only the ungated non-supersedes write is left on the autocommit
-	// path, which is where it has always been.
-	if requireUnopposed || relation == "supersedes" {
+	// A 'supersedes' edge takes the transaction for its history row, an
+	// unopposed write takes it for the reverse-edge check, and a 'related'
+	// edge takes it to cap live degree on both endpoints atomically with the
+	// upsert.
+	if requireUnopposed || relation == "supersedes" || relation == "related" {
 		return s.createLinkTx(ctx, sourceID, targetID, relation, strength, source, judgedAt, requireUnopposed)
 	}
 
@@ -206,8 +211,18 @@ func (s *Store) createLinkTx(ctx context.Context, sourceID, targetID, relation s
 				return false, err
 			}
 		}
-	} else if err := insertLinkTx(ctx, tx, sourceID, targetID, relation, strength, source, judgedAt); err != nil {
-		return false, err
+	} else {
+		if err := insertLinkTx(ctx, tx, sourceID, targetID, relation, strength, source, judgedAt); err != nil {
+			return false, err
+		}
+		if relation == "related" {
+			if err := capRelatedDegreeTx(ctx, tx, sourceID); err != nil {
+				return false, err
+			}
+			if err := capRelatedDegreeTx(ctx, tx, targetID); err != nil {
+				return false, err
+			}
+		}
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -215,6 +230,31 @@ func (s *Store) createLinkTx(ctx context.Context, sourceID, targetID, relation s
 	}
 	lock.reportHold("create-link", time.Now())
 	return true, nil
+}
+
+// capRelatedDegreeTx invalidates the weakest live 'related' links touching
+// memoryID so its live 'related' degree does not exceed MaxRelatedDegree,
+// keeping the strongest links. It runs inside the caller's transaction.
+func capRelatedDegreeTx(ctx context.Context, tx *sql.Tx, memoryID string) error {
+	_, err := tx.ExecContext(ctx, `
+		UPDATE memory_links
+		SET invalidated_at = datetime('now')
+		WHERE relation = 'related'
+		  AND invalidated_at IS NULL
+		  AND (source_id = ? OR target_id = ?)
+		  AND rowid NOT IN (
+		    SELECT rowid FROM memory_links
+		    WHERE relation = 'related'
+		      AND invalidated_at IS NULL
+		      AND (source_id = ? OR target_id = ?)
+		    ORDER BY strength DESC, created_at, rowid
+		    LIMIT ?
+		  )
+	`, memoryID, memoryID, memoryID, memoryID, MaxRelatedDegree)
+	if err != nil {
+		return fmt.Errorf("cap related degree: %w", err)
+	}
+	return nil
 }
 
 // linkInsertSQL is the upsert CreateLink performs: re-inserting an existing

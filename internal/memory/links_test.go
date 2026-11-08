@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"fmt"
 	"testing"
 )
 
@@ -343,5 +344,98 @@ func TestEmbeddingAndLinkStats(t *testing.T) {
 	}
 	if links != 1 || scans != 1 {
 		t.Errorf("LinkStats = links %d scans %d, want 1 and 1", links, scans)
+	}
+}
+
+func liveRelatedDegree(t *testing.T, s *Store, id string) int {
+	t.Helper()
+	links, err := s.GetLinks(context.Background(), id)
+	if err != nil {
+		t.Fatalf("GetLinks(%s): %v", id, err)
+	}
+	n := 0
+	for _, l := range links {
+		if l.Relation == "related" {
+			n++
+		}
+	}
+	return n
+}
+
+func TestCreateLinkCapsRelatedDegree(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	hub := makeMemory(t, s, "hub memory")
+	others := make([]string, MaxRelatedDegree+5)
+	for i := range others {
+		others[i] = makeMemory(t, s, fmt.Sprintf("neighbor %d", i))
+		// Descending strengths so the first MaxRelatedDegree are strongest.
+		strength := 0.99 - float32(i)*0.001
+		if err := s.CreateLink(ctx, hub, others[i], "related", strength, "auto"); err != nil {
+			t.Fatalf("CreateLink %d: %v", i, err)
+		}
+	}
+	if got := liveRelatedDegree(t, s, hub); got != MaxRelatedDegree {
+		t.Fatalf("hub related degree = %d, want %d", got, MaxRelatedDegree)
+	}
+	links, err := s.GetLinks(ctx, hub)
+	if err != nil {
+		t.Fatalf("GetLinks: %v", err)
+	}
+	kept := map[string]bool{}
+	for _, l := range links {
+		if l.Relation != "related" {
+			continue
+		}
+		other := l.SourceID
+		if other == hub {
+			other = l.TargetID
+		}
+		kept[other] = true
+	}
+	// The strongest MaxRelatedDegree (lowest indices) must survive.
+	for i := 0; i < MaxRelatedDegree; i++ {
+		if !kept[others[i]] {
+			t.Errorf("strong link to neighbor %d (strength %.3f) was invalidated; weakest should be dropped", i, 0.99-float32(i)*0.001)
+		}
+	}
+	for i := MaxRelatedDegree; i < len(others); i++ {
+		if kept[others[i]] {
+			t.Errorf("weak link to neighbor %d (strength %.3f) survived; degree cap should invalidate it", i, 0.99-float32(i)*0.001)
+		}
+	}
+}
+
+func TestCreateLinkCapsRelatedDegreeOnBothEndpoints(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	a := makeMemory(t, s, "endpoint a")
+	b := makeMemory(t, s, "endpoint b")
+	// Fill a to capacity with strong links.
+	for i := 0; i < MaxRelatedDegree; i++ {
+		peer := makeMemory(t, s, fmt.Sprintf("a peer %d", i))
+		if err := s.CreateLink(ctx, a, peer, "related", 0.95, "auto"); err != nil {
+			t.Fatalf("fill a: %v", err)
+		}
+	}
+	// A weak link between a and b should not survive on a.
+	if err := s.CreateLink(ctx, a, b, "related", 0.70, "auto"); err != nil {
+		t.Fatalf("CreateLink a-b: %v", err)
+	}
+	links, err := s.GetLinks(ctx, a)
+	if err != nil {
+		t.Fatalf("GetLinks(a): %v", err)
+	}
+	for _, l := range links {
+		other := l.SourceID
+		if other == a {
+			other = l.TargetID
+		}
+		if other == b {
+			t.Fatal("weak a-b link survived on endpoint a despite degree cap")
+		}
+	}
+	if got := liveRelatedDegree(t, s, a); got != MaxRelatedDegree {
+		t.Fatalf("a degree = %d, want %d", got, MaxRelatedDegree)
 	}
 }
