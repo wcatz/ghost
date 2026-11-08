@@ -101,6 +101,10 @@ TIMEOUT_REASON = "the model run timed out"
 _OUTAGE_PATTERNS = (
     # The paid fallback's shared usage window, in the provider's words.
     "go usage limit exceeded",
+    # The account behind every keyed model has no balance left, in the
+    # provider's words. It comes back when the account is topped up, so it
+    # is an outage of every paid model at once, never a verdict.
+    "insufficient account funds",
     # The free tier's rate limit, in the provider's words.
     "rate limit exceeded",
     "too many requests",
@@ -188,9 +192,13 @@ def is_usage_limit(reason):
     account's Go window: the one window every paid model shares, which
     comes back by itself later. The provider names it exactly, and the
     phrase is matched exactly - a looser match would be a phrase a model
-    could write.
+    could write. An empty account balance ("Insufficient account funds")
+    is the same window from the other side: every keyed model refuses
+    until the account is topped up.
     """
-    return "go usage limit exceeded" in str(reason or "").lower()
+    text = str(reason or "").lower()
+    return ("go usage limit exceeded" in text
+            or "insufficient account funds" in text)
 
 
 def decide(free_status, free_failures, paid_status, paid_reason,
