@@ -639,6 +639,45 @@ func (c *countingMarkStore) MarkResolved(ctx context.Context, projectID string, 
 	return c.store.MarkResolved(ctx, projectID, ids, prov)
 }
 
+// TestResolveMarkAcceptsStringifiedMemoryIDs: some clients send array
+// arguments as JSON strings, the way the save tools' tags arrive. The tool
+// must accept that form for memory_ids too, rather than refusing it at
+// schema validation before the handler can normalize it.
+func TestResolveMarkAcceptsStringifiedMemoryIDs(t *testing.T) {
+	srv, store := linkWithdrawServer(t)
+	session := connectedClientNamed(t, srv, "claude-code")
+	id := seedMarkable(t, store, "test-project", "a note to mark through a stringified id list")
+	out := resultText(callTool(t, session, "ghost_resolve_mark", map[string]any{
+		"project_id": "test-project",
+		"memory_ids": `["` + id[:8] + `"]`,
+	}))
+	if !strings.Contains(out, "Marked 1") {
+		t.Errorf("the tool did not report its one stamp:\n%s", out)
+	}
+	if !isMarkedResolved(t, store, id) {
+		t.Error("the named memory is not resolved")
+	}
+}
+
+// TestResolveMarkRefusesMalformedStringifiedMemoryIDs: a string that is not
+// a JSON array of strings is refused by name, rather than silently treated
+// as naming no memory.
+func TestResolveMarkRefusesMalformedStringifiedMemoryIDs(t *testing.T) {
+	srv, store := linkWithdrawServer(t)
+	session := connectedClientNamed(t, srv, "claude-code")
+	id := seedMarkable(t, store, "test-project", "a note a malformed list must not touch")
+	refused := callToolErr(t, session, "ghost_resolve_mark", map[string]any{
+		"project_id": "test-project",
+		"memory_ids": "not json",
+	})
+	if !strings.Contains(refused, "memory_ids") || !strings.Contains(refused, "array of strings") {
+		t.Errorf("the refusal must name the field and the shape it wanted: %q", refused)
+	}
+	if isMarkedResolved(t, store, id) {
+		t.Error("a refused request marked a memory")
+	}
+}
+
 // TestResolveMarkEscapesControlAndFormatCharacters verifies that the
 // ghost_resolve_mark tool result escapes control characters (ESC) and format
 // characters (U+202E RLO) in the preview so they are visible rather than
