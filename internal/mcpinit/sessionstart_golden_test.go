@@ -374,7 +374,7 @@ Use project_id: "goldproj" for all ghost_* tool calls.
 - [preference] «global memory 08 content for the golden block»
 
 
-Save new discoveries with ghost_memory_save during work.
+Save to Ghost as it happens, not at the end: when the user corrects you or states a rule, when a bug's root cause is found, when a choice is made for a reason, when a tool or dependency behaves unexpectedly. One memory per fact — refine an earlier one with ghost_memory_update rather than saving it again. A memory is a rule, constraint, decision or reason the code does not state; not what the repository says, not the current task's progress, never a key or token value.
 `
 
 // goldenBlockAfter is the block the session-start surface renders on this
@@ -431,4 +431,4 @@ const goldenBlockAfter = "## Ghost context: goldproj\n" +
 	"- [preference] `gmem08` (0.5) «global memory 08 content for the golden block»\n" +
 	"\n" +
 	"\n" +
-	"Save new discoveries with ghost_memory_save during work.\n"
+	"Save to Ghost as it happens, not at the end: when the user corrects you or states a rule, when a bug's root cause is found, when a choice is made for a reason, when a tool or dependency behaves unexpectedly. One memory per fact — refine an earlier one with ghost_memory_update rather than saving it again. A memory is a rule, constraint, decision or reason the code does not state; not what the repository says, not the current task's progress, never a key or token value.\n"

@@ -168,7 +168,7 @@ export const GhostPlugin: Plugin = async ({ client, directory }) => {
 			child.on("error", async (e) => {
 				await log("warn", `ghost: fail-open (spawn: ${e})`)
 			})
-			// opencode cannot block a stop, so the {"decision":"approve"} nudge
+			// opencode cannot block a stop, so the hookSpecificOutput.additionalContext nudge
 			// ghost emits on stdout is captured here and injected into the live
 			// session (client.session.promptAsync) so the agent itself acts on
 			// it — the faithful analog of the claude/codex blocking nudge. If
@@ -195,7 +195,9 @@ export const GhostPlugin: Plugin = async ({ client, directory }) => {
 					let reason = trimmed
 					try {
 						const parsed = JSON.parse(trimmed)
-						if (typeof parsed?.reason === "string") reason = parsed.reason
+						const additionalContext = parsed?.hookSpecificOutput?.additionalContext
+						if (typeof additionalContext === "string") reason = additionalContext
+						else if (typeof parsed?.reason === "string") reason = parsed.reason
 					} catch { /* keep raw payload */ }
 					// Inject the reminder into the live session so the agent
 					// acts on it. Once per session; on failure, fall back to a
@@ -454,7 +456,9 @@ const setupV2 = async (ctx: ContextV2) => {
 					let reason = trimmed
 					try {
 						const parsed = JSON.parse(trimmed)
-						if (typeof parsed?.reason === "string") reason = parsed.reason
+						const additionalContext = parsed?.hookSpecificOutput?.additionalContext
+						if (typeof additionalContext === "string") reason = additionalContext
+						else if (typeof parsed?.reason === "string") reason = parsed.reason
 					} catch { /* keep raw payload */ }
 					nudgedSessions.set(sessionID, true)
 					if (nudgedSessions.size > MAX_TRACKED_SESSIONS) {

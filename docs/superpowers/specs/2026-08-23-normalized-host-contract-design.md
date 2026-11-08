@@ -170,6 +170,7 @@ Rules:
   | --- | --- | --- | --- |
   | block (claude-code, codex, goose; eligible) | `{"decision":"block","reason":…}` | — | 0 |
   | context injection (`session-start`, inject-capable hosts) | host-visible injection text (Claude: system-reminder block; codex: `additionalContext` JSON) | — | 0 |
+  | nudge on save-less stop (claude-code) | `{"hookSpecificOutput":{"hookEventName":"Stop","additionalContext":…}}` | — | 0 |
   | session-start on non-injecting host (goose, opencode) | empty (silent success) | — | 0 |
   | normal completion (spawns done, nothing to say) | empty | — | 0 |
   | nudge on non-blocking host | empty | one log line | 0 |

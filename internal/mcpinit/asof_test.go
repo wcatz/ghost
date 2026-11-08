@@ -89,7 +89,7 @@ func TestRenderSessionContextAtDisclosesTheInstantAndTheGap(t *testing.T) {
 	}
 	// The session instruction aims the reader at the present, which is not what
 	// this block is.
-	if strings.Contains(block, "Save new discoveries with ghost_memory_save") {
+	if strings.Contains(block, "Save to Ghost as it happens") {
 		t.Errorf("the historical block ends with the session instruction:\n%s", block)
 	}
 
@@ -175,7 +175,7 @@ func TestRenderSessionContextAtNamesTheInstantWithNoProjectMatched(t *testing.T)
 	if !strings.Contains(block, "as_of 2035-01-01T00:00:00Z") {
 		t.Errorf("the block lists globals from an instant without naming it:\n%s", block)
 	}
-	if strings.Contains(block, "Save discoveries with ghost_memory_save") {
+	if strings.Contains(block, "Save to Ghost as it happens") {
 		t.Errorf("the historical block aims the reader at the present:\n%s", block)
 	}
 }
@@ -478,7 +478,7 @@ func TestRenderSessionContextAtWithNoInstantIsTheCurrentPath(t *testing.T) {
 	if strings.Contains(block, "as_of ") {
 		t.Errorf("a nil instant rendered a historical note:\n%s", block)
 	}
-	if !strings.Contains(block, "Save new discoveries with ghost_memory_save") {
+	if !strings.Contains(block, "Save to Ghost as it happens") {
 		t.Errorf("a nil instant dropped the session instruction, so the current path's framing changed:\n%s", block)
 	}
 	if !strings.Contains(block, "**Session #1**") {

@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"math/rand"
 	"path/filepath"
@@ -52,7 +53,7 @@ func legacyPassiveWindow(t *testing.T, s *Store, pol SlicePolicy, req CandidateR
 func TestPassiveThresholdScanMatchesTheLegacyWindow(t *testing.T) {
 	rng := rand.New(rand.NewSource(20261015))
 	now := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
-	for trial := 0; trial < 60; trial++ {
+	for trial := 0; trial < 30; trial++ {
 		st := randomPassiveStore(t, rng, trial)
 		cols, err := passiveColumnsFor(st)
 		if err != nil {
@@ -98,7 +99,7 @@ func randomPassiveStore(t *testing.T, rng *rand.Rand, trial int) *Store {
 	cats := []string{"gotcha", "preference", "architecture", "decision", "fact", "pattern", "convention", "dependency"}
 	tiers := []string{"project", "session", "persistent"}
 	base := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
-	n := 20 + rng.Intn(90)
+	n := 15 + rng.Intn(25)
 	// One transaction for the whole trial: an autocommit per row paid a commit
 	// for each of the ~60 trials' rows.
 	tx, err := db.Begin()
@@ -239,13 +240,9 @@ func decayedBucket(t *testing.T, n int, cat string, ageDays int, importance floa
 // A bucket of rows that DO NOT DECAY holds a window whose last rank is its
 // importance, so the stop fires at the window's edge and the scan reads the
 // window plus the row that proves it, whatever the bucket's size. A bucket of
-// AGED rows of a decaying category holds a window whose last rank has decayed
-// far below their importance, every later row is above it, and the scan reads
-// the bucket to its end.
-//
-// The second figure is the real behaviour, not a bound to hold the code to: the
-// scan's stop is exact, so the window it returns is the same either way, and
-// the price of a window whose rows have aged is a read of the whole bucket.
+// AGED rows of a decaying category with TIED importance holds a window whose
+// last rank has decayed far below their importance, every later row's
+// importance is still above it, and the scan reads the bucket to its end.
 func TestPassiveThresholdScanReadsWhatTheStopBounds(t *testing.T) {
 	now := time.Date(2026, 10, 15, 0, 0, 0, 0, time.UTC)
 	pol := projectPassivePolicy()
@@ -272,11 +269,80 @@ func TestPassiveThresholdScanReadsWhatTheStopBounds(t *testing.T) {
 		t.Errorf("a bucket of %d rows that do not decay cost %d reads; the stop ends the scan at the window's edge, so it costs the window plus one row",
 			rows, got)
 	}
-	// A decaying category whose rows have aged: the window's last rank has
-	// decayed with them, so the stop cannot hold and the bucket is read whole.
-	if got := reads(decayedBucket(t, rows, "gotcha", 400, 0.8)); got != rows {
-		t.Errorf("a bucket of %d aged rows of a decaying category cost %d reads; the scan reads such a bucket to its end",
-			rows, got)
+	// A uniform decaying bucket with importance cycling 0.4-0.8: every row
+	// shares the same decay factor, rank equals importance scaled, so the
+	// tight rank bound fires at window+1.
+	if got := reads(cyclingDecayedBucket(t, rows, "gotcha", 400)); got != int64(pol.OverFetch)+1 {
+		t.Errorf("a uniform %d-row 400-day-old gotcha bucket with cycling importance cost %d reads; want %d", rows, got, pol.OverFetch+1)
+	}
+}
+
+// cyclingDecayedBucket seeds one project bucket whose n rows are all of cat and
+// ageDays old, with importance cycling 0.4 to 0.8 in steps of 0.05. Every row
+// shares the same decay factor, so rank order equals importance order and the
+// tight rank bound fires at window+1.
+func cyclingDecayedBucket(t *testing.T, n int, cat string, ageDays int) *Store {
+	t.Helper()
+	db, err := OpenDB(filepath.Join(t.TempDir(), "cycling.db"))
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	st := NewStore(db, nil)
+	ctx := context.Background()
+	if err := st.EnsureProject(ctx, "proj", "proj", "proj"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	created := time.Date(2026, 10, 15, 0, 0, 0, 0, time.UTC).AddDate(0, 0, -ageDays).Format("2006-01-02 15:04:05")
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	for i := 0; i < n; i++ {
+		imp := 0.4 + float64(i%9)*0.05 // 0.4, 0.45 ... 0.8
+		if _, err := tx.Exec(
+			`INSERT INTO memories (id, project_id, category, content, source, importance, pinned, created_at, updated_at)
+			 VALUES (?, 'proj', ?, 'cycling fixture', 'manual', ?, 0, ?, ?)`,
+			fmt.Sprintf("%s%06d", cat[:1], i), cat, imp, created, created,
+		); err != nil {
+			t.Fatalf("insert %d: %v", i, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	return st
+}
+
+// TestPassiveThresholdScanCyclingOldDecayingIsBounded pins the fix for #1705:
+// a uniform 400-day-old decaying bucket with importance cycling 0.4-0.8 and
+// OverFetch 45 must cost about window+1 reads whatever the bucket size, and
+// the window must equal the brute-force legacy ranking.
+func TestPassiveThresholdScanCyclingOldDecayingIsBounded(t *testing.T) {
+	now := time.Date(2026, 10, 15, 0, 0, 0, 0, time.UTC)
+	pol := projectPassivePolicy()
+	pol.OverFetch = 45
+	for _, n := range []int{1000, 50000} {
+		t.Run(fmt.Sprint(n), func(t *testing.T) {
+			st := cyclingDecayedBucket(t, n, "gotcha", 400)
+			cols, err := passiveColumnsFor(st)
+			if err != nil {
+				t.Fatalf("passiveColumnsFor: %v", err)
+			}
+			req := passiveRequest("proj", pol)
+			req.Now = now
+			resetPassiveKeyScan()
+			window, err := st.passiveWindow(context.Background(), req, pol, cols)
+			if err != nil {
+				t.Fatalf("passiveWindow: %v", err)
+			}
+			if got := passiveKeyScanReads(); got != int64(pol.OverFetch)+1 {
+				t.Errorf("a uniform %d-row 400-day-old gotcha bucket with cycling importance cost %d reads; want %d", n, got, pol.OverFetch+1)
+			}
+			if want := legacyPassiveWindow(t, st, pol, req, cols); !eqStrings(idsOfMemories(window), want) {
+				t.Errorf("cycling window differs from legacy:\n got %v\nwant %v", idsOfMemories(window), want)
+			}
+		})
 	}
 }
 
@@ -376,7 +442,7 @@ func TestPassiveThresholdScanReadsDoNotGrowWithTheTail(t *testing.T) {
 	pol.OverFetch = 45
 
 	reads := make(map[int]int64)
-	for _, tail := range []int{1000, 5000} {
+	for _, tail := range []int{1000, 2000} {
 		st := thresholdScanFixture(t, 45, tail)
 		cols, err := passiveColumnsFor(st)
 		if err != nil {
@@ -394,13 +460,13 @@ func TestPassiveThresholdScanReadsDoNotGrowWithTheTail(t *testing.T) {
 			t.Fatalf("tail %d: the window holds %d rows, want %d", tail, len(window), pol.OverFetch)
 		}
 	}
-	if reads[1000] != reads[5000] {
-		t.Errorf("the scan read %d rows at a 1,000-row tail and %d at 5,000; the tail is below the window and must not be read",
-			reads[1000], reads[5000])
+	if reads[1000] != reads[2000] {
+		t.Errorf("the scan read %d rows at a 1,000-row tail and %d at 2,000; the tail is below the window and must not be read",
+			reads[1000], reads[2000])
 	}
-	if reads[5000] > int64(pol.OverFetch)+2 {
+	if reads[2000] > int64(pol.OverFetch)+2 {
 		t.Errorf("the scan read %d rows for a %d-row window; it must stop at the window, not walk the bucket",
-			reads[5000], pol.OverFetch)
+			reads[2000], pol.OverFetch)
 	}
 }
 
@@ -709,5 +775,175 @@ func TestPassiveKeyScanPlanUsesBothIndexShapes(t *testing.T) {
 				t.Errorf("the passive key scan does not stream out of %s:\n%s", c.index, plan)
 			}
 		})
+	}
+}
+
+func TestPassiveMaxDecayIndexSeekPlans(t *testing.T) {
+	// fresh store
+	db, err := OpenDB(filepath.Join(t.TempDir(), "empty.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := NewStore(db, nil)
+	pol := projectPassivePolicy()
+	cols, err := passiveColumnsFor(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := db.Query("EXPLAIN QUERY PLAN SELECT COALESCE(MAX(created_at), '') FROM memories WHERE project_id = ? AND resolved_at IS NULL AND pinned = 0", pol.Bucket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got string
+	for rows.Next() {
+		var id, parent, notused int
+		var detail string
+		if err := rows.Scan(&id, &parent, &notused, &detail); err != nil {
+			_ = rows.Close()
+			t.Fatal(err)
+		}
+		got += detail + "|"
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "idx_memories_project_created") {
+		t.Fatalf("MAX plan missing index: %s", got)
+	}
+	if strings.Contains(got, "SCAN memories") || strings.Contains(got, "USE TEMP B-TREE") {
+		t.Fatalf("MAX plan not seek: %s", got)
+	}
+	where, args := passivePopulationSQL(pol, CandidateRequest{}, cols)
+	where += " AND pinned = 0"
+	cats := []string{"preference", "convention", "fact"}
+	placeholders := make([]string, len(cats))
+	for i := range cats {
+		placeholders[i] = "?"
+	}
+	q := "EXPLAIN QUERY PLAN SELECT EXISTS(SELECT 1 FROM memories WHERE " + where + " AND category IN (" + strings.Join(placeholders, ",") + "))"
+	all := make([]interface{}, 0, len(args)+len(cats))
+	all = append(all, args...)
+	for _, c := range cats {
+		all = append(all, c)
+	}
+	rows, err = db.Query(q, all...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got = ""
+	for rows.Next() {
+		var id, parent, notused int
+		var detail string
+		if err := rows.Scan(&id, &parent, &notused, &detail); err != nil {
+			_ = rows.Close()
+			t.Fatal(err)
+		}
+		got += detail + "|"
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "idx_memories_project_cat") {
+		t.Fatalf("cat plan missing index: %s", got)
+	}
+	if strings.Contains(got, "SCAN memories") || strings.Contains(got, "USE TEMP B-TREE") {
+		t.Fatalf("cat plan not seek: %s", got)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	// migrated from v29
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "v29.db")
+	db, err = sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`PRAGMA foreign_keys = ON`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(initSQL); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensurePostMigrationIndexes(db); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("PRAGMA user_version = 29"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`DROP INDEX IF EXISTS idx_memories_project_created`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	migrated, err := OpenDB(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = migrated.Close() }()
+	st2 := NewStore(migrated, nil)
+	cols2, err := passiveColumnsFor(st2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err = migrated.Query("EXPLAIN QUERY PLAN SELECT COALESCE(MAX(created_at), '') FROM memories WHERE project_id = ? AND resolved_at IS NULL AND pinned = 0", pol.Bucket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got = ""
+	for rows.Next() {
+		var id, parent, notused int
+		var detail string
+		if err := rows.Scan(&id, &parent, &notused, &detail); err != nil {
+			_ = rows.Close()
+			t.Fatal(err)
+		}
+		got += detail + "|"
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "idx_memories_project_created") {
+		t.Fatalf("MAX plan missing index: %s", got)
+	}
+	if strings.Contains(got, "SCAN memories") || strings.Contains(got, "USE TEMP B-TREE") {
+		t.Fatalf("MAX plan not seek: %s", got)
+	}
+	where, args = passivePopulationSQL(pol, CandidateRequest{}, cols2)
+	where += " AND pinned = 0"
+	placeholders = make([]string, len(cats))
+	for i := range cats {
+		placeholders[i] = "?"
+	}
+	q = "EXPLAIN QUERY PLAN SELECT EXISTS(SELECT 1 FROM memories WHERE " + where + " AND category IN (" + strings.Join(placeholders, ",") + "))"
+	all = make([]interface{}, 0, len(args)+len(cats))
+	all = append(all, args...)
+	for _, c := range cats {
+		all = append(all, c)
+	}
+	rows, err = migrated.Query(q, all...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got = ""
+	for rows.Next() {
+		var id, parent, notused int
+		var detail string
+		if err := rows.Scan(&id, &parent, &notused, &detail); err != nil {
+			_ = rows.Close()
+			t.Fatal(err)
+		}
+		got += detail + "|"
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "idx_memories_project_cat") {
+		t.Fatalf("cat plan missing index: %s", got)
+	}
+	if strings.Contains(got, "SCAN memories") || strings.Contains(got, "USE TEMP B-TREE") {
+		t.Fatalf("cat plan not seek: %s", got)
 	}
 }

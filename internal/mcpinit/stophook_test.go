@@ -88,10 +88,11 @@ func runStopHook(t *testing.T, stdin string) string {
 }
 
 func TestRunStop(t *testing.T) {
+	isolatedHome(t)
 	t.Run("blocks when tools ran but nothing saved", func(t *testing.T) {
 		path := writeTranscript(t, lineUser, lineToolBash, lineText)
 		out := runStopHook(t, stopInput(t, path, false))
-		if !strings.Contains(out, `"decision":"approve"`) {
+		if !strings.Contains(out, `"additionalContext"`) {
 			t.Errorf("expected block decision, got %q", out)
 		}
 		if !strings.Contains(out, "ghost_memory_save") {
@@ -116,7 +117,7 @@ func TestRunStop(t *testing.T) {
 	t.Run("tool name in prose does not count as a save", func(t *testing.T) {
 		path := writeTranscript(t, lineToolBash, lineText)
 		out := runStopHook(t, stopInput(t, path, false))
-		if !strings.Contains(out, `"decision":"approve"`) {
+		if !strings.Contains(out, `"additionalContext"`) {
 			t.Errorf("prose mention must not suppress the nudge, got %q", out)
 		}
 	})
@@ -162,7 +163,7 @@ func TestRunHostEvent_NativeClaudePayloadCompletesEnvelope(t *testing.T) {
 	isolatedHome(t)
 	path := writeTranscript(t, lineUser, lineToolBash, lineText)
 	out := runStopHook(t, nativeStopInput(path))
-	if !strings.Contains(out, `"decision":"approve"`) {
+	if !strings.Contains(out, `"additionalContext"`) {
 		t.Errorf("native payload should complete its envelope and block, got %q", out)
 	}
 }
@@ -196,7 +197,7 @@ func TestRunStop_SweepsTransientTempTranscript(t *testing.T) {
 	// opencode now receives the nudge on stdout (its plugin re-presents it as a
 	// non-blocking reminder); the key invariant here is that the transient
 	// transcript dir is still swept after the hook runs.
-	if !strings.Contains(out.String(), `"decision":"approve"`) {
+	if !strings.Contains(out.String(), `"additionalContext"`) {
 		t.Errorf("expected nudge block decision on stdout, got %q", out.String())
 	}
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
@@ -413,7 +414,7 @@ func TestRunHostEvent_NudgeEmittedForAllHosts(t *testing.T) {
 
 	var out, errBuf bytes.Buffer
 	RunHostEvent("stop", "opencode", strings.NewReader(input), &out, &errBuf)
-	if !strings.Contains(out.String(), `"decision":"approve"`) {
+	if !strings.Contains(out.String(), `"additionalContext"`) {
 		t.Errorf("nudge must emit block decision on stdout, got %q", out.String())
 	}
 	if errBuf.Len() != 0 {
@@ -804,7 +805,7 @@ func TestRunStop_OpencodeV2Transcript(t *testing.T) {
 				fmt.Sprintf(`{"session_id":"oc2","transcript_path":%q,"cwd":"/repo","stop_hook_active":false}`, path))
 			var out bytes.Buffer
 			RunHostEvent("stop", "opencode", strings.NewReader(input), &out, io.Discard)
-			if got := strings.Contains(out.String(), `"decision":"approve"`); got != tc.wantNudge {
+			if got := strings.Contains(out.String(), `"additionalContext"`); got != tc.wantNudge {
 				t.Errorf("nudge emitted = %v, want %v (stdout %q)", got, tc.wantNudge, out.String())
 			}
 			if _, err := os.Stat(dir); !os.IsNotExist(err) {
@@ -841,6 +842,62 @@ func TestTheLongestAcceptedProjectIDStillNamesEveryFile(t *testing.T) {
 	widest := filepath.Join(dir, lifecycleLastStartFile(id)+".tmp4294967295")
 	if err := os.WriteFile(widest, nil, 0o600); err != nil {
 		t.Fatalf("widest start stamp temp name at the length limit: %v", err)
+	}
+}
+
+// TestStopSaveMarkerMissingDataDirDoesNotCreate guards the write path: the gate
+// must not create the data directory when it is absent. It fails if the
+// os.Stat/IsDir guard in writeLastSeenGhostSaves is removed.
+func TestStopSaveMarkerMissingDataDirDoesNotCreate(t *testing.T) {
+	dataHome := isolatedHome(t)
+	dataDir := filepath.Join(dataHome, "ghost")
+	path := writeTranscript(t, lineToolBash)
+	in := stopInput(t, path, false)
+	runStopHook(t, in)
+	if _, err := os.Stat(dataDir); !os.IsNotExist(err) {
+		t.Fatalf("stop hook created the data directory: %v", err)
+	}
+}
+
+// TestDecisionRecordCountsAsSaveForNudge pins finding #3: a session that
+// records a decision is not re-nudged, because the nudge counts
+// ghost_decision_record as a save.
+func TestDecisionRecordCountsAsSaveForNudge(t *testing.T) {
+	isolatedHome(t)
+	lineDecision := `{"type":"assistant","message":{"content":[{"type":"tool_use","name":"mcp__ghost__ghost_decision_record","input":{}}]}}`
+	path := writeTranscript(t, lineToolBash, lineDecision)
+	out := runStopHook(t, stopInput(t, path, false))
+	if strings.TrimSpace(out) != "" {
+		t.Fatalf("decision record should suppress the nudge, got %q", out)
+	}
+}
+
+// TestStopSaveGateEmptySessionID nudges on a second stop with no new save pins
+// finding #3: when no session id is available the gate keys on the transcript
+// path instead of degrading to "never reminded".
+func TestStopSaveGateEmptySessionID(t *testing.T) {
+	dataHome := isolatedHome(t)
+	if err := os.MkdirAll(filepath.Join(dataHome, "ghost"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	transcriptPath := filepath.Join(t.TempDir(), "transcript.jsonl")
+	if err := os.WriteFile(transcriptPath, []byte(lineToolBash+"\n"+lineGhostSave+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	input := func() string {
+		return contractInputFor(t, "Stop", "claude-code", "claude-jsonl",
+			fmt.Sprintf(`{"session_id":"","transcript_path":%q,"cwd":"/repo","stop_hook_active":false}`, transcriptPath))
+	}
+	// First stop records one save.
+	if out := runStopHook(t, input()); strings.Contains(out, "additionalContext") {
+		t.Fatalf("first stop with a save must not nudge, got %q", out)
+	}
+	// Second stop: same transcript, no new save -> must nudge.
+	if err := os.WriteFile(transcriptPath, []byte(lineToolBash+"\n"+lineGhostSave+"\n"+lineToolBash+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if out := runStopHook(t, input()); !strings.Contains(out, "additionalContext") {
+		t.Fatalf("second stop with no new save must nudge, got %q", out)
 	}
 }
 

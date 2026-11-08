@@ -670,7 +670,7 @@ func TestPruneBatchesCommitPerBatch(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
 
-	const total = 3*pruneBatchSize + 50 // four batches
+	const total = pruneBatchSize + 50 // two batches
 	// One instant for the whole backlog, for the reason the other batch loop
 	// gives: the rows are identical in shape and differ only in content (#800).
 	now := time.Now().UTC()

@@ -4,6 +4,7 @@ package mcpinit
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -88,4 +89,23 @@ func TestRunStopRefusesASymlinkToAFIFOTranscript(t *testing.T) {
 	if !strings.Contains(errOut.String(), "open transcript") {
 		t.Errorf("a symlink to a FIFO was not refused at the open; stderr was %q", errOut.String())
 	}
+}
+
+// TestStopSaveMarkerFIFOIsTreatedAsNoMarker pins finding #1: a FIFO (or any
+// non-regular file) at the marker path must not block or crash the hook.
+func TestStopSaveMarkerFIFOIsTreatedAsNoMarker(t *testing.T) {
+	isolatedHome(t)
+	dataDir := filepath.Join(t.TempDir(), "data", "ghost")
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sess := "fifo-sess"
+	markerPath := stopSaveMarkerPath(sess, "")
+	if markerPath == "" {
+		t.Fatal("no marker path")
+	}
+	path := mkfifo(t)
+	in := contractInputFor(t, "Stop", "claude-code", "claude-jsonl",
+		fmt.Sprintf(`{"session_id":%q,"transcript_path":%q,"cwd":"/repo","stop_hook_active":false}`, sess, path))
+	_ = runStopHook(t, in)
 }

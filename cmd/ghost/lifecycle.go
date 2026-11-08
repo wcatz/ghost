@@ -51,6 +51,11 @@ verbatim, so dash-prefixed names work.
                     by a stop hook.
 `
 
+// lifecycleExecutable is os.Executable, a var so a test can force the
+// "locate ghost binary" failure branch without touching the process's own
+// executable.
+var lifecycleExecutable = os.Executable
+
 // runLifecycle runs the enabled auto-consolidation phases for one project, in
 // order, inside a single process: reflect (which rewrites memories), then
 // resolve (which stamps resolved_at), then supersede (which links memories).
@@ -143,10 +148,10 @@ func runLifecycle() int {
 		}
 		return 1
 	}
-	exe, err := os.Executable()
+	exe, err := lifecycleExecutable()
 	if err != nil {
 		lifecycleLogf(projectName, "error: locate ghost binary: %v", err)
-		os.Exit(1)
+		return 1
 	}
 
 	// Consolidation is only worth an unattended write when a real LLM tier is
@@ -814,6 +819,34 @@ func consolidationContext(parent context.Context, timeout time.Duration) (contex
 	return context.WithTimeout(parent, timeout)
 }
 
+// consolidateBounded runs one consolidation under the bound that
+// reflection.consolidation_timeout_minutes puts on it and reports the error
+// that must stop the run before it applies. The check after the call reads the
+// consolidation context, not the maintenance context it derives from: that is
+// where the deadline lives, and a bare mechanical tier returns its result
+// without ever consulting the context, so an expired bound would otherwise be
+// invisible and the pass would be applied and reported as a success.
+//
+// A context that has ended for either reason is fatal. Cancellation is the
+// operator stopping the command; a deadline is the bound this call was given.
+// Neither may fall through to a rewrite of the corpus.
+func consolidateBounded(ctx context.Context, consolidator reflection.Consolidator, input reflection.ReflectionInput, timeout time.Duration) (reflection.ReflectionResult, error) {
+	consolidateCtx, cancel := consolidationContext(ctx, timeout)
+	defer cancel()
+
+	result, err := consolidator.Consolidate(consolidateCtx, input)
+	if err != nil {
+		return reflection.ReflectionResult{}, fmt.Errorf("consolidation failed: %w", err)
+	}
+	if err := consolidateCtx.Err(); err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return reflection.ReflectionResult{}, fmt.Errorf("consolidation did not finish within its deadline: %w", err)
+		}
+		return reflection.ReflectionResult{}, fmt.Errorf("consolidation cancelled: %w", err)
+	}
+	return result, nil
+}
+
 const (
 	// phaseGracePeriod is how long a phase has to exit after its deadline's
 	// SIGTERM before its whole process group is force-killed.
@@ -1124,7 +1157,7 @@ func clampReflectMemories(mems []reflection.ReflectMemory) int {
 func consolidatable(mems []memory.Memory) []memory.Memory {
 	out := make([]memory.Memory, 0, len(mems))
 	for _, m := range mems {
-		if m.ResolvedAt != nil || m.Pinned || memory.RetentionExempt(m) || m.Source == "manual" || m.Source == "builtin" {
+		if !memory.IsConsolidatable(m) {
 			continue
 		}
 		out = append(out, m)
@@ -1357,7 +1390,9 @@ func reflectMaySkip(skipUnchanged, apply, promoteGlobals, allowDrops bool, store
 // harness tier is sent all of it as text, and the SQLite floor compares every
 // pair (measured on a raw-SQL-seeded store: 1.8s at 2000 rows, 43s at 10000),
 // so above the bound a run would either overrun the model's context or stall.
-const maxConsolidationInput = 2000
+// The value is re-exported from reflection.MaxConsolidationInput; this alias
+// stays so the many call sites in this package keep their current name.
+const maxConsolidationInput = reflection.MaxConsolidationInput
 
 // consolidationBound decides what `ghost reflect` does with a consolidatable
 // set of n memories. At or below maxConsolidationInput it returns "" and the
@@ -1603,6 +1638,18 @@ var reflectWindowStamp = func(ctx context.Context, s *memory.Store) (string, err
 // runReflect manually triggers memory consolidation for a project.
 // Defaults to dry-run (preview only). Use --apply to save results.
 // Use --restore to undo the last consolidation from snapshot.
+// reflectProjectHeader renders the reflect phase's "Project:" line. The id
+// consults the secret detector first, because assemble.Token only escapes
+// line-breaking characters and this line reaches the append-only lifecycle
+// log on the detached `ghost lifecycle` path (#1895).
+func reflectProjectHeader(projectName, projectID string) string {
+	renderedProjectID := assemble.Token(projectID)
+	if placeholder, withheld := memory.TokenGuardPlaceholder("project", projectID); withheld {
+		renderedProjectID = placeholder
+	}
+	return fmt.Sprintf("Project:      %s (%s)", assemble.Label(projectName), renderedProjectID)
+}
+
 func runReflect() {
 	parsed, parseErr := parseReflectArgs(os.Args[2:])
 	if parseErr != nil {
@@ -1767,7 +1814,7 @@ func runReflect() {
 		fmt.Println("DRY RUN (use --apply to save results)")
 		fmt.Println()
 	}
-	fmt.Printf("Project:      %s (%s)\n", assemble.Label(projectName), assemble.Token(projectID))
+	fmt.Println(reflectProjectHeader(projectName, projectID))
 	fmt.Printf("Consolidator: %s\n", consolidator.Name())
 
 	// Captured BEFORE fetching the consolidation input, then handed to
@@ -1883,34 +1930,30 @@ func runReflect() {
 	}
 
 	input := reflection.ReflectionInput{
-		ExistingMemories:  live,
-		CurrentContext:    currentContext,
-		LastCommits:       lastCommits,
-		ProjectLanguage:   projectLanguage,
-		ProjectName:       projectName,
-		OtherProjectNames: filteredNames,
-		Usefulness:        usefulness,
+		ExistingMemories:   live,
+		CurrentContext:     currentContext,
+		LastCommits:        lastCommits,
+		ProjectLanguage:    projectLanguage,
+		ProjectName:        projectName,
+		OtherProjectNames:  filteredNames,
+		Usefulness:         usefulness,
+		NearDuplicatePairs: memory.NearDuplicatePairs(live),
 		// The prompt tells the model what omitting an input costs, and that is
 		// the other side of this run's --allow-drops: without it an unreferenced
 		// memory is re-added verbatim, with it the memory is deleted.
 		AllowDrops: allowDrops,
 	}
 
-	consolidateCtx, cancel := consolidationContext(ctx, cfg.Reflection.ConsolidationTimeout())
-	defer cancel()
-
-	result, err := consolidator.Consolidate(consolidateCtx, input)
+	// The bound is reflection.consolidation_timeout_minutes, carried by
+	// consolidateBounded's own context. A cancelled run must not apply: the
+	// tier guard inside a tiered list makes a cancellation fatal there, and
+	// consolidateBounded covers the consolidators that are not one — a bare
+	// mechanical tier returns a result without ever looking at the context —
+	// so neither a command the operator stopped nor a pass that outlived its
+	// deadline can rewrite the corpus and exit 0.
+	result, err := consolidateBounded(ctx, consolidator, input, cfg.Reflection.ConsolidationTimeout())
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: consolidation failed: %v\n", err)
-		os.Exit(1)
-	}
-	// A cancelled run must not apply. The tier guard inside a tiered list makes
-	// a cancellation fatal there; this covers the consolidators that are not
-	// one — a bare mechanical tier returns a result without ever looking at the
-	// context — so a command the operator stopped cannot rewrite the corpus and
-	// exit 0.
-	if ctx.Err() != nil {
-		fmt.Fprintf(os.Stderr, "error: consolidation cancelled: %v\n", ctx.Err())
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -2084,12 +2127,22 @@ func runReflect() {
 			Tags:       m.Tags,
 		})
 	}
-	keptProjectMems, keptGlobalMems, preserved, promoted, keptMems, droppedProject, droppedGlobal, deleted, appliedByCategory, applied, err := applyReflection(
-		ctx, store, projectID, projectMems, globalMems, consolidatedSince, parsed.promoteGlobals, replacedIDsFor(&result), fed)
+	appliedRes, err := applyReflection(ctx, store, projectID, projectMems, globalMems, consolidatedSince, parsed.promoteGlobals, replacedIDsFor(&result), fed)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: save memories: %v\n", err)
 		os.Exit(1)
 	}
+	keptProjectMems := appliedRes.KeptProject
+	keptGlobalMems := appliedRes.KeptGlobal
+	preserved := appliedRes.Preserved
+	promoted := appliedRes.Promoted
+	keptMems := appliedRes.KeptMems
+	droppedProject := appliedRes.ProjectDropped
+	droppedGlobal := appliedRes.GlobalDropped
+	deleted := appliedRes.Deleted
+	appliedByCategory := appliedRes.AppliedByCategory
+	credDropped := appliedRes.CredDropped
+	applied := appliedRes.Applied
 	// The store's refusals split by reason, and every report below reads one of
 	// the two separately. A drop the corpus guard made claims a row that moved,
 	// so the report names that row and suppresses the skip fingerprint; an
@@ -2111,6 +2164,7 @@ func runReflect() {
 		sameSecond:    droppedProject.SameSecond + droppedGlobal.SameSecond,
 		overflowed:    droppedProject.Overflow + droppedGlobal.Overflow,
 		overflowLinks: droppedProject.OverflowLinks + droppedGlobal.OverflowLinks,
+		credDropped:   credDropped,
 	}
 	if promoted > 0 {
 		fmt.Printf("Promoted %d/%d global memories\n", promoted, len(globalMems))
@@ -5122,6 +5176,9 @@ type reflectRefusals struct {
 	// overflowLinks is how many decision links those overflowing merges stood
 	// for.
 	overflowLinks int
+	// credDropped is the proposals dropped because they held a token-shaped
+	// value (#1565).
+	credDropped int
 }
 
 // dropped is every refused emission, whatever the reason: the ones whose
@@ -5170,26 +5227,31 @@ func (r reflectRefusals) claimedPhrase() string {
 // and a round with more than one prints the mixed line carrying every count.
 func reportAppliedNothing(w io.Writer, r reflectRefusals) {
 	switch {
-	case r.overflowed > 0 && r.changed == 0 && r.sameSecond == 0 && r.scopeRefused == 0:
+	case r.overflowed > 0 && r.changed == 0 && r.sameSecond == 0 && r.scopeRefused == 0 && r.credDropped == 0:
 		_, _ = fmt.Fprintf(w, "Applied: nothing — every consolidation proposal folded more decision links than one source_ref can hold (%d link(s), %d-byte bound) and was dropped\n", r.overflowLinks, memory.MaxSourceRefLen)
 		_, _ = fmt.Fprintln(w, "  the decisions it merged are left live, each still linked to its own decision; split the merge, or record the memory by hand")
-	case r.scopeRefused > 0 && r.changed == 0 && r.sameSecond == 0 && r.overflowed == 0:
+	case r.scopeRefused > 0 && r.changed == 0 && r.sameSecond == 0 && r.overflowed == 0 && r.credDropped == 0:
 		_, _ = fmt.Fprintln(w, "Applied: nothing — every consolidation proposal merged memories whose scopes disagree, and was refused")
 		_, _ = fmt.Fprintln(w, "  every source is left exactly as it is, under its own scope; merge them by hand under one scope if they really are one fact")
-	case refusalReasons(r.scopeRefused, r.changed, r.sameSecond, r.overflowed) >= 2:
-		// Mixed reasons: each is counted, so neither a scope refusal nor an
+	case refusalReasons(r.scopeRefused, r.changed, r.sameSecond, r.overflowed, r.credDropped) >= 2: // Mixed reasons: each is counted, so neither a scope refusal nor an
 		// overflow is folded into the concurrent-edit line below, and a
 		// concurrent edit is not hidden. Any two of them make a mix; an
 		// overflow beside a concurrent edit is one too, scope refusal or not.
 		// The same-second count is added only when there is one, so a round
 		// without it reads exactly as it always did.
+		line := fmt.Sprintf("Applied: nothing — every consolidation proposal was refused: %d merged memories whose scopes disagree, %d claimed a memory that changed or was deleted while consolidation ran, %d folded more decision links than one source_ref can hold", r.scopeRefused, r.changed, r.overflowed)
 		if r.sameSecond > 0 {
-			_, _ = fmt.Fprintf(w, "Applied: nothing — every consolidation proposal was refused: %d merged memories whose scopes disagree, %d claimed a memory that changed or was deleted while consolidation ran, %d folded more decision links than one source_ref can hold, %d were held back because their memories were written in the same second this pass started\n", r.scopeRefused, r.changed, r.overflowed, r.sameSecond)
-		} else {
-			_, _ = fmt.Fprintf(w, "Applied: nothing — every consolidation proposal was refused: %d merged memories whose scopes disagree, %d claimed a memory that changed or was deleted while consolidation ran, %d folded more decision links than one source_ref can hold\n", r.scopeRefused, r.changed, r.overflowed)
+			line += fmt.Sprintf(", %d were held back because their memories were written in the same second this pass started", r.sameSecond)
 		}
+		if r.credDropped > 0 {
+			line += fmt.Sprintf(", %d held a credential value", r.credDropped)
+		}
+		_, _ = fmt.Fprintln(w, line)
 		_, _ = fmt.Fprintln(w, "  every memory those proposals named is left exactly as it is")
-	case r.sameSecond > 0 && r.changed == 0:
+		if r.credDropped > 0 {
+			_, _ = fmt.Fprintln(w, "  the project is unchanged, so a stored memory holding that value is still there: remove or correct it by hand")
+		}
+	case r.sameSecond > 0 && r.changed == 0 && r.credDropped == 0:
 		_, _ = fmt.Fprintf(w, "Applied: nothing — %d consolidation proposal(s) were held back because their memories were written in the same second this pass started, so none could be written\n", r.sameSecond)
 		_, _ = fmt.Fprintln(w, "  nothing changed: run the pass again to apply them, and those memories are older by then")
 	case r.changed == 0:

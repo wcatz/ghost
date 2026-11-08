@@ -65,6 +65,10 @@ type Record struct {
 	// claim applies, e.g. {"environment": "staging"}. A scoped record is the one
 	// a session working somewhere else must not be handed as applying to it.
 	Scope map[string]string
+	// Pin saves the record pinned, guaranteeing it a slot on every passive
+	// surface ahead of ranking. A pin that outnumbers the bucket is the
+	// efficiency defect the pins-over-bucket arc measures.
+	Pin bool
 }
 
 // Probe is one search a reader of the project would run once the arc is over,
@@ -526,7 +530,9 @@ func validateRecord(r Record, seen map[string]bool) error {
 // truth.go (a rename, a regressed fix, a version upgrade and a scoped setting),
 // and the six default-install arcs in default_install.go (a retired dependency,
 // a reverted change, a plain-word change, a replacement in another category,
-// repeated tuning of one setting and a superseded convention).
+// repeated tuning of one setting and a superseded convention), and the three
+// efficiency arcs in efficiency_arcs.go (pins over the bucket, a duplicate never
+// merged, a dated global status) for #1831, #1834 and #1832.
 // The service-migration, on-call and
 // config-clutter candidates from the design are follow-ups, and each is a
 // Storyline literal here rather than a new mechanism.
@@ -536,6 +542,7 @@ func storylines() []Storyline {
 		RenamedEndpoint(), RegressedFix(), VersionUpgrade(), ScopedSetting(),
 		RetiredDependency(), RevertedChange(), ProseOnlyChange(),
 		RecategorisedReplacement(), RepeatedTuning(), SupersededConvention(),
+		PinsOverBucket(), DuplicateNeverMerged(), DatedGlobalStatus(),
 	}
 }
 

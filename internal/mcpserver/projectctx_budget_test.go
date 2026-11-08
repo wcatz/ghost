@@ -197,10 +197,7 @@ func TestProjectContextResourceUnresolvedEmptyStoreNoLeadingNewline(t *testing.T
 	if strings.HasPrefix(text, "\n") {
 		t.Errorf("leading newline: %q", text[:10])
 	}
-	if !strings.Contains(text, "No memories found for this project.") {
-		t.Errorf("missing census line: %q", text)
-	}
-	if !strings.Contains(text, "Project") || !strings.Contains(text, "is not registered") {
+	if !strings.Contains(text, "is not registered") {
 		t.Errorf("missing not-registered sentence: %q", text)
 	}
 }

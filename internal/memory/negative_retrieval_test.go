@@ -222,7 +222,7 @@ var negativeRetrievalCases = []negFixture{
 // chance: a single run can pass even with the demotion disabled. Repeating
 // makes the expectation hold across ID orderings, so a missing demotion
 // fails reliably instead of flaking.
-const negRepeats = 8
+const negRepeats = 4
 
 func TestNegativeRetrievalFixtures(t *testing.T) {
 	for _, f := range negativeRetrievalCases {

@@ -1048,9 +1048,18 @@ func TestAProjectWhoseOwnRowsAreAllWithheldIsToldSoBesideTheCrossProjectRows(t *
 		t.Errorf("the _global project was told it holds none of its own rows:\n%s", asGlobal)
 	}
 
-	// An UNRESOLVED name already gets the not-registered sentence, which says
-	// something stronger; two sentences about one absence is one too many.
+	// An UNRESOLVED name with cross-project rows gets the global section
+	// followed by the not-registered sentence.
 	unresolved := resultText(callTool(t, session, "ghost_project_context", map[string]any{"project_id": "no-such-here"}))
+	if !strings.Contains(unresolved, "## Global (applies to all projects)") {
+		t.Errorf("an unresolved project name with cross-project rows dropped the global section:\n%s", unresolved)
+	}
+	if !strings.Contains(unresolved, "a live cross-project preference") {
+		t.Errorf("an unresolved project name did not deliver the cross-project row:\n%s", unresolved)
+	}
+	if !strings.Contains(unresolved, "not registered with Ghost yet") {
+		t.Errorf("an unresolved project name was not given the not-registered sentence:\n%s", unresolved)
+	}
 	if strings.Contains(unresolved, "Ghost holds") {
 		t.Errorf("an unresolved project name was also given the withheld-rows note, which is about a project that "+
 			"exists:\n%s", unresolved)
@@ -2091,4 +2100,70 @@ func TestProjectContextFirstContactImportNotifiesEmbeddingWorker(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("the first-contact import did not notify the embedding worker")
 	}
+}
+
+// TestEveryProjectContextSurfaceAnswersAnUnregisteredProjectWithEmptyGlobalBucket is
+// the sentence-only case: an unregistered project on a store with no cross-project
+// rows must yield only the not-registered sentence on all three surfaces.
+func TestEveryProjectContextSurfaceAnswersAnUnregisteredProjectWithEmptyGlobalBucket(t *testing.T) {
+	srv, session := newValiditySession(t)
+	const wanted = "no-such-project-anywhere"
+
+	// NO cross-project row is seeded, so the _global bucket is empty.
+
+	assertSentenceOnly := func(surface, out string) {
+		t.Helper()
+		if !strings.Contains(out, "is not registered with Ghost yet") {
+			t.Errorf("%s did not answer the not-registered sentence:\n%s", surface, out)
+		}
+		if !strings.Contains(out, wanted) {
+			t.Errorf("%s did not NAME the project the caller asked for (want %q):\n%s", surface, wanted, out)
+		}
+		if strings.Contains(out, "No memories found for this project.") {
+			t.Errorf("%s carried the empty census; an unresolved project with no global rows must be sentence-only:\n%s", surface, out)
+		}
+		if strings.Contains(out, "## Global (applies to all projects)") {
+			t.Errorf("%s rendered a Global section for an empty bucket:\n%s", surface, out)
+		}
+		if strings.Contains(out, "## Memories") {
+			t.Errorf("%s rendered a project memory listing for a project that does not exist:\n%s", surface, out)
+		}
+		if strings.Contains(out, "Ghost holds") {
+			t.Errorf("%s carried the withheld-rows note, which is about a project that exists:\n%s", surface, out)
+		}
+	}
+
+	// The tool.
+	assertSentenceOnly("ghost_project_context", resultText(callTool(t, session, "ghost_project_context",
+		map[string]any{"project_id": wanted})))
+
+	// The resource template.
+	rr, err := session.ReadResource(context.Background(), &mcp.ReadResourceParams{
+		URI: "ghost://project/" + wanted + "/context",
+	})
+	if err != nil {
+		t.Fatalf("ReadResource context: %v", err)
+	}
+	if len(rr.Contents) != 1 {
+		t.Fatalf("expected 1 resource content, got %d", len(rr.Contents))
+	}
+	assertSentenceOnly("the context RESOURCE", rr.Contents[0].Text)
+
+	// The recall_project prompt.
+	pr, err := session.GetPrompt(context.Background(), &mcp.GetPromptParams{
+		Name:      "recall_project",
+		Arguments: map[string]string{"project_id": wanted},
+	})
+	if err != nil {
+		t.Fatalf("GetPrompt recall_project: %v", err)
+	}
+	if len(pr.Messages) != 1 {
+		t.Fatalf("expected 1 prompt message, got %d", len(pr.Messages))
+	}
+	tc, ok := pr.Messages[0].Content.(*mcp.TextContent)
+	if !ok {
+		t.Fatalf("expected TextContent, got %T", pr.Messages[0].Content)
+	}
+	assertSentenceOnly("the recall_project PROMPT", tc.Text)
+	_ = srv
 }

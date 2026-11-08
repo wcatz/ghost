@@ -16,6 +16,7 @@ so a bare word such as "permission" or "bash" must not turn a genuine
 outage into a model that acted.
 """
 
+import json
 import os
 import subprocess
 import sys
@@ -46,6 +47,32 @@ PERMISSION_TRACE = ("Traceback (most recent call last):\n"
                     "'/root/.bashrc'\n")
 SHELL_TRACE = "/bin/bash: line 3: go: command not found\n"
 EPERM_TRACE = "Traceback (most recent call last):\nOperation not permitted\n"
+
+# What opencode writes as it begins to shut down: an aborted error, a
+# declined tool call, and the auto-reject notice on the stderr. A run
+# killed by its own timeout leaves this shape while the provider is still
+# thinking, so it is not evidence that the model produced anything. The
+# same shape from a run that ended on its own IS a real declined tool
+# call, and stays evidence.
+SHUTDOWN_STREAM = (
+    '{"type":"step_start","part":{"type":"step-start"}}' + "\n" +
+    '{"type":"error","error":{"type":"aborted","message":"Session '
+    'interrupted: shutdown"}}' + "\n" +
+    '{"type":"tool_use","part":{"type":"tool","tool":"bash","state":'
+    '{"status":"error","error":"The user declined this tool call"}}}'
+)
+SHUTDOWN_STDERR = "permission requested: bash; auto-rejecting\n"
+
+# A timeout can end the stream mid-line. A final line with no newline is
+# an interrupted write, not a complete event.
+TRUNCATED_STREAM = ('{"type":"step_start","part":{"type":"step-start"}}'
+                    + "\n" +
+                    '{"type":"text","part":{"type":"text","text":"a rev')
+
+# A tool call that ran to completion before the timeout is still the
+# model's own work.
+COMPLETED_TOOL_EVENT = ('{"type":"tool_use","part":{"type":"tool",'
+                        '"tool":"read","state":{"status":"completed"}}}')
 
 
 class TestTheEventStream(unittest.TestCase):
@@ -193,8 +220,48 @@ class TestTheAnswer(unittest.TestCase):
         self.assertFalse(acted(ERROR_EVENT, PERMISSION_TRACE))
 
 
+class TestATimedOutRun(unittest.TestCase):
+    """A run killed by its own timeout is an outage, not a verdict.
+
+    opencode writes the shutdown shape - an aborted error, a declined
+    tool call and the auto-reject notice - as it begins to shut down. A
+    timed-out run carries that shape even though the provider was still
+    thinking, so it must not be read as the model acting. The same shape
+    from a run that ended on its own is a real declined tool call.
+    """
+
+    def test_the_shutdown_shape_is_not_the_model_acting(self):
+        self.assertFalse(stream_acted(SHUTDOWN_STREAM, timed_out=True))
+
+    def test_the_shutdown_shape_on_stderr_is_not_a_refusal(self):
+        self.assertFalse(stderr_acted(SHUTDOWN_STDERR, timed_out=True))
+
+    def test_a_timeout_that_produced_only_the_shutdown_did_not_act(self):
+        self.assertFalse(acted(SHUTDOWN_STREAM, SHUTDOWN_STDERR,
+                               timed_out=True))
+
+    def test_the_same_shutdown_shape_without_a_timeout_is_acted(self):
+        # Without the timeout, the declined tool call is the model's own
+        # attempt and the run is a verdict.
+        self.assertTrue(acted(SHUTDOWN_STREAM, SHUTDOWN_STDERR))
+
+    def test_a_truncated_final_line_is_an_interrupted_write(self):
+        self.assertFalse(stream_acted(TRUNCATED_STREAM, timed_out=True))
+
+    def test_a_truncated_final_line_without_a_timeout_still_counts(self):
+        self.assertTrue(stream_acted(TRUNCATED_STREAM))
+
+    def test_output_before_the_timeout_is_still_evidence(self):
+        stream = SHUTDOWN_STREAM + "\n" + TEXT_EVENT
+        self.assertTrue(stream_acted(stream, timed_out=True))
+
+    def test_a_completed_tool_before_the_timeout_is_still_evidence(self):
+        stream = COMPLETED_TOOL_EVENT + "\n" + SHUTDOWN_STREAM
+        self.assertTrue(stream_acted(stream, timed_out=True))
+
+
 class TestTheCommand(unittest.TestCase):
-    def _run(self, events="", stderr=""):
+    def _run(self, events="", stderr="", exit_status=""):
         with tempfile.TemporaryDirectory() as folder:
             events_path = os.path.join(folder, "events.jsonl")
             stderr_path = os.path.join(folder, "stderr.txt")
@@ -203,11 +270,13 @@ class TestTheCommand(unittest.TestCase):
                 handle.write(events)
             with open(stderr_path, "w", encoding="utf-8") as handle:
                 handle.write(stderr)
-            result = subprocess.run(
-                [sys.executable, "-I", _script("model_acted.py"),
-                 "--events", events_path, "--stderr", stderr_path,
-                 "--marker", marker],
-                capture_output=True, text=True, check=False)
+            argv = [sys.executable, "-I", _script("model_acted.py"),
+                    "--events", events_path, "--stderr", stderr_path,
+                    "--marker", marker]
+            if exit_status != "":
+                argv += ["--exit-status", str(exit_status)]
+            result = subprocess.run(argv, capture_output=True, text=True,
+                                    check=False)
             return result, _marker(marker)
 
     def test_the_command_answers_true_for_a_model_that_produced_something(self):
@@ -235,6 +304,65 @@ class TestTheCommand(unittest.TestCase):
             capture_output=True, text=True, check=False)
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stdout.strip(), "false")
+
+    def test_the_command_reads_the_timeout_status(self):
+        result, marker = self._run(events=SHUTDOWN_STREAM,
+                                   stderr=SHUTDOWN_STDERR,
+                                   exit_status=124)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout.strip(), "false")
+        self.assertEqual(marker.strip(), "")
+
+    def test_the_same_shutdown_shape_on_a_run_that_ended_is_acted(self):
+        result, marker = self._run(events=SHUTDOWN_STREAM,
+                                   stderr=SHUTDOWN_STDERR,
+                                   exit_status=1)
+        self.assertEqual(result.stdout.strip(), "true")
+        self.assertEqual(marker.strip(), model_acted.MARKER_ACTED)
+
+    def test_the_command_reports_the_event_that_decided(self):
+        result, _marker = self._run(events=TEXT_EVENT)
+        report = _report(result)
+        self.assertIs(report["acted"], True)
+        self.assertIn("text", report["stream"])
+
+    def test_the_command_reports_a_timeout_and_its_evidence(self):
+        result, _marker = self._run(events=SHUTDOWN_STREAM,
+                                    stderr=SHUTDOWN_STDERR,
+                                    exit_status=124)
+        report = _report(result)
+        self.assertIs(report["acted"], False)
+        self.assertIs(report["timed_out"], True)
+        self.assertIn("shutdown", report["stream"])
+
+    def test_the_command_reports_the_refusal_phrase(self):
+        result, _marker = self._run(stderr=ASK_NOTICE)
+        report = _report(result)
+        self.assertIs(report["acted"], True)
+        self.assertIn("permission requested", report["stderr"])
+
+    def test_the_command_reports_an_unreadable_stream(self):
+        with tempfile.TemporaryDirectory() as folder:
+            events_path = os.path.join(folder, "events.jsonl")
+            os.mkdir(events_path)
+            stderr_path = os.path.join(folder, "stderr.txt")
+            with open(stderr_path, "w", encoding="utf-8") as handle:
+                handle.write("")
+            result = subprocess.run(
+                [sys.executable, "-I", _script("model_acted.py"),
+                 "--events", events_path, "--stderr", stderr_path],
+                capture_output=True, text=True, check=False)
+        report = _report(result)
+        self.assertIs(report["acted"], True)
+        self.assertIn("could not be read", report["stream"])
+
+
+def _report(result):
+    """The evidence line the command wrote, as a dict."""
+    for line in result.stderr.splitlines():
+        if line.startswith("model-acted: "):
+            return json.loads(line[len("model-acted: "):])
+    return {}
 
 
 def _script(name):

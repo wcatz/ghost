@@ -213,7 +213,11 @@ func writeSummary(dir string, stories []Storyline, model, summary string) (strin
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "# Storyline summary\n\n- storylines: %s\n- model: %s\n\n%s", strings.Join(keys, ", "), model, summary)
-	path := filepath.Join(dir, "summary-"+strings.Join(keys, "+")+".md")
+	name := strings.Join(keys, "+")
+	if len(name) > 180 {
+		name = "all"
+	}
+	path := filepath.Join(dir, "summary-"+name+".md")
 	if err := os.WriteFile(path, []byte(b.String()), 0o644); err != nil {
 		return "", fmt.Errorf("write summary: %w", err)
 	}
