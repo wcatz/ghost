@@ -351,12 +351,15 @@ type ReflectionConfig struct {
 	LifecycleTimeoutMinutes int `koanf:"lifecycle_timeout_minutes"`
 }
 
-// ConsolidationEnabled reports whether any automatic lifecycle consolidation
-// phase is configured. When none of AutoReflect, AutoResolve or AutoSupersede
-// is set, automatic consolidation is disabled and no retry of overdue
-// maintenance is useful.
+// ConsolidationEnabled reports whether automatic consolidation is
+// configured. Consolidation is the reflect phase: the only phase whose
+// input is the consolidatable set the overdue list counts, and the only
+// one that rewrites that set. Resolve stamps resolved_at on its own
+// candidates and supersede only links rows, so neither clears the
+// consolidatable count on its own. When AutoReflect is not set, no
+// retry of overdue maintenance is useful.
 func (c ReflectionConfig) ConsolidationEnabled() bool {
-	return c.AutoReflect || c.AutoResolve || c.AutoSupersede
+	return c.AutoReflect
 }
 
 const (

@@ -1,6 +1,7 @@
 package mcpinit
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -290,5 +291,61 @@ func TestOverdueMaintenanceProjects_WordingSingularAndPlural(t *testing.T) {
 	}
 	if !contains(text, "have not had lifecycle maintenance within 30m0s") {
 		t.Fatalf("missing plural interval wording: %q", text)
+	}
+}
+
+func TestOverdueNotListedWhenReflectIsOff(t *testing.T) {
+	cases := []struct {
+		name string
+		env  map[string]string
+	}{
+		{"resolve only", map[string]string{"GHOST_REFLECTION_AUTO_REFLECT": "false", "GHOST_REFLECTION_AUTO_RESOLVE": "true", "GHOST_REFLECTION_AUTO_SUPERSEDE": "false"}},
+		{"supersede only", map[string]string{"GHOST_REFLECTION_AUTO_REFLECT": "false", "GHOST_REFLECTION_AUTO_RESOLVE": "false", "GHOST_REFLECTION_AUTO_SUPERSEDE": "true"}},
+		{"none", map[string]string{"GHOST_REFLECTION_AUTO_REFLECT": "false", "GHOST_REFLECTION_AUTO_RESOLVE": "false", "GHOST_REFLECTION_AUTO_SUPERSEDE": "false"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tmp := t.TempDir()
+			t.Setenv("XDG_DATA_HOME", filepath.Join(tmp, "data"))
+			t.Setenv("XDG_CONFIG_HOME", filepath.Join(tmp, "config"))
+			setHome(t, filepath.Join(tmp, "home"))
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+			if err := os.MkdirAll(filepath.Join(tmp, "home"), 0700); err != nil {
+				t.Fatalf("MkdirAll: %v", err)
+			}
+			dataDir, err := config.DataDir()
+			if err != nil {
+				t.Fatalf("DataDir: %v", err)
+			}
+			if err := os.MkdirAll(dataDir, 0700); err != nil {
+				t.Fatalf("MkdirAll: %v", err)
+			}
+			dbPath := filepath.Join(dataDir, "ghost.db")
+			db, err := memory.OpenDB(dbPath)
+			if err != nil {
+				t.Fatalf("OpenDB: %v", err)
+			}
+			defer func() { _ = db.Close() }()
+			store := memory.NewStore(db, nil)
+			ctx := context.Background()
+			if err := store.EnsureProject(ctx, "proj", "/tmp/proj", "proj"); err != nil {
+				t.Fatalf("EnsureProject: %v", err)
+			}
+			for i := 0; i < 2; i++ {
+				if _, err := store.Create(ctx, "proj", memory.Memory{Category: "fact", Content: fmt.Sprintf("mem %d", i), Importance: 0.5, Source: "mcp"}); err != nil {
+					t.Fatalf("create: %v", err)
+				}
+			}
+			var out bytes.Buffer
+			reportOverdueMaintenanceStatus(&out, store, dataDir)
+			if contains(out.String(), "maintenance overdue:") {
+				t.Fatalf("proj listed as overdue with reflect off (%s): %q", tc.name, out.String())
+			}
+			if contains(out.String(), "cannot be maintained unattended:") {
+				t.Fatalf("proj listed as unmaintainable with reflect off (%s): %q", tc.name, out.String())
+			}
+		})
 	}
 }

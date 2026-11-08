@@ -10,11 +10,11 @@ func TestReflectionConfig_ConsolidationEnabled_TruthTable(t *testing.T) {
 	}{
 		{"none", ReflectionConfig{}, false},
 		{"reflect only", ReflectionConfig{AutoReflect: true}, true},
-		{"resolve only", ReflectionConfig{AutoResolve: true}, true},
-		{"supersede only", ReflectionConfig{AutoSupersede: true}, true},
+		{"resolve only", ReflectionConfig{AutoResolve: true}, false},
+		{"supersede only", ReflectionConfig{AutoSupersede: true}, false},
 		{"all three", ReflectionConfig{AutoReflect: true, AutoResolve: true, AutoSupersede: true}, true},
 		{"reflect+resolve", ReflectionConfig{AutoReflect: true, AutoResolve: true}, true},
-		{"resolve+supersede", ReflectionConfig{AutoResolve: true, AutoSupersede: true}, true},
+		{"resolve+supersede", ReflectionConfig{AutoResolve: true, AutoSupersede: true}, false},
 		{"reflect+supersede", ReflectionConfig{AutoReflect: true, AutoSupersede: true}, true},
 	}
 	for _, c := range cases {
