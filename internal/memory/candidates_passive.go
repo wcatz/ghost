@@ -332,6 +332,9 @@ func (s *Store) candidatesPassive(ctx context.Context, req CandidateRequest, set
 	// project other than "table absent" is a real error; a project with no
 	// negative evidence leaves its rows carrying the zero value.
 	//
+	// Only the memory ids this window carries are read (#1920), because the
+	// assembler renders only those rows.
+	//
 	// The read uses the same handle as the rows above (s.queryDB()), not the
 	// same read transaction: each call to usefulnessByMemory issues independent
 	// statements outside an explicit transaction, so interleaving writes can
@@ -339,15 +342,8 @@ func (s *Store) candidatesPassive(ctx context.Context, req CandidateRequest, set
 	// second transaction here would deadlock on the single-connection pool while
 	// the caller holds the snapshot.
 	usefulness := map[string]UsefulnessEvidence{}
-	projects := map[string]struct{}{}
-	for i := range rows {
-		projects[rows[i].ProjectID] = struct{}{}
-	}
-	for proj := range projects {
-		if strings.TrimSpace(proj) == "" {
-			continue
-		}
-		ev, uErr := s.usefulnessByMemory(ctx, s.queryDB(), proj)
+	for proj, ids := range usefulnessIDsByProject(rows) {
+		ev, uErr := s.usefulnessByMemoryIDs(ctx, s.queryDB(), proj, ids)
 		if uErr != nil {
 			if isMissingTable(uErr) {
 				s.logger.Debug("candidates: passive usefulness read found no table", "error", uErr)

@@ -49,6 +49,7 @@ type usefulnessQueryCounter struct {
 
 	mu      sync.Mutex
 	queries []string
+	args    [][]driver.NamedValue
 	begins  int
 }
 
@@ -79,7 +80,23 @@ func (c *usefulnessQueryCounter) reset() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.queries = nil
+	c.args = nil
 	c.begins = 0
+}
+
+// usefulnessContentReadArgs returns the bound arguments of every recorded
+// statement that is the usefulness content read, so a test can see WHICH memory
+// ids the read touched rather than only how many.
+func usefulnessContentReadArgs(counter *usefulnessQueryCounter) [][]driver.NamedValue {
+	var out [][]driver.NamedValue
+	recorded := counter.recorded()
+	args := counter.recordedArgs()
+	for i, q := range recorded {
+		if usefulnessContentIDs.MatchString(q) {
+			out = append(out, args[i])
+		}
+	}
+	return out
 }
 
 // beginCount is the number of transactions begun since the last reset.
@@ -89,6 +106,17 @@ func (c *usefulnessQueryCounter) beginCount() int {
 	return c.begins
 }
 
+// recordedArgs returns the arguments bound to each recorded statement, in order.
+func (c *usefulnessQueryCounter) recordedArgs() [][]driver.NamedValue {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([][]driver.NamedValue, len(c.args))
+	for i := range c.args {
+		out[i] = append([]driver.NamedValue(nil), c.args[i]...)
+	}
+	return out
+}
+
 // recorded returns the statements issued since the last reset, in order.
 func (c *usefulnessQueryCounter) recorded() []string {
 	c.mu.Lock()
@@ -96,10 +124,11 @@ func (c *usefulnessQueryCounter) recorded() []string {
 	return append([]string(nil), c.queries...)
 }
 
-func (c *usefulnessQueryCounter) record(query string) {
+func (c *usefulnessQueryCounter) record(query string, args []driver.NamedValue) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.queries = append(c.queries, query)
+	c.args = append(c.args, append([]driver.NamedValue(nil), args...))
 }
 
 func (c *usefulnessQueryCounter) recordBegin() {
@@ -118,7 +147,7 @@ type usefulnessQueryConn struct {
 }
 
 func (c *usefulnessQueryConn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
-	c.owner.record(query)
+	c.owner.record(query, args)
 	return c.QueryerContext.QueryContext(ctx, query, args)
 }
 

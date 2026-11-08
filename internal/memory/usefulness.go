@@ -282,12 +282,28 @@ func (s *Store) UsefulnessByMemory(ctx context.Context, projectID string) (map[s
 // transaction (Candidates) can reuse that snapshot instead of deadlocking on the
 // single-connection pool.
 func (s *Store) usefulnessByMemory(ctx context.Context, q Queryer, projectID string) (map[string]UsefulnessEvidence, error) {
+	return s.usefulnessByMemoryIDs(ctx, q, projectID, nil)
+}
+
+// usefulnessByMemoryIDs is usefulnessByMemory restricted to the memory ids one
+// candidate window holds. A nil ids reads the whole project, which is what the
+// maintenance passes need; a non-nil list — including an empty one — bounds both
+// statements to that window, so a corpus with tens of thousands of verdicts
+// costs the caller only the rows it will render.
+//
+// The ids are the WINDOW's, never every row the project holds: the assembler
+// reads Usefulness only for the candidates it renders, so evidence about any
+// other memory is work whose result nothing consumes.
+func (s *Store) usefulnessByMemoryIDs(ctx context.Context, q Queryer, projectID string, ids []string) (map[string]UsefulnessEvidence, error) {
 	if strings.TrimSpace(projectID) == "" {
 		return nil, fmt.Errorf("usefulness evidence needs a project: an unscoped read would hand " +
 			"one project's pass another project's contradiction as evidence about its own memories")
 	}
+	if ids != nil && len(ids) == 0 {
+		return map[string]UsefulnessEvidence{}, nil
+	}
 
-	verdicts, err := usefulnessVerdicts(ctx, q, projectID)
+	verdicts, err := usefulnessVerdicts(ctx, q, projectID, ids)
 	if err != nil {
 		return nil, err
 	}
@@ -513,20 +529,61 @@ const usefulnessContentChunk = 500
 // the content it was stamped with, and SQLite has no sha256 to do that
 // comparison here. Flags are stamped by FlagMemory with the same digest, so one
 // rule withdraws a verdict and a flag alike when the text is rewritten.
-func usefulnessVerdicts(ctx context.Context, q Queryer, projectID string) ([]usefulnessAuditRow, error) {
+//
+// A non-nil ids adds one predicate to BOTH branches: the verdict must name one
+// of the window's memories. It is the candidate paths' bound, because the
+// assembler reads Usefulness only for the rows it renders and a project-wide
+// scan reads and hashes content no consumer will look at. The id list is
+// chunked at usefulnessContentChunk for the same variable-ceiling reason the
+// content read is, so a window wider than one statement is answered in several
+// reads rather than failing. A nil ids keeps the project-wide read the
+// maintenance passes make.
+func usefulnessVerdicts(ctx context.Context, q Queryer, projectID string, ids []string) ([]usefulnessAuditRow, error) {
+	if ids == nil {
+		return usefulnessVerdictsBatch(ctx, q, projectID, nil)
+	}
+	var verdicts []usefulnessAuditRow
+	for start := 0; start < len(ids); start += usefulnessContentChunk {
+		batch := ids[start:min(start+usefulnessContentChunk, len(ids))]
+		batchVerdicts, err := usefulnessVerdictsBatch(ctx, q, projectID, batch)
+		if err != nil {
+			return nil, err
+		}
+		verdicts = append(verdicts, batchVerdicts...)
+	}
+	return verdicts, nil
+}
+
+// usefulnessVerdictsBatch runs usefulnessVerdicts' statement over one chunk of
+// ids, or over the whole project when ids is nil.
+func usefulnessVerdictsBatch(ctx context.Context, q Queryer, projectID string, ids []string) ([]usefulnessAuditRow, error) {
+	idPredicate := ""
+	var idArgs []any
+	if ids != nil {
+		idPredicate = " AND memory_id IN (" + placeholders(len(ids)) + ")"
+		for _, id := range ids {
+			idArgs = append(idArgs, id)
+		}
+	}
 	query := `
 		SELECT rowid, memory_id, outcome, session_id, recorded_at, content_hash, 'audit' AS source
 		FROM retrieval_audit
-		WHERE project_id = ? AND memory_id <> '' AND degraded = '' AND session_id <> ''
+		WHERE project_id = ?` + idPredicate + ` AND memory_id <> '' AND degraded = '' AND session_id <> ''
 		  AND outcome IN (?, ?)
 		UNION ALL
 		SELECT rowid, memory_id, kind, session_id, recorded_at, content_hash, 'flag' AS source
 		FROM memory_flags
-		WHERE project_id = ? AND memory_id <> '' AND kind IN (?, ?)`
+		WHERE project_id = ?` + idPredicate + ` AND memory_id <> '' AND kind IN (?, ?)`
 
-	rows, err := q.QueryContext(ctx, query,
-		projectID, VerdictOutcomeContradicted, VerdictOutcomeSuperseded,
-		projectID, FlagKindWrong, FlagKindStale)
+	args := make([]any, 0, 2*len(idArgs)+5)
+	args = append(args, projectID)
+	args = append(args, idArgs...)
+	args = append(args, VerdictOutcomeContradicted, VerdictOutcomeSuperseded)
+	args = append(args, projectID)
+	args = append(args, idArgs...)
+	args = append(args, FlagKindWrong, FlagKindStale)
+
+	rows, err := q.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("read usefulness evidence: %w", err)
 	}
@@ -614,6 +671,27 @@ func usefulnessMemoryIDs(verdicts []usefulnessAuditRow) []string {
 		}
 		seen[v.memory] = struct{}{}
 		ids = append(ids, v.memory)
+	}
+	return ids
+}
+
+// usefulnessIDsByProject groups a candidate window's memory ids by project, the
+// scope usefulnessByMemoryIDs requires. A row with no project contributes
+// nothing — the read refuses an empty project rather than pooling every
+// project's evidence — and a duplicate id is named once.
+func usefulnessIDsByProject(rows []Candidate) map[string][]string {
+	ids := make(map[string][]string, len(rows))
+	seen := make(map[string]struct{}, len(rows))
+	for i := range rows {
+		project := rows[i].ProjectID
+		if strings.TrimSpace(project) == "" {
+			continue
+		}
+		if _, ok := seen[rows[i].ID]; ok {
+			continue
+		}
+		seen[rows[i].ID] = struct{}{}
+		ids[project] = append(ids[project], rows[i].ID)
 	}
 	return ids
 }
