@@ -207,3 +207,9 @@ func (m *memoryIDStoreMem) CreateLink(ctx context.Context, sourceID, targetID, r
 func (m *memoryIDStoreMem) MarkLinkScanned(ctx context.Context, memoryID string, scanned []float32) error {
 	return m.store.MarkLinkScanned(ctx, memoryID, scanned)
 }
+
+func (s scriptedLinkStoreMem) TrimOverCapRelatedDegrees(context.Context) error { return nil }
+
+func (m *memoryIDStoreMem) TrimOverCapRelatedDegrees(ctx context.Context) error {
+	return m.store.TrimOverCapRelatedDegrees(ctx)
+}
