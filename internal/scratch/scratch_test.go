@@ -240,7 +240,7 @@ func TestReap_ClassifiesEntries(t *testing.T) {
 				}
 			}
 
-			removed, err := Reap(time.Hour)
+			removed, _, err := Reap(time.Hour)
 			if err != nil {
 				t.Fatalf("Reap: %v", err)
 			}
@@ -313,7 +313,7 @@ func TestReap_LeavesForeignEntriesAlone(t *testing.T) {
 				}
 			}
 
-			removed, err := Reap(time.Hour)
+			removed, _, err := Reap(time.Hour)
 			if err != nil {
 				t.Fatalf("Reap: %v", err)
 			}
@@ -390,7 +390,7 @@ func TestReap_LeavesMarkerlessEntriesWithImpossiblePidsAlone(t *testing.T) {
 		t.Fatalf("chtimes %s: %v", ownFile, err)
 	}
 
-	removed, err := Reap(time.Hour)
+	removed, _, err := Reap(time.Hour)
 	if err != nil {
 		t.Fatalf("Reap: %v", err)
 	}
@@ -479,7 +479,7 @@ func TestReap_LeavesSymlinksAlone(t *testing.T) {
 		t.Fatalf("dangling symlink: %v", err)
 	}
 
-	removed, err := Reap(0)
+	removed, _, err := Reap(0)
 	if err != nil {
 		t.Fatalf("Reap: %v", err)
 	}
@@ -579,7 +579,7 @@ func TestReap_ReclaimsOnlyStaleReassessIDFiles(t *testing.T) {
 				t.Fatalf("chtimes: %v", err)
 			}
 
-			removed, err := Reap(0)
+			removed, _, err := Reap(0)
 			if err != nil {
 				t.Fatalf("Reap: %v", err)
 			}
@@ -605,7 +605,7 @@ func TestReap_UnusableRootReturnsError(t *testing.T) {
 	}
 	t.Setenv("GHOST_SCRATCH_DIR", filepath.Join(blocker, "scratch"))
 
-	removed, err := Reap(time.Hour)
+	removed, _, err := Reap(time.Hour)
 	if err == nil {
 		t.Fatal("expected an error for an unusable scratch root")
 	}
@@ -666,5 +666,79 @@ func TestOwnerMarker_RefusesOversized(t *testing.T) {
 	pid, start, ok = ownerMarker(dir)
 	if ok {
 		t.Fatalf("ownerMarker accepted an oversized marker: pid=%d start=%q", pid, start)
+	}
+}
+
+// TestRelease_RemovesTreeWithRestrictiveSubdir: a scratch dir that contains a
+// subtree the process left without write permission (module caches leave 0555
+// directories) must still be removed by Release. Reproduction for issue #1960.
+func TestRelease_RemovesTreeWithRestrictiveSubdir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("permission bits are not enforced the same way on Windows")
+	}
+	root := t.TempDir()
+	t.Setenv("GHOST_SCRATCH_DIR", root)
+
+	d, err := Open()
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	sub := filepath.Join(d.Path(), "sub")
+	if err := os.Mkdir(sub, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sub, "f"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(sub, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(sub, 0o700) })
+
+	d.Release()
+	if _, err := os.Stat(d.Path()); !os.IsNotExist(err) {
+		t.Fatalf("Release left dir behind (stat err %v)", err)
+	}
+}
+
+// TestReap_RemovesDeadOwnerEntryWithRestrictiveSubdir: an aged dead-owner
+// scratch entry containing an unremovable subtree (0555 directory) must be
+// removed by Reap, counted as removed, and not reported as failed. Reproduction
+// for issue #1960.
+func TestReap_RemovesDeadOwnerEntryWithRestrictiveSubdir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("permission bits are not enforced the same way on Windows")
+	}
+	const deadPid = 1 << 30
+	root := t.TempDir()
+	t.Setenv("GHOST_SCRATCH_DIR", root)
+
+	name := "999-0123456789abcdef"
+	dir := writeOwnerDir(t, root, name, "pid="+strconv.Itoa(deadPid)+"\ntoken=aa\nstart=gone\n")
+	sub := filepath.Join(dir, "sub")
+	if err := os.Mkdir(sub, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sub, "f"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(sub, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(sub, 0o700) })
+	old := time.Now().Add(-25 * time.Hour)
+	if err := os.Chtimes(dir, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	removed, failed, err := Reap(time.Hour)
+	if err != nil {
+		t.Fatalf("Reap: %v", err)
+	}
+	if removed != 1 || failed != 0 {
+		t.Errorf("Reap = (removed=%d, failed=%d), want (1, 0)", removed, failed)
+	}
+	if _, statErr := os.Stat(dir); !os.IsNotExist(statErr) {
+		t.Fatalf("entry survived Reap (stat err %v)", statErr)
 	}
 }

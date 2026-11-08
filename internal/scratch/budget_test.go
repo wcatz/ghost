@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -409,4 +410,138 @@ func TestEnforceBudget_DisabledWhenZero(t *testing.T) {
 // way bootstrap does, so budget-record tests exercise the real schema.
 func openTestDB(dbPath string) (*sql.DB, error) {
 	return memory.OpenDB(dbPath)
+}
+
+// TestSize_MeasuresWhatItCanWithUnreadableSubdir: an unreadable directory
+// inside the root must not prevent Size from measuring the rest of the tree.
+// Reproduction for issue #1960.
+func TestSize_MeasuresWhatItCanWithUnreadableSubdir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("permission bits are not enforced the same way on Windows")
+	}
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "a.bin"), make([]byte, 1000), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sub := filepath.Join(root, "sub")
+	if err := os.Mkdir(sub, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sub, "hidden.bin"), make([]byte, 2000), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(sub, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(sub, 0o700) })
+
+	gotBytes, gotFiles, err := Size(root)
+	if err != nil {
+		t.Fatalf("Size: %v", err)
+	}
+	if gotBytes != 1000 {
+		t.Errorf("Size bytes = %d, want 1000 (measure what it can)", gotBytes)
+	}
+	if gotFiles != 1 {
+		t.Errorf("Size files = %d, want 1 (measure what it can)", gotFiles)
+	}
+}
+
+// TestEnforceBudget_MeasuresWhatItCanWithUnreadableSubdir: an unreadable
+// subtree inside the root must not disable the budget check. When the
+// measurable portion is over budget, the check fires and records a row.
+// Reproduction for issue #1960.
+func TestEnforceBudget_MeasuresWhatItCanWithUnreadableSubdir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("permission bits are not enforced the same way on Windows")
+	}
+	root := t.TempDir()
+	t.Setenv("GHOST_SCRATCH_DIR", root)
+	t.Setenv("GHOST_SCRATCH_MAX_BYTES", "512")
+	dataHome := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", dataHome)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	if err := os.MkdirAll(filepath.Join(dataHome, "ghost"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	db, err := openTestDB(filepath.Join(dataHome, "ghost", "ghost.db"))
+	if err != nil {
+		t.Fatalf("seed db: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Measurable content over budget.
+	stale := filepath.Join(root, "123-0123456789abcdef")
+	if err := os.Mkdir(stale, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stale, "payload"), make([]byte, 1024), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-25 * time.Hour)
+	if err := os.Chtimes(stale, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	// Unreadable subtree that must not disable the check.
+	blocked := filepath.Join(root, "blocked")
+	if err := os.Mkdir(blocked, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(blocked, "x"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(blocked, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(blocked, 0o700) })
+
+	logs := captureLogs(t)
+	res := EnforceBudget()
+
+	if !res.Fired {
+		t.Fatalf("budget check skipped because of an unreadable entry: %+v; logs:\n%s", res, logs.String())
+	}
+	if out := logs.String(); strings.Contains(out, "cannot measure root; skipping check") {
+		t.Errorf("check was skipped on unreadable entry:\n%s", out)
+	}
+	if !res.Recorded {
+		t.Errorf("Recorded = false, want true (fired check must record a row)")
+	}
+	// The stale measurable entry should have been reaped.
+	if _, statErr := os.Stat(stale); !os.IsNotExist(statErr) {
+		t.Errorf("stale dir survived (stat err %v)", statErr)
+	}
+}
+
+// TestSize_UnreadableRootReturnsError: an unreadable scratch root cannot be
+// measured, so Size returns an error rather than a partial measurement.
+func TestSize_UnreadableRootReturnsError(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("permission bits are not enforced the same way on Windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: a mode-0o000 directory is still readable")
+	}
+	parent := t.TempDir()
+	root := filepath.Join(parent, "scratchroot")
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "a"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(root, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(root, 0o700) })
+
+	_, _, err := Size(root)
+	if err == nil {
+		t.Fatal("Size returned no error for an unreadable root")
+	}
 }

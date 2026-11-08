@@ -161,11 +161,8 @@ func skipWithoutPOSIXModes(t *testing.T) {
 }
 
 // TestPrintMaintenanceStatus_UnmeasuredRootIsNotEmpty: a scratch root the
-// command could not measure is not a scratch root it measured as empty.
-// scratch.Size returns (0, 0, err) for a walk that met an entry it cannot
-// read, so the zeros it returns with the error are a FAILED measurement;
-// printing them as the root's size is what made the status line report an
-// unmeasured root as an empty one.
+// command could not measure at the root level is reported as unmeasured, not
+// as empty.
 func TestPrintMaintenanceStatus_UnmeasuredRootIsNotEmpty(t *testing.T) {
 	view := maintenanceStatusView{
 		Root:           "/root/scratch",
@@ -193,14 +190,37 @@ func TestPrintMaintenanceStatus_UnmeasuredRootIsNotEmpty(t *testing.T) {
 	}
 }
 
-// TestMeasureScratchRootReportsAFailedWalk: the live measurement carries the
-// failure with it, because scratch.Size returns (0, 0, err) when its walk
-// meets an entry it cannot read — the zeros are a failed measurement, not an
-// empty root. The root's path is still reported, so the operator knows WHICH
-// root could not be measured.
+// TestMeasureScratchRootReportsAFailedWalk: a root that cannot be resolved or
+// read at the root level is reported as a failed measurement, not as an empty
+// root (#1960). Unreadable subtrees inside a readable root are measured past.
 func TestMeasureScratchRootReportsAFailedWalk(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write the file: %v", err)
+	}
+	t.Setenv("GHOST_SCRATCH_DIR", filepath.Join(file, "scratch"))
+
+	view := maintenanceStatusView{Budget: 1}
+	measureScratchRoot(&view)
+	if view.RootMeasureErr == nil {
+		t.Fatalf("a failed root measurement was reported as %d bytes in %d files",
+			view.RootBytes, view.RootFiles)
+	}
+	if view.Root != "(unavailable)" {
+		t.Errorf("root = %q, want %q", view.Root, "(unavailable)")
+	}
+}
+
+// TestMeasureScratchRootMeasuresWhatItCanPastALockedDirectory: an unreadable
+// directory inside the root must not prevent the live measurement from
+// reporting what it can (#1960). scratch.Size skips entries it cannot read so
+// one unreadable subtree does not disable the budget check.
+func TestMeasureScratchRootMeasuresWhatItCanPastALockedDirectory(t *testing.T) {
 	skipWithoutPOSIXModes(t)
 	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "seen"), []byte("abc"), 0o600); err != nil {
+		t.Fatalf("write the readable file: %v", err)
+	}
 	locked := filepath.Join(root, "locked")
 	if err := os.Mkdir(locked, 0o700); err != nil {
 		t.Fatalf("mkdir the locked directory: %v", err)
@@ -217,12 +237,14 @@ func TestMeasureScratchRootReportsAFailedWalk(t *testing.T) {
 
 	view := maintenanceStatusView{Budget: 1}
 	measureScratchRoot(&view)
-	if view.RootMeasureErr == nil {
-		t.Fatalf("the failed walk was reported as a measurement of %d bytes in %d files",
-			view.RootBytes, view.RootFiles)
+	if view.RootMeasureErr != nil {
+		t.Fatalf("a root with an unreadable subtree must still be measured: %v", view.RootMeasureErr)
 	}
 	if view.Root != root {
-		t.Errorf("root = %q, want %q — the operator has to know which root failed", view.Root, root)
+		t.Errorf("root = %q, want %q", view.Root, root)
+	}
+	if view.RootBytes != 3 || view.RootFiles != 1 {
+		t.Errorf("measured %d bytes in %d files, want 3 bytes in 1 file", view.RootBytes, view.RootFiles)
 	}
 }
 
@@ -283,38 +305,19 @@ func TestMeasureScratchRootReportsAnUnresolvableRoot(t *testing.T) {
 	}
 }
 
-// TestPrintMaintenanceStatus_EscapesAHostileEntryName: the entry that made
-// the measurement fail is a name any local process can choose, and scratch.Size
-// puts that name in the error it returns. Printed raw, a name holding a line
-// break ends the header line and the rest of the name becomes a second line of
-// output — a line a reader takes for the product's own. So the failure is
-// rendered through the same renderer the rest of this file uses, and the name
-// comes out escaped.
+// TestPrintMaintenanceStatus_EscapesAHostileEntryName: a measurement failure
+// can carry a path or name chosen by any local process. Printed raw, a name
+// holding a line break ends the header line and the rest of the name becomes a
+// second line of output — a line a reader takes for the product's own. So the
+// failure is rendered through the same renderer the rest of this file uses,
+// and the name comes out escaped.
 func TestPrintMaintenanceStatus_EscapesAHostileEntryName(t *testing.T) {
-	skipWithoutPOSIXModes(t)
-	// A line break and a control character in one name.
-	const hostile = "bad\nname\x01"
-	root := t.TempDir()
-	locked := filepath.Join(root, hostile)
-	if err := os.Mkdir(locked, 0o700); err != nil {
-		t.Fatalf("mkdir the locked directory: %v", err)
+	const hostile = "size /root/scratch/bad\nname\x01: permission denied"
+	view := maintenanceStatusView{
+		Root:           "/root/scratch",
+		RootMeasureErr: errors.New(hostile),
+		Budget:         536870912,
 	}
-	if err := os.WriteFile(filepath.Join(locked, "hidden"), []byte("x"), 0o600); err != nil {
-		t.Fatalf("write the file behind the lock: %v", err)
-	}
-	if err := os.Chmod(locked, 0o000); err != nil {
-		t.Fatalf("lock the directory: %v", err)
-	}
-	// The temp dir's own cleanup has to be able to read the tree again.
-	t.Cleanup(func() { _ = os.Chmod(locked, 0o700) })
-	t.Setenv("GHOST_SCRATCH_DIR", root)
-
-	view := maintenanceStatusView{Budget: 536870912}
-	measureScratchRoot(&view)
-	if view.RootMeasureErr == nil {
-		t.Fatal("the locked directory did not fail the measurement")
-	}
-
 	var buf bytes.Buffer
 	if err := printMaintenanceStatus(&buf, view); err != nil {
 		t.Fatalf("printMaintenanceStatus: %v", err)
@@ -328,7 +331,7 @@ func TestPrintMaintenanceStatus_EscapesAHostileEntryName(t *testing.T) {
 		t.Fatalf("the status printed %d lines, want 2 — the entry name forged one:\n%q", len(lines), out)
 	}
 	// The name is printed escaped, never raw.
-	if strings.Contains(out, hostile) {
+	if strings.Contains(out, "bad\nname\x01") {
 		t.Errorf("the entry name was printed raw:\n%q", out)
 	}
 	if !strings.Contains(lines[0], `bad\nname\x01`) {

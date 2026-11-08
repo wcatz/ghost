@@ -8,23 +8,12 @@ import (
 	"testing"
 )
 
-// TestMaintenanceStatusReportsAnUnmeasurableScratchRoot: `ghost maintenance
-// status` reports the scratch root's live usage, and a root it could NOT
-// measure is not a root it measured as empty.
-//
-// scratch.Size returns (0, 0, err) when its walk meets an entry it cannot
-// read, so the zeros that come back with the error are a FAILED measurement.
-// The status line used to print them as the root's size — "0 bytes in 0
-// files" beside a root that holds a readable file and a bigger one behind a
-// lock — and the command exited 0, so nothing in its output said the
-// measurement had failed. The header must name the failure instead.
-//
-// The exit code stays 0 and the test says so by using mustRun: the scratch
-// side of this report is best-effort by the command's own contract ("an
-// unusable root is reported in the header, not fatal"), and the budget check
-// that measures the same root warns and continues rather than refusing the
-// spawn. What must not happen is a report that states a size nobody measured.
-func TestMaintenanceStatusReportsAnUnmeasurableScratchRoot(t *testing.T) {
+// TestMaintenanceStatusMeasuresWhatItCanPastAnUnreadableScratchEntry: `ghost
+// maintenance status` reports the scratch root's live usage. An unreadable
+// entry inside the scratch root is skipped so the measurement reflects what it
+// can (#1960); the root is not reported as unmeasurable and the command still
+// exits 0.
+func TestMaintenanceStatusMeasuresWhatItCanPastAnUnreadableScratchEntry(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("running as root: a mode-0o000 directory is still readable")
 	}
@@ -36,12 +25,9 @@ func TestMaintenanceStatusReportsAnUnmeasurableScratchRoot(t *testing.T) {
 		"content":    "a memory so the status command has a store to open",
 	})
 
-	// The scratch root holds a readable file and a directory nobody can
-	// enter, so the walk fails on the second and the measurement is a failure
-	// rather than a count. The entry's NAME carries a line break and a control
-	// character: the name is one any local process can choose, and it rides
-	// back in the error the walk returns, so it must not be able to end the
-	// header line and become a second line of output.
+	// The scratch root holds a readable file and a directory nobody can enter.
+	// The unreadable subtree is skipped (#1960), so the header reports the bytes
+	// it could measure rather than a failed measurement.
 	const hostile = "locked\nname\x01"
 	if err := os.WriteFile(filepath.Join(s.scratch, "readable"), []byte("small"), 0o600); err != nil {
 		t.Fatalf("write the readable file: %v", err)
@@ -60,9 +46,6 @@ func TestMaintenanceStatusReportsAnUnmeasurableScratchRoot(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chmod(locked, 0o700) })
 
 	r := s.mustRun("maintenance", "status")
-	mustMatch(t, "maintenance status with an unreadable scratch entry", r.stdout, "(?i)could not be measured")
-	mustNotContain(t, "maintenance status with an unreadable scratch entry", r.stdout, "0 bytes in 0 files")
-	// The name is printed escaped, so it ends no line and adds none.
-	mustNotContain(t, "maintenance status with an unreadable scratch entry", r.stdout, hostile)
-	mustContain(t, "maintenance status with an unreadable scratch entry", r.stdout, `locked\nname\x01`)
+	mustNotContain(t, "maintenance status with an unreadable scratch entry", r.stdout, "could not be measured")
+	mustMatch(t, "maintenance status with an unreadable scratch entry", r.stdout, `5 bytes in 1 files`)
 }

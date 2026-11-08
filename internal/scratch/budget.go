@@ -27,6 +27,7 @@ type BudgetResult struct {
 	BytesBefore int64
 	BytesAfter  int64
 	ReapedCount int
+	ReapFailed  int
 	ReapedBytes int64
 	OverBudget  bool // still over budget after reaping
 	Fired       bool // initial measure exceeded the budget (reap path ran)
@@ -43,14 +44,23 @@ type BudgetResult struct {
 // root contributes neither bytes nor a file count, so a link to a large
 // out-of-tree file cannot inflate (or, via removal, deflate) the accounting.
 // A missing directory is (0, 0, nil) — the root may not exist yet, which is
-// not an error anywhere this is used.
+// not an error anywhere this is used. An entry or subdirectory that cannot be
+// read is skipped so the measurement reflects what it can: one unreadable
+// subtree must not disable a caller's budget check. An unreadable root is
+// returned as an error.
 func Size(dir string) (bytes int64, files int, err error) {
 	walkErr := filepath.WalkDir(dir, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			if os.IsNotExist(walkErr) && path == dir {
 				return nil // root itself absent: empty, not an error
 			}
-			return walkErr
+			if path == dir {
+				return walkErr // unreadable root: the measurement cannot proceed
+			}
+			if d != nil && d.IsDir() {
+				return fs.SkipDir // unreadable subdirectory: measure what we can
+			}
+			return nil // unreadable entry: skip it
 		}
 		if d.IsDir() {
 			return nil
@@ -60,7 +70,7 @@ func Size(dir string) (bytes int64, files int, err error) {
 			if os.IsNotExist(err) {
 				return nil // vanished mid-walk
 			}
-			return err
+			return nil // cannot stat: skip it, measure what we can
 		}
 		if !info.Mode().IsRegular() {
 			return nil // symlinks, sockets, etc.: never counted, never followed
@@ -70,7 +80,7 @@ func Size(dir string) (bytes int64, files int, err error) {
 		return nil
 	})
 	if walkErr != nil {
-		return 0, 0, fmt.Errorf("size %s: %w", dir, walkErr)
+		return bytes, files, fmt.Errorf("size %s: %w", dir, walkErr)
 	}
 	return bytes, files, nil
 }
@@ -122,13 +132,18 @@ func EnforceBudget() BudgetResult {
 
 	// Over budget: reap stale entries FIRST, then re-measure.
 	res.Fired = true
-	removed, reapErr := Reap(staleAge)
+	removed, failed, reapErr := Reap(staleAge)
 	res.ReapErr = reapErr
 	if reapErr != nil {
 		slog.Warn("scratch budget: reap of stale entries failed",
 			"root", root, "error", reapErr)
 	}
+	if failed > 0 {
+		slog.Warn("scratch budget: could not remove stale entries",
+			"root", root, "failed", failed)
+	}
 	res.ReapedCount = removed
+	res.ReapFailed = failed
 	after, _, sizeErr := Size(root)
 	if sizeErr != nil {
 		slog.Warn("scratch budget: cannot re-measure root after reap",
@@ -150,7 +165,8 @@ func EnforceBudget() BudgetResult {
 			"bytes", after,
 			"max_bytes", maxBytes,
 			"over_by", after-maxBytes,
-			"reaped", removed)
+			"reaped", removed,
+			"reap_failed", failed)
 	}
 
 	res.Recorded = recordBudgetRun(res)
@@ -191,6 +207,13 @@ func recordBudgetRun(res BudgetResult) bool {
 		note = fmt.Sprintf("reap of stale entries failed: %v", res.ReapErr)
 	case res.OverBudget:
 		note = fmt.Sprintf("over budget by %d bytes; proceeding", res.BytesAfter-res.MaxBytes)
+	}
+	if res.ReapFailed > 0 && res.ReapErr == nil {
+		if note != "" {
+			note = fmt.Sprintf("%s; %d stale entries could not be removed", note, res.ReapFailed)
+		} else {
+			note = fmt.Sprintf("%d stale entries could not be removed", res.ReapFailed)
+		}
 	}
 	run := memory.MaintenanceRun{
 		Kind:               "scratch-budget",

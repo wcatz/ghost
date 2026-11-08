@@ -176,14 +176,41 @@ func ownerMarkerText(pid int, token, start string, haveStart bool) string {
 // Path returns the directory's absolute path.
 func (d *Dir) Path() string { return d.path }
 
-// Release removes the directory and everything under it. It is best-effort:
-// removal errors are ignored because Release also runs on early returns and on
-// paths Reap may already have collected. It is safe to call more than once and
-// safe when the directory is already gone.
+// makeRemovable restores owner read, write and execute permission on path and,
+// when path is a directory, on every directory beneath it. Module caches and
+// package managers commonly leave directories without write permission (0555)
+// or without any permission (0000); os.RemoveAll cannot remove their contents
+// until the directory is writable and traversable. It is best-effort: a path
+// that still cannot be read after the chmod is left for the caller's removal
+// to report.
+func makeRemovable(path string) {
+	info, err := os.Lstat(path)
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return
+	}
+	_ = os.Chmod(path, 0o700)
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			makeRemovable(filepath.Join(path, entry.Name()))
+		}
+	}
+}
+
+// Release removes the directory and everything under it. It restores owner
+// permissions on the way down so a subtree left without write permission can
+// still be removed. It is best-effort: removal errors are ignored because
+// Release also runs on early returns and on paths Reap may already have
+// collected. It is safe to call more than once and safe when the directory is
+// already gone.
 func (d *Dir) Release() {
 	if d == nil {
 		return
 	}
+	makeRemovable(d.path)
 	_ = os.RemoveAll(d.path)
 }
 
@@ -227,25 +254,26 @@ func (d *Dir) Release() {
 // last only as long as that owner lives — its exit turns them into the
 // dead-pid case for the next reap.
 //
-// Removal failures and entries that vanish mid-scan are ignored — several
-// Ghost processes (one MCP server per client session) may reap concurrently,
-// so races are normal — and only entries actually removed are counted. A
-// missing root is not an error; an unreadable one is returned so the caller
-// can warn, but callers proceed either way.
-func Reap(maxAge time.Duration) (int, error) {
+// Before removing a directory, Reap restores owner permissions on the way down
+// so a subtree left without write permission can still be removed. Entries that
+// vanish mid-scan are ignored — several Ghost processes (one MCP server per
+// client session) may reap concurrently, so races are normal. It returns the
+// number of entries removed and the number whose removal failed. A missing
+// root is not an error; an unreadable one is returned so the caller can warn,
+// but callers proceed either way.
+func Reap(maxAge time.Duration) (removed, failed int, err error) {
 	root, err := Root()
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return 0, nil
+			return 0, 0, nil
 		}
-		return 0, fmt.Errorf("scratch root %s: %w", root, err)
+		return 0, 0, fmt.Errorf("scratch root %s: %w", root, err)
 	}
 	now := time.Now()
-	removed := 0
 	for _, entry := range entries {
 		path := filepath.Join(root, entry.Name())
 		info, err := os.Lstat(path)
@@ -265,8 +293,10 @@ func Reap(maxAge time.Duration) (int, error) {
 		// os.Remove below removes one file and never descends.
 		if info.Mode().IsRegular() && isReassessIDFile(entry.Name()) {
 			if now.Sub(info.ModTime()) > idFileStaleAge {
-				if err := os.Remove(path); err == nil {
+				if rmErr := os.Remove(path); rmErr == nil {
 					removed++
+				} else if !os.IsNotExist(rmErr) {
+					failed++
 				}
 			}
 			continue
@@ -301,11 +331,14 @@ func Reap(maxAge time.Duration) (int, error) {
 				continue
 			}
 		}
-		if err := os.RemoveAll(path); err == nil {
+		makeRemovable(path)
+		if rmErr := os.RemoveAll(path); rmErr == nil {
 			removed++
+		} else if !os.IsNotExist(rmErr) {
+			failed++
 		}
 	}
-	return removed, nil
+	return removed, failed, nil
 }
 
 // ownerMarkerMaxBytes is the most bytes an owner marker can carry. A marker is a
