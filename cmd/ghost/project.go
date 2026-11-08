@@ -256,10 +256,10 @@ func runProjectMergeCore(ctx context.Context, store *memory.Store, out io.Writer
 	oldID, oldName := resolveForMerge(ctx, store, oldArg)
 	newID, newName := resolveForMerge(ctx, store, newArg)
 	if oldID == "" {
-		return fmt.Errorf("project %s not found; known projects: %s", memory.RefusalArg("project", oldArg), strings.Join(knownProjectNames(ctx, store), ", "))
+		return fmt.Errorf("project %s not found; known projects: %s", memory.RefusalArg("project", oldArg), knownProjectsSentence(knownProjectNames(ctx, store)))
 	}
 	if newID == "" {
-		return fmt.Errorf("project %s not found; known projects: %s", memory.RefusalArg("project", newArg), strings.Join(knownProjectNames(ctx, store), ", "))
+		return fmt.Errorf("project %s not found; known projects: %s", memory.RefusalArg("project", newArg), knownProjectsSentence(knownProjectNames(ctx, store)))
 	}
 	if oldID == newID {
 		return fmt.Errorf("refusing to merge a project into itself (%s)", memory.RefusalArg(memory.ProjectIdentifierLabel, oldID))
@@ -306,7 +306,7 @@ func resolveProjectBindID(ctx context.Context, store *memory.Store, projectID st
 	} else if !ok {
 		if names := knownProjectNames(ctx, store); len(names) > 0 {
 			return "", fmt.Errorf("project %s not found (bind takes a project id). Known projects: %s",
-				memory.RefusalArg("project", projectID), strings.Join(names, ", "))
+				memory.RefusalArg("project", projectID), knownProjectsSentence(names))
 		}
 		return "", fmt.Errorf("project %s not found (bind takes a project id)", memory.RefusalArg("project", projectID))
 	}
