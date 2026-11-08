@@ -74,6 +74,20 @@ class TestThePaidFallback(unittest.TestCase):
                           "failed", "the paid model answered with nothing")
         self.assertEqual(decision.outcome, OUTCOME_UNAVAILABLE)
 
+    def test_an_empty_account_balance_is_the_usage_window(self):
+        # The provider's words when the account behind every keyed model
+        # has no balance: an outage of the whole paid route, so the gate
+        # is left pending for the scheduled retry, not published red.
+        decision = decide("failed", [], "failed",
+                          "Error: Insufficient account funds")
+        self.assertEqual(decision.outcome, OUTCOME_UNAVAILABLE)
+        self.assertEqual(decision.cause, CAUSE_PAID_USAGE_LIMIT)
+
+    def test_a_model_that_acted_and_named_the_funds_phrase_is_a_failure(self):
+        decision = decide("failed", [], "failed",
+                          "Insufficient account funds", model_acted=True)
+        self.assertEqual(decision.outcome, OUTCOME_FAILURE)
+
     def test_only_the_providers_own_phrase_is_the_usage_window(self):
         # "usage limit" on its own is not the window: the provider names
         # it, and a model can write anything.
