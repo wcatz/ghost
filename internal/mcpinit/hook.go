@@ -474,6 +474,22 @@ func formatSessionContext(projectID, project string, asOf *time.Time, memories [
 		// preferences" would present rows the block never read as
 		// authoritative, the #545 chain).
 		fmt.Fprintf(&gsb, "\n**Global (applies to all projects):**\n%s\n", note)
+	} else if tally.globals.ByteCut > 0 {
+		// A byte-cut global half: the same branch the project half keeps
+		// when its rows are all cut for size (#1837). The fit pass cut
+		// every global row to keep the block under the host's output
+		// limit, so the section keeps its heading (bucket label alone,
+		// as the withheld branch does) and the counts line, which
+		// already carries the "cut to keep this block under the host's
+		// output limit" clause and points at the tool that shows the
+		// rows. The origin-guidance sentence is omitted with no rows
+		// shown, for the same reason the withheld branch omits it.
+		// The heading and the counts line are part of the block the
+		// fit pass measures, so the cap still holds.
+		fmt.Fprintf(&gsb, "\n**Global (applies to all projects):**\n")
+		if line := sessionCountsLine(tally.globals, globalsRankPhrase, globalsToolPhrase); line != "" {
+			fmt.Fprintf(&gsb, "(%s)\n", line)
+		}
 	}
 	globalSection := gsb.String()
 
@@ -490,7 +506,7 @@ func formatSessionContext(projectID, project string, asOf *time.Time, memories [
 			fmt.Fprintln(&sb, memory.AsOfSourceNote(*asOf))
 		}
 		if asOf == nil {
-			fmt.Fprintln(&sb, "Save discoveries with ghost_memory_save during work.")
+			fmt.Fprintln(&sb, "Save to Ghost as it happens, not at the end: when the user corrects you or states a rule, when a bug's root cause is found, when a choice is made for a reason, when a tool or dependency behaves unexpectedly. One memory per fact — refine an earlier one with ghost_memory_update rather than saving it again. A memory is a rule, constraint, decision or reason the code does not state; not what the repository says, not the current task's progress, never a key or token value.")
 		} else {
 			fmt.Fprintf(&sb, "(%s Run `ghost context` without --as-of for the present.)\n", memory.AsOfUnversionedNote())
 			if len(globals) > 0 || tally.asOfWithheld > 0 {
@@ -606,7 +622,7 @@ func formatSessionContext(projectID, project string, asOf *time.Time, memories [
 		fmt.Fprintf(&sb, "\n(%s Run `ghost context` without --as-of for the present.)\n", memory.AsOfUnversionedNote())
 		return sb.String()
 	}
-	fmt.Fprintf(&sb, "\nSave new discoveries with ghost_memory_save during work.")
+	fmt.Fprintf(&sb, "\nSave to Ghost as it happens, not at the end: when the user corrects you or states a rule, when a bug's root cause is found, when a choice is made for a reason, when a tool or dependency behaves unexpectedly. One memory per fact — refine an earlier one with ghost_memory_update rather than saving it again. A memory is a rule, constraint, decision or reason the code does not state; not what the repository says, not the current task's progress, never a key or token value.")
 	return sb.String()
 }
 
@@ -781,8 +797,10 @@ func RenderSessionContextAt(cwd string, asOf *time.Time) string {
 	// is still the thing this render exists to carry. A global bucket whose rows
 	// were all withheld is not nothing either: the hook renders its heading and
 	// the withheld sentence, so this render must too (the --as-of path's
-	// withheldAtT guard, for the current reading).
-	if projectID == "" && len(globals) == 0 && tally.globals.WithheldNote() == "" {
+	// withheldAtT guard, for the current reading). A global bucket whose rows
+	// were all cut for size is not nothing either: the hook now keeps the
+	// Global heading and its counts line (#1837), so this render must too.
+	if projectID == "" && len(globals) == 0 && tally.globals.WithheldNote() == "" && tally.globals.ByteCut == 0 {
 		return alert
 	}
 	block := formatSessionContext(projectID, project, nil, memories, learned, tasks, decisions, interactionCount, globals, tally)
@@ -806,8 +824,9 @@ func RenderSessionContextAt(cwd string, asOf *time.Time) string {
 func SessionBlockAt(dbPath, cwd string, cfg *config.Config, now time.Time) string {
 	projectID, project, memories, globals, learned, tasks, decisions, interactionCount, tally := loadSessionContextFrom(dbPath, cwd, cfg, func() time.Time { return now }, "")
 	// The same guard as RenderSessionContextAt's: a wholly-withheld global
-	// bucket still renders, so the measured block is the one the hook prints.
-	if projectID == "" && len(globals) == 0 && tally.globals.WithheldNote() == "" {
+	// bucket still renders, so the measured block is the one the hook prints;
+	// and a byte-cut global bucket renders its heading and counts line (#1837).
+	if projectID == "" && len(globals) == 0 && tally.globals.WithheldNote() == "" && tally.globals.ByteCut == 0 {
 		return ""
 	}
 	return formatSessionContext(projectID, project, nil, memories, learned, tasks, decisions, interactionCount, globals, tally)
@@ -1075,9 +1094,8 @@ func historicalSessionItems(rows []memory.AsOfRow, projectID string, scope map[s
 	return out, withheld, rankedOut
 }
 
-// globalsCap is lower than the project-memories cap (sessionMemoriesCap)
-// since globals compete for attention across every project, not just one.
-const globalsCap = 8
+// globalsCap aliases memory.SessionGlobalCap; see there for rationale.
+const globalsCap = memory.SessionGlobalCap
 
 // globalsDemotionThreshold is lower than memory.DefaultDemotionThreshold
 // (0.90): a live near-duplicate pair of global preferences was observed
@@ -1085,11 +1103,8 @@ const globalsCap = 8
 // second pass at demotion the way project memories do via config override.
 const globalsDemotionThreshold = 0.85
 
-// sessionMemoriesCap is the session-start context cap. It is deliberately
-// smaller than the historical 25-memory context and independent of the
-// caller-supplied limit used by Store.GetTopMemories; the ranking below keeps
-// the session digest bounded while preserving the most useful memories.
-const sessionMemoriesCap = 15
+// sessionMemoriesCap aliases memory.SessionProjectCap; see there for rationale.
+const sessionMemoriesCap = memory.SessionProjectCap
 
 // sessionMemory is loadSessionContext's own memory shape — a local struct
 // rather than memory.Memory because this function deliberately queries its

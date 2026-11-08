@@ -397,6 +397,11 @@ type Candidate struct {
 	// is carried so the trace can report what supports a memory, which is a
 	// question a reader of a search result has and no other field answers.
 	Evidence EvidenceCounts
+	// Usefulness is #648's negative evidence about this memory: what the
+	// retrieval audit recorded against it. It rides here for the same reason
+	// Evidence does — the assembler may reach the store through this one read —
+	// and a memory with repeated contradicted verdicts may be demoted on it.
+	Usefulness UsefulnessEvidence
 }
 
 // LinkEdge is one edge between two candidates. Stages 5 and 6 read it to
@@ -504,6 +509,18 @@ func (s *Store) Candidates(ctx context.Context, req CandidateRequest) (*Candidat
 		return nil, fmt.Errorf("candidates: store has no database handle")
 	}
 
+	// Read the in-memory knobs under the lock BEFORE opening the snapshot
+	// transaction. A store with no read handle opens that transaction on the
+	// primary pool, which is pinned to one connection, and a writer holds the
+	// store mutex while it waits for that connection. Taking the lock after
+	// the transaction would let the reader hold the connection while waiting
+	// for the writer's lock — the classic inversion. Reading here and
+	// releasing first removes the overlap.
+	s.mu.RLock()
+	demotion := s.demotionThreshold
+	floor := s.vectorMinSimilarity
+	s.mu.RUnlock()
+
 	p := req.Params
 	if p.RRFK == 0 && p.FTSWeight == 0 && p.VecWeight == 0 {
 		// A caller that passes no parameters gets production's, resolved here
@@ -512,7 +529,7 @@ func (s *Store) Candidates(ctx context.Context, req CandidateRequest) (*Candidat
 		p = DefaultSearchParams()
 	}
 	p.ProjectID = req.ProjectID
-	p.MinSimilarity = s.vectorMinSimilarityFloor()
+	p.MinSimilarity = floor
 	p.Scope = req.Scope
 
 	ftsTopK := req.Fetch.FTSTopK
@@ -530,10 +547,6 @@ func (s *Store) Candidates(ctx context.Context, req CandidateRequest) (*Candidat
 	}
 	defer tx.Rollback() //nolint:errcheck
 
-	s.mu.RLock()
-	demotion := s.demotionThreshold
-	floor := s.vectorMinSimilarity
-	s.mu.RUnlock()
 	identity := s.embeddingIdentityValue()
 	// A store bound to the transaction: every read below has to come from the
 	// snapshot, and the primary handle's single connection is held by the
@@ -793,6 +806,35 @@ func (s *Store) Candidates(ctx context.Context, req CandidateRequest) (*Candidat
 	}
 	for i := range rows {
 		rows[i].Evidence = counts[rows[i].ID]
+	}
+
+	// #648: the audit's negative evidence rides with the row, the same way the
+	// evidence counts do, so the assembler can demote a memory the audit has
+	// contradicted repeatedly without a second read. It is read per project,
+	// because UsefulnessByMemory is project-scoped; a row whose project has no
+	// negative evidence simply carries the zero value.
+	usefulness := map[string]UsefulnessEvidence{}
+	projects := map[string]struct{}{}
+	for i := range rows {
+		projects[rows[i].ProjectID] = struct{}{}
+	}
+	for proj := range projects {
+		if strings.TrimSpace(proj) == "" {
+			continue
+		}
+		ev, uErr := s.usefulnessByMemory(ctx, tx, proj)
+		if uErr != nil {
+			if isMissingTable(uErr) {
+				continue
+			}
+			return nil, fmt.Errorf("candidates: usefulness evidence: %w", uErr)
+		}
+		for id, v := range ev {
+			usefulness[id] = v
+		}
+	}
+	for i := range rows {
+		rows[i].Usefulness = usefulness[rows[i].ID]
 	}
 
 	// A row the vector leg could never have retrieved — no embedding it could

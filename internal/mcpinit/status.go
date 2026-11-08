@@ -10,12 +10,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/wcatz/ghost/internal/assemble"
 	"github.com/wcatz/ghost/internal/claudeimport"
 	"github.com/wcatz/ghost/internal/config"
 	"github.com/wcatz/ghost/internal/embedding"
 	"github.com/wcatz/ghost/internal/memory"
+	"github.com/wcatz/ghost/internal/reflection"
 )
 
 // Status checks the health of the Ghost ↔ Claude Code integration. The
@@ -236,10 +238,10 @@ func claudeMCPVerdict(out, ghostBin string) (present, current bool, why string) 
 	if rerr != nil {
 		// There is no program there to run: the binary was moved away, or the
 		// registration names a path that never held one.
-		return true, false, fmt.Sprintf("MCP server registered for a command that is not there (%s)", command)
+		return true, false, fmt.Sprintf("MCP server registered for a command that is not there (%s)", claudeMCPCommandLabel(command))
 	}
 	if !mcpCommandIsGhost(resolved, ghostBin) {
-		return true, false, fmt.Sprintf("MCP server registered for a different binary (%s)", command)
+		return true, false, fmt.Sprintf("MCP server registered for a different binary (%s)", claudeMCPCommandLabel(command))
 	}
 	args, _ := reg.config["args"].([]string)
 	if len(args) != 1 || args[0] != "mcp" {
@@ -253,14 +255,42 @@ func claudeMCPVerdict(out, ghostBin string) (present, current bool, why string) 
 // re-registers Claude Code's ghost server with this build's binary.
 const claudeMCPRepair = "run ghost mcp init --client claude"
 
+// claudeMCPCommandLabel renders the command a registration runs for the drift
+// line.
+//
+// The command is read from the client's own rendering, so it is text Ghost did
+// not author, and the line it lands on is a line of Ghost's own report: it
+// goes through the same renderer every other report uses for a value read from
+// outside (`memory.RefusalArg`), so a token-shaped value is withheld behind a
+// placeholder naming the format the guard found and a control character is
+// escaped. Quoting is what keeps a value carrying a line break from ending
+// the report line and putting a line of Ghost's own on the next one.
+func claudeMCPCommandLabel(command string) string {
+	return memory.RefusalArg("command", command)
+}
+
 // claudeMCPArgsLabel renders the arguments a registration carries for the
-// status line: the list as the client printed it, or "none" when it carries
+// status line: each one as the client printed it, or "none" when it carries
 // none.
+//
+// Each argument is rendered on its own rather than the list as one span, for
+// two reasons. An argument is a place where a key really is passed, so the
+// token guard is asked of each one and a token-shaped one is withheld behind a
+// placeholder naming the format — while the arguments beside it are still
+// named, because a renderer that withheld the whole list would keep the token
+// out and leave the line unable to say what the registration runs. And each
+// argument is quoted on its own, so an argument carrying a line break cannot
+// end the report line: the line break is escaped, and the report keeps one
+// line per check.
 func claudeMCPArgsLabel(args []string) string {
 	if len(args) == 0 {
 		return "none"
 	}
-	return strings.Join(args, " ")
+	parts := make([]string, 0, len(args))
+	for i, arg := range args {
+		parts = append(parts, memory.RefusalArg(fmt.Sprintf("argument[%d]", i), arg))
+	}
+	return strings.Join(parts, " ")
 }
 
 // mcpCommandIsGhost reports whether a resolved MCP command path is the ghost
@@ -738,7 +768,98 @@ func checkStoreHealth(w io.Writer, check func(ok bool, pass, fail string)) *memo
 		}
 	}
 	reportHistoryGrowth(w, store)
+	reportGlobalConsolidation(w, store)
+	reportOverdueMaintenanceStatus(w, store, dataDir)
+	reportReflectionExclusions(w, store)
+	reportReflectOverBound(w, store)
 	return store
+}
+
+// reportReflectionExclusions prints, per project, the share of live rows
+// reflect will never consolidate and why. Pinned, persistent, manual,
+// builtin and resolved rows are the frozen set; a project whose rows are
+// mostly frozen looks maintained while nothing can shrink it (#1849).
+// One line per project with memories, additive and never a health failure:
+// the store was opened cleanly and the read is a `!` line on failure, the
+// same rule reportHistoryGrowth follows.
+func reportReflectionExclusions(w io.Writer, store *memory.Store) {
+	ctx := context.Background()
+	projects, err := store.ListProjects(ctx)
+	if err != nil {
+		_, _ = fmt.Fprintf(w, "  ! consolidation exclusion: %v\n", err)
+		return
+	}
+	for _, p := range projects {
+		st, err := store.ReflectionExclusionStats(ctx, p.ID)
+		if err != nil {
+			_, _ = fmt.Fprintf(w, "  ! %s (%s): consolidation exclusion could not be read: %v\n",
+				assemble.Label(p.Name), assemble.Token(p.ID), err)
+			continue
+		}
+		if st.Total == 0 {
+			continue
+		}
+		pct := float64(st.Frozen) * 100 / float64(st.Total)
+		_, _ = fmt.Fprintf(w, "  - %s (%s): %d memories — %d frozen (%.0f%% excluded from consolidation: pinned %d, persistent %d, manual %d, builtin %d, resolved %d; %d consolidatable)\n",
+			assemble.Label(p.Name), assemble.Token(p.ID), st.Total, st.Frozen, pct,
+			st.Pinned, st.Persistent, st.Manual, st.Builtin, st.Resolved, st.Consolidatable)
+	}
+}
+
+// reportReflectOverBound prints projects above the consolidation input bound
+// (#1848). A project above the bound is skipped by the unattended lifecycle
+// with no failure marker, so this is the one place it is surfaced on the CLI.
+// The bound and the count are the same predicate the lifecycle's
+// consolidationBound checks, and the manual remediation is the command that
+// does not skip. It is a `!` line for a store that has one and no line for a
+// store that has none, the same shape reportHistoryGrowth uses: the health
+// verdict is about wiring, and a project that grew past the bound is not wiring
+// that `ghost mcp init` repairs, so it never fails the run. A store that
+// opened cleanly and then cannot be read is reported in place, like the blocks
+// around it.
+func reportReflectOverBound(w io.Writer, store *memory.Store) {
+	ctx := context.Background()
+	projects, err := store.ListProjects(ctx)
+	if err != nil {
+		_, _ = fmt.Fprintf(w, "  ! reflect: could not list projects: %v\n", err)
+		return
+	}
+	type over struct {
+		name  string
+		id    string
+		count int
+	}
+	var overs []over
+	for _, p := range projects {
+		n, err := store.CountConsolidatableMemories(ctx, p.ID)
+		if err != nil {
+			nm := p.Name
+			if ph, ok := memory.TokenGuardPlaceholder("project", nm); ok {
+				nm = ph
+			} else {
+				nm = assemble.Label(nm)
+			}
+			_, _ = fmt.Fprintf(w, "  ! reflect: project %s (%s) consolidatable count could not be read\n", nm, assemble.Token(p.ID))
+			continue
+		}
+		if n > reflection.MaxConsolidationInput {
+			overs = append(overs, over{name: p.Name, id: p.ID, count: n})
+		}
+	}
+	if len(overs) == 0 {
+		return
+	}
+	_, _ = fmt.Fprintf(w, "  ! reflect: %d project(s) above the %d consolidatable-memory limit for a single consolidation and skipped by unattended reflect — to consolidate, bring to at most %d: `ghost resolve <project> --apply` or `ghost prune --project <project> --apply` (pinned, manual and persistent memories do not count). Then run `ghost reflect <project> --apply`.\n",
+		len(overs), reflection.MaxConsolidationInput, reflection.MaxConsolidationInput)
+	for _, o := range overs {
+		nm := o.name
+		if ph, ok := memory.TokenGuardPlaceholder("project", nm); ok {
+			nm = ph
+		} else {
+			nm = assemble.Label(nm)
+		}
+		_, _ = fmt.Fprintf(w, "    - %s (%s): %d consolidatable memories\n", nm, assemble.Token(o.id), o.count)
+	}
 }
 
 // reportHistoryGrowth prints how fast memory_history is growing into its two
@@ -790,4 +911,89 @@ func reportHistoryGrowth(w io.Writer, store *memory.Store) {
 	for _, warn := range res.Warnings {
 		_, _ = fmt.Fprintf(w, "  ! %s\n", warn.Detail)
 	}
+}
+
+// reportGlobalConsolidation prints how many _global rows are consolidatable and
+// how many near-duplicate clusters they form (#1846).
+//
+// _global has no checkout path so no unattended run ever reaches it, yet its
+// rows are injected into every session. This block surfaces that backlog as
+// consolidatable rows and clusters, and names the manual command that folds
+// them, so an operator reading either `ghost mcp status` or `ghost_health` is
+// told the same thing about one store. It is a `-` line when there is nothing
+// to fold and a `!` line when there is, and it never takes the health verdict:
+// a store with duplicates is working as configured and the repair is the fold
+// command, not `ghost mcp init`. A failed read is reported rather than dropped,
+// because an absent line reads as a healthy store.
+func reportGlobalConsolidation(w io.Writer, store *memory.Store) {
+	all, err := store.GetAll(context.Background(), memory.GlobalProjectID, -1)
+	if err != nil {
+		_, _ = fmt.Fprintf(w, "  ! _global: could not be read: %v\n", err)
+		return
+	}
+	live := globalConsolidatable(all)
+	clusters := reflection.PlanGlobalFold(live)
+	switch {
+	case len(live) == 0:
+		if len(clusters) == 0 {
+			_, _ = fmt.Fprintf(w, "  - _global: %d memories, 0 reflection-written consolidatable\n", len(all))
+		} else {
+			folded := 0
+			for _, c := range clusters {
+				folded += len(c.Folded)
+			}
+			_, _ = fmt.Fprintf(w, "  ! _global: %d memories, %d reflection-written consolidatable, %d near-duplicate cluster(s) covering %d rows — run `ghost maintenance consolidate-global --apply` to fold\n", len(all), len(live), len(clusters), folded+len(clusters))
+		}
+	case len(clusters) == 0:
+		_, _ = fmt.Fprintf(w, "  - _global: %d memories, %d reflection-written consolidatable — nothing to fold\n", len(all), len(live))
+	default:
+		folded := 0
+		for _, c := range clusters {
+			folded += len(c.Folded)
+		}
+		_, _ = fmt.Fprintf(w, "  ! _global: %d memories, %d reflection-written consolidatable, %d near-duplicate cluster(s) covering %d rows — run `ghost maintenance consolidate-global --apply` to fold\n", len(all), len(live), len(clusters), folded+len(clusters))
+	}
+}
+
+// globalConsolidatable is the _global rows the fold may touch: the same
+// consolidatable filter the fold uses (not pinned, not resolved, not
+// persistent, not manual/builtin) and only what reflection wrote. It mirrors the
+// filter in cmd/ghost/maintenance.go and internal/mcpserver, so the diagnostic
+// and the folder cannot disagree about what a duplicate is.
+func globalConsolidatable(mems []memory.Memory) []memory.Memory {
+	out := make([]memory.Memory, 0, len(mems))
+	for _, m := range mems {
+		if m.ResolvedAt != nil || m.Pinned || memory.RetentionExempt(m) || m.Source == "manual" || m.Source == "builtin" {
+			continue
+		}
+		if m.Source != "reflection" {
+			continue
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
+// reportOverdueMaintenanceStatus lists projects that have consolidatable
+// memories and have not had lifecycle maintenance within the configured
+// interval, and projects whose id cannot key lifecycle bookkeeping and so
+// cannot be maintained unattended. It never fails the run — a read that
+// cannot be made is a missing diagnostic, not an unhealthy wiring — and it
+// is reported as a `!` line, the same shape reportHistoryGrowth uses.
+func reportOverdueMaintenanceStatus(w io.Writer, store *memory.Store, dataDir string) {
+	if store == nil || dataDir == "" {
+		return
+	}
+	cfg := config.LoadForHook()
+	minInterval := cfg.Lifecycle.MinIntervalDuration()
+	overdue, err := OverdueMaintenanceProjects(context.Background(), store, dataDir, time.Now(), minInterval, cfg.Reflection.ConsolidationEnabled())
+	if err != nil {
+		_, _ = fmt.Fprintf(w, "  ! maintenance overdue: could not be read: %s\n", err)
+		return
+	}
+	if len(overdue) == 0 {
+		return
+	}
+	ReportOverdueMaintenance(w, overdue, time.Now())
+
 }

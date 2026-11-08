@@ -260,17 +260,43 @@ func (s *Store) UsefulnessByMemory(ctx context.Context, projectID string) (map[s
 			"one project's pass another project's contradiction as evidence about its own memories")
 	}
 
-	verdicts, contents, err := s.usefulnessRows(ctx, projectID)
+	if s.readDB == nil {
+		s.warnNoReadHandle()
+	}
+	handle := s.readHandle()
+	if handle == nil {
+		return nil, fmt.Errorf("usefulness evidence: store has no database handle")
+	}
+	tx, err := handle.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, fmt.Errorf("usefulness evidence: begin read snapshot: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	return s.usefulnessByMemory(ctx, tx, projectID)
+}
+
+// usefulnessByMemory is UsefulnessByMemory's read over an already-open handle:
+// the same two bounded statements and the same Go-side filtering, but without
+// opening its own transaction, so a caller that is already inside a read
+// transaction (Candidates) can reuse that snapshot instead of deadlocking on the
+// single-connection pool.
+func (s *Store) usefulnessByMemory(ctx context.Context, q Queryer, projectID string) (map[string]UsefulnessEvidence, error) {
+	if strings.TrimSpace(projectID) == "" {
+		return nil, fmt.Errorf("usefulness evidence needs a project: an unscoped read would hand " +
+			"one project's pass another project's contradiction as evidence about its own memories")
+	}
+
+	verdicts, err := usefulnessVerdicts(ctx, q, projectID)
 	if err != nil {
 		return nil, err
 	}
-	// A project the audit has nothing negative to say about reads no memory
-	// content at all: usefulnessRows issues the second statement only when the
-	// first returned verdicts, so an unaudited project costs one statement and
-	// no content read, and the map it gets back is the one every caller already
-	// behaves correctly with.
 	if len(verdicts) == 0 {
 		return map[string]UsefulnessEvidence{}, nil
+	}
+	contents, err := usefulnessMemories(ctx, q, projectID, usefulnessMemoryIDs(verdicts))
+	if err != nil {
+		return nil, err
 	}
 
 	out := map[string]UsefulnessEvidence{}
@@ -453,60 +479,6 @@ func verdictDescribes(stamped, current, recordedAt, updatedAt string) bool {
 // id), and a store with verdicts on tens of thousands of memories would exceed
 // an unchunked list rather than return a partial one.
 const usefulnessContentChunk = 500
-
-// usefulnessRows is UsefulnessByMemory's read: TWO bounded statements inside
-// ONE deferred read transaction, so both describe the same database state.
-//
-// The transaction is opened on readHandle, never on the primary handle, for the
-// reason NewStoreWithRead gives: the primary DSN issues BEGIN IMMEDIATE, so a
-// snapshot there holds the write lock for the whole read.
-//
-// THE READ TAKES NO s.mu, and that is a decision rather than an omission. The
-// store's handles are fixed at construction (NewStore, NewStoreWithRead) and
-// warnOnce is a sync.Once, so there is no in-memory state here for the lock to
-// guard — every value this read consults comes out of the transaction. Taking it
-// anyway would put a mutex around a transaction in whichever order, and BOTH
-// orders are wrong on the single-connection pool: lock-then-transact waits for
-// the connection Candidates holds while Candidates waits for that same lock,
-// and transact-then-lock waits for the connection any writer holds while the
-// writer waits for that same lock. Not taking it removes the edge instead of
-// choosing which deadlock to risk, and nothing that completes on its own
-// (a query, a rollback) can hold this read up behind a lock it does not take.
-//
-// Rows are drained and closed by the helper that opened them, by its defer,
-// because the pool is one connection and a cursor left open would hold it.
-//
-// Both statements are literals used directly in QueryContext, which is what the
-// #746 structural scan needs to call them reads — an unresolved statement is
-// counted as a WRITE — and nothing in either is built from stored data: the
-// ids travel as bound parameters in an IN list.
-func (s *Store) usefulnessRows(ctx context.Context, projectID string) ([]usefulnessAuditRow, map[string]usefulnessContent, error) {
-	if s.readDB == nil {
-		s.warnNoReadHandle()
-	}
-	handle := s.readHandle()
-	if handle == nil {
-		return nil, nil, fmt.Errorf("usefulness evidence: store has no database handle")
-	}
-	tx, err := handle.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
-	if err != nil {
-		return nil, nil, fmt.Errorf("usefulness evidence: begin read snapshot: %w", err)
-	}
-	defer tx.Rollback() //nolint:errcheck
-
-	verdicts, err := usefulnessVerdicts(ctx, tx, projectID)
-	if err != nil {
-		return nil, nil, err
-	}
-	if len(verdicts) == 0 {
-		return nil, nil, nil
-	}
-	contents, err := usefulnessMemories(ctx, tx, projectID, usefulnessMemoryIDs(verdicts))
-	if err != nil {
-		return nil, nil, err
-	}
-	return verdicts, contents, nil
-}
 
 // usefulnessVerdicts is the first read: every piece of NEGATIVE EVIDENCE the
 // project holds — the two verdict buckets off retrieval_audit, and the flags off

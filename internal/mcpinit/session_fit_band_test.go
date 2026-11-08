@@ -23,7 +23,7 @@ const responseFitStage = "response_fit"
 // the one framing field nothing bounds — it is printed twice, in the heading and
 // in the project_id line — so it is what carries a block's framing to within a
 // few hundred bytes of the host limit with rows still in it.
-const bandNameBytes = 3184
+const bandNameBytes = 3024
 
 // bandFramingMargin is how close to the host limit the band fixture's framing has
 // to sit: the count line a cut adds, and the heading it earns, are longer than
@@ -74,7 +74,7 @@ func seedFitBandStore(t *testing.T) (dbPath, projectPath string) {
 	exec(`INSERT INTO projects (id, path, name) VALUES ('pband', ?, ?)`, projectPath, strings.Repeat("n", bandNameBytes))
 	// Past its 1,000-byte bound: the read decides how much the block spends.
 	exec(`INSERT INTO ghost_state (project_id, learned_context) VALUES ('pband', ?)`,
-		strings.Repeat("Learned summary sentence. ", 200))
+		strings.Repeat("Learned summary sentence. ", 178))
 
 	ts := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC).Format("2006-01-02 15:04:05")
 	insert := func(id, project, category string, content string, imp float64) {

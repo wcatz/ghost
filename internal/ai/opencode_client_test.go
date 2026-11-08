@@ -645,6 +645,51 @@ printf '%s\n' '{"type":"text","part":{"type":"text","text":"'"$*"'"}}'`
 	}
 }
 
+// TestOpenCodeClient_UnparseableVersionIsNotCached: a failed probe is already
+// not cached, and an answer that parses no major version is not an answer
+// either. One garbled `--version` reply must not pin a V2 binary to the V1 argv
+// for the life of the process: the next call asks again and recovers, where the
+// first call — which had only the garbled answer to go on — still runs V1 and
+// fails against a V2 binary that rejects `--pure`.
+func TestOpenCodeClient_UnparseableVersionIsNotCached(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script fake binary requires a POSIX shell")
+	}
+	probeLog := filepath.Join(t.TempDir(), "probes")
+	bin := fakeOpenCodeBinary(t, `
+if [ "$1" = "--version" ]; then
+  n=0
+  [ -f '`+probeLog+`' ] && n=$(wc -l < '`+probeLog+`')
+  n=$((n+1))
+  echo "$n" >> '`+probeLog+`'
+  if [ "$n" -eq 1 ]; then echo 'garbled version output'; else echo 'opencode v2.0.15'; fi
+  exit 0
+fi
+for arg in "$@"; do
+  if [ "$arg" = "--pure" ]; then echo 'unknown flag: --pure was removed' >&2; exit 1; fi
+done
+printf '%s\n' '{"type":"text","part":{"type":"text","text":"OK"}}'
+`)
+	c := &OpenCodeClient{binary: bin}
+	if _, _, err := c.Reflect(context.Background(), "prompt"); err == nil {
+		t.Fatal("first call read a garbled version as V1, and this fake rejects --pure")
+	}
+	text, _, err := c.Reflect(context.Background(), "prompt")
+	if err != nil {
+		t.Fatalf("second Reflect: %v", err)
+	}
+	if text != "OK" {
+		t.Errorf("second Reflect = %q, want OK from the V2 invocation", text)
+	}
+	raw, err := os.ReadFile(probeLog)
+	if err != nil {
+		t.Fatalf("read probe log: %v", err)
+	}
+	if probes := strings.Count(string(raw), "\n"); probes != 2 {
+		t.Errorf("version probes = %d, want 2: an unparseable answer must be asked again", probes)
+	}
+}
+
 // declinedStream is opencode v2's stream when the model answers and then asks
 // for a tool: the non-interactive run auto-rejects the ask and shuts the
 // session down, exiting 1 (captured from opencode v2.0.15).
@@ -652,12 +697,8 @@ const declinedStream = `printf '%s\n' '{"type":"step_start","part":{"type":"step
 
 func TestOpenCodeClient_Run_SalvagesAnswerBeforeDeclinedTool(t *testing.T) {
 	c := &OpenCodeClient{binary: fakeOpenCodeBinary(t, declinedStream)}
-	text, _, err := c.Reflect(context.Background(), "prompt")
-	if err != nil {
-		t.Fatalf("Reflect: %v (an answer written before a declined tool call must be kept)", err)
-	}
-	if text != "ANSWER: 42" {
-		t.Errorf("text = %q, want %q", text, "ANSWER: 42")
+	if _, _, err := c.Reflect(context.Background(), "prompt"); err == nil {
+		t.Fatal("a failed opencode run must not be promoted to success through declined-tool salvage")
 	}
 }
 

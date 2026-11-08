@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 )
 
@@ -55,8 +56,9 @@ type hookAction struct {
 // settingsFile provides safe read-modify-write for ~/.claude/settings.json.
 // It preserves all keys it does not understand via json.RawMessage.
 type settingsFile struct {
-	path string
-	raw  map[string]json.RawMessage
+	path     string
+	raw      map[string]json.RawMessage
+	keyOrder []string
 	// ghostManaged records whether the document AS LOADED held nothing but
 	// what ghost itself writes. It is decided at load, before any step merges
 	// into the in-memory document, so it describes the file still on disk when
@@ -129,6 +131,7 @@ func loadSettings(path string) (*settingsFile, error) {
 	// one-time .bak — an empty backup would stand forever and block the user's
 	// real file, the reason a 0-byte config.toml is skipped rather than copied.
 	if len(bytes.TrimSpace(data)) > 0 {
+		s.keyOrder = topLevelKeyOrder(data)
 		if err := json.Unmarshal(data, &s.raw); err != nil {
 			return nil, fmt.Errorf("%s must be a JSON object", filepath.Base(path))
 		}
@@ -170,7 +173,7 @@ func (s *settingsFile) save() error {
 		}
 	}
 
-	out, err := json.MarshalIndent(s.raw, "", "  ")
+	out, err := marshalOrderedRawObjectPretty(s.raw, s.keyOrder)
 	if err != nil {
 		return fmt.Errorf("marshal settings: %w", err)
 	}
@@ -418,9 +421,18 @@ func (s *settingsFile) getPermissions() ([]string, error) {
 // addPermissions adds any missing ghost permissions and returns the list of
 // newly added entries.
 func (s *settingsFile) addPermissions(perms []string) ([]string, error) {
-	existing, err := s.getPermissions()
+	// Get existing allow as RawMessage to preserve user formatting (escaping, order).
+	allowRaw, permsOrder, err := s.getAllowRaw()
 	if err != nil {
 		return nil, err
+	}
+
+	// Decode existing allow entries to check for duplicates.
+	var existing []string
+	if allowRaw != nil {
+		if err := json.Unmarshal(allowRaw, &existing); err != nil {
+			return nil, fmt.Errorf("%s: permissions.allow must be a list of strings", s.base())
+		}
 	}
 
 	set := make(map[string]bool, len(existing))
@@ -429,9 +441,22 @@ func (s *settingsFile) addPermissions(perms []string) ([]string, error) {
 	}
 
 	var added []string
+	var newAllow []json.RawMessage
+	// Preserve existing entries as RawMessage to keep original formatting.
+	if allowRaw != nil {
+		var existingRaw []json.RawMessage
+		if err := json.Unmarshal(allowRaw, &existingRaw); err != nil {
+			return nil, fmt.Errorf("%s: permissions.allow must be a list of strings", s.base())
+		}
+		newAllow = append(newAllow, existingRaw...)
+	}
 	for _, p := range perms {
 		if !set[p] {
-			existing = append(existing, p)
+			enc, err := escapeJSONString(p)
+			if err != nil {
+				return nil, err
+			}
+			newAllow = append(newAllow, json.RawMessage(enc))
 			added = append(added, p)
 		}
 	}
@@ -440,10 +465,7 @@ func (s *settingsFile) addPermissions(perms []string) ([]string, error) {
 		return nil, nil
 	}
 
-	// Rebuild the permissions object, preserving other fields. The nil guard
-	// mirrors addHook's: a null value decodes into a nil map with no error, and
-	// getPermissions refuses it, but the assignment below must not be able to
-	// panic if this is ever reached another way.
+	// Rebuild the permissions object, preserving other fields and their order.
 	var permsMap map[string]json.RawMessage
 	if raw, ok := s.raw["permissions"]; ok {
 		if err := json.Unmarshal(raw, &permsMap); err != nil {
@@ -454,19 +476,57 @@ func (s *settingsFile) addPermissions(perms []string) ([]string, error) {
 		permsMap = make(map[string]json.RawMessage)
 	}
 
-	allowJSON, err := json.Marshal(existing)
-	if err != nil {
-		return nil, err
-	}
+	allowJSON := marshalRawSliceCompact(newAllow)
 	permsMap["allow"] = allowJSON
 
-	permsJSON, err := json.Marshal(permsMap)
+	// If "allow" was not in the original permissions object, append it to the order.
+	if permsOrder != nil && !containsString(permsOrder, "allow") {
+		permsOrder = append(permsOrder, "allow")
+	}
+
+	permsJSON, err := marshalOrderedRawObjectCompact(permsMap, permsOrder)
 	if err != nil {
 		return nil, err
 	}
-	s.raw["permissions"] = permsJSON
+	s.setRaw("permissions", permsJSON)
 
 	return added, nil
+}
+
+// getAllowRaw returns the permissions.allow array as RawMessage and the
+// permissions object's key order. Absent permissions returns (nil, nil, nil).
+// When allow is absent or null, the order still includes the other keys
+// so addPermissions can preserve them and append "allow" at the end.
+func (s *settingsFile) getAllowRaw() (json.RawMessage, []string, error) {
+	permsRaw, ok := s.raw["permissions"]
+	if !ok {
+		return nil, nil, nil
+	}
+	if isJSONNull(permsRaw) {
+		return nil, nil, fmt.Errorf("%s: permissions is null", s.base())
+	}
+	// Compute order of all keys in permissions object before we might return early.
+	permsOrder := topLevelKeyOrder(permsRaw)
+	var perms struct {
+		Allow json.RawMessage `json:"allow"`
+	}
+	if err := json.Unmarshal(permsRaw, &perms); err != nil {
+		return nil, nil, fmt.Errorf("%s: permissions must be an object", s.base())
+	}
+	if perms.Allow == nil || isJSONNull(perms.Allow) {
+		return nil, permsOrder, nil
+	}
+	return perms.Allow, permsOrder, nil
+}
+
+// escapeJSONString escapes a string for JSON and returns the JSON-encoded form
+// including surrounding quotes.
+func escapeJSONString(s string) (string, error) {
+	b, err := marshalNoEscape(s)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
 }
 
 // setAutoMemoryEnabled sets the "autoMemoryEnabled" key in settings.json.
@@ -485,7 +545,7 @@ func (s *settingsFile) setAutoMemoryEnabled(v bool) (changed bool, err error) {
 		}
 	}
 
-	s.raw["autoMemoryEnabled"] = desired
+	s.setRaw("autoMemoryEnabled", desired)
 	return true, nil
 }
 
@@ -891,17 +951,15 @@ func (s *settingsFile) replaceHookCommand(event, oldCmd, newCmd string) (bool, e
 		return false, nil
 	}
 
-	entriesJSON, err := json.Marshal(entries)
-	if err != nil {
-		return false, err
-	}
+	entriesJSON := marshalRawSliceCompact(entries)
 	hooks[event] = entriesJSON
 
-	hooksJSON, err := json.Marshal(hooks)
+	hooksOrder := topLevelKeyOrder(s.raw["hooks"])
+	hooksJSON, err := marshalOrderedRawObjectCompact(hooks, hooksOrder)
 	if err != nil {
 		return false, err
 	}
-	s.raw["hooks"] = hooksJSON
+	s.setRaw("hooks", hooksJSON)
 	return true, nil
 }
 
@@ -912,49 +970,62 @@ func (s *settingsFile) replaceHookCommand(event, oldCmd, newCmd string) (bool, e
 // string "command" is left untouched rather than reshaped. changed is false
 // (and out is nil) when nothing in the entry matched.
 func replaceEntryCommand(entryRaw json.RawMessage, oldCmd, newCmd string) (out json.RawMessage, changed bool, err error) {
-	var entry map[string]json.RawMessage
-	if json.Unmarshal(entryRaw, &entry) != nil || entry == nil {
+	obj, ok := decodeCodexObject(entryRaw)
+	if !ok {
+		return nil, false, nil
+	}
+	// Get the hooks array as raw messages to preserve order and other keys.
+	hooksRaw := obj.get("hooks")
+	if hooksRaw == nil {
 		return nil, false, nil
 	}
 	var actions []json.RawMessage
-	if json.Unmarshal(entry["hooks"], &actions) != nil {
+	if err := json.Unmarshal(hooksRaw, &actions); err != nil {
 		return nil, false, nil
 	}
-	for j, actionRaw := range actions {
-		var action map[string]json.RawMessage
-		if json.Unmarshal(actionRaw, &action) != nil || action == nil {
+	for i, actionRaw := range actions {
+		actionObj, ok := decodeCodexObject(actionRaw)
+		if !ok {
+			continue
+		}
+		cmdRaw := actionObj.get("command")
+		if cmdRaw == nil {
 			continue
 		}
 		var cmd string
-		if json.Unmarshal(action["command"], &cmd) != nil || cmd != oldCmd {
+		if err := json.Unmarshal(cmdRaw, &cmd); err != nil || cmd != oldCmd {
 			continue
 		}
-		cmdJSON, err := json.Marshal(newCmd)
+		cmdJSON, err := marshalNoEscape(newCmd)
 		if err != nil {
 			return nil, false, err
 		}
-		action["command"] = cmdJSON
-		if actions[j], err = json.Marshal(action); err != nil {
+		actionObj.set("command", cmdJSON)
+		rewritten, err := actionObj.marshal()
+		if err != nil {
 			return nil, false, err
 		}
+		actions[i] = rewritten
 		changed = true
 	}
 	if !changed {
 		return nil, false, nil
 	}
-	if entry["hooks"], err = json.Marshal(actions); err != nil {
+	hooksJSON := marshalRawSliceCompact(actions)
+	obj.set("hooks", hooksJSON)
+	rebuilt, err := obj.marshal()
+	if err != nil {
 		return nil, false, err
 	}
-	if out, err = json.Marshal(entry); err != nil {
-		return nil, false, err
-	}
-	return out, true, nil
+	return rebuilt, true, nil
 }
 
 // addHook adds a hook entry for the given event. Does not clobber existing hooks.
 func (s *settingsFile) addHook(event string, entry hookEntry) error {
 	var hooks map[string]json.RawMessage
+	var hooksOrder []string
 	if raw, ok := s.raw["hooks"]; ok {
+		hooksOrder = topLevelKeyOrder(raw)
 		if err := json.Unmarshal(raw, &hooks); err != nil {
 			hooks = make(map[string]json.RawMessage)
 		}
@@ -972,22 +1043,147 @@ func (s *settingsFile) addHook(event string, entry hookEntry) error {
 		}
 	}
 
-	entryJSON, err := json.Marshal(entry)
+	entryJSON, err := marshalNoEscape(entry)
 	if err != nil {
 		return err
 	}
 	entries = append(entries, entryJSON)
 
-	entriesJSON, err := json.Marshal(entries)
-	if err != nil {
-		return err
-	}
-	hooks[event] = entriesJSON
+	entriesJSON := marshalRawSliceCompact(entries)
 
-	hooksJSON, err := json.Marshal(hooks)
+	hooks[event] = entriesJSON
+	if !containsString(hooksOrder, event) {
+		hooksOrder = append(hooksOrder, event)
+	}
+
+	hooksJSON, err := marshalOrderedRawObjectCompact(hooks, hooksOrder)
 	if err != nil {
 		return err
 	}
-	s.raw["hooks"] = hooksJSON
+	s.setRaw("hooks", hooksJSON)
 	return nil
+}
+
+// setRaw records value under key while remembering the key's position in the
+// document's original order. A key seen for the first time is appended, so a
+// save never reorders keys the user wrote and ghost's own additions land after
+// them.
+func (s *settingsFile) setRaw(key string, value json.RawMessage) {
+	if s.raw == nil {
+		s.raw = make(map[string]json.RawMessage)
+	}
+	if _, ok := s.raw[key]; !ok {
+		s.keyOrder = append(s.keyOrder, key)
+	}
+	s.raw[key] = value
+}
+
+// marshalOrderedRawObjectCompact renders raw as a JSON object whose keys appear
+// in order (user keys first, in document order, then any remaining keys in
+// sorted order), without HTML-escaping the values it embeds.
+func marshalOrderedRawObjectCompact(raw map[string]json.RawMessage, order []string) ([]byte, error) {
+	seen := make(map[string]bool)
+	var fields []string
+	for _, k := range order {
+		if _, ok := raw[k]; ok && !seen[k] {
+			fields = append(fields, k)
+			seen[k] = true
+		}
+	}
+	var rest []string
+	for k := range raw {
+		if !seen[k] {
+			rest = append(rest, k)
+		}
+	}
+	sort.Strings(rest)
+	fields = append(fields, rest...)
+
+	var buf bytes.Buffer
+	buf.WriteByte('{')
+	for i, k := range fields {
+		if i > 0 {
+			buf.WriteByte(',')
+		}
+		keyBytes, err := marshalNoEscape(k)
+		if err != nil {
+			return nil, err
+		}
+		buf.Write(keyBytes)
+		buf.WriteByte(':')
+		buf.Write(raw[k])
+	}
+	buf.WriteByte('}')
+	return buf.Bytes(), nil
+}
+
+// marshalOrderedRawObjectPretty is the compact form passed through json.Indent,
+// so the on-disk document keeps the two-space shape readers expect while the
+// embedded values are neither re-escaped nor re-sorted.
+func marshalOrderedRawObjectPretty(raw map[string]json.RawMessage, order []string) ([]byte, error) {
+	compact, err := marshalOrderedRawObjectCompact(raw, order)
+	if err != nil {
+		return nil, err
+	}
+	var pretty bytes.Buffer
+	if err := json.Indent(&pretty, compact, "", "  "); err != nil {
+		return nil, err
+	}
+	return pretty.Bytes(), nil
+}
+
+// marshalRawSliceCompact renders a slice of raw JSON values as a JSON array
+// without re-escaping or re-sorting its contents.
+func marshalRawSliceCompact(items []json.RawMessage) json.RawMessage {
+	var buf bytes.Buffer
+	buf.WriteByte('[')
+	for i, it := range items {
+		if i > 0 {
+			buf.WriteByte(',')
+		}
+		buf.Write(it)
+	}
+	buf.WriteByte(']')
+	return buf.Bytes()
+}
+
+// containsString reports whether s is in ss.
+func containsString(ss []string, s string) bool {
+	for _, v := range ss {
+		if v == s {
+			return true
+		}
+	}
+	return false
+}
+
+// topLevelKeyOrder decodes a JSON object and returns its keys in document
+// order, deduplicated. It is the one reader used by both the Claude settings
+// and codex hooks loaders and their mutation helpers, so key order is captured
+// the same way everywhere.
+func topLevelKeyOrder(raw json.RawMessage) []string {
+	obj, ok := decodeCodexObject(raw)
+	if !ok {
+		return nil
+	}
+	seen := make(map[string]bool)
+	var out []string
+	for _, f := range obj.fields {
+		if !seen[f.key] {
+			out = append(out, f.key)
+			seen[f.key] = true
+		}
+	}
+	return out
+}
+
+// marshalNoEscape renders v as JSON with HTML escaping disabled.
+func marshalNoEscape(v any) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
 }

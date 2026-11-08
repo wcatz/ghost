@@ -72,3 +72,69 @@ func TestTheMemoriesListNamesTheProjectItWasAskedAbout(t *testing.T) {
 		t.Errorf("a registered project's own memory did not appear in its browse:\n%s", res)
 	}
 }
+
+// TestMemoriesListUnknownProjectIDIsBounded verifies that ghost_memories_list
+// does not echo a very long unknown project ID whole. The not-registered
+// answer must bound the ID at recallProjectPrefaceMaxBytes (512 bytes) so a
+// 20,000-byte id does not come back in full.
+func TestMemoriesListUnknownProjectIDIsBounded(t *testing.T) {
+	_, session := validityServerFor(t, newMemoriesListStore(t))
+
+	cases := []struct {
+		name         string
+		projectID    string
+		wantEchoed   bool
+		wantWithheld bool
+	}{
+		{
+			name:       "an id at the bound is echoed whole",
+			projectID:  strings.Repeat("a", recallProjectPrefaceMaxBytes),
+			wantEchoed: true,
+		},
+		{
+			name:         "an id past the bound is withheld",
+			projectID:    strings.Repeat("a", recallProjectPrefaceMaxBytes+1),
+			wantWithheld: true,
+		},
+		{
+			name:         "a very long id is withheld",
+			projectID:    strings.Repeat("a", 20000),
+			wantWithheld: true,
+		},
+		{
+			name:       "an ordinary name is echoed whole",
+			projectID:  "no-such-project",
+			wantEchoed: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out := resultText(callTool(t, session, "ghost_memories_list", map[string]any{
+				"project_id": tc.projectID,
+			}))
+
+			if tc.wantEchoed {
+				if !strings.Contains(out, tc.projectID) {
+					t.Errorf("the %d-byte id was not echoed whole", len(tc.projectID))
+				}
+				if strings.Contains(out, "withheld") {
+					t.Errorf("the %d-byte id was withheld: %.200s", len(tc.projectID), out)
+				}
+			}
+			if tc.wantWithheld {
+				if strings.Contains(out, tc.projectID) {
+					t.Errorf("the %d-byte id was echoed", len(tc.projectID))
+				}
+				if !strings.Contains(out, "withheld") {
+					t.Errorf("the %d-byte id was not withheld: %.200s", len(tc.projectID), out)
+				}
+			}
+
+			// The not-registered sentence must still appear
+			if !strings.Contains(out, "is not registered with Ghost yet") {
+				t.Errorf("the not-registered sentence did not appear: %.200s", out)
+			}
+		})
+	}
+}

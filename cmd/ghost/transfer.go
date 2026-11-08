@@ -1075,13 +1075,13 @@ func reportSkippedRecords(out io.Writer, skipped []portable.SkippedRecord) error
 			phrase = fmt.Sprintf("delete the row and re-save it with a shorter scope (at most %d keys, each key at most %d bytes and each value at most %d bytes)", memory.MaxScopeKeys, memory.MaxScopeKeyLen, memory.MaxScopeValueLen)
 		}
 		if hasScope && hasScopeChar && !hasSecret {
-			phrase = fmt.Sprintf("delete the row and re-save it with a shorter scope (at most %d keys, each key at most %d bytes and each value at most %d bytes) containing no blank, NUL, control or line-separator characters", memory.MaxScopeKeys, memory.MaxScopeKeyLen, memory.MaxScopeValueLen)
+			phrase = fmt.Sprintf("delete the row and re-save it with a shorter scope (at most %d keys, each key at most %d bytes and each value at most %d bytes) containing no blank, NUL, control, FORMAT or line-separator characters", memory.MaxScopeKeys, memory.MaxScopeKeyLen, memory.MaxScopeValueLen)
 		} else if hasScopeChar && !hasSecret {
 			// A scope with invalid characters is not fixed by a different id either.
 			// No tool edits a stored scope, so the repair is the delete-and-save the
-			// sentence already names, with the scope cleaned of blank, NUL, control
-			// and line-separator characters.
-			phrase = "delete the row and re-save it with a scope containing no blank, NUL, control or line-separator characters"
+			// sentence already names, with the scope cleaned of blank, NUL, control,
+			// invisible FORMAT characters and line-separator characters.
+			phrase = "delete the row and re-save it with a scope containing no blank, NUL, control, FORMAT or line-separator characters"
 		}
 		if _, err := fmt.Fprintf(out, "  To include it, %s: `ghost project delete <project>` drops that project and every row under it, and a memory goes through the ghost_memory_delete tool.\n", phrase); err != nil {
 			return err
@@ -1093,7 +1093,7 @@ func reportSkippedRecords(out io.Writer, skipped []portable.SkippedRecord) error
 		}
 	}
 	if hasScopeChar && hasSecret {
-		if _, err := fmt.Fprintf(out, "  A scope with invalid characters is a separate fix: delete the row and re-save it with a scope containing no blank, NUL, control or line-separator characters.\n"); err != nil {
+		if _, err := fmt.Fprintf(out, "  A scope with invalid characters is a separate fix: delete the row and re-save it with a scope containing no blank, NUL, control, FORMAT or line-separator characters.\n"); err != nil {
 			return err
 		}
 	}

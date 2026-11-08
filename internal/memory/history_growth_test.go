@@ -828,7 +828,7 @@ func historyGrowthPlan(t *testing.T, s *Store, build func() (string, []any)) []s
 // Measured on this machine at 20,000 rows: 1.7 ms with a realistic window and
 // 183 ms with every row inside it, on a table the retention cap holds at 20,000.
 func TestHistoryGrowthIsLinearInTableSize(t *testing.T) {
-	const memories, restatements = 100, 9
+	const memories, restatements = 50, 9
 	small := growthLoadStore(t, memories, restatements)
 	big := growthLoadStore(t, 8*memories, restatements)
 

@@ -1565,7 +1565,7 @@ func TestPassiveEligibleCountReportsWhenItStoppedAtTheCap(t *testing.T) {
 	}{
 		{"below the cap", PassiveEligibleCountCap - 1, PassiveEligibleCountCap - 1, false},
 		{"at the cap", PassiveEligibleCountCap, PassiveEligibleCountCap, true},
-		{"above the cap", PassiveEligibleCountCap + 500, PassiveEligibleCountCap, true},
+		{"above the cap", PassiveEligibleCountCap + 1, PassiveEligibleCountCap, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			db, err := OpenDB(":memory:")

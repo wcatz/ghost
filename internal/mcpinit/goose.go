@@ -27,8 +27,8 @@ import (
 //     script, hostevent.Parse aliases those names in core for --source goose,
 //     so the hook command is `<ghost> hook <event> --source goose` directly:
 //     cross-platform, nothing to interpret or repair.
-//   - Stop emits a non-blocking {"decision":"approve","reason":…} reminder on
-//     stdout (the same protocol as Claude Code) so goose never surfaces it as a
+//   - Stop emits a non-blocking reminder through hookSpecificOutput.additionalContext
+//     on stdout (the same protocol as Claude Code) so goose never surfaces it as a
 //     Stop hook error; SessionStart output is not injected by goose, which
 //     RunHostEvent already gates on InjectContext=false for this source.
 //   - Agent Plugins Spec v1.0.0 packaging: plugin.json requires exactly

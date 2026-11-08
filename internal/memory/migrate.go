@@ -13,7 +13,7 @@ import (
 // Bump it and append to migrations whenever initSQL changes in a way that
 // CREATE TABLE IF NOT EXISTS cannot deliver to existing databases (new columns,
 // CHECK values, foreign keys, dropped tables).
-const schemaVersion = 29
+const schemaVersion = 30
 
 // SchemaVersion returns the schema version this build of Ghost expects, which is
 // the value a fully migrated database carries in PRAGMA user_version.
@@ -92,6 +92,7 @@ var migrations = []func(*sql.Tx) error{
 	migrateV27,
 	migrateV28,
 	migrateV29,
+	migrateV30,
 }
 
 // migrate brings an existing database up to schemaVersion. Fresh databases
@@ -2067,6 +2068,16 @@ func migrateV29(tx *sql.Tx) error {
 		if _, err := tx.Exec(`ALTER TABLE memory_snapshots ADD COLUMN updated_at TEXT`); err != nil {
 			return fmt.Errorf("add memory_snapshots.updated_at: %w", err)
 		}
+	}
+	return nil
+}
+
+// migrateV30 adds idx_memories_project_created for the passive bucket's
+// newest-instant MAX lookup, so the bound is an index seek on migrated stores
+// rather than a scan of the project.
+func migrateV30(tx *sql.Tx) error {
+	if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_memories_project_created ON memories(project_id, created_at DESC)`); err != nil {
+		return fmt.Errorf("create idx_memories_project_created: %w", err)
 	}
 	return nil
 }

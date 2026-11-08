@@ -1125,3 +1125,132 @@ func TestSettingsFileSaveWritesThroughASymlinkedConfig(t *testing.T) {
 		t.Errorf("the second save replaced the symlink with a regular file: init is not idempotent for a linked config")
 	}
 }
+
+// TestReplaceEntryCommand_PreservesUserKeysAndText verifies that migrating a
+// hook command keeps the entry's other keys (matcher, timeout, custom keys)
+// in their original order and preserves their text (including <, >, &).
+func TestReplaceEntryCommand_PreservesUserKeysAndText(t *testing.T) {
+	// Seed an entry with custom key order and special characters in timeout/zz/aa
+	entryRaw := json.RawMessage(`{"matcher":"Edit|Write","zz":1,"aa":2,"hooks":[{"type":"command","command":"OLD <>","timeout":5}]}`)
+
+	rewritten, changed, err := replaceEntryCommand(entryRaw, "OLD <>", "NEW &&")
+	if err != nil {
+		t.Fatalf("replaceEntryCommand: %v", err)
+	}
+	if !changed {
+		t.Fatal("expected changed=true")
+	}
+
+	var out map[string]json.RawMessage
+	if err := json.Unmarshal(rewritten, &out); err != nil {
+		t.Fatalf("unmarshal rewritten: %v", err)
+	}
+
+	// Check key order in the entry: matcher, zz, aa, hooks (by byte position)
+	entryStr := string(rewritten)
+	findKey := func(key string, start int) int {
+		target := "\"" + key + "\""
+		for i := start; i < len(entryStr); i++ {
+			if strings.HasPrefix(entryStr[i:], target) {
+				// Check if it's a key (preceded by { or ,)
+				j := i - 1
+				for j >= 0 && (entryStr[j] == ' ' || entryStr[j] == '\n' || entryStr[j] == '\t' || entryStr[j] == '\r') {
+					j--
+				}
+				if j >= 0 && (entryStr[j] == '{' || entryStr[j] == ',') {
+					return i
+				}
+			}
+		}
+		return -1
+	}
+	matcherPos := findKey("matcher", 0)
+	zzPos := findKey("zz", matcherPos+1)
+	aaPos := findKey("aa", zzPos+1)
+	hooksPos := findKey("hooks", aaPos+1)
+	if matcherPos < 0 || zzPos < 0 || aaPos < 0 || hooksPos < 0 || matcherPos >= zzPos || zzPos >= aaPos || aaPos >= hooksPos {
+		t.Errorf("key order changed: want matcher < zz < aa < hooks (got matcher=%d, zz=%d, aa=%d, hooks=%d)", matcherPos, zzPos, aaPos, hooksPos)
+	}
+
+	// Check hooks array content
+	var hooks []json.RawMessage
+	if err := json.Unmarshal(out["hooks"], &hooks); err != nil {
+		t.Fatalf("unmarshal hooks: %v", err)
+	}
+	if len(hooks) != 1 {
+		t.Fatalf("expected 1 hook action, got %d", len(hooks))
+	}
+	var action map[string]json.RawMessage
+	if err := json.Unmarshal(hooks[0], &action); err != nil {
+		t.Fatalf("unmarshal action: %v", err)
+	}
+	// Command should be updated, with && preserved (not escaped)
+	var cmd string
+	if err := json.Unmarshal(action["command"], &cmd); err != nil {
+		t.Fatalf("unmarshal command: %v", err)
+	}
+	if cmd != "NEW &&" {
+		t.Errorf("command: got %q, want %q", cmd, "NEW &&")
+	}
+	// Timeout should be preserved
+	var timeout int
+	if err := json.Unmarshal(action["timeout"], &timeout); err != nil {
+		t.Fatalf("unmarshal timeout: %v", err)
+	}
+	if timeout != 5 {
+		t.Errorf("timeout: got %d, want 5", timeout)
+	}
+	// Type should be preserved
+	var typ string
+	if err := json.Unmarshal(action["type"], &typ); err != nil {
+		t.Fatalf("unmarshal type: %v", err)
+	}
+	if typ != "command" {
+		t.Errorf("type: got %q, want command", typ)
+	}
+}
+
+// TestReplaceEntryCommand_MultipleActions_PreservesOrder verifies that when
+// an entry has multiple hook actions, only the matching one is updated and
+// the order of actions is preserved.
+func TestReplaceEntryCommand_MultipleActions_PreservesOrder(t *testing.T) {
+	entryRaw := json.RawMessage(`{"matcher":"","hooks":[{"type":"command","command":"FIRST"},{"type":"command","command":"OLD"},{"type":"command","command":"THIRD"}]}`)
+
+	rewritten, changed, err := replaceEntryCommand(entryRaw, "OLD", "SECOND")
+	if err != nil {
+		t.Fatalf("replaceEntryCommand: %v", err)
+	}
+	if !changed {
+		t.Fatal("expected changed=true")
+	}
+
+	var out map[string]json.RawMessage
+	if err := json.Unmarshal(rewritten, &out); err != nil {
+		t.Fatalf("unmarshal rewritten: %v", err)
+	}
+	var hooks []json.RawMessage
+	if err := json.Unmarshal(out["hooks"], &hooks); err != nil {
+		t.Fatalf("unmarshal hooks: %v", err)
+	}
+	if len(hooks) != 3 {
+		t.Fatalf("expected 3 hook actions, got %d", len(hooks))
+	}
+	cmds := make([]string, 0, len(hooks))
+	for _, h := range hooks {
+		var a map[string]json.RawMessage
+		if err := json.Unmarshal(h, &a); err != nil {
+			t.Fatalf("unmarshal action: %v", err)
+		}
+		var c string
+		if err := json.Unmarshal(a["command"], &c); err != nil {
+			t.Fatalf("unmarshal command: %v", err)
+		}
+		cmds = append(cmds, c)
+	}
+	want := []string{"FIRST", "SECOND", "THIRD"}
+	for i, c := range cmds {
+		if c != want[i] {
+			t.Errorf("action %d: got %q, want %q", i, c, want[i])
+		}
+	}
+}

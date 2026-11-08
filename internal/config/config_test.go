@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -532,22 +533,46 @@ func TestDataDirPath_NoCreate(t *testing.T) {
 }
 
 func TestDataDir_DefaultFallback(t *testing.T) {
-	// Unset XDG_DATA_HOME to test the fallback to ~/.local/share.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if runtime.GOOS == "windows" {
+		t.Setenv("USERPROFILE", home)
+	}
 	t.Setenv("XDG_DATA_HOME", "")
-	unsetEnvVars(t, []string{"XDG_DATA_HOME"})
+	unsetEnvVars(t, []string{"XDG_DATA_HOME", DevForbidDataDirEnv})
 
 	dir, err := DataDir()
 	if err != nil {
 		t.Fatalf("DataDir() error: %v", err)
 	}
 
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Fatalf("UserHomeDir() error: %v", err)
-	}
 	expected := filepath.Join(home, ".local", "share", "ghost")
 	if dir != expected {
 		t.Errorf("expected %q, got %q", expected, dir)
+	}
+}
+
+func TestDataDir_DefaultFallback_DevForbidRefusesFallback(t *testing.T) {
+	withBuildVersion(t, devVersion)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if runtime.GOOS == "windows" {
+		t.Setenv("USERPROFILE", home)
+	}
+	t.Setenv("XDG_DATA_HOME", "")
+	unsetEnvVars(t, []string{"XDG_DATA_HOME"})
+	forbidden := filepath.Join(home, ".local", "share", "ghost")
+	t.Setenv(DevForbidDataDirEnv, forbidden)
+
+	if _, err := DataDir(); err == nil {
+		t.Fatalf("DataDir() = nil, want a refusal when %s is %q", DevForbidDataDirEnv, forbidden)
+	} else if !strings.Contains(err.Error(), DevForbidDataDirEnv) {
+		t.Errorf("DataDir() error = %q, want it to name %s", err, DevForbidDataDirEnv)
+	}
+	if _, err := DataDirPath(); err == nil {
+		t.Fatalf("DataDirPath() = nil, want a refusal when %s is %q", DevForbidDataDirEnv, forbidden)
+	} else if !strings.Contains(err.Error(), DevForbidDataDirEnv) {
+		t.Errorf("DataDirPath() error = %q, want it to name %s", err, DevForbidDataDirEnv)
 	}
 }
 

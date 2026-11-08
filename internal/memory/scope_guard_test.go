@@ -430,14 +430,17 @@ func TestScopeAcceptsValidKeysAndValues(t *testing.T) {
 func TestScopeRefusalOrderNeverPrintsAToken(t *testing.T) {
 	tok := scopeToken()
 	cases := []struct {
-		name  string
-		scope map[string]string
-		want  string
+		name       string
+		scope      map[string]string
+		want       string
+		wantSecret bool
 	}{
-		{"over-long token value with a control character", map[string]string{"k": tok + strings.Repeat("x", MaxScopeValueLen) + "\n"}, "a scope value must be at most"},
-		{"over-long token key with a control character", map[string]string{tok + strings.Repeat("x", MaxScopeKeyLen) + "\n": "v"}, "a scope key must be at most"},
-		{"token value with a control character", map[string]string{"k": tok + "\n"}, "scope[k] must not be a control character"},
-		{"token key with a control character", map[string]string{tok + "\n": "v"}, "scope_key[0] must not be a control character"},
+		{"over-long token value with a control character", map[string]string{"k": tok + strings.Repeat("x", MaxScopeValueLen) + "\n"}, "a scope value must be at most", false},
+		{"over-long token key with a control character", map[string]string{tok + strings.Repeat("x", MaxScopeKeyLen) + "\n": "v"}, "a scope key must be at most", false},
+		{"token value with a control character", map[string]string{"k": tok + "\n"}, "scope[k] must not be a control character", false},
+		{"token key with a control character", map[string]string{tok + "\n": "v"}, "scope_key[0] must not be a control character", false},
+		{"token value with a format character", map[string]string{"k": tok + "\u200b"}, "refusing to store credential-shaped content", true},
+		{"token key with a format character", map[string]string{tok + "\u200b": "v"}, "refusing to store credential-shaped content", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -446,7 +449,11 @@ func TestScopeRefusalOrderNeverPrintsAToken(t *testing.T) {
 				t.Fatalf("err = %v, want it to contain %q", err, tc.want)
 			}
 			var secretErr *SecretContentError
-			if errors.As(err, &secretErr) {
+			if tc.wantSecret {
+				if !errors.As(err, &secretErr) {
+					t.Errorf("not refused by the token guard, so the format character rule ran first: %v", err)
+				}
+			} else if errors.As(err, &secretErr) {
 				t.Errorf("refused by the token guard, so the character rules did not run first: %v", err)
 			}
 			if strings.Contains(err.Error(), tok) || strings.Contains(err.Error(), tok[:12]) {
@@ -469,6 +476,78 @@ func TestACharacterRefusalNeverPrintsATokenShapedKey(t *testing.T) {
 			}
 			if strings.Contains(err.Error(), key) || strings.Contains(err.Error(), key[:12]) {
 				t.Errorf("the refusal printed the key: %v", err)
+			}
+		})
+	}
+}
+
+// TestScopeRejectsInvisibleFormatCharactersMixedIn covers the #1888 regression:
+// an invisible Unicode format rune (category Cf, e.g. U+200B) mixed into a key
+// or a value must be refused on every writer.
+func TestScopeRejectsInvisibleFormatCharactersMixedIn(t *testing.T) {
+	ctx := context.Background()
+	cases := []struct {
+		name  string
+		scope map[string]string
+	}{
+		{"key with trailing zero-width", map[string]string{"env\u200b": "prod"}},
+		{"key with leading zero-width", map[string]string{"\u200benv": "prod"}},
+		{"value with trailing zero-width", map[string]string{"env": "prod\u200b"}},
+		{"value with leading zero-width", map[string]string{"env": "\u200bprod"}},
+	}
+	for _, tc := range cases {
+		t.Run("checkScope/"+tc.name, func(t *testing.T) {
+			err := checkScope(tc.scope)
+			if err == nil {
+				t.Fatal("checkScope accepted a scope with an invisible format character")
+			}
+			if !strings.Contains(err.Error(), "an invisible Unicode FORMAT character") {
+				t.Fatalf("checkScope refused for unexpected reason: %v", err)
+			}
+			var b *ScopeKeyValueError
+			if !errors.As(err, &b) {
+				t.Fatalf("checkScope refused as %T, want *ScopeKeyValueError", err)
+			}
+		})
+		t.Run("create/"+tc.name, func(t *testing.T) {
+			s := testStore(t)
+			_, err := s.Create(ctx, testProject, Memory{Category: "fact", Content: "deploy notes", Source: "mcp", Scope: tc.scope})
+			if err == nil {
+				t.Fatal("Create accepted a scope with an invisible format character")
+			}
+			if n := countAllMemories(t, s); n != 0 {
+				t.Errorf("%d row(s) stored after a refused create", n)
+			}
+		})
+		t.Run("upsert/"+tc.name, func(t *testing.T) {
+			s := testStore(t)
+			_, _, _, err := s.UpsertWithOptions(ctx, testProject, "fact", "deploy notes for alpha", "mcp", 0.5, nil,
+				UpsertOptions{Scope: tc.scope})
+			if err == nil {
+				t.Fatal("UpsertWithOptions accepted a scope with an invisible format character")
+			}
+			if n := countAllMemories(t, s); n != 0 {
+				t.Errorf("%d row(s) stored after a refused upsert", n)
+			}
+		})
+		t.Run("import/"+tc.name, func(t *testing.T) {
+			s := portableTestStore(t)
+			if err := s.EnsureProject(ctx, "p1", "/src/p1", "p1"); err != nil {
+				t.Fatalf("EnsureProject: %v", err)
+			}
+			pm := PortableMemory{ID: "M1", ProjectID: "p1", Category: "fact", Content: "an artifact's claim", Source: "mcp", Scope: tc.scope}
+			importErr := CheckImportedMemory(pm)
+			if importErr == nil {
+				t.Fatal("CheckImportedMemory accepted a scope with an invisible format character")
+			}
+			for _, apply := range []bool{false, true} {
+				_, _, _, err := s.ImportMemory(ctx, pm, ImportOptions{Apply: apply, TrustProvenance: true})
+				if err == nil {
+					t.Fatalf("ImportMemory accepted a scope with an invisible format character (apply=%v)", apply)
+				}
+			}
+			if n := countAllMemories(t, s); n != 0 {
+				t.Errorf("%d row(s) stored after a refused import", n)
 			}
 		})
 	}

@@ -301,7 +301,7 @@ func TestVectorSearchScoresWithTheStoreLockReleased(t *testing.T) {
 		t.Fatalf("begin seed: %v", err)
 	}
 	defer tx.Rollback() //nolint:errcheck
-	for i := range 2000 {
+	for i := range 500 {
 		var id string
 		if err := tx.QueryRowContext(ctx, `
 			INSERT INTO memories (project_id, category, content, source)

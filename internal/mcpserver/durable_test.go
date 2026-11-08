@@ -569,3 +569,381 @@ func TestUpdateJudgesAnOmittedCategoryAgainstTheStoredRow(t *testing.T) {
 		})
 	}
 }
+
+// #1832: long save advisory. Over LongMemoryThreshold (800) bytes it advises,
+// at or below does not. The advisory is guide-only, the row is stored unchanged,
+// and it composes with repoFactHint.
+func TestLongMemoryThresholdExists(t *testing.T) {
+	srv, session := newCapSession(t)
+
+	// At threshold (800 bytes): no note.
+	at := strings.Repeat("a", 800)
+	resp, stored := saveAndFetchContent(t, srv, session, at)
+	if strings.Contains(resp, "ADVISORY") {
+		t.Fatalf("content at threshold must not advise: %q", resp)
+	}
+	if stored != at {
+		t.Fatalf("stored content changed at threshold")
+	}
+
+	// One byte over (801): note appears.
+	over := strings.Repeat("a", 801)
+	resp, stored = saveAndFetchContent(t, srv, session, over)
+	if !strings.Contains(resp, "ADVISORY") {
+		t.Fatalf("content over threshold must advise: %q", resp)
+	}
+	if !strings.Contains(resp, "801 bytes") {
+		t.Fatalf("advisory must state byte count: %q", resp)
+	}
+	if stored != over {
+		t.Fatalf("stored content changed over threshold")
+	}
+}
+
+func TestLongMemoryHintThreshold(t *testing.T) {
+	srv, session := newCapSession(t)
+
+	// Below threshold
+	resp, stored := saveAndFetchContent(t, srv, session, strings.Repeat("b", 799))
+	if strings.Contains(resp, "ADVISORY") {
+		t.Fatalf("content below threshold must not advise: %q", resp)
+	}
+	if len(stored) != 799 {
+		t.Fatalf("expected stored length 799, got %d", len(stored))
+	}
+
+	// Exactly threshold
+	resp, stored = saveAndFetchContent(t, srv, session, strings.Repeat("c", 800))
+	if strings.Contains(resp, "ADVISORY") {
+		t.Fatalf("content at threshold must not advise: %q", resp)
+	}
+	if len(stored) != 800 {
+		t.Fatalf("expected stored length 800, got %d", len(stored))
+	}
+
+	// Over threshold - stored unchanged
+	long := strings.Repeat("d", 850)
+	resp, stored = saveAndFetchContent(t, srv, session, long)
+	if !strings.Contains(resp, "ADVISORY") {
+		t.Fatalf("content over threshold must advise: %q", resp)
+	}
+	if stored != long {
+		t.Fatalf("stored content must be unchanged")
+	}
+	if !strings.Contains(resp, "850 bytes") {
+		t.Fatalf("advisory must show actual byte count: %q", resp)
+	}
+}
+
+func TestGlobalStatusHintDateline(t *testing.T) {
+	_, session := newCapSession(t)
+	ctx := context.Background()
+
+	// Dated global status without valid_until advises
+	res := callTool(t, session, "ghost_save_global", map[string]any{
+		"content":  "2026-10-16: System is down for maintenance",
+		"category": "fact",
+	})
+	resp := resultText(res)
+	if !strings.Contains(resp, "Global memory saved (id: ") {
+		t.Fatalf("global save response reports no stored id: %q", resp)
+	}
+	if !strings.Contains(resp, "ADVISORY") {
+		t.Fatalf("dated global status without valid_until must advise: %q", resp)
+	}
+	// Row stored unchanged
+	found := callTool(t, session, "ghost_memory_search", map[string]any{
+		"project_id": "test-project",
+		"query":      "2026-10-16",
+		"limit":      5,
+	})
+	if !strings.Contains(resultText(found), "2026-10-16") {
+		t.Fatalf("dated global status was not stored")
+	}
+
+	// Same row with valid_until does not advise
+	res = callTool(t, session, "ghost_save_global", map[string]any{
+		"content":     "2026-11-01: Deployment window opens",
+		"category":    "fact",
+		"valid_until": "2026-11-02T00:00:00Z",
+	})
+	resp = resultText(res)
+	if !strings.Contains(resp, "Global memory saved (id: ") {
+		t.Fatalf("global save response reports no stored id: %q", resp)
+	}
+	if strings.Contains(resp, "ADVISORY") {
+		t.Fatalf("dated global status with valid_until must not advise: %q", resp)
+	}
+
+	// Dated preference "Wayne, 2026-10-16: ..." does not advise
+	res = callTool(t, session, "ghost_save_global", map[string]any{
+		"content":  "Wayne, 2026-10-16: prefer tabs over spaces",
+		"category": "preference",
+	})
+	resp = resultText(res)
+	if !strings.Contains(resp, "Global memory saved (id: ") {
+		t.Fatalf("global save response reports no stored id: %q", resp)
+	}
+	if strings.Contains(resp, "ADVISORY") {
+		t.Fatalf("dated preference attributed to person must not advise: %q", resp)
+	}
+
+	// Clean up
+	_ = ctx
+}
+
+// #1832: compositions of advisories
+func TestLongMemoryComposesWithRepoFact(t *testing.T) {
+	_, session := newCapSession(t)
+	// Long content (>800 bytes) that is also a repo fact
+	longRepoFact := strings.Repeat("x", 500) + " foo.go contains HandleFoo() " + strings.Repeat("y", 400) // total > 800
+	if len(longRepoFact) <= 800 {
+		longRepoFact = strings.Repeat("x", 400) + " foo.go contains HandleFoo() " + strings.Repeat("y", 500)
+	}
+	resp := resultText(callTool(t, session, "ghost_memory_save", map[string]any{
+		"project_id": "test-project",
+		"content":    longRepoFact,
+		"category":   "fact",
+	}))
+	if !strings.Contains(resp, "ADVISORY") {
+		t.Fatalf("long repo fact must advise: %q", resp)
+	}
+	if !strings.Contains(resp, "bytes") {
+		t.Fatalf("long advisory must appear: %q", resp)
+	}
+	if !strings.Contains(resp, "repository fact") {
+		t.Fatalf("repo fact advisory must appear: %q", resp)
+	}
+	// Row stored unchanged - verify
+	found := callTool(t, session, "ghost_memory_search", map[string]any{
+		"project_id": "test-project",
+		"query":      "HandleFoo",
+		"limit":      5,
+	})
+	if !strings.Contains(resultText(found), "HandleFoo") {
+		t.Fatalf("stored content must be unchanged and findable")
+	}
+}
+
+func TestLongMemoryComposesWithGlobalStatus(t *testing.T) {
+	_, session := newCapSession(t)
+	// Long dated global status without valid_until
+	longDated := "2026-10-16: " + strings.Repeat("status update ", 100)
+	res := callTool(t, session, "ghost_save_global", map[string]any{
+		"content":  longDated,
+		"category": "fact",
+	})
+	resp := resultText(res)
+	if !strings.Contains(resp, "Global memory saved (id: ") {
+		t.Fatalf("global save response reports no stored id: %q", resp)
+	}
+	if !strings.Contains(resp, "ADVISORY") {
+		t.Fatalf("composed advisories must appear: %q", resp)
+	}
+	if !strings.Contains(resp, "bytes") {
+		t.Fatalf("long advisory must appear in composition: %q", resp)
+	}
+	if !strings.Contains(resp, "session start") {
+		t.Fatalf("global status advisory must appear in composition: %q", resp)
+	}
+	// Row stored unchanged
+	found := callTool(t, session, "ghost_memory_search", map[string]any{
+		"project_id": "test-project",
+		"query":      "2026-10-16",
+		"limit":      5,
+	})
+	if !strings.Contains(resultText(found), "2026-10-16") {
+		t.Fatalf("composed global status was not stored")
+	}
+}
+
+func TestDatedGlobalComposesWithRepoFact(t *testing.T) {
+	_, session := newCapSession(t)
+	// Dated global that is also a repo fact
+	datedRepoFact := "2026-10-16: foo.go contains HandleFoo()"
+	res := callTool(t, session, "ghost_save_global", map[string]any{
+		"content":  datedRepoFact,
+		"category": "fact",
+	})
+	resp := resultText(res)
+	if !strings.Contains(resp, "Global memory saved (id: ") {
+		t.Fatalf("global save response reports no stored id: %q", resp)
+	}
+	if !strings.Contains(resp, "ADVISORY") {
+		t.Fatalf("composed advisories must appear: %q", resp)
+	}
+	if !strings.Contains(resp, "session start") {
+		t.Fatalf("global status advisory must appear: %q", resp)
+	}
+	if !strings.Contains(resp, "repository fact") {
+		t.Fatalf("repo fact advisory must appear: %q", resp)
+	}
+	found := callTool(t, session, "ghost_memory_search", map[string]any{
+		"project_id": "test-project",
+		"query":      "HandleFoo",
+		"limit":      5,
+	})
+	if !strings.Contains(resultText(found), "HandleFoo") {
+		t.Fatalf("composed dated repo fact was not stored")
+	}
+}
+
+func TestPromoteGlobalStatusHint(t *testing.T) {
+	srv, session := newCapSession(t)
+	ctx := context.Background()
+	// Create a project memory with dated content
+	id, err := srv.store.Create(ctx, "abc123", memory.Memory{
+		Category: "fact", Content: "2026-10-16: Deployments paused", Source: "mcp", Importance: 0.7, Tags: []string{},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	res := callTool(t, session, "ghost_memory_promote", map[string]any{
+		"project_id": "test-project",
+		"memory_id":  id,
+	})
+	resp := resultText(res)
+	if !strings.Contains(resp, "promoted to global scope") {
+		t.Fatalf("promote response unexpected: %q", resp)
+	}
+	if !strings.Contains(resp, "ADVISORY") {
+		t.Fatalf("dated global status on promote must advise: %q", resp)
+	}
+	if !strings.Contains(resp, "session start") {
+		t.Fatalf("advisory must mention session start: %q", resp)
+	}
+	// Row stored unchanged
+	found := callTool(t, session, "ghost_memory_search", map[string]any{
+		"project_id": "test-project",
+		"query":      "Deployments",
+		"limit":      5,
+	})
+	if !strings.Contains(resultText(found), "Deployments") {
+		t.Fatalf("promoted memory was not stored")
+	}
+}
+
+func TestPromoteRepoFactHint(t *testing.T) {
+	srv, session := newCapSession(t)
+	ctx := context.Background()
+	// Create a project memory that is a repo fact
+	id, err := srv.store.Create(ctx, "abc123", memory.Memory{
+		Category: "fact", Content: "foo.go contains HandleFoo()", Source: "mcp", Importance: 0.7, Tags: []string{},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	res := callTool(t, session, "ghost_memory_promote", map[string]any{
+		"project_id": "test-project",
+		"memory_id":  id,
+	})
+	resp := resultText(res)
+	if !strings.Contains(resp, "promoted to global scope") {
+		t.Fatalf("promote response unexpected: %q", resp)
+	}
+	if !strings.Contains(resp, "ADVISORY") {
+		t.Fatalf("repo fact advisory on promote must appear: %q", resp)
+	}
+	if !strings.Contains(resp, "repository fact") {
+		t.Fatalf("advisory must mention repository fact: %q", resp)
+	}
+	// Row stored unchanged
+	found := callTool(t, session, "ghost_memory_search", map[string]any{
+		"project_id": "test-project",
+		"query":      "HandleFoo",
+		"limit":      5,
+	})
+	if !strings.Contains(resultText(found), "HandleFoo") {
+		t.Fatalf("promoted repo fact was not stored")
+	}
+}
+
+func TestPromoteLongAndRepoFactCompose(t *testing.T) {
+	srv, session := newCapSession(t)
+	ctx := context.Background()
+	longRepoFact := strings.Repeat("x", 500) + " foo.go contains HandleFoo() " + strings.Repeat("y", 400)
+	if len(longRepoFact) <= 800 {
+		longRepoFact = strings.Repeat("x", 400) + " foo.go contains HandleFoo() " + strings.Repeat("y", 500)
+	}
+	id, err := srv.store.Create(ctx, "abc123", memory.Memory{
+		Category: "fact", Content: longRepoFact, Source: "mcp", Importance: 0.7, Tags: []string{},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	res := callTool(t, session, "ghost_memory_promote", map[string]any{
+		"project_id": "test-project",
+		"memory_id":  id,
+	})
+	resp := resultText(res)
+	if !strings.Contains(resp, "promoted to global scope") {
+		t.Fatalf("promote response unexpected: %q", resp)
+	}
+	if !strings.Contains(resp, "ADVISORY") {
+		t.Fatalf("composed advisories must appear: %q", resp)
+	}
+	if !strings.Contains(resp, "bytes") {
+		t.Fatalf("long advisory must appear in composition: %q", resp)
+	}
+	if !strings.Contains(resp, "repository fact") {
+		t.Fatalf("repo fact advisory must appear in composition: %q", resp)
+	}
+	found := callTool(t, session, "ghost_memory_search", map[string]any{
+		"project_id": "test-project",
+		"query":      "HandleFoo",
+		"limit":      5,
+	})
+	if !strings.Contains(resultText(found), "HandleFoo") {
+		t.Fatalf("composed long repo fact on promote was not stored")
+	}
+}
+
+// #1832 SHOULD-FIX 5: clamped path — a very large input is stored clamped at
+// MaxContentLen (8000) and the advisory still fires with the clamped size,
+// and truncationWarning composes after the advisories.
+func TestLongMemoryClampedStillAdvisesAndWarns(t *testing.T) {
+	srv, session := newCapSession(t)
+	// 9000 bytes → clamped to 8000, marker appended; advisory on stored length
+	long := strings.Repeat("x", 9000)
+	res := callTool(t, session, "ghost_memory_save", map[string]any{
+		"project_id": "test-project",
+		"content":    long,
+		"category":   "fact",
+	})
+	resp := resultText(res)
+	if !strings.Contains(resp, "Memory saved (id: ") {
+		t.Fatalf("save response reports no stored id: %q", resp)
+	}
+	if !strings.Contains(resp, "ADVISORY") {
+		t.Fatalf("clamped long save must still advise: %q", resp)
+	}
+	if !strings.Contains(resp, "8000 bytes") {
+		t.Fatalf("clamped advisory must state 8000 bytes: %q", resp)
+	}
+	if !strings.Contains(resp, "WARNING") || !strings.Contains(resp, "truncated at 8000 bytes") {
+		t.Fatalf("clamped save must include truncation warning: %q", resp)
+	}
+	// Advisory must appear before truncation warning (long, repoFact, global, then truncationWarning)
+	advIdx := strings.Index(resp, "ADVISORY")
+	warnIdx := strings.Index(resp, "WARNING")
+	if advIdx == -1 || warnIdx == -1 || advIdx > warnIdx {
+		t.Fatalf("advisory must precede truncation warning: ADVISORY at %d, WARNING at %d in %q", advIdx, warnIdx, resp)
+	}
+	// Stored row is clamped, not original
+	id, ok := extractID(resp)
+	if !ok {
+		t.Fatalf("no id in response: %q", resp)
+	}
+	mems, err := srv.store.GetByIDs(context.Background(), []string{id})
+	if err != nil || len(mems) != 1 {
+		t.Fatalf("GetByIDs(%q): err=%v n=%d", id, err, len(mems))
+	}
+	if !strings.Contains(mems[0].Content, "truncated at 8000 bytes") {
+		t.Fatalf("stored content must carry truncation marker: %q", mems[0].Content)
+	}
+	if len(mems[0].Content) <= 8000 {
+		// marker adds bytes beyond 8000, so total >8000 but prefix is 8000
+	} else if !strings.HasPrefix(mems[0].Content, strings.Repeat("x", 8000)[:100]) {
+		t.Fatalf("stored content prefix unexpected")
+	}
+}

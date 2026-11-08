@@ -523,6 +523,7 @@ func TestEveryVerifiedAtMentionIsClassified(t *testing.T) {
 		"store.go:SearchFTS":                   true,
 		"store.go:SearchFTSAll":                true,
 		"vector.go:GetByIDs":                   true,
+		"pinned_overflow.go:PinnedOverflow":    true,
 		// Normalizes a portable record's triple for the import predicate and for
 		// ImportMemory's bind. A reader of the record: no SQL, no write; the write
 		// is ImportMemory's, which is classified on its own.

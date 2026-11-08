@@ -42,6 +42,22 @@ func TestWriteFileAtomicAppliesUmaskOnCreate(t *testing.T) {
 	defer syscall.Umask(restore)
 
 	dir := t.TempDir()
+	// A default POSIX ACL on TMPDIR overrides the umask: the kernel builds the
+	// new file's mode from the ACL rather than from perm &^ umask, so a probe
+	// file created at 0o666 under umask 0o077 must be 0o600 when the umask
+	// applies. A subdirectory made with os.Mkdir inherits the default ACL, so
+	// creating one does not help; detect it with a probe and skip instead.
+	probe := filepath.Join(dir, ".umask-probe")
+	if err := os.WriteFile(probe, []byte("probe"), 0o666); err != nil {
+		t.Fatalf("probe write: %v", err)
+	}
+	if info, err := os.Stat(probe); err != nil {
+		t.Fatalf("probe stat: %v", err)
+	} else if mode := info.Mode().Perm(); mode != 0o600 {
+		t.Skipf("skipping: default ACL on TMPDIR prevents umask from applying (probe mode %04o, want 0600)", mode)
+	}
+	_ = os.Remove(probe)
+
 	path := filepath.Join(dir, "config.toml")
 	if err := writeFileAtomic(path, []byte("a = 1\n"), 0644); err != nil {
 		t.Fatalf("writeFileAtomic (create): %v", err)

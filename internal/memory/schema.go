@@ -180,6 +180,12 @@ CREATE INDEX IF NOT EXISTS idx_memories_project_cat ON memories(project_id, cate
 CREATE INDEX IF NOT EXISTS idx_memories_project_imp ON memories(project_id, importance DESC, created_at DESC, id);
 CREATE INDEX IF NOT EXISTS idx_memories_project_imp_updated ON memories(project_id, importance DESC, updated_at DESC, id);
 CREATE INDEX IF NOT EXISTS idx_memories_project_source ON memories(project_id, source);
+-- The bucket read's newest-instant lookup: MAX(created_at) over a bucket's
+-- project is one seek in this index rather than a walk of the project's rows in
+-- idx_memories_project_imp's importance-then-created_at order, where the age a
+-- row's decay was taken against is not the leading secondary column and the
+-- newest instant is not the last entry of a range SQLite can stop at.
+CREATE INDEX IF NOT EXISTS idx_memories_project_created ON memories(project_id, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS ghost_state (
     project_id          TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,

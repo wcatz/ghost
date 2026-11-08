@@ -44,11 +44,22 @@ jobs:
     # leaves opencode/big-pickle ninth, which costs nothing in CI since its
     # provider refuses CI calls anyway.
     #
-    # PAID_MODEL is deliberately one low-cost Go coding model, not a list and
-    # not Kimi: DeepSeek V4.1 Flash is the current opencode-go route, chosen
-    # after Muse Spark 1.3 Contributor hit the Go usage limit while the free
-    # tier refused every anonymous CI call. The secret is injected only around
-    # its invocation.
+    # PAID_MODELS is the ordered keyed fallback, tried one at a time until one
+    # produces a valid findings document. Each entry must be an opencode-go
+    # model and never Kimi. It is a list because a single paid model was a
+    # single point of failure twice. Muse Spark 1.3 Contributor hit the Go
+    # usage limit, and on 2026-11-08 DeepSeek V4.1 Flash failed with
+    # "Insufficient account funds". Every PR's review-gate then stayed red,
+    # because the anonymous free tier refused every CI call too.
+    #
+    # The order puts the contributor route first. It still answered while the
+    # account balance was empty, so it is tried even when the anonymous free
+    # path failed as an outage (see "free models are unreachable" below); it
+    # may still count against the Go usage window. The billed models after it
+    # are skipped in that case, to preserve the balance. Only the cheap tier
+    # is listed: the expensive Go models are left out on purpose. PAID_MODEL
+    # is the single-model form, and it is read only when PAID_MODELS is empty.
+    # The secret is injected only around these invocations.
     # Job scope, because shell variables do not survive between steps.
     env:
       MODELS: >-
@@ -61,6 +72,12 @@ jobs:
         opencode/space-bunny-free
         opencode/muse-spark-1.3-contributor-free
         opencode/big-pickle
+      # vars.REVIEWER_PAID_MODELS, when set, replaces the default order.
+      # An external model tracker can publish the keyed models that answered
+      # its last probe, so the order follows live health rather than this
+      # file. The entry check below still refuses any id
+      # that is not a non-Kimi opencode-go model, whatever the variable says.
+      PAID_MODELS: ${{ vars.REVIEWER_PAID_MODELS || 'opencode-go/iceman-contributor-free opencode-go/deepseek-v4.1-flash' }}
       PAID_MODEL: opencode-go/deepseek-v4.1-flash
     # Must stay above the bounded model-selection phase (15 min), the free
     # review phase (80 min), the paid fallback phase (25 min), and the
@@ -376,6 +393,12 @@ jobs:
           fi
           mv .base-scripts/.github/scripts "${RUNNER_TEMP}/base-scripts"
           rm -rf .base-scripts
+          # helper_accepts is defined identically in each run: step (separate shell).
+          helper_accepts() {
+            local script="$1"
+            local flag="$2"
+            python3 -I "$script" --help 2>/dev/null | grep -q -- "$flag"
+          }
           gh pr checkout "$PR_NUMBER"
           # gh pr checkout fetches at fetch-depth 1; the prior reviewed
           # commit is not present in a shallow clone, so the incremental
@@ -752,6 +775,11 @@ jobs:
             candidates=("${capped_candidates[@]}")
             notice "free candidate list capped at ${MAX_CANDIDATES} models to reserve retry and paid-fallback time"
           fi
+          helper_accepts() {
+            local script="$1"
+            local flag="$2"
+            python3 -I "$script" --help 2>/dev/null | grep -q -- "$flag"
+          }
           notice "review model candidates: ${#candidates[@]} (catalog free ids: $(wc -l < "$free_catalog"))"
           selected_model=
           probe_dir="$RUNNER_TEMP/reviewer-model-probe"
@@ -799,17 +827,28 @@ jobs:
               printf 'agent_fatal=true\n' >> "$GITHUB_OUTPUT"
               fail "ghost-reviewer agent did not register; refusing to select a model with the default (write-capable) tool set"
             fi
+            if [ "$probe_status" -eq 124 ]; then
+              reason="the model run timed out"
+            fi
             [ -n "$reason" ] || reason="probe exited ${probe_status} without a valid JSON event stream"
             printf '%s: %s\n' "$model" "$reason" >> "$probe_failure_file"
             # Whether the model acted is ONE tested rule, and it is read
             # from the TRUSTED copy of the scripts: the probe's event
             # stream AND the process's own stderr. A reason may
             # classify an outage only when the model produced nothing.
-            python3 -I "${RUNNER_TEMP}/base-scripts/model_acted.py" \
-              --events "$probe_out" --stderr "$probe_err" \
-              --marker "${RUNNER_TEMP}/model-acted.txt" >/dev/null 2>&1 \
+            acted_args=(
+              python3 -I "${RUNNER_TEMP}/base-scripts/model_acted.py"
+              --events "$probe_out" --stderr "$probe_err"
+              --marker "${RUNNER_TEMP}/model-acted.txt"
+            )
+            if helper_accepts "${RUNNER_TEMP}/base-scripts/model_acted.py" '--exit-status'; then
+              acted_args+=(--exit-status "$probe_status")
+            fi
+            "${acted_args[@]}" 2> "${RUNNER_TEMP}/model-acted-probe.txt" >/dev/null \
               || { printf 'unknown\n' >> "${RUNNER_TEMP}/model-acted.txt"; \
                    echo "::warning::the review model rule could not be consulted"; }
+            sed -n 's/^model-acted: /::notice::review model evidence: /p' \
+              "${RUNNER_TEMP}/model-acted-probe.txt" | sed 's/%/%25/g' || true
             # The reason is provider output and it is not printed: the
             # classification reads it, and the log says which model was
             # skipped.
@@ -962,19 +1001,41 @@ jobs:
               # stream AND the process's own stderr. A reason may
               # classify an outage only when the model produced
               # nothing: a stream that does not parse counts as acted,
-              # so the rule fails closed.
-              python3 -I "${RUNNER_TEMP}/base-scripts/model_acted.py" \
-                --events model-reply.txt --stderr model-stderr.txt \
-                --marker "${RUNNER_TEMP}/model-acted.txt" >/dev/null 2>&1 \
+              # so the rule fails closed. The exit status tells the
+              # rule whether the run's own timeout killed it (124).
+              helper_accepts() {
+                local script="$1"
+                local flag="$2"
+                python3 -I "$script" --help 2>/dev/null | grep -q -- "$flag"
+              }
+              free_acted_args=(
+                python3 -I "${RUNNER_TEMP}/base-scripts/model_acted.py"
+                --events model-reply.txt --stderr model-stderr.txt
+                --marker "${RUNNER_TEMP}/model-acted.txt"
+              )
+              if helper_accepts "${RUNNER_TEMP}/base-scripts/model_acted.py" '--exit-status'; then
+                free_acted_args+=(--exit-status "${free_status}")
+              fi
+              "${free_acted_args[@]}" 2> "${RUNNER_TEMP}/model-acted-free.txt" >/dev/null \
                 || { printf 'unknown\n' >> "${RUNNER_TEMP}/model-acted.txt"; \
                      echo "::warning::the review model rule could not be consulted"; }
+              sed -n 's/^model-acted: /::notice::review model evidence: /p' \
+                "${RUNNER_TEMP}/model-acted-free.txt" | sed 's/%/%25/g' || true
 
-              free_failure_reason=$(
-                {
-                  jq -r 'select(.type == "error") | (.error.data.message // .error.message // .error.name // tostring)' model-reply.txt 2>/dev/null || true
-                  cat model-stderr.txt 2>/dev/null || true
-                } | tr -d '\r' | grep -v '^[[:space:]]*$' | head -c 400 | tr '\n' ' ' || true
-              )
+              # When the run's own timeout killed it, the reason is the
+              # clock, not the provider. The workflow writes a FIXED
+              # reason for this, because the shutdown shape opencode
+              # leaves behind is not provider output.
+              if [ "${free_status}" -eq 124 ]; then
+                free_failure_reason="the model run timed out"
+              else
+                free_failure_reason=$(
+                  {
+                    jq -r 'select(.type == "error") | (.error.data.message // .error.message // .error.name // tostring)' model-reply.txt 2>/dev/null || true
+                    cat model-stderr.txt 2>/dev/null || true
+                  } | tr -d '\r' | grep -v '^[[:space:]]*$' | head -c 400 | tr '\n' ' ' || true
+                )
+              fi
               # The MODEL's own document is kept apart from the reason.
               # The validation error quotes values the model chose, so a
               # reason that carried it would be text a model wrote - and a
@@ -1074,11 +1135,28 @@ jobs:
             exit 0
           fi
           REVIEW_PROMPT="$(cat "${RUNNER_TEMP}/reviewer-prompt.txt")"
-          if [[ "${PAID_MODEL:-}" != opencode-go/* || "${PAID_MODEL:-}" == *kimi* ]]; then
+          # The keyed route: PAID_MODELS in order, or PAID_MODEL alone when
+          # the list is empty. Every entry must be a non-Kimi opencode-go id.
+          # One bad entry refuses the whole fallback rather than skipping it,
+          # because a typo here should be noticed, not quietly routed around.
+          declare -a paid_models=()
+          if [ -n "${PAID_MODELS:-}" ]; then
+            read -r -a paid_models <<< "${PAID_MODELS}"
+          elif [ -n "${PAID_MODEL:-}" ]; then
+            paid_models=("${PAID_MODEL}")
+          fi
+          if [ "${#paid_models[@]}" -eq 0 ]; then
             printf 'paid_status=failed\n' >> "$GITHUB_OUTPUT"
             echo "::error::paid fallback must be a non-Kimi opencode-go model — refusing the fallback"
             exit 0
           fi
+          for candidate in "${paid_models[@]}"; do
+            if [[ "$candidate" != opencode-go/* || "$candidate" == *kimi* ]]; then
+              printf 'paid_status=failed\n' >> "$GITHUB_OUTPUT"
+              echo "::error::paid fallback must be a non-Kimi opencode-go model — refusing the fallback"
+              exit 0
+            fi
+          done
 
           failure_file="${RUNNER_TEMP}/free-review-failure.txt"
           if [ -s "$failure_file" ]; then
@@ -1088,62 +1166,164 @@ jobs:
           else
             free_failure_reason="no free candidate produced a usable reply"
           fi
+
+          # During a free-model outage the free candidates all failed on a
+          # rate limit or a dropped connection. Spending the paid Go quota
+          # on every such head drains it on retries of the same outage, so
+          # the BILLED fallback models are not invoked then. Only the
+          # zero-cost keyed entries run, and if none answers the run stays
+          # pending and the scheduled retry picks it up when the free tier
+          # recovers.
+          free_is_outage=0
+          if [ -s "$failure_file" ]; then
+            if python3 -I - "$RUNNER_TEMP/base-scripts" "$failure_file" <<'PY' >/dev/null 2>&1
+          import sys
+
+          sys.path.insert(0, sys.argv[1])
+          from review_outcome import parse_failures, is_outage
+
+          with open(sys.argv[2], encoding="utf-8", errors="replace") as handle:
+              failures = parse_failures(handle.read())
+          raise SystemExit(0 if failures and all(is_outage(reason)
+                                          for _model, reason in failures) else 1)
+          PY
+            then
+              free_is_outage=1
+            fi
+          fi
+          # On a free-tier outage only the zero-cost (*-free) keyed entries
+          # run. They spend no account funds, so the reason for skipping the
+          # fallback does not apply to them. The billed entries are still
+          # skipped then, to preserve the Go quota.
+          declare -a run_models=()
+          for candidate in "${paid_models[@]}"; do
+            if [ "$free_is_outage" = 1 ] && [[ "$candidate" != *-free ]]; then
+              continue
+            fi
+            run_models+=("$candidate")
+          done
+          if [ "${#run_models[@]}" -eq 0 ]; then
+            printf 'paid_status=failed\n' >> "$GITHUB_OUTPUT"
+            echo "::notice::free models are unreachable; skipping the paid fallback to preserve the Go quota"
+            exit 0
+          fi
           # The reason is not printed: it is provider output, and the log
           # says which path failed and which model is taking over.
-          echo "::warning::the free review path failed: $(workflow_escape "$free_failure_reason"); using paid fallback ${PAID_MODEL}"
+          echo "::warning::the free review path failed: $(workflow_escape "$free_failure_reason"); using paid fallback ${run_models[*]}"
 
-          : > model-reply.txt
-          : > model-stderr.txt
-          : > model-validation.err
-          paid_status=0
           # Half the free slope: the paid route is a single fast model, but
           # it still has to read the whole diff. 9 s/KB gives the 68 KB case
-          # a 2x budget over the 600s it died at, capped at 1200s.
+          # a 2x budget over the 600s it died at, capped at 1200s. The
+          # attempts share one deadline (23 min) that sits under the step's
+          # 25-minute ceiling, so a slow first model cannot get the step
+          # killed before a later model has run or the failure is recorded.
           diff_bytes=$(wc -c < pr.diff 2>/dev/null || echo 0)
           diff_kb=$(( (diff_bytes + 1023) / 1024 ))
           paid_timeout=$(( 600 + diff_kb * 9 ))
           if [ "$paid_timeout" -gt 1200 ]; then
             paid_timeout=1200
           fi
-          OPENCODE_DISABLE_PROJECT_CONFIG=1 \
-            timeout --foreground "${paid_timeout}s" opencode run --standalone \
-            --agent ghost-reviewer -m "$PAID_MODEL" --format json \
-            "$REVIEW_PROMPT" > model-reply.txt 2> model-stderr.txt || paid_status=$?
-
-          valid_reply=0
-          if [ "$paid_status" -eq 0 ] && [ -s model-reply.txt ] \
-             && jq -s -e 'length > 0 and all(.[]; .type != "error")' \
-                model-reply.txt >/dev/null 2>&1; then
-            if validate_reply model-reply.txt 2> model-validation.err; then
-              valid_reply=1
-            fi
-          fi
-          if [ "$valid_reply" -eq 1 ]; then
-            printf 'paid_status=success\n' >> "$GITHUB_OUTPUT"
-            echo "review produced by paid fallback ${PAID_MODEL}"
-            echo "model reply: $(wc -c < model-reply.txt) bytes"
-            jq -r '"\(.type)|\(.part.type // "-")|\(.part.tool // "-")"' model-reply.txt 2>/dev/null \
-              | sort | uniq -c | sed 's/^/  /' || true
-            exit 0
-          fi
+          paid_deadline=$(( $(date +%s) + 1380 ))
+          : > model-reply.txt
+          : > model-stderr.txt
+          : > model-validation.err
 
           # Whether the model acted is ONE tested rule, and it is read
           # from the TRUSTED copy of the scripts: the event stream AND
           # the process's own stderr. A reason may classify an outage
           # only when the model produced nothing: a stream that does
           # not parse counts as acted, so the rule fails closed.
-          python3 -I "${RUNNER_TEMP}/base-scripts/model_acted.py" \
-            --events model-reply.txt --stderr model-stderr.txt \
-            --marker "${RUNNER_TEMP}/model-acted.txt" >/dev/null 2>&1 \
-            || { printf 'unknown\n' >> "${RUNNER_TEMP}/model-acted.txt"; \
-                 echo "::warning::the review model rule could not be consulted"; }
+          helper_accepts() {
+            local script="$1"
+            local flag="$2"
+            python3 -I "$script" --help 2>/dev/null | grep -q -- "$flag"
+          }
+          # Every failed attempt is assessed, not only the last one: the
+          # marker and the validation file only ever GAIN evidence, so a
+          # model earlier in the list that acted or answered with an
+          # unusable document keeps the run a failure even when a later
+          # model then fails as an outage. A model that answered or acted
+          # is never an outage, whichever attempt it was.
+          assess_paid_attempt() {
+            acted_args=(
+              python3 -I "${RUNNER_TEMP}/base-scripts/model_acted.py"
+              --events model-reply.txt --stderr model-stderr.txt
+              --marker "${RUNNER_TEMP}/model-acted.txt"
+            )
+            if helper_accepts "${RUNNER_TEMP}/base-scripts/model_acted.py" '--exit-status'; then
+              acted_args+=(--exit-status "${paid_status}")
+            fi
+            "${acted_args[@]}" 2> "${RUNNER_TEMP}/model-acted-paid.txt" >/dev/null \
+              || { printf 'unknown\n' >> "${RUNNER_TEMP}/model-acted.txt"; \
+                   echo "::warning::the review model rule could not be consulted"; }
+            sed -n 's/^model-acted: /::notice::review model evidence: /p' \
+              "${RUNNER_TEMP}/model-acted-paid.txt" | sed 's/%/%25/g' || true
+            # The classification reads the validation file only as the
+            # sign that a model ANSWERED, so it accumulates too.
+            if [ -s model-validation.err ]; then
+              cat model-validation.err >> "${RUNNER_TEMP}/paid-review-validation.txt"
+            fi
+          }
+          PAID_MODEL="${run_models[0]}"
+          paid_status=1
+          for PAID_MODEL in "${run_models[@]}"; do
+            remaining=$(( paid_deadline - $(date +%s) ))
+            if [ "$remaining" -le 30 ]; then
+              echo "::warning::paid fallback budget spent before ${PAID_MODEL}"
+              break
+            fi
+            attempt_timeout=$paid_timeout
+            if [ "$attempt_timeout" -gt "$remaining" ]; then
+              attempt_timeout=$remaining
+            fi
+            : > model-reply.txt
+            : > model-stderr.txt
+            : > model-validation.err
+            paid_status=0
+            OPENCODE_DISABLE_PROJECT_CONFIG=1 \
+              timeout --foreground "${attempt_timeout}s" opencode run --standalone \
+              --agent ghost-reviewer -m "$PAID_MODEL" --format json \
+              "$REVIEW_PROMPT" > model-reply.txt 2> model-stderr.txt || paid_status=$?
+            valid_reply=0
+            if [ "$paid_status" -eq 0 ] && [ -s model-reply.txt ] \
+               && jq -s -e 'length > 0 and all(.[]; .type != "error")' \
+                  model-reply.txt >/dev/null 2>&1; then
+              if validate_reply model-reply.txt 2> model-validation.err; then
+                valid_reply=1
+              fi
+            fi
+            if [ "$valid_reply" -eq 1 ]; then
+              printf 'paid_timed_out=false\n' >> "$GITHUB_OUTPUT"
+              printf 'paid_status=success\n' >> "$GITHUB_OUTPUT"
+              echo "review produced by paid fallback ${PAID_MODEL}"
+              echo "model reply: $(wc -c < model-reply.txt) bytes"
+              jq -r '"\(.type)|\(.part.type // "-")|\(.part.tool // "-")"' model-reply.txt 2>/dev/null \
+                | sort | uniq -c | sed 's/^/  /' || true
+              exit 0
+            fi
+            assess_paid_attempt
+            # An agent that did not register is fatal for every model, so
+            # stop here and let the shared handling below report it.
+            if grep -Fqi 'agent not found' model-reply.txt model-stderr.txt 2>/dev/null; then
+              break
+            fi
+            echo "::warning::paid fallback ${PAID_MODEL} did not produce a valid review; trying the next keyed model"
+          done
+          # The reason and the timeout below describe the LAST attempt; the
+          # acted marker and the validation file carry every attempt's
+          # evidence (assess_paid_attempt above).
+          printf 'paid_timed_out=%s\n' "$([ "$paid_status" -eq 124 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
 
-          reason=$(
-            {
-              jq -r 'select(.type == "error") | (.error.data.message // .error.message // .error.name // tostring)' model-reply.txt 2>/dev/null || true
-              cat model-stderr.txt 2>/dev/null || true
-            } | tr -d '\r' | grep -v '^[[:space:]]*$' | head -c 400 | tr '\n' ' ' || true
-          )
+          if [ "${paid_status}" -eq 124 ]; then
+            reason="the model run timed out"
+          else
+            reason=$(
+              {
+                jq -r 'select(.type == "error") | (.error.data.message // .error.message // .error.name // tostring)' model-reply.txt 2>/dev/null || true
+                cat model-stderr.txt 2>/dev/null || true
+              } | tr -d '\r' | grep -v '^[[:space:]]*$' | head -c 400 | tr '\n' ' ' || true
+            )
+          fi
           # The reason is the PROVIDER's words only: the opencode
           # process's own error events and its stderr. The model's own
           # document is kept apart, because a reason that quoted it would
@@ -1152,9 +1332,6 @@ jobs:
           # review reads as an outage. The classification reads the
           # validation file only as the sign that a model ANSWERED.
           printf '%s\n' "$reason" > "${RUNNER_TEMP}/paid-review-failure.txt"
-          if [ -s model-validation.err ]; then
-            cp model-validation.err "${RUNNER_TEMP}/paid-review-validation.txt"
-          fi
           if printf '%s' "$reason" | grep -Fqi 'agent not found'; then
             printf 'paid_status=agent_fatal\npaid_agent_fatal=true\n' >> "$GITHUB_OUTPUT"
             echo "::error::ghost-reviewer agent did not register — refusing to review with the default (write-capable) tool set"
@@ -1176,8 +1353,15 @@ jobs:
           SELECT_AGENT_FATAL: ${{ steps.select_model.outputs.agent_fatal }}
           FREE_AGENT_FATAL: ${{ steps.free_review.outputs.agent_fatal }}
           PAID_AGENT_FATAL: ${{ steps.paid_review.outputs.paid_agent_fatal }}
+          PAID_TIMED_OUT: ${{ steps.paid_review.outputs.paid_timed_out }}
         run: |
           set +e
+          # helper_accepts is defined identically in each run: step (separate shell).
+          helper_accepts() {
+            local script="$1"
+            local flag="$2"
+            python3 -I "$script" --help 2>/dev/null | grep -q -- "$flag"
+          }
           # WHY THE DECISION IS NOT IN THIS SHELL: the rule is what the
           # review-gate is allowed to do with a run that produced no
           # result, and a rule that lives only in a workflow cannot be
@@ -1211,18 +1395,24 @@ jobs:
             *unknown*) rule_unknown=1 ;;
           esac
           if [ -f "${RUNNER_TEMP}/base-scripts/review_outcome.py" ]; then
-            report="$(python3 -I "${RUNNER_TEMP}/base-scripts/review_outcome.py" \
-              --free-status "${FREE_STATUS}" \
-              --paid-status "${PAID_STATUS}" \
-              --free-failures "${RUNNER_TEMP}/free-probe-failure.txt" \
-              --free-failures "${RUNNER_TEMP}/free-review-failure.txt" \
-              --paid-reason "${RUNNER_TEMP}/paid-review-failure.txt" \
-              --free-validation "${RUNNER_TEMP}/free-review-validation.txt" \
-              --paid-validation "${RUNNER_TEMP}/paid-review-validation.txt" \
-              --model-acted "${model_acted}" \
-              --select-agent-fatal "${SELECT_AGENT_FATAL}" \
-              --free-agent-fatal "${FREE_AGENT_FATAL}" \
-              --paid-agent-fatal "${PAID_AGENT_FATAL}" 2>/dev/null)"
+            outcome_args=(
+              python3 -I "${RUNNER_TEMP}/base-scripts/review_outcome.py"
+              --free-status "${FREE_STATUS}"
+              --paid-status "${PAID_STATUS}"
+              --free-failures "${RUNNER_TEMP}/free-probe-failure.txt"
+              --free-failures "${RUNNER_TEMP}/free-review-failure.txt"
+              --paid-reason "${RUNNER_TEMP}/paid-review-failure.txt"
+              --free-validation "${RUNNER_TEMP}/free-review-validation.txt"
+              --paid-validation "${RUNNER_TEMP}/paid-review-validation.txt"
+              --model-acted "${model_acted}"
+              --select-agent-fatal "${SELECT_AGENT_FATAL}"
+              --free-agent-fatal "${FREE_AGENT_FATAL}"
+              --paid-agent-fatal "${PAID_AGENT_FATAL}"
+            )
+            if helper_accepts "${RUNNER_TEMP}/base-scripts/review_outcome.py" '--paid-timed-out'; then
+              outcome_args+=(--paid-timed-out "${PAID_TIMED_OUT}")
+            fi
+            report="$("${outcome_args[@]}" 2>/dev/null)"
             outcome="$(printf '%s' "$report" | jq -r '.outcome // empty' 2>/dev/null)"
             reported="$(printf '%s' "$report" | jq -r '.cause // empty' 2>/dev/null)"
             case "${outcome}" in
