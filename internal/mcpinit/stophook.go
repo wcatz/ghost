@@ -666,6 +666,11 @@ func spawnLifecycleIfConfigured(cwd, source string, signals func() *audit.Signal
 	if projectID == "" || projectName == "" {
 		return
 	}
+	// _global has no unattended fold, so a home-directory session routed to it
+	// through routing.default_project must not spawn a lifecycle run for it.
+	if projectID == memory.GlobalProjectID {
+		return
+	}
 
 	// The project id is interpolated into a filename inside dataDir, and ids
 	// are not constrained by the store: an MCP client may pass an arbitrary
@@ -836,7 +841,7 @@ func recordReflectSkipMarker(cwd string, stderr io.Writer) {
 	defer db.Close() //nolint:errcheck
 	store := memory.NewStore(db, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	projectID, _ := resolveSessionProject(context.Background(), store, cwd)
-	if projectID == "" {
+	if projectID == "" || projectID == memory.GlobalProjectID {
 		return
 	}
 	if err := WriteLifecycleFailure(projectID, []string{"reflect"}, NoLLMBackendError); err != nil && stderr != nil {
