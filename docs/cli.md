@@ -201,9 +201,15 @@ has no checkout path so no unattended `ghost lifecycle` run ever reaches it, yet
 its rows are injected into every session. The count is reflection-written only because `ghost maintenance consolidate-global` folds only reflection-written, consolidatable rows; other consolidatable `_global` rows (for example `ghost_save_global` rows) are listed under **Near duplicates:** and consolidated by `ghost reflect _global --apply`. The line prints ` - _global: %d memories, 0 reflection-written consolidatable` when there are no reflection-written consolidatable rows; ` - _global: %d memories, %d reflection-written consolidatable — nothing to fold` when there are reflection-written consolidatable rows but no clusters; otherwise ` - _global: %d memories, %d reflection-written consolidatable, %d near-duplicate cluster(s) covering %d rows` and, when at
 least one cluster exists, a `!` line names `ghost maintenance
 consolidate-global --apply` as the repair. A read that fails prints `! _global:
-could not be read: …` rather than nothing. The same line and the same warning
-appear in `ghost_health`, so a terminal and an agent reading one store are told
-the same thing about it.
+could not be read: …` rather than nothing. When live near-duplicate pairs
+exist among any consolidatable `_global` rows, a follow-up `! Near duplicates:
+%d live near-duplicate pair(s) in _global: … — run `ghost reflect _global
+--apply` to consolidate` line lists up to five sampled pairs by id and names
+that command as the repair; a scan that reached the row bound adds a `!` line
+naming the bound, and a failed pair read prints `! Near duplicates: _global
+could not be read: …` rather than nothing. No such line prints when no live
+pair exists. The same line and the same warning appear in `ghost_health`, so
+a terminal and an agent reading one store are told the same thing about it.
 
 Status also reports, per project, the share of live rows reflect cannot consolidate and why:
 
