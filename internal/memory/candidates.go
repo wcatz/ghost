@@ -812,17 +812,13 @@ func (s *Store) Candidates(ctx context.Context, req CandidateRequest) (*Candidat
 	// evidence counts do, so the assembler can demote a memory the audit has
 	// contradicted repeatedly without a second read. It is read per project,
 	// because UsefulnessByMemory is project-scoped; a row whose project has no
-	// negative evidence simply carries the zero value.
+	// negative evidence simply carries the zero value. Only the memory ids this
+	// window actually carries are read: the assembler renders only those, so
+	// evidence about any other memory is work whose result nothing consumes
+	// (#1920).
 	usefulness := map[string]UsefulnessEvidence{}
-	projects := map[string]struct{}{}
-	for i := range rows {
-		projects[rows[i].ProjectID] = struct{}{}
-	}
-	for proj := range projects {
-		if strings.TrimSpace(proj) == "" {
-			continue
-		}
-		ev, uErr := s.usefulnessByMemory(ctx, tx, proj)
+	for proj, ids := range usefulnessIDsByProject(rows) {
+		ev, uErr := s.usefulnessByMemoryIDs(ctx, tx, proj, ids)
 		if uErr != nil {
 			if isMissingTable(uErr) {
 				continue
