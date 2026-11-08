@@ -136,6 +136,17 @@ def _fake_opencode(folder):
             "    exit 1\n"
             "    ;;\n"
             "  run)\n"
+            "    if [ -n \"${FAKE_OPENCODE_ARGV_LOG:-}\" ]; then\n"
+            "      echo \"$@\" >> \"$FAKE_OPENCODE_ARGV_LOG\"\n"
+            "    fi\n"
+            "    if [ -n \"${FAKE_OPENCODE_OK_MODEL:-}\" ]; then\n"
+            "      case \" $* \" in\n"
+            "        *\" -m $FAKE_OPENCODE_OK_MODEL \"*)\n"
+            "          cat \"$FAKE_OPENCODE_OK_STDOUT\"\n"
+            "          exit 0\n"
+            "          ;;\n"
+            "      esac\n"
+            "    fi\n"
             "    if [ -n \"${FAKE_OPENCODE_STDOUT:-}\" ]; then\n"
             "      cat \"$FAKE_OPENCODE_STDOUT\"\n"
             "    fi\n"
@@ -1288,6 +1299,7 @@ print('true')
 sys.exit(0)
 """)
             os.chmod(helper, 0o755)
+            _fake_opencode(folder)
             _write(os.path.join(runner, "free-review-failure.txt"),
                    "opencode/ling-3.1-flash-free: some other error\n")
             _write(os.path.join(runner, "reviewer-prompt.txt"), "review\n")
@@ -1334,6 +1346,173 @@ sys.exit(0)
         first = re.sub(r'\s+', ' ', blocks[0])
         for b in blocks[1:]:
             self.assertEqual(re.sub(r'\s+', ' ', b), first)
+
+
+# A findings document the trusted validator accepts, as the event
+# stream a keyed model writes it: one text part holding the JSON.
+VALID_PAID_REPLY = json.dumps({
+    "type": "text",
+    "part": {"type": "text", "text": json.dumps({
+        "verdict": "clean", "summary": "no findings", "findings": []})},
+})
+
+
+class TestThePaidModelList(unittest.TestCase):
+    """PAID_MODELS: the keyed fallback tries an ordered list.
+
+    A single keyed model was a single point of failure twice (a Go usage
+    limit, then "Insufficient account funds"), and every PR's review-gate
+    stayed red until it was edited by hand.
+    """
+
+    def run_paid(self, folder, env, free_failure=""):
+        runner = os.path.join(folder, "runner-temp")
+        scripts = os.path.join(runner, "base-scripts")
+        os.makedirs(scripts)
+        for name in ("review_outcome.py", "review_findings.py", "model_acted.py"):
+            shutil.copyfile(script_path(name), os.path.join(scripts, name))
+        if free_failure:
+            _write(os.path.join(runner, "free-review-failure.txt"), free_failure)
+        _write(os.path.join(runner, "reviewer-prompt.txt"), "review\n")
+        _fake_opencode(folder)
+        failing = os.path.join(folder, "opencode.out")
+        _write(failing, PROVIDER_ERROR + "\n")
+        ok = os.path.join(folder, "opencode-ok.out")
+        _write(ok, VALID_PAID_REPLY + "\n")
+        _write(os.path.join(folder, "pr.diff"), "diff --git a/x b/x\n")
+        output = os.path.join(folder, "github-output")
+        _write(output, "")
+        argv = os.path.join(folder, "opencode-argv.log")
+        step = os.path.join(folder, "paid.sh")
+        _write(step, step_shell("Review with opencode (paid fallback)"))
+        environment = dict(os.environ)
+        environment.pop("PAID_MODELS", None)
+        environment.pop("PAID_MODEL", None)
+        environment.update({
+            "HOME": folder,
+            "PATH": folder + os.pathsep + environment.get("PATH", ""),
+            "RUNNER_TEMP": runner,
+            "GITHUB_OUTPUT": output,
+            "OPENCODE_API_KEY": "test",
+            "SELECT_MODEL_OUTCOME": "failure",
+            "FAKE_OPENCODE_STDOUT": failing,
+            "FAKE_OPENCODE_STATUS": "1",
+            "FAKE_OPENCODE_OK_STDOUT": ok,
+            "FAKE_OPENCODE_ARGV_LOG": argv,
+            "GITHUB_WORKSPACE": folder,
+            "CI": "true",
+        })
+        environment.update(env)
+        old = os.getcwd()
+        try:
+            os.chdir(folder)
+            result = subprocess.run(["bash", step], env=environment,
+                                    capture_output=True, text=True, check=False)
+        finally:
+            os.chdir(old)
+        with open(output, encoding="utf-8") as handle:
+            out = handle.read()
+        tried = []
+        if os.path.exists(argv):
+            with open(argv, encoding="utf-8") as handle:
+                for line in handle:
+                    words = line.split()
+                    if "-m" in words:
+                        tried.append(words[words.index("-m") + 1])
+        return result, out, tried
+
+    def test_a_later_model_answers_when_the_first_fails(self):
+        with tempfile.TemporaryDirectory() as folder:
+            result, out, tried = self.run_paid(folder, {
+                "PAID_MODELS": "opencode-go/a-free opencode-go/b",
+                "FAKE_OPENCODE_OK_MODEL": "opencode-go/b",
+            })
+            self.assertEqual(tried, ["opencode-go/a-free", "opencode-go/b"])
+            self.assertIn("paid_status=success", out)
+            self.assertIn("review produced by paid fallback opencode-go/b", result.stdout)
+
+    def test_the_first_model_that_answers_ends_the_list(self):
+        with tempfile.TemporaryDirectory() as folder:
+            result, out, tried = self.run_paid(folder, {
+                "PAID_MODELS": "opencode-go/a-free opencode-go/b",
+                "FAKE_OPENCODE_OK_MODEL": "opencode-go/a-free",
+            })
+            self.assertEqual(tried, ["opencode-go/a-free"])
+            self.assertIn("paid_status=success", out)
+
+    def test_every_model_failing_is_one_failure(self):
+        with tempfile.TemporaryDirectory() as folder:
+            result, out, tried = self.run_paid(folder, {
+                "PAID_MODELS": "opencode-go/a-free opencode-go/b",
+            })
+            self.assertEqual(tried, ["opencode-go/a-free", "opencode-go/b"])
+            self.assertIn("paid_status=failed", out)
+            self.assertNotIn("paid_status=success", out)
+            self.assertIn("paid fallback opencode-go/b failed", result.stdout)
+
+    def test_an_earlier_answer_is_kept_when_a_later_model_is_an_outage(self):
+        # The first model ANSWERED with an unusable document, the second
+        # failed as a provider outage. Evidence from the first must survive
+        # the second attempt, or the run would read as an outage and the
+        # gate would go pending instead of failing.
+        with tempfile.TemporaryDirectory() as folder:
+            unusable = os.path.join(folder, "opencode-unusable.out")
+            _write(unusable, json.dumps({"type": "text", "part": {
+                "type": "text", "text": "not a findings document"}}) + "\n")
+            result, out, tried = self.run_paid(folder, {
+                "PAID_MODELS": "opencode-go/a-free opencode-go/b",
+                "FAKE_OPENCODE_OK_MODEL": "opencode-go/a-free",
+                "FAKE_OPENCODE_OK_STDOUT": unusable,
+            })
+            self.assertEqual(tried, ["opencode-go/a-free", "opencode-go/b"])
+            self.assertIn("paid_status=failed", out)
+            runner = os.path.join(folder, "runner-temp")
+            evidence = ""
+            for name in ("model-acted.txt", "paid-review-validation.txt"):
+                path = os.path.join(runner, name)
+                if os.path.exists(path):
+                    evidence += _read(path)
+            self.assertTrue(evidence.strip(),
+                            "the first model's answer left no acted or validation evidence")
+
+    def test_a_free_outage_runs_only_the_zero_cost_entries(self):
+        with tempfile.TemporaryDirectory() as folder:
+            result, out, tried = self.run_paid(folder, {
+                "PAID_MODELS": "opencode-go/a-free opencode-go/b",
+                "FAKE_OPENCODE_OK_MODEL": "opencode-go/a-free",
+            }, free_failure="opencode/x-free: rate limit exceeded\n")
+            self.assertEqual(tried, ["opencode-go/a-free"])
+            self.assertIn("paid_status=success", out)
+
+    def test_a_free_outage_with_no_zero_cost_entry_skips_the_fallback(self):
+        with tempfile.TemporaryDirectory() as folder:
+            result, out, tried = self.run_paid(folder, {
+                "PAID_MODELS": "opencode-go/b",
+            }, free_failure="opencode/x-free: rate limit exceeded\n")
+            self.assertEqual(tried, [])
+            self.assertIn("paid_status=failed", out)
+            self.assertIn("skipping the paid fallback to preserve the Go quota", result.stdout)
+
+    def test_a_kimi_or_foreign_entry_refuses_the_whole_list(self):
+        for bad in ("opencode-go/kimi-k3", "opencode/b-free", "openai/gpt"):
+            with self.subTest(entry=bad), tempfile.TemporaryDirectory() as folder:
+                result, out, tried = self.run_paid(folder, {
+                    "PAID_MODELS": "opencode-go/a-free " + bad,
+                    "FAKE_OPENCODE_OK_MODEL": "opencode-go/a-free",
+                })
+                self.assertEqual(tried, [])
+                self.assertIn("paid_status=failed", out)
+                self.assertIn("non-Kimi opencode-go", result.stdout)
+
+    def test_paid_model_alone_still_works_when_the_list_is_empty(self):
+        with tempfile.TemporaryDirectory() as folder:
+            result, out, tried = self.run_paid(folder, {
+                "PAID_MODELS": "",
+                "PAID_MODEL": "opencode-go/b",
+                "FAKE_OPENCODE_OK_MODEL": "opencode-go/b",
+            })
+            self.assertEqual(tried, ["opencode-go/b"])
+            self.assertIn("paid_status=success", out)
 
 
 if __name__ == "__main__":
