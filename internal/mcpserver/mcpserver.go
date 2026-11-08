@@ -3590,8 +3590,8 @@ func (s *Server) registerTools() {
 
 	// ghost_resolve_mark — stamp resolved_at on the memories a caller NAMES.
 	type markArgs struct {
-		ProjectID string   `json:"project_id" jsonschema:"Project name the memories belong to (required for ownership check)"`
-		MemoryIDs []string `json:"memory_ids" jsonschema:"IDs of the memories to mark resolved. Each may be a full memory id or an unambiguous 8-or-more-character prefix of one."`
+		ProjectID string `json:"project_id" jsonschema:"Project name the memories belong to (required for ownership check)"`
+		MemoryIDs any    `json:"memory_ids" jsonschema:"IDs of the memories to mark resolved. Each may be a full memory id or an unambiguous 8-or-more-character prefix of one."`
 	}
 
 	mcp.AddTool(s.mcp, &mcp.Tool{
@@ -3604,7 +3604,11 @@ func (s *Server) registerTools() {
 			OpenWorldHint:   boolPtr(false),
 		},
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args markArgs) (*mcp.CallToolResult, any, error) {
-		msg, err := s.markMemoriesResolved(ctx, req, args.ProjectID, args.MemoryIDs)
+		refs, err := optStringSlice(args.MemoryIDs, "memory_ids")
+		if err != nil {
+			return nil, nil, err
+		}
+		msg, err := s.markMemoriesResolved(ctx, req, args.ProjectID, refs)
 		if err != nil {
 			return nil, nil, err
 		}
