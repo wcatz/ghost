@@ -976,9 +976,10 @@ func globalConsolidatable(mems []memory.Memory) []memory.Memory {
 
 // reportOverdueMaintenanceStatus lists projects that have consolidatable
 // memories and have not had lifecycle maintenance within the configured
-// interval. It never fails the run — a read that cannot be made is a
-// missing diagnostic, not an unhealthy wiring — and it is reported as a `!`
-// line, the same shape reportHistoryGrowth uses.
+// interval, and projects whose id cannot key lifecycle bookkeeping and so
+// cannot be maintained unattended. It never fails the run — a read that
+// cannot be made is a missing diagnostic, not an unhealthy wiring — and it
+// is reported as a `!` line, the same shape reportHistoryGrowth uses.
 func reportOverdueMaintenanceStatus(w io.Writer, store *memory.Store, dataDir string) {
 	if store == nil || dataDir == "" {
 		return
