@@ -69,11 +69,11 @@ func (e *Exporter) Export(ctx context.Context, vaultDir, projectFilter string) e
 	for _, p := range selected {
 		mems, err := e.Store.GetAll(ctx, p.ID, limit)
 		if err != nil {
-			return fmt.Errorf("load memories for %s: %w", p.ID, err)
+			return fmt.Errorf("load memories for %s: %w", memory.RefusalArg("project_id", p.ID), err)
 		}
 		trunc := truncated(len(mems), limit)
 		if trunc {
-			e.Logger.Warn("obsidian export: list truncated at limit", "project", p.ID, "kind", "memories", "limit", limit)
+			e.Logger.Warn("obsidian export: list truncated at limit", "project", memory.RefusalArg("project_id", p.ID), "kind", "memories", "limit", limit)
 		}
 		// One project's memories share one Memories/ directory, so they are
 		// named together: see noteNames for why a built name is not enough.
@@ -99,7 +99,7 @@ func (e *Exporter) Export(ctx context.Context, vaultDir, projectFilter string) e
 		for _, m := range d.memories {
 			links, err := e.Store.GetLinks(ctx, m.ID)
 			if err != nil {
-				return fmt.Errorf("links for %s: %w", m.ID, err)
+				return fmt.Errorf("links for %s: %w", memory.RefusalArg("memory_id", m.ID), err)
 			}
 			path := filepath.Join(vaultDir, d.folder, "Memories", fileFor[m.ID])
 			keep[keepKey(vaultDir, path)] = struct{}{}
@@ -111,10 +111,10 @@ func (e *Exporter) Export(ctx context.Context, vaultDir, projectFilter string) e
 		}
 		decisions, err := e.Store.ListDecisions(ctx, d.p.ID, "", limit)
 		if err != nil {
-			return fmt.Errorf("decisions for %s: %w", d.p.ID, err)
+			return fmt.Errorf("decisions for %s: %w", memory.RefusalArg("project_id", d.p.ID), err)
 		}
 		if truncated(len(decisions), limit) {
-			e.Logger.Warn("obsidian export: list truncated at limit", "project", d.p.ID, "kind", "decisions", "limit", limit)
+			e.Logger.Warn("obsidian export: list truncated at limit", "project", memory.RefusalArg("project_id", d.p.ID), "kind", "decisions", "limit", limit)
 			d.trunc = true
 		}
 		decRecs := make([]noteRecord, 0, len(decisions))
@@ -133,10 +133,10 @@ func (e *Exporter) Export(ctx context.Context, vaultDir, projectFilter string) e
 		}
 		tasks, err := e.Store.ListTasks(ctx, d.p.ID, "", limit)
 		if err != nil {
-			return fmt.Errorf("tasks for %s: %w", d.p.ID, err)
+			return fmt.Errorf("tasks for %s: %w", memory.RefusalArg("project_id", d.p.ID), err)
 		}
 		if truncated(len(tasks), limit) {
-			e.Logger.Warn("obsidian export: list truncated at limit", "project", d.p.ID, "kind", "tasks", "limit", limit)
+			e.Logger.Warn("obsidian export: list truncated at limit", "project", memory.RefusalArg("project_id", d.p.ID), "kind", "tasks", "limit", limit)
 			d.trunc = true
 		}
 		taskRecs := make([]noteRecord, 0, len(tasks))
