@@ -691,7 +691,7 @@ const decisionRefPrefix = "decision:"
 // path, commit or URL" leaves that caller with no way to keep the links (#1228).
 func checkReservedSourceRef(ref string) error {
 	if len(decisionRefsInSourceRef(ref)) > 0 {
-		return fmt.Errorf("source_ref %q is reserved: a %q entry links a decision to its companion memory and is managed by Ghost — omit source_ref to keep the links this row already has, or use a path, commit or URL", ref, decisionRefPrefix)
+		return fmt.Errorf("source_ref %s is reserved: a %q entry links a decision to its companion memory and is managed by Ghost — omit source_ref to keep the links this row already has, or use a path, commit or URL", RefusalArg("source_ref", ref), decisionRefPrefix)
 	}
 	return nil
 }

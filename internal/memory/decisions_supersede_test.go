@@ -944,6 +944,41 @@ func TestSupersedeDecisionIgnoresAForgedLinkOnANonDecisionMemory(t *testing.T) {
 	})
 }
 
+func TestTheReservedRefRefusalBoundsAnOversizedValue(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	short := "decision:someid123"
+	_, _, _, err := s.UpsertWithOptions(ctx, testProject, "fact", "short reserved", "manual", 0.5, nil,
+		UpsertOptions{Provenance: Provenance{SourceRef: short}})
+	if err == nil {
+		t.Fatal("UpsertWithOptions accepted a short reserved source_ref")
+	}
+	if !strings.Contains(err.Error(), `"`+short+`"`) {
+		t.Errorf("a short reserved source_ref refusal lost the value: %v", err)
+	}
+
+	big := "decision:abc" + strings.Repeat("x", 5000)
+	_, _, _, err = s.UpsertWithOptions(ctx, testProject, "fact", "oversized reserved", "manual", 0.5, nil,
+		UpsertOptions{Provenance: Provenance{SourceRef: big}})
+	if err == nil {
+		t.Fatal("UpsertWithOptions accepted an oversized reserved source_ref")
+	}
+	if len(err.Error()) > 1024 || strings.Contains(err.Error(), strings.Repeat("x", 100)) || !strings.Contains(err.Error(), "source_ref withheld") {
+		t.Errorf("the oversized reserved refusal repeated the value: len %d, %.200s", len(err.Error()), err)
+	}
+
+	id, err := s.Create(ctx, testProject, Memory{Category: "fact", Content: "plain", Source: "manual", Importance: 0.5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpdateMemoryWithOptions(ctx, testProject, id, UpdateOptions{Provenance: Provenance{SourceRef: big}}); err == nil {
+		t.Error("UpdateMemoryWithOptions accepted an oversized reserved source_ref")
+	} else if len(err.Error()) > 1024 || strings.Contains(err.Error(), strings.Repeat("x", 100)) || !strings.Contains(err.Error(), "source_ref withheld") {
+		t.Errorf("the update refusal repeated the value: len %d, %.200s", len(err.Error()), err)
+	}
+}
+
 func TestWriterPathsRefuseTheReservedDecisionRef(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
