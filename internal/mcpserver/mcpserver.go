@@ -4993,7 +4993,7 @@ func (s *Server) registerResources() {
 		}
 		projectID, _, err := s.store.ResolveProject(ctx, rawID)
 		if err != nil {
-			return nil, fmt.Errorf("resolve project: %w", err)
+			return nil, resolveProjectRefusal(err)
 		}
 		// Refused for the reason the matching list tool refuses it: the empty
 		// sentence below would describe a project that does not exist. The
@@ -5058,7 +5058,7 @@ func (s *Server) registerResources() {
 		}
 		projectID, _, err := s.store.ResolveProject(ctx, rawID)
 		if err != nil {
-			return nil, fmt.Errorf("resolve project: %w", err)
+			return nil, resolveProjectRefusal(err)
 		}
 		// Refused for the reason the matching list tool refuses it: the empty
 		// sentence below would describe a project that does not exist. The

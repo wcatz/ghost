@@ -51,6 +51,30 @@ func TestProjectContextResource_AmbiguousProjectIsInvalidParams(t *testing.T) {
 	}
 }
 
+func TestProjectDecisionsResource_AmbiguousProjectIsInvalidParams(t *testing.T) {
+	session, _ := ambiguousProjectSession(t)
+	_, err := session.ReadResource(context.Background(), &mcp.ReadResourceParams{URI: "ghost://project/dup/decisions"})
+	wire := wireErrorOf(t, "read decisions of dup", err)
+	if wire.Code != jsonrpc.CodeInvalidParams {
+		t.Errorf("code = %d, want %d (invalid params): %q", wire.Code, jsonrpc.CodeInvalidParams, wire.Message)
+	}
+	if !strings.Contains(wire.Message, "resolve project: ") || !strings.Contains(wire.Message, "ambiguous") {
+		t.Errorf("message changed: %q", wire.Message)
+	}
+}
+
+func TestProjectTasksResource_AmbiguousProjectIsInvalidParams(t *testing.T) {
+	session, _ := ambiguousProjectSession(t)
+	_, err := session.ReadResource(context.Background(), &mcp.ReadResourceParams{URI: "ghost://project/dup/tasks"})
+	wire := wireErrorOf(t, "read tasks of dup", err)
+	if wire.Code != jsonrpc.CodeInvalidParams {
+		t.Errorf("code = %d, want %d (invalid params): %q", wire.Code, jsonrpc.CodeInvalidParams, wire.Message)
+	}
+	if !strings.Contains(wire.Message, "resolve project: ") || !strings.Contains(wire.Message, "ambiguous") {
+		t.Errorf("message changed: %q", wire.Message)
+	}
+}
+
 func TestRecallProject_AmbiguousProjectIsInvalidParams(t *testing.T) {
 	session, _ := ambiguousProjectSession(t)
 	_, err := session.GetPrompt(context.Background(), &mcp.GetPromptParams{
@@ -72,15 +96,18 @@ func TestProjectRefusals_StoreFailureIsNotInvalidParams(t *testing.T) {
 	breakStore()
 	ctx := context.Background()
 
-	_, err := session.ReadResource(ctx, &mcp.ReadResourceParams{URI: "ghost://project/dup/context"})
-	if err == nil {
-		t.Fatal("read context with a broken store: got success")
-	}
-	if wire := wireErrorOf(t, "read context", err); wire.Code == jsonrpc.CodeInvalidParams {
-		t.Errorf("resource: store failure answered -32602: %q", wire.Message)
+	for _, tail := range []string{"context", "decisions", "tasks"} {
+		uri := "ghost://project/dup/" + tail
+		_, err := session.ReadResource(ctx, &mcp.ReadResourceParams{URI: uri})
+		if err == nil {
+			t.Fatalf("read %s with a broken store: got success", uri)
+		}
+		if wire := wireErrorOf(t, "read "+tail, err); wire.Code == jsonrpc.CodeInvalidParams {
+			t.Errorf("resource %s: store failure answered -32602: %q", uri, wire.Message)
+		}
 	}
 
-	_, err = session.GetPrompt(ctx, &mcp.GetPromptParams{
+	_, err := session.GetPrompt(ctx, &mcp.GetPromptParams{
 		Name: "recall_project", Arguments: map[string]string{"project_id": "dup"},
 	})
 	if err == nil {
