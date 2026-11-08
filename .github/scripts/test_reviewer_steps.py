@@ -139,6 +139,19 @@ def _fake_opencode(folder):
             "    if [ -n \"${FAKE_OPENCODE_ARGV_LOG:-}\" ]; then\n"
             "      echo \"$@\" >> \"$FAKE_OPENCODE_ARGV_LOG\"\n"
             "    fi\n"
+            # A refused tool call: opencode's own wording on the stderr, a
+            # tool_use event on the stream, exit 1. FAKE_OPENCODE_REFUSALS
+            # counts how many runs refuse before the normal answer, and
+            # FAKE_OPENCODE_REFUSALS_STATE is where the count so far is kept.
+            "    if [ -n \"${FAKE_OPENCODE_REFUSALS:-}\" ]; then\n"
+            "      n=$(cat \"$FAKE_OPENCODE_REFUSALS_STATE\" 2>/dev/null || echo 0)\n"
+            "      if [ \"$n\" -lt \"$FAKE_OPENCODE_REFUSALS\" ]; then\n"
+            "        echo $((n + 1)) > \"$FAKE_OPENCODE_REFUSALS_STATE\"\n"
+            "        echo '{\"type\":\"tool_use\",\"part\":{\"type\":\"tool\",\"tool\":\"bash\"}}'\n"
+            "        echo 'permission requested: bash (git log); auto-rejecting' >&2\n"
+            "        exit 1\n"
+            "      fi\n"
+            "    fi\n"
             "    if [ -n \"${FAKE_OPENCODE_OK_MODEL:-}\" ]; then\n"
             "      case \" $* \" in\n"
             "        *\" -m $FAKE_OPENCODE_OK_MODEL \"*)\n"
@@ -1474,6 +1487,46 @@ class TestThePaidModelList(unittest.TestCase):
                     evidence += _read(path)
             self.assertTrue(evidence.strip(),
                             "the first model's answer left no acted or validation evidence")
+
+    def test_a_refused_tool_call_retries_the_same_model_once(self):
+        # The read-only agent refused a tool call the model tried, so the
+        # model produced no verdict. That is a failed attempt, not an
+        # outage. One more try with the same model often answers, and
+        # with a single keyed model there is nothing else to fall to.
+        with tempfile.TemporaryDirectory() as folder:
+            result, out, tried = self.run_paid(folder, {
+                "PAID_MODELS": "opencode-go/a-free",
+                "FAKE_OPENCODE_OK_MODEL": "opencode-go/a-free",
+                "FAKE_OPENCODE_REFUSALS": "1",
+                "FAKE_OPENCODE_REFUSALS_STATE": os.path.join(folder, "refusals"),
+            })
+            self.assertEqual(tried, ["opencode-go/a-free", "opencode-go/a-free"])
+            self.assertIn("paid_status=success", out)
+            self.assertIn("retrying it once", result.stdout)
+
+    def test_a_second_refusal_moves_on_and_is_not_retried_again(self):
+        with tempfile.TemporaryDirectory() as folder:
+            result, out, tried = self.run_paid(folder, {
+                "PAID_MODELS": "opencode-go/a-free opencode-go/b",
+                "FAKE_OPENCODE_OK_MODEL": "opencode-go/b",
+                "FAKE_OPENCODE_REFUSALS": "2",
+                "FAKE_OPENCODE_REFUSALS_STATE": os.path.join(folder, "refusals"),
+            })
+            self.assertEqual(tried, ["opencode-go/a-free", "opencode-go/a-free",
+                                     "opencode-go/b"])
+            self.assertIn("paid_status=success", out)
+
+    def test_a_refusal_on_every_try_still_fails_closed(self):
+        with tempfile.TemporaryDirectory() as folder:
+            result, out, tried = self.run_paid(folder, {
+                "PAID_MODELS": "opencode-go/a-free",
+                "FAKE_OPENCODE_REFUSALS": "9",
+                "FAKE_OPENCODE_REFUSALS_STATE": os.path.join(folder, "refusals"),
+            })
+            self.assertEqual(tried, ["opencode-go/a-free", "opencode-go/a-free"])
+            self.assertIn("paid_status=failed", out)
+            acted = _read(os.path.join(folder, "runner-temp", "model-acted.txt"))
+            self.assertIn("acted", acted)
 
     def test_a_free_outage_runs_only_the_zero_cost_entries(self):
         with tempfile.TemporaryDirectory() as folder:
