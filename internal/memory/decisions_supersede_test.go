@@ -2336,3 +2336,253 @@ func TestAVerbatimReAddOfAnOverflowKeptRowIsAKeep(t *testing.T) {
 		})
 	}
 }
+
+// TestSupersedeDecisionRepointUpdatesCompanionHistoryAndEdge covers the case
+// where a decision already superseded by B is repointed to C after B was itself
+// superseded. The decisions row must report C as the successor, and the
+// companion memory's history and supersedes edge must name C's companion rather
+// than the original successor's.
+func TestSupersedeDecisionRepointUpdatesCompanionHistoryAndEdge(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	a, aComp, _, err := s.RecordDecision(ctx, testProject, "Use Redis", "Redis", "fast", nil, nil)
+	if err != nil {
+		t.Fatalf("RecordDecision (A): %v", err)
+	}
+	b, bComp, _, err := s.RecordDecision(ctx, testProject, "Use Postgres", "Postgres", "durable", nil, nil)
+	if err != nil {
+		t.Fatalf("RecordDecision (B): %v", err)
+	}
+	c, cComp, _, err := s.RecordDecision(ctx, testProject, "Use SQLite", "SQLite", "simple", nil, nil)
+	if err != nil {
+		t.Fatalf("RecordDecision (C): %v", err)
+	}
+
+	if err := s.SupersedeDecision(ctx, testProject, a, b); err != nil {
+		t.Fatalf("SupersedeDecision(A, B): %v", err)
+	}
+	if err := s.SupersedeDecision(ctx, testProject, b, c); err != nil {
+		t.Fatalf("SupersedeDecision(B, C): %v", err)
+	}
+	if err := s.SupersedeDecision(ctx, testProject, a, c); err != nil {
+		t.Fatalf("SupersedeDecision(A, C) repoint: %v", err)
+	}
+
+	all, err := s.ListDecisions(ctx, testProject, "", 10)
+	if err != nil {
+		t.Fatalf("ListDecisions: %v", err)
+	}
+	for _, d := range all {
+		if d.ID == a {
+			if d.Status != "superseded" || d.SupersededBy != c {
+				t.Errorf("A is %s superseded_by %q, want superseded by %s", d.Status, d.SupersededBy, c)
+			}
+			break
+		}
+	}
+
+	hist, err := s.MemoryHistory(ctx, aComp, 0)
+	if err != nil {
+		t.Fatalf("MemoryHistory: %v", err)
+	}
+	if len(hist) == 0 {
+		t.Fatal("A's companion has no history")
+	}
+	last := hist[len(hist)-1]
+	if last.Phase != phaseSupersede || last.RelatedID != cComp {
+		t.Errorf("last history is phase=%q related=%q, want phase=%q related=%q (C's companion)", last.Phase, last.RelatedID, phaseSupersede, cComp)
+	}
+
+	links, err := s.GetLinks(ctx, aComp)
+	if err != nil {
+		t.Fatalf("GetLinks: %v", err)
+	}
+	var toC bool
+	for _, l := range links {
+		if l.Relation == "supersedes" && l.SourceID == cComp && l.TargetID == aComp {
+			toC = true
+		}
+		if l.Relation == "supersedes" && l.SourceID == bComp && l.TargetID == aComp {
+			t.Errorf("stale supersedes edge from B's companion %s to A's companion %s still active", bComp, aComp)
+		}
+	}
+	if !toC {
+		t.Errorf("no supersedes edge from C's companion %s to A's companion %s", cComp, aComp)
+	}
+}
+
+// TestSupersedeDecisionRepointKeepsUnrelatedSupersedesEdge verifies that a
+// repoint invalidates only the stale edge from the prior successor's companion
+// and leaves unrelated supersedes edges into the retired companion in place.
+func TestSupersedeDecisionRepointKeepsUnrelatedSupersedesEdge(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	a, aComp, _, err := s.RecordDecision(ctx, testProject, "Use Redis", "Redis", "fast", nil, nil)
+	if err != nil {
+		t.Fatalf("RecordDecision (A): %v", err)
+	}
+	b, bComp, _, err := s.RecordDecision(ctx, testProject, "Use Postgres", "Postgres", "durable", nil, nil)
+	if err != nil {
+		t.Fatalf("RecordDecision (B): %v", err)
+	}
+	c, cComp, _, err := s.RecordDecision(ctx, testProject, "Use SQLite", "SQLite", "simple", nil, nil)
+	if err != nil {
+		t.Fatalf("RecordDecision (C): %v", err)
+	}
+	d, dComp, _, err := s.RecordDecision(ctx, testProject, "Use DuckDB", "DuckDB", "analytics", nil, nil)
+	if err != nil {
+		t.Fatalf("RecordDecision (D): %v", err)
+	}
+	_ = d
+
+	if err := s.SupersedeDecision(ctx, testProject, a, b); err != nil {
+		t.Fatalf("SupersedeDecision(A, B): %v", err)
+	}
+	if err := s.SupersedeDecision(ctx, testProject, b, c); err != nil {
+		t.Fatalf("SupersedeDecision(B, C): %v", err)
+	}
+	if err := s.CreateLink(ctx, dComp, aComp, "supersedes", 1, "manual"); err != nil {
+		t.Fatalf("CreateLink unrelated supersedes edge: %v", err)
+	}
+	if err := s.SupersedeDecision(ctx, testProject, a, c); err != nil {
+		t.Fatalf("SupersedeDecision(A, C) repoint: %v", err)
+	}
+
+	links, err := s.GetLinks(ctx, aComp)
+	if err != nil {
+		t.Fatalf("GetLinks: %v", err)
+	}
+	var toB, toC, toD bool
+	for _, l := range links {
+		if l.Relation != "supersedes" || l.TargetID != aComp {
+			continue
+		}
+		switch l.SourceID {
+		case bComp:
+			toB = true
+		case cComp:
+			toC = true
+		case dComp:
+			toD = true
+		}
+	}
+	if toB {
+		t.Errorf("stale supersedes edge from prior successor companion %s still active", bComp)
+	}
+	if !toC {
+		t.Errorf("no supersedes edge from new successor companion %s", cComp)
+	}
+	if !toD {
+		t.Errorf("unrelated supersedes edge from %s was removed", dComp)
+	}
+}
+
+// TestSupersedeDecisionRepointIsIdempotent verifies that repeating the same
+// repoint does not append duplicate history or create duplicate edge effects.
+func TestSupersedeDecisionRepointIsIdempotent(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	a, aComp, _, err := s.RecordDecision(ctx, testProject, "Use Redis", "Redis", "fast", nil, nil)
+	if err != nil {
+		t.Fatalf("RecordDecision (A): %v", err)
+	}
+	b, _, _, err := s.RecordDecision(ctx, testProject, "Use Postgres", "Postgres", "durable", nil, nil)
+	if err != nil {
+		t.Fatalf("RecordDecision (B): %v", err)
+	}
+	c, cComp, _, err := s.RecordDecision(ctx, testProject, "Use SQLite", "SQLite", "simple", nil, nil)
+	if err != nil {
+		t.Fatalf("RecordDecision (C): %v", err)
+	}
+	if err := s.SupersedeDecision(ctx, testProject, a, b); err != nil {
+		t.Fatalf("SupersedeDecision(A, B): %v", err)
+	}
+	if err := s.SupersedeDecision(ctx, testProject, b, c); err != nil {
+		t.Fatalf("SupersedeDecision(B, C): %v", err)
+	}
+	if err := s.SupersedeDecision(ctx, testProject, a, c); err != nil {
+		t.Fatalf("SupersedeDecision(A, C): %v", err)
+	}
+	hist1, err := s.MemoryHistory(ctx, aComp, 0)
+	if err != nil {
+		t.Fatalf("MemoryHistory: %v", err)
+	}
+	links1, err := s.GetLinks(ctx, aComp)
+	if err != nil {
+		t.Fatalf("GetLinks: %v", err)
+	}
+	if err := s.SupersedeDecision(ctx, testProject, a, c); err != nil {
+		t.Fatalf("SupersedeDecision(A, C) repeat: %v", err)
+	}
+	hist2, err := s.MemoryHistory(ctx, aComp, 0)
+	if err != nil {
+		t.Fatalf("MemoryHistory after repeat: %v", err)
+	}
+	links2, err := s.GetLinks(ctx, aComp)
+	if err != nil {
+		t.Fatalf("GetLinks after repeat: %v", err)
+	}
+	if len(hist2) != len(hist1) {
+		t.Errorf("history rows %d after repeat, want %d", len(hist2), len(hist1))
+	}
+	if last := hist2[len(hist2)-1]; last.Phase != phaseSupersede || last.RelatedID != cComp {
+		t.Errorf("last history after repeat is phase=%q related=%q, want %q %q", last.Phase, last.RelatedID, phaseSupersede, cComp)
+	}
+	if len(links2) != len(links1) {
+		t.Errorf("links %d after repeat, want %d", len(links2), len(links1))
+	}
+}
+
+// TestSupersedeDecisionRepointToSuccessorWithNoCompanion invalidates the stale
+// edge from the prior successor's companion when the new successor has no
+// companion memory to name.
+func TestSupersedeDecisionRepointToSuccessorWithNoCompanion(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	a, aComp, _, err := s.RecordDecision(ctx, testProject, "Use Redis", "Redis", "fast", nil, nil)
+	if err != nil {
+		t.Fatalf("RecordDecision (A): %v", err)
+	}
+	b, bComp, _, err := s.RecordDecision(ctx, testProject, "Use Postgres", "Postgres", "durable", nil, nil)
+	if err != nil {
+		t.Fatalf("RecordDecision (B): %v", err)
+	}
+	cID := "IMPORTEDDECISIONNOCOMPANION0000001"
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO decisions (id, project_id, title, decision, rationale, status) VALUES (?, ?, ?, ?, ?, 'active')`,
+		cID, testProject, "Use SQLite", "SQLite", "simple"); err != nil {
+		t.Fatalf("insert imported decision: %v", err)
+	}
+
+	if err := s.SupersedeDecision(ctx, testProject, a, b); err != nil {
+		t.Fatalf("SupersedeDecision(A, B): %v", err)
+	}
+	if err := s.SupersedeDecision(ctx, testProject, b, cID); err != nil {
+		t.Fatalf("SupersedeDecision(B, C): %v", err)
+	}
+	if err := s.SupersedeDecision(ctx, testProject, a, cID); err != nil {
+		t.Fatalf("SupersedeDecision(A, C) repoint: %v", err)
+	}
+
+	all, err := s.ListDecisions(ctx, testProject, "", 10)
+	if err != nil {
+		t.Fatalf("ListDecisions: %v", err)
+	}
+	for _, d := range all {
+		if d.ID == a && d.SupersededBy != cID {
+			t.Errorf("A superseded_by = %q, want %s", d.SupersededBy, cID)
+		}
+	}
+	links, err := s.GetLinks(ctx, aComp)
+	if err != nil {
+		t.Fatalf("GetLinks: %v", err)
+	}
+	for _, l := range links {
+		if l.Relation == "supersedes" && l.SourceID == bComp && l.TargetID == aComp {
+			t.Errorf("stale supersedes edge from prior successor companion %s still active", bComp)
+		}
+	}
+}
