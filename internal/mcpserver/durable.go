@@ -246,12 +246,8 @@ func globalStatusHint(content string, validUntil *string) string {
 		return ""
 	}
 	trimmed := strings.TrimLeft(content, " \t\r\n")
-	window := trimmed
-	if len(window) > GlobalStatusDateScanBytes {
-		window = window[:GlobalStatusDateScanBytes]
-	}
-	loc := isoDateRE.FindStringIndex(window)
-	if loc == nil {
+	loc := isoDateRE.FindStringIndex(trimmed)
+	if loc == nil || loc[0] >= GlobalStatusDateScanBytes {
 		return ""
 	}
 	if loc[0] > 0 && attributedDateLeadRE.MatchString(trimmed) && attributedPreferenceRE.MatchString(trimmed) {

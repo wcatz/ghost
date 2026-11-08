@@ -697,6 +697,27 @@ func TestGlobalStatusHintDateOutsideScanWindowDoesNotAdvise(t *testing.T) {
 	}
 }
 
+func TestGlobalStatusHintScanWindowBoundary(t *testing.T) {
+	// A non-word separator places the ISO date so its start byte straddles the
+	// 120-byte scan boundary. A start below the boundary must fire even when the
+	// full date extends past it; a start at or beyond the boundary must not.
+	at115 := "On " + strings.Repeat("x", 111) + " 2026-10-16: status update"
+	if idx := strings.Index(at115, "2026-10-16"); idx != 115 {
+		t.Fatalf("test setup: date starts at %d, want 115", idx)
+	}
+	if got := globalStatusHint(at115, nil); got == "" {
+		t.Fatalf("date starting at byte 115 must advise, got no advisory")
+	}
+
+	at121 := "On " + strings.Repeat("x", 117) + " 2026-10-16: status update"
+	if idx := strings.Index(at121, "2026-10-16"); idx != 121 {
+		t.Fatalf("test setup: date starts at %d, want 121", idx)
+	}
+	if got := globalStatusHint(at121, nil); got != "" {
+		t.Fatalf("date starting at byte 121 must not advise, got %q", got)
+	}
+}
+
 func TestPromoteGlobalStatusHintMatchesEmbeddedDate(t *testing.T) {
 	srv, session := newCapSession(t)
 	ctx := context.Background()
