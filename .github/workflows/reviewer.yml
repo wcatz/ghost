@@ -1266,47 +1266,64 @@ jobs:
           }
           PAID_MODEL="${run_models[0]}"
           paid_status=1
+          # A refused tool call (the read-only agent auto-rejected a tool
+          # the model asked for) leaves no verdict, but it is the model
+          # straying, not the provider failing, and the next try of the
+          # same model usually answers. So it earns ONE retry of that
+          # model. The refusal is still assessed as acted, so a model that
+          # never answers keeps the run a failure.
+          refused_tool_call() {
+            [ "$paid_status" -ne 124 ] \
+              && grep -Fqi 'permission requested' model-stderr.txt 2>/dev/null
+          }
           for PAID_MODEL in "${run_models[@]}"; do
-            remaining=$(( paid_deadline - $(date +%s) ))
-            if [ "$remaining" -le 30 ]; then
-              echo "::warning::paid fallback budget spent before ${PAID_MODEL}"
-              break
-            fi
-            attempt_timeout=$paid_timeout
-            if [ "$attempt_timeout" -gt "$remaining" ]; then
-              attempt_timeout=$remaining
-            fi
-            : > model-reply.txt
-            : > model-stderr.txt
-            : > model-validation.err
-            paid_status=0
-            OPENCODE_DISABLE_PROJECT_CONFIG=1 \
-              timeout --foreground "${attempt_timeout}s" opencode run --standalone \
-              --agent ghost-reviewer -m "$PAID_MODEL" --format json \
-              "$REVIEW_PROMPT" > model-reply.txt 2> model-stderr.txt || paid_status=$?
-            valid_reply=0
-            if [ "$paid_status" -eq 0 ] && [ -s model-reply.txt ] \
-               && jq -s -e 'length > 0 and all(.[]; .type != "error")' \
-                  model-reply.txt >/dev/null 2>&1; then
-              if validate_reply model-reply.txt 2> model-validation.err; then
-                valid_reply=1
+            for paid_try in 1 2; do
+              remaining=$(( paid_deadline - $(date +%s) ))
+              if [ "$remaining" -le 30 ]; then
+                echo "::warning::paid fallback budget spent before ${PAID_MODEL}"
+                break 2
               fi
-            fi
-            if [ "$valid_reply" -eq 1 ]; then
-              printf 'paid_timed_out=false\n' >> "$GITHUB_OUTPUT"
-              printf 'paid_status=success\n' >> "$GITHUB_OUTPUT"
-              echo "review produced by paid fallback ${PAID_MODEL}"
-              echo "model reply: $(wc -c < model-reply.txt) bytes"
-              jq -r '"\(.type)|\(.part.type // "-")|\(.part.tool // "-")"' model-reply.txt 2>/dev/null \
-                | sort | uniq -c | sed 's/^/  /' || true
-              exit 0
-            fi
-            assess_paid_attempt
-            # An agent that did not register is fatal for every model, so
-            # stop here and let the shared handling below report it.
-            if grep -Fqi 'agent not found' model-reply.txt model-stderr.txt 2>/dev/null; then
+              attempt_timeout=$paid_timeout
+              if [ "$attempt_timeout" -gt "$remaining" ]; then
+                attempt_timeout=$remaining
+              fi
+              : > model-reply.txt
+              : > model-stderr.txt
+              : > model-validation.err
+              paid_status=0
+              OPENCODE_DISABLE_PROJECT_CONFIG=1 \
+                timeout --foreground "${attempt_timeout}s" opencode run --standalone \
+                --agent ghost-reviewer -m "$PAID_MODEL" --format json \
+                "$REVIEW_PROMPT" > model-reply.txt 2> model-stderr.txt || paid_status=$?
+              valid_reply=0
+              if [ "$paid_status" -eq 0 ] && [ -s model-reply.txt ] \
+                 && jq -s -e 'length > 0 and all(.[]; .type != "error")' \
+                    model-reply.txt >/dev/null 2>&1; then
+                if validate_reply model-reply.txt 2> model-validation.err; then
+                  valid_reply=1
+                fi
+              fi
+              if [ "$valid_reply" -eq 1 ]; then
+                printf 'paid_timed_out=false\n' >> "$GITHUB_OUTPUT"
+                printf 'paid_status=success\n' >> "$GITHUB_OUTPUT"
+                echo "review produced by paid fallback ${PAID_MODEL}"
+                echo "model reply: $(wc -c < model-reply.txt) bytes"
+                jq -r '"\(.type)|\(.part.type // "-")|\(.part.tool // "-")"' model-reply.txt 2>/dev/null \
+                  | sort | uniq -c | sed 's/^/  /' || true
+                exit 0
+              fi
+              assess_paid_attempt
+              # An agent that did not register is fatal for every model, so
+              # stop here and let the shared handling below report it.
+              if grep -Fqi 'agent not found' model-reply.txt model-stderr.txt 2>/dev/null; then
+                break 2
+              fi
+              if [ "$paid_try" -eq 1 ] && refused_tool_call; then
+                echo "::warning::paid fallback ${PAID_MODEL} asked for a tool the reviewer refuses; retrying it once"
+                continue
+              fi
               break
-            fi
+            done
             echo "::warning::paid fallback ${PAID_MODEL} did not produce a valid review; trying the next keyed model"
           done
           # The reason and the timeout below describe the LAST attempt; the
