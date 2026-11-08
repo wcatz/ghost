@@ -5830,31 +5830,46 @@ func TestDecaySQLParity(t *testing.T) {
 		}
 	}
 	// A dated fact decays on the pattern/architecture curve; the SQL and Go
-	// paths must agree on the same heuristic.
-	for _, age := range ages {
-		for _, pinned := range []bool{false, true} {
-			content := "component upgraded on 2026-01-15"
-			id, err := s.Create(ctx, testProject, Memory{
-				Category: "fact", Content: content, Source: "manual", Importance: 1.0,
-			})
-			if err != nil {
-				t.Fatalf("create dated fact/%d/pinned=%v: %v", age, pinned, err)
-			}
-			setCreatedAtDaysAgo(t, s, id, age)
-			if pinned {
-				if err := s.TogglePin(ctx, id, true); err != nil {
-					t.Fatalf("pin dated fact/%d: %v", age, err)
+	// paths must agree on the same heuristic, including where the date sits in
+	// the content and on near-misses (a malformed date, non-ASCII digits).
+	datedContents := []string{
+		"component upgraded on 2026-01-15",
+		"2026-01-15 component upgraded",
+		"upgraded 2026-01-15",
+		"12026-01-15x",
+		"2026-01-15",
+		"component upgraded on 2026-1-15",
+		"component upgraded on 2026/01/15",
+		"component upgraded on 20260115",
+		"component upgraded on 2026-01-1",
+		"component upgraded on \u0662\u0660\u0662\u0666-\u0660\u0661-\u0661\u0665",
+		"component upgraded on \uff12\uff10\uff12\uff16-\uff10\uff11-\uff11\uff15",
+	}
+	for _, content := range datedContents {
+		for _, age := range []int{0, 90, 1000} {
+			for _, pinned := range []bool{false, true} {
+				id, err := s.Create(ctx, testProject, Memory{
+					Category: "fact", Content: content, Source: "manual", Importance: 1.0,
+				})
+				if err != nil {
+					t.Fatalf("create fact %q/%d/pinned=%v: %v", content, age, pinned, err)
 				}
-			}
-			sqlFactor := memoryScore(t, s, id)
-			goAge := time.Since(memoryCreatedAtAsTime(t, s, id)).Hours() / 24.0
-			if goAge < 0 {
-				goAge = 0
-			}
-			goFactor := DecayFactor("fact", content, RetentionProject, pinned, goAge)
-			if math.Abs(sqlFactor-goFactor) > eps {
-				t.Errorf("dated fact age=%d pinned=%v: SQL=%v Go=%v (diff %v)",
-					age, pinned, sqlFactor, goFactor, math.Abs(sqlFactor-goFactor))
+				setCreatedAtDaysAgo(t, s, id, age)
+				if pinned {
+					if err := s.TogglePin(ctx, id, true); err != nil {
+						t.Fatalf("pin fact %q/%d: %v", content, age, err)
+					}
+				}
+				sqlFactor := memoryScore(t, s, id)
+				goAge := time.Since(memoryCreatedAtAsTime(t, s, id)).Hours() / 24.0
+				if goAge < 0 {
+					goAge = 0
+				}
+				goFactor := DecayFactor("fact", content, RetentionProject, pinned, goAge)
+				if math.Abs(sqlFactor-goFactor) > eps {
+					t.Errorf("fact %q age=%d pinned=%v: SQL=%v Go=%v (diff %v)",
+						content, age, pinned, sqlFactor, goFactor, math.Abs(sqlFactor-goFactor))
+				}
 			}
 		}
 	}

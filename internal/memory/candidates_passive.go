@@ -729,7 +729,11 @@ func passiveRankKeyLess(a, b passiveRankKey, order string) bool {
 // row is hydrated. It carries a dated flag, derived in SQL, because the rank's
 // category-aware decay treats a dated fact differently from a timeless one, and
 // it holds importance as the double the column stores so the tie it breaks is
-// the engine's. The bucket's content is never carried into Go here.
+// the engine's. The bucket's content is never carried into Go here, but the
+// engine does read it: the GLOB behind the flag runs over `content` for each
+// scanned row of category fact (the `category = 'fact' AND` guard short-circuits
+// every other row), so the scan's read count, which counts rows, does not see
+// that cost. It is accepted so the scan and every other rank share one rule.
 type passiveRankKey struct {
 	id         string
 	pinned     bool

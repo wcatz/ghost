@@ -308,10 +308,11 @@ type TrapSummary struct {
 func SummarizeTrap(outcomes []TrapOutcome) []TrapSummary {
 	byCategory := map[string]*TrapSummary{}
 	for _, o := range outcomes {
-		s := byCategory[o.Category]
+		label := trapRowLabel(o)
+		s := byCategory[label]
 		if s == nil {
-			s = &TrapSummary{Category: o.Category, Decays: o.Decays}
-			byCategory[o.Category] = s
+			s = &TrapSummary{Category: label, Decays: o.Decays}
+			byCategory[label] = s
 		}
 		s.Probes++
 		if o.CorrectPinned {
@@ -346,6 +347,17 @@ func SummarizeTrap(outcomes []TrapOutcome) []TrapSummary {
 		}
 	}
 	return out
+}
+
+// trapRowLabel is the report row an outcome is counted under: its category,
+// except that a fact whose content carries a calendar date decays and so gets a
+// row of its own. Both are category `fact`, and one row would pool a class decay
+// never touches with one it reorders.
+func trapRowLabel(o TrapOutcome) string {
+	if o.Category == "fact" && o.Decays {
+		return "fact (dated)"
+	}
+	return o.Category
 }
 
 // poolTrapMatch selects which category rows a pooled row sums: one named

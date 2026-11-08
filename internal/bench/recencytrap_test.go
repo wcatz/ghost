@@ -331,3 +331,34 @@ func TestDecayFrontier(t *testing.T) {
 			rows[0].trapWins, rows[1].trapWins)
 	}
 }
+
+// TestRecencyTrapDatedFactIsItsOwnRow holds the dated-fact half of the fixture:
+// a fact whose content carries a calendar date decays, so it must be counted in
+// the decaying class under its own row, apart from the undated facts decay never
+// touches. Pooled under one `fact` row the two classes would read as one number.
+func TestRecencyTrapDatedFactIsItsOwnRow(t *testing.T) {
+	scenarios := loadTrapTestdata(t)
+	dated := 0
+	for _, sc := range scenarios {
+		if sc.effectiveCategory() == "fact" && memory.ContentCarriesDate(sc.Correct.Content) {
+			dated++
+		}
+	}
+	if dated == 0 {
+		t.Fatal("no dated-fact trap scenario: the dated half of the fact rule is unmeasured")
+	}
+	outcomes, err := RunRecencyTrap(context.Background(), scenarios, memory.DefaultSearchParams())
+	if err != nil {
+		t.Fatalf("RunRecencyTrap: %v", err)
+	}
+	rows := map[string]TrapSummary{}
+	for _, s := range SummarizeTrap(outcomes) {
+		rows[s.Category] = s
+	}
+	if r, ok := rows["fact (dated)"]; !ok || !r.Decays || r.Probes < dated {
+		t.Errorf("dated-fact row = %+v (present %v), want a decaying row with >= %d probes", r, ok, dated)
+	}
+	if r, ok := rows["fact"]; !ok || r.Decays {
+		t.Errorf("undated fact row = %+v (present %v), want a never-decay row", r, ok)
+	}
+}

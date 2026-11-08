@@ -54,8 +54,8 @@ const (
 	KindLive PassiveKind = "live"
 	// KindPinned is a pinned row with low importance and an old created_at, in a
 	// DECAYING category (gotcha), because a pin only exempts a row from decay and
-	// the never-decay categories (preference, convention, fact) are exempt anyway:
-	// a pinned convention row would test nothing. It is expected on every passive
+	// the never-decay categories (preference, convention, and a fact with no
+	// date) are exempt anyway: a pinned convention row would test nothing. It is expected on every passive
 	// surface: a pin is a slot guarantee (#924), whatever the row's rank.
 	KindPinned PassiveKind = "pinned"
 	// KindFiller is live, valid and unremarkable: low importance, so it is what a

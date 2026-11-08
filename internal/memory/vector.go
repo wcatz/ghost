@@ -549,8 +549,9 @@ type SearchParams struct {
 // see decayFactor) — not a blanket age-only freshness prior. The recency-trap
 // suite in docs/benchmarks.md showed an untargeted prior damages correct-wins,
 // which is why a flat RecencyWeight/RecencyTau prior was removed in favor of
-// the category-aware factor (preference/convention never decay; a fact never decays unless its content carries a calendar date; pattern/
-// architecture tau 45, decision/gotcha/dependency tau 30).
+// the category-aware factor (preference/convention never decay; a fact never
+// decays unless its content carries a calendar date; pattern/architecture tau
+// 45, decision/gotcha/dependency tau 30).
 //
 // A link-graph expansion bonus was evaluated and removed. It was structurally
 // dominated by simply retrieving a deeper vector-k: links are built from cosine
@@ -735,17 +736,12 @@ func decayFactorDated(category string, dated bool, retention string, pinned bool
 	return categoryDecayDated(category, dated, ageDays) * RetentionDecayFactor(retention, pinned, ageDays)
 }
 
-// categoryDecay is the category-and-age half of DecayFactor, split out because
-// the tier half multiplies it and because the two have different floors: a
-// session row is never worth more than half a durable one, whatever its
-// category, and the floors are per-category.
-func categoryDecay(category, content string, ageDays float64) float64 {
-	return categoryDecayDated(category, ContentCarriesDate(content), ageDays)
-}
-
-// categoryDecayDated is categoryDecay with the dated-fact classification
-// already decided. dated means the row is a fact whose content carries a
-// calendar date (the same shape DecayRankingSQL tests with GLOB).
+// categoryDecayDated is the category-and-age half of DecayFactor, split out
+// because the tier half multiplies it and because the two have different
+// floors: a session row is never worth more than half a durable one, whatever
+// its category, and the floors are per-category. dated means the row is a fact
+// whose content carries a calendar date (the same shape DecayRankingSQL tests
+// with GLOB); the caller decides it once so the passive scan can take it from SQL.
 func categoryDecayDated(category string, dated bool, ageDays float64) float64 {
 	switch category {
 	case "preference", "convention":
