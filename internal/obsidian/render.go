@@ -216,6 +216,33 @@ var edgeRelations = []struct {
 	{name: "supersedes", directed: true},
 }
 
+// linkInFrontmatter reports whether fmEdges can represent l for note m in
+// frontmatter: a typed edge relation whose other endpoint resolves in fileFor,
+// emitted on the endpoint fmEdges writes for that relation.
+func linkInFrontmatter(m memory.Memory, l memory.Link, fileFor map[string]string) bool {
+	var directed bool
+	var known bool
+	for _, er := range edgeRelations {
+		if er.name == l.Relation {
+			directed, known = er.directed, true
+			break
+		}
+	}
+	if !known {
+		return false
+	}
+	other := l.TargetID
+	if directed {
+		if l.SourceID != m.ID {
+			return false
+		}
+	} else if other == m.ID {
+		other = l.SourceID
+	}
+	_, ok := fileFor[other]
+	return ok
+}
+
 // fmEdges appends typed edge fields for m after the existing frontmatter
 // keys. Targets missing from fileFor are skipped (no dead wikilinks under
 // --project); a relation with zero remaining targets omits its key. Filenames
@@ -290,9 +317,15 @@ func renderMemory(m memory.Memory, links []memory.Link, fileFor map[string]strin
 	b.WriteString("\n")
 	b.WriteString(strings.TrimRight(m.Content, "\n"))
 	b.WriteString("\n")
-	if len(links) > 0 {
+	var related []memory.Link
+	for _, l := range links {
+		if !linkInFrontmatter(m, l, fileFor) {
+			related = append(related, l)
+		}
+	}
+	if len(related) > 0 {
 		b.WriteString("\n## Related\n")
-		for _, l := range links {
+		for _, l := range related {
 			other := l.TargetID
 			if other == m.ID {
 				other = l.SourceID
