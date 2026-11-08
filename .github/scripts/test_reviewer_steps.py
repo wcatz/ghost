@@ -1450,6 +1450,31 @@ class TestThePaidModelList(unittest.TestCase):
             self.assertNotIn("paid_status=success", out)
             self.assertIn("paid fallback opencode-go/b failed", result.stdout)
 
+    def test_an_earlier_answer_is_kept_when_a_later_model_is_an_outage(self):
+        # The first model ANSWERED with an unusable document, the second
+        # failed as a provider outage. Evidence from the first must survive
+        # the second attempt, or the run would read as an outage and the
+        # gate would go pending instead of failing.
+        with tempfile.TemporaryDirectory() as folder:
+            unusable = os.path.join(folder, "opencode-unusable.out")
+            _write(unusable, json.dumps({"type": "text", "part": {
+                "type": "text", "text": "not a findings document"}}) + "\n")
+            result, out, tried = self.run_paid(folder, {
+                "PAID_MODELS": "opencode-go/a-free opencode-go/b",
+                "FAKE_OPENCODE_OK_MODEL": "opencode-go/a-free",
+                "FAKE_OPENCODE_OK_STDOUT": unusable,
+            })
+            self.assertEqual(tried, ["opencode-go/a-free", "opencode-go/b"])
+            self.assertIn("paid_status=failed", out)
+            runner = os.path.join(folder, "runner-temp")
+            evidence = ""
+            for name in ("model-acted.txt", "paid-review-validation.txt"):
+                path = os.path.join(runner, name)
+                if os.path.exists(path):
+                    evidence += _read(path)
+            self.assertTrue(evidence.strip(),
+                            "the first model's answer left no acted or validation evidence")
+
     def test_a_free_outage_runs_only_the_zero_cost_entries(self):
         with tempfile.TemporaryDirectory() as folder:
             result, out, tried = self.run_paid(folder, {
