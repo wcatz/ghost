@@ -44,8 +44,7 @@ const (
 // The rows are the caller's, in the order the block renders them. measure
 // renders the block for the rows it is given and returns its size in bytes;
 // allCutFraming returns the size of the framing as it stands with every row
-// cut; cut drops the row at an index and records it (reserveViolated is true
-// when the cut broke a bucket reserve to meet the cap); giveWay is asked when
+// cut; cut drops the row at an index and records it; giveWay is asked when
 // there is no row left to drop and reports whether the caller has something
 // else to give way (the search envelope's notes). A nil giveWay means nothing
 // else can give way.
