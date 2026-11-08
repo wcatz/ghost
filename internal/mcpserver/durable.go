@@ -220,26 +220,37 @@ func longMemoryHint(content string) string {
 	return fmt.Sprintf(longMemoryAdvisoryFormat, len(content), LongMemoryThreshold)
 }
 
-// datedStatusRE matches a memory that opens with a calendar date — the narrow
-// heuristic for the global-status advisory (#1832). The content is trimmed of
-// leading whitespace and must start with YYYY-MM-DD at column 0; a dated
-// preference attributed to a person ("Wayne, 2026-10-16: ...") does not start
-// with the date and so does not match. The check is documented as narrow so
-// it does not fire on such preferences.
-var datedStatusRE = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}\b`)
+// GlobalStatusDateScanBytes bounds how far into a trimmed global save the
+// dated-status heuristic looks for an ISO calendar date. The match is widened
+// from column 0 to this window (#1953) so status written as "On YYYY-MM-DD",
+// with an embedded release date, or "as of YYYY-MM-DD" is still caught; it
+// stays narrow by scanning only the opening of the note.
+const GlobalStatusDateScanBytes = 120
+
+var (
+	isoDateRE              = regexp.MustCompile(`\b\d{4}-\d{2}-\d{2}\b`)
+	attributedDateLeadRE   = regexp.MustCompile(`^(?:[^:\n]{1,60}?)(?:,\s*|\s+\()\d{4}-\d{2}-\d{2}\)?\s*:`)
+	attributedPreferenceRE = regexp.MustCompile(`(?i)\b(?:always|never|must|prefer|prefers|preferred|rather avoid|avoid)\b`)
+)
 
 const globalStatusAdvisory = " — ADVISORY: this dated status line will be injected into every project's session start. Save it to its project instead, or set valid_until so it expires. Stored anyway — Ghost guides saves, it never refuses one on a heuristic."
 
-// globalStatusHint returns the global-status advisory when content opens with
-// a date and validUntil is absent, or "" otherwise. It applies to
-// ghost_save_global and ghost_memory_promote into _global; it never refuses a
-// save.
+// globalStatusHint returns the global-status advisory when the opening of
+// content carries an ISO date and validUntil is absent, or "" otherwise. A
+// dated note attributed to a person and phrased as a preference or rule
+// ("Name, YYYY-MM-DD: prefer...") stays quiet; an attributed line that is
+// plainly status still draws the advisory. It applies to ghost_save_global and
+// ghost_memory_promote into _global; it never refuses a save.
 func globalStatusHint(content string, validUntil *string) string {
 	if validUntil != nil && strings.TrimSpace(*validUntil) != "" {
 		return ""
 	}
 	trimmed := strings.TrimLeft(content, " \t\r\n")
-	if !datedStatusRE.MatchString(trimmed) {
+	loc := isoDateRE.FindStringIndex(trimmed)
+	if loc == nil || loc[0] >= GlobalStatusDateScanBytes {
+		return ""
+	}
+	if loc[0] > 0 && attributedDateLeadRE.MatchString(trimmed) && attributedPreferenceRE.MatchString(trimmed) {
 		return ""
 	}
 	return globalStatusAdvisory
