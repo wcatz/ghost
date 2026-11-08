@@ -940,22 +940,16 @@ func renderHistoricalSessionContext(cwd string, asOf time.Time) string {
 	// The cut: the row the rule gives up, counted as cut FOR SIZE, so the
 	// count line says which rows the cap took rather than calling them
 	// outranked.
-	cut := func(rows []assemble.Item, at int, reserveViolated bool) []assemble.Item {
+	cut := func(rows []assemble.Item, at int) []assemble.Item {
 		it := rows[at]
 		if it.ProjectID == memory.GlobalProjectID {
 			tally.globals.Shown--
 			tally.globals.RankedOut++
 			tally.globals.ByteCut++
-			if reserveViolated {
-				tally.globals.ReserveByteCut++
-			}
 		} else {
 			tally.project.Shown--
 			tally.project.RankedOut++
 			tally.project.ByteCut++
-			if reserveViolated {
-				tally.project.ReserveByteCut++
-			}
 		}
 		return append(rows[:at:at], rows[at+1:]...)
 	}
@@ -978,7 +972,7 @@ func renderHistoricalSessionContext(cwd string, asOf time.Time) string {
 	// the block is measured again. A caller with its own render cuts down to
 	// none, and a framing already over the host's own limit keeps its rows
 	// rather than being cut for nothing.
-	items, _, _ = assemble.FitItems(items, assemble.Budget{
+	items, _ = assemble.FitItems(items, assemble.Budget{
 		MaxBytes:         sessionStartByteCap,
 		KeepPinned:       true,
 		FramingCeiling:   sessionHostLimit,

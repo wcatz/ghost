@@ -313,17 +313,11 @@ func (p *pipeline) explainReason(id string, row memory.ExplainRow, rows map[stri
 				Token(d.category), d.share, slots)
 		case "budget", "slice_budget":
 			return fmt.Sprintf("outside the result window: the answer admits only the top %d", p.admitCap())
-		case reasonBudgetDropped, reasonBudgetDroppedReserve:
-			msg := ""
+		case reasonBudgetDropped:
 			if p.req.Budget.KeepPinned {
-				msg = fmt.Sprintf("dropped to fit the %d-byte response cap: the lowest-ranked unpinned rows are cut first, until the response fits", p.req.Budget.MaxBytes)
-			} else {
-				msg = fmt.Sprintf("dropped to fit the %d-byte response cap: rows are cut from the bottom of the ranking until the response fits", p.req.Budget.MaxBytes)
+				return fmt.Sprintf("dropped to fit the %d-byte response cap: the lowest-ranked unpinned rows are cut first, until the response fits", p.req.Budget.MaxBytes)
 			}
-			if code == reasonBudgetDroppedReserve {
-				msg += "; a reserved bucket row was cut to stay under the hard host limit"
-			}
-			return msg
+			return fmt.Sprintf("dropped to fit the %d-byte response cap: rows are cut from the bottom of the ranking until the response fits", p.req.Budget.MaxBytes)
 		}
 		return "withheld by the " + code + " rule"
 	}

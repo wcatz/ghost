@@ -30,7 +30,7 @@ const (
 //     last);
 //   - a bucket reserve (Budget.ReserveByProject) is kept when other rows can be
 //     cut instead; if honouring the reserve would prevent meeting the cap, the
-//     reserve gives way so the hard host limit is not exceeded;
+//     reserve gives way so the byte cap is still met;
 //   - the block is measured again after every drop, because the framing grows
 //     with every cut and a cap measured against a stale framing is the bug
 //     this pass exists to avoid;
@@ -50,17 +50,15 @@ const (
 // else to give way (the search envelope's notes). A nil giveWay means nothing
 // else can give way.
 //
-// It returns the rows that are left, what the rule settled on, and whether any
-// cut violated a bucket reserve.
+// It returns the rows that are left and what the rule settled on.
 //
 // IT IS THE ONE IMPLEMENTATION: two copies of a fit are two fits, and the
 // second one is the one nobody updates.
-func FitItems(items []Item, budget Budget, measure func([]Item) int, allCutFraming func() int, cut func([]Item, int, bool) []Item, giveWay func() bool, keepLastRow bool) ([]Item, FitOutcome, bool) {
+func FitItems(items []Item, budget Budget, measure func([]Item) int, allCutFraming func() int, cut func([]Item, int) []Item, giveWay func() bool, keepLastRow bool) ([]Item, FitOutcome) {
 	// Whether the framing alone is the excess, and whether that has been asked
 	// yet. It is asked ONCE, on the first over-cap iteration, and never
 	// re-asked: the answer does not depend on how many rows have been cut.
 	asked, excess := false, false
-	reserveCut := false
 
 	for {
 		// The block is measured first, and always: the caller's render is what
@@ -68,17 +66,17 @@ func FitItems(items []Item, budget Budget, measure func([]Item) int, allCutFrami
 		// fitted (nor answered).
 		measured := measure(items)
 		if budget.MaxBytes <= 0 || measured <= budget.MaxBytes {
-			return items, FitFits, reserveCut
+			return items, FitFits
 		}
 		if !asked {
 			asked = true
 			excess = budget.FramingCeiling > 0 && allCutFraming() >= budget.FramingCeiling
 		}
 		if excess {
-			return items, FitFramingIsTheExcess, reserveCut
+			return items, FitFramingIsTheExcess
 		}
 		if keepLastRow && len(items) == 1 {
-			return items, FitLastRowKept, reserveCut
+			return items, FitLastRowKept
 		}
 		if len(items) == 0 {
 			// Nothing left to give way: the caller either has something else
@@ -87,47 +85,38 @@ func FitItems(items []Item, budget Budget, measure func([]Item) int, allCutFrami
 			if giveWay != nil && giveWay() {
 				continue
 			}
-			return items, FitNoRowsLeft, reserveCut
+			return items, FitNoRowsLeft
 		}
-		at, violated := fitCutIndex(items, budget)
+		at := fitCutIndex(items, budget)
 		if at < 0 {
-			return items, FitNoRowsLeft, reserveCut
+			return items, FitNoRowsLeft
 		}
-		items = cut(items, at, violated)
-		reserveCut = reserveCut || violated
+		items = cut(items, at)
 	}
 }
 
 // fitCutIndex selects the index of the row to cut: the lowest-ranked row, an
 // UNPINNED row before any pinned one when KeepPinned is set, and never a row
 // whose removal would take a reserved bucket below its minimum when another cut
-// is possible. If no reserve-respecting cut exists, it selects a row that
-// violates a reserve so the hard host limit can still be met. It returns -1
-// when no row can be cut.
-func fitCutIndex(items []Item, budget Budget) (int, bool) {
+// is possible. If no reserve-respecting cut exists, the reserve gives way so the
+// byte cap can still be met. It returns -1 when no row can be cut.
+func fitCutIndex(items []Item, budget Budget) int {
 	counts := reserveCounts(items, budget.ReserveByProject)
-	if budget.KeepPinned {
-		if at := findCutCandidate(items, counts, budget.ReserveByProject, false); at >= 0 {
-			return at, false
+	for _, respect := range []bool{true, false} {
+		c, r := counts, budget.ReserveByProject
+		if !respect {
+			c, r = nil, nil
 		}
-		if at := findCutCandidate(items, counts, budget.ReserveByProject, true); at >= 0 {
-			return at, false
+		if budget.KeepPinned {
+			if at := findCutCandidate(items, c, r, false); at >= 0 {
+				return at
+			}
 		}
-		if at := findCutCandidate(items, nil, nil, false); at >= 0 {
-			return at, true
+		if at := findCutCandidate(items, c, r, true); at >= 0 {
+			return at
 		}
-		if at := findCutCandidate(items, nil, nil, true); at >= 0 {
-			return at, true
-		}
-		return -1, false
 	}
-	if at := findCutCandidate(items, counts, budget.ReserveByProject, true); at >= 0 {
-		return at, false
-	}
-	if at := findCutCandidate(items, nil, nil, true); at >= 0 {
-		return at, true
-	}
-	return -1, false
+	return -1
 }
 
 func reserveCounts(items []Item, reserve map[string]int) map[string]int {
