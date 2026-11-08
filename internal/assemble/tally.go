@@ -58,6 +58,10 @@ type BucketTally struct {
 	// SUBSET of RankedOut and never added to Total, kept apart so a header can say
 	// those rows were cut for size and not outranked by the composite score.
 	ByteCut int
+	// ReserveByteCut is how many of ByteCut were cut only because keeping a
+	// reserved bucket minimum would have left the block over the hard host limit.
+	// It is a SUBSET of ByteCut.
+	ReserveByteCut int
 	// Reason is the withheld rows' dominant cause, first-seen on a tie. It is
 	// the one cause WithheldNote names, so the sentence a wholly-withheld block
 	// renders matches what actually withheld the rows.
@@ -174,6 +178,9 @@ func CountsFor(trace *Trace, bucket string, shown int) BucketTally {
 			t.RankedOut++
 			if d.Stage == stageResponseFit {
 				t.ByteCut++
+				if d.Reason == reasonBudgetDroppedReserve {
+					t.ReserveByteCut++
+				}
 			}
 		default:
 			t.Withheld++

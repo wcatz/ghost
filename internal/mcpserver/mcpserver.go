@@ -4949,7 +4949,7 @@ func (s *Server) registerResources() {
 		if len(res.Items) > 0 {
 			pinnedLine := ""
 			if res.Trace != nil {
-				pinnedLine = projectContextPinnedLine(res.Trace.PinnedCut[memory.GlobalProjectID], "global ")
+				pinnedLine = projectContextPinnedLine(res.Trace.PinnedCut[memory.GlobalProjectID], "global ", len(res.Items))
 			}
 			parts := responseSection(0, "## Ghost Global Memories", itemLines(res.Items), itemPins(res.Items), pinnedLine)
 			text, _ = capResponseParts(parts, s.searchResponseCap(), projectContextCutAdvice)
@@ -5258,7 +5258,7 @@ func (s *Server) buildProjectContext(ctx context.Context, projectID, asked strin
 		}
 		own, globals = projectContextSplit(memories.Items)
 		var ownLine string
-		ownLine, foldedOwn, globalLine = projectContextPinnedLines(memories, projectID, own)
+		ownLine, foldedOwn, globalLine = projectContextPinnedLines(memories, projectID, own, globals)
 		parts = append(parts, responseSection(responsePartsLen(parts), memorySectionHeading, itemLines(own), itemPins(own), ownLine)...)
 	}
 

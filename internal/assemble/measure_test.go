@@ -248,3 +248,89 @@ func TestKeepPinnedCutsUnpinnedRowsFirst(t *testing.T) {
 		t.Errorf("cut order %q, want U3,U2,U1: lowest-ranked unpinned first", got)
 	}
 }
+
+// TestReserveByProjectKeepsGlobalBucketFromZero: the response-fit pass must not
+// empty a reserved bucket to zero when other buckets can be cut, and it prefers
+// keeping pinned rows in that bucket.
+func TestReserveByProjectKeepsGlobalBucketFromZero(t *testing.T) {
+	var cands []memory.Candidate
+	for i, id := range []string{"P1", "P2", "P3"} {
+		c := ranked(id, i, strings.Repeat("x", 100))
+		c.ProjectID = "proj"
+		cands = append(cands, c)
+	}
+	for i, id := range []string{"G1", "GP"} {
+		c := ranked(id, 10+i, strings.Repeat("x", 100))
+		c.ProjectID = memory.GlobalProjectID
+		c.Pinned = id == "GP"
+		cands = append(cands, c)
+	}
+	req := baseRequest()
+	req.Budget.MaxItems = 10
+	req.Budget.KeepPinned = true
+	req.Budget.MaxBytes = 150
+	req.Budget.ReserveByProject = map[string]int{memory.GlobalProjectID: 1}
+	req.Budget.Measure = func(items []Item, _ *Trace) int { return 100 * len(items) }
+	res := run(t, &fakeRetriever{set: ftsOnlySet(cands...)}, req)
+	gotGlobals := 0
+	hasPinnedGlobal := false
+	for _, it := range res.Items {
+		if it.ProjectID == memory.GlobalProjectID {
+			gotGlobals++
+			if it.Pinned {
+				hasPinnedGlobal = true
+			}
+		}
+	}
+	if gotGlobals == 0 {
+		t.Fatalf("kept %v, want at least one global row; the fit pass must not empty the reserved global bucket", itemIDs(res.Items))
+	}
+	if !hasPinnedGlobal {
+		t.Fatalf("kept %v, want the pinned global row preserved first", itemIDs(res.Items))
+	}
+}
+
+// TestReserveGivesWayWhenASingleGlobalRowCannotStay: a reserved bucket row is
+// cut last, but it is still cut when keeping it would leave the block over the
+// hard host limit. The cut is recorded with the reserve-violated reason, counted
+// as a reserved byte cut, and explained as such.
+func TestReserveGivesWayWhenASingleGlobalRowCannotStay(t *testing.T) {
+	c := ranked("G1", 0, strings.Repeat("x", 100))
+	c.ProjectID = memory.GlobalProjectID
+	req := baseRequest()
+	req.Budget.MaxItems = 10
+	req.Budget.KeepPinned = true
+	req.Budget.MaxBytes = 10
+	req.Budget.FramingCeiling = 1000
+	req.Budget.ReserveByProject = map[string]int{memory.GlobalProjectID: 1}
+	req.Budget.Measure = func(items []Item, _ *Trace) int { return 100 * len(items) }
+	res := run(t, &fakeRetriever{set: ftsOnlySet(c)}, withExplain(req))
+
+	if len(res.Items) != 0 {
+		t.Fatalf("kept %v, want no rows: the reserved global row cannot fit the hard host limit", itemIDs(res.Items))
+	}
+	var found bool
+	for _, d := range res.Trace.Decisions {
+		if d.ID == "G1" && d.Stage == stageResponseFit && !d.Kept {
+			found = true
+			if d.Reason != reasonBudgetDroppedReserve {
+				t.Errorf("row G1 cut reason = %q, want %q", d.Reason, reasonBudgetDroppedReserve)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("trace missing a response_fit drop decision for the reserved global row")
+	}
+	tally := CountsFor(res.Trace, memory.GlobalProjectID, 0)
+	if tally.ByteCut != 1 || tally.ReserveByteCut != 1 {
+		t.Errorf("global tally ByteCut=%d ReserveByteCut=%d, want 1 and 1", tally.ByteCut, tally.ReserveByteCut)
+	}
+	if res.Explain == nil {
+		t.Fatal("want explain projection")
+	}
+	row := explainRowByID(t, res.Explain, "G1")
+	want := "a reserved bucket row was cut to stay under the hard host limit"
+	if !strings.Contains(row.Reason, want) {
+		t.Errorf("explain reason = %q, want suffix %q", row.Reason, want)
+	}
+}

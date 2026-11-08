@@ -84,10 +84,11 @@ const (
 	reasonAllDiversity        = "all_diversity_capped"
 	reasonAllOverBudget       = "all_over_budget"
 	// Results that admitted rows.
-	reasonBelowFloor    = "below_floor"
-	reasonFloorMet      = "floor_met"
-	reasonNoFloorArm    = "no_floor_arm"
-	reasonBudgetDropped = "response_budget"
+	reasonBelowFloor           = "below_floor"
+	reasonFloorMet             = "floor_met"
+	reasonNoFloorArm           = "no_floor_arm"
+	reasonBudgetDropped        = "response_budget"
+	reasonBudgetDroppedReserve = "response_budget_reserved"
 	// reasonRelevanceCutoff is the cutoff stage's per-row reason (#954): the
 	// row's fused Base fell below the configured fraction of the top row's, so
 	// the answer stopped where relevance fell off. It is a per-row reason like
@@ -1162,7 +1163,7 @@ func (p *pipeline) fitResponse(base Result) (Result, error) {
 	// The cut: the row the rule gives up, dropped from the items and from the
 	// rows beside them, and recorded as a response_fit decision so a cut row
 	// is never recorded as delivered.
-	cut := func(items []Item, at int) []Item {
+	cut := func(items []Item, at int, reserveViolated bool) []Item {
 		// p.rows alongside p.items, or notes()'s gate on an empty row set
 		// stays false and the removal breakdown — the thing that makes an
 		// empty answer's leading sentence checkable — disappears on exactly
@@ -1172,9 +1173,13 @@ func (p *pipeline) fitResponse(base Result) (Result, error) {
 		if len(p.rows) > at {
 			p.rows = append(p.rows[:at:at], p.rows[at+1:]...)
 		}
-		p.dropped[lowest.ID] = reasonBudgetDropped
+		reason := reasonBudgetDropped
+		if reserveViolated {
+			reason = reasonBudgetDroppedReserve
+		}
+		p.dropped[lowest.ID] = reason
 		p.droppedBy[stageResponseFit]++
-		p.trace.decide(lowest.ID, lowest.ProjectID, stageResponseFit, reasonBudgetDropped, lowest.Score)
+		p.trace.decide(lowest.ID, lowest.ProjectID, stageResponseFit, reason, lowest.Score)
 		dropped = append(dropped, lowest.ID)
 		return p.items
 	}
@@ -1205,7 +1210,7 @@ func (p *pipeline) fitResponse(base Result) (Result, error) {
 	// to a byte cap: the search envelope never cuts its LAST row (#1483), and
 	// a Budget.Measure caller is excluded from that because its contract is
 	// to cut down to none (FramingCeiling).
-	kept, outcome := FitItems(p.items, p.req.Budget, measure, p.allCutFraming, cut, giveWay, p.req.Budget.Measure == nil)
+	kept, outcome, _ := FitItems(p.items, p.req.Budget, measure, p.allCutFraming, cut, giveWay, p.req.Budget.Measure == nil)
 	p.items = kept
 
 	switch outcome {
