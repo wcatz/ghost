@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"regexp"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -548,7 +549,7 @@ type SearchParams struct {
 // see decayFactor) — not a blanket age-only freshness prior. The recency-trap
 // suite in docs/benchmarks.md showed an untargeted prior damages correct-wins,
 // which is why a flat RecencyWeight/RecencyTau prior was removed in favor of
-// the category-aware factor (preference/convention/fact never decay, pattern/
+// the category-aware factor (preference/convention never decay; a fact never decays unless its content carries a calendar date; pattern/
 // architecture tau 45, decision/gotcha/dependency tau 30).
 //
 // A link-graph expansion bonus was evaluated and removed. It was structurally
@@ -689,34 +690,55 @@ func parseCreatedAt(s string) time.Time {
 	return t
 }
 
+// datedFactRE matches a calendar date (YYYY-MM-DD) anywhere in content. A fact
+// whose content carries one is a dated status note and decays; a fact with no
+// date is a timeless claim and keeps the never-decay treatment preference and
+// convention have. The pattern is the same shape DecayRankingSQL tests with GLOB,
+// so the Go and SQL paths classify the same rows.
+var datedFactRE = regexp.MustCompile(`\d{4}-\d{2}-\d{2}`)
+
+// ContentCarriesDate reports whether content carries a calendar date. It is the
+// one implementation of the heuristic both the decay factor and callers that need
+// the same answer share; the SQL ranking uses the equivalent GLOB on content.
+func ContentCarriesDate(content string) bool {
+	return datedFactRE.MatchString(content)
+}
+
 // DecayFactor is the time-decay multiplier for a memory of this category, this
 // tier, this pin state and this age in days. It mirrors DecayRankingSQL
-// (store.go) exactly — a pinned memory or a preference/convention/fact never
-// decays (factor 1.0); pattern/architecture decay with tau 45 and a 0.3 floor;
-// all other categories (decision, gotcha, dependency, ...) decay with tau 30 and
-// a 0.15 floor; and a session-tier row carries the bounded tier decay on top of
-// whichever of those applies (see RetentionDecayFactor). The SQL-vs-Go parity
-// test (store_test.go) guards against drift between this and the SQL constant.
+// (store.go) exactly — a pinned memory never decays (factor 1.0); preference
+// and convention never decay; a fact never decays unless its content carries a
+// calendar date, in which case it decays on the pattern/architecture curve;
+// pattern/architecture decay with tau 45 and a 0.3 floor; all other categories
+// (decision, gotcha, dependency, ...) decay with tau 30 and a 0.15 floor; and a
+// session-tier row carries the bounded tier decay on top of whichever of those
+// applies (see RetentionDecayFactor). The SQL-vs-Go parity test (store_test.go)
+// guards against drift between this and the SQL constant.
 //
 // The tier is a parameter rather than a second multiplication at each call site
 // because it is not a separate signal: it is how long this memory is wanted, and
 // the age it is being scored against is the same age. A row that ranks as
 // conversation-scoped should read that way in the one number that ranks it.
-func DecayFactor(category, retention string, pinned bool, ageDays float64) float64 {
+func DecayFactor(category, content, retention string, pinned bool, ageDays float64) float64 {
 	if pinned {
 		return 1.0
 	}
-	return categoryDecay(category, ageDays) * RetentionDecayFactor(retention, pinned, ageDays)
+	return categoryDecay(category, content, ageDays) * RetentionDecayFactor(retention, pinned, ageDays)
 }
 
 // categoryDecay is the category-and-age half of DecayFactor, split out because
 // the tier half multiplies it and because the two have different floors: a
 // session row is never worth more than half a durable one, whatever its
 // category, and the floors are per-category.
-func categoryDecay(category string, ageDays float64) float64 {
+func categoryDecay(category, content string, ageDays float64) float64 {
 	switch category {
-	case "preference", "convention", "fact":
+	case "preference", "convention":
 		return 1.0
+	case "fact":
+		if !ContentCarriesDate(content) {
+			return 1.0
+		}
+		return math.Max(0.3, 1.0/(1.0+ageDays/45.0))
 	case "pattern", "architecture":
 		return math.Max(0.3, 1.0/(1.0+ageDays/45.0))
 	default:
@@ -772,7 +794,7 @@ func decayRank(results []Memory, scores map[string]float64, p SearchParams, limi
 			// every multiplier the composite applied — the category half and the
 			// bounded session decay alike. Recording only the first would report a
 			// factor the sequence never used.
-			t.Decay = DecayFactor(m.Category, m.Retention, m.Pinned, t.AgeDays)
+			t.Decay = DecayFactor(m.Category, m.Content, m.Retention, m.Pinned, t.AgeDays)
 		}
 	}
 
@@ -797,8 +819,8 @@ func decayRank(results []Memory, scores map[string]float64, p SearchParams, limi
 		// Reorder by base × decay (ordering; with DecayReselect this also
 		// owns final membership via the subsequent truncate).
 		sort.SliceStable(scored, func(i, j int) bool {
-			fi := scored[i].base * DecayFactor(scored[i].m.Category, scored[i].m.Retention, scored[i].m.Pinned, ageDays(scored[i].m.CreatedAt, now))
-			fj := scored[j].base * DecayFactor(scored[j].m.Category, scored[j].m.Retention, scored[j].m.Pinned, ageDays(scored[j].m.CreatedAt, now))
+			fi := scored[i].base * DecayFactor(scored[i].m.Category, scored[i].m.Content, scored[i].m.Retention, scored[i].m.Pinned, ageDays(scored[i].m.CreatedAt, now))
+			fj := scored[j].base * DecayFactor(scored[j].m.Category, scored[j].m.Content, scored[j].m.Retention, scored[j].m.Pinned, ageDays(scored[j].m.CreatedAt, now))
 			if fi != fj {
 				return fi > fj
 			}

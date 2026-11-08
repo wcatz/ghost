@@ -5794,8 +5794,12 @@ func TestDecaySQLParity(t *testing.T) {
 	for _, cat := range categories {
 		for _, age := range ages {
 			for _, pinned := range []bool{false, true} {
+				content := cat
+				if cat == "fact" {
+					content = "timeless claim"
+				}
 				id, err := s.Create(ctx, testProject, Memory{
-					Category: cat, Content: cat, Source: "manual",
+					Category: cat, Content: content, Source: "manual",
 					Importance: 1.0, // importance must be 1 so the SQL result IS the factor
 				})
 				if err != nil {
@@ -5816,12 +5820,41 @@ func TestDecaySQLParity(t *testing.T) {
 				if goAge < 0 {
 					goAge = 0
 				}
-				goFactor := DecayFactor(cat, RetentionProject, pinned, goAge)
+				goFactor := DecayFactor(cat, content, RetentionProject, pinned, goAge)
 
 				if math.Abs(sqlFactor-goFactor) > eps {
-					t.Errorf("category=%s age=%d pinned=%v: SQL=%v Go=%v (diff %v)",
-						cat, age, pinned, sqlFactor, goFactor, math.Abs(sqlFactor-goFactor))
+					t.Errorf("category=%s content=%q age=%d pinned=%v: SQL=%v Go=%v (diff %v)",
+						cat, content, age, pinned, sqlFactor, goFactor, math.Abs(sqlFactor-goFactor))
 				}
+			}
+		}
+	}
+	// A dated fact decays on the pattern/architecture curve; the SQL and Go
+	// paths must agree on the same heuristic.
+	for _, age := range ages {
+		for _, pinned := range []bool{false, true} {
+			content := "component upgraded on 2026-01-15"
+			id, err := s.Create(ctx, testProject, Memory{
+				Category: "fact", Content: content, Source: "manual", Importance: 1.0,
+			})
+			if err != nil {
+				t.Fatalf("create dated fact/%d/pinned=%v: %v", age, pinned, err)
+			}
+			setCreatedAtDaysAgo(t, s, id, age)
+			if pinned {
+				if err := s.TogglePin(ctx, id, true); err != nil {
+					t.Fatalf("pin dated fact/%d: %v", age, err)
+				}
+			}
+			sqlFactor := memoryScore(t, s, id)
+			goAge := time.Since(memoryCreatedAtAsTime(t, s, id)).Hours() / 24.0
+			if goAge < 0 {
+				goAge = 0
+			}
+			goFactor := DecayFactor("fact", content, RetentionProject, pinned, goAge)
+			if math.Abs(sqlFactor-goFactor) > eps {
+				t.Errorf("dated fact age=%d pinned=%v: SQL=%v Go=%v (diff %v)",
+					age, pinned, sqlFactor, goFactor, math.Abs(sqlFactor-goFactor))
 			}
 		}
 	}

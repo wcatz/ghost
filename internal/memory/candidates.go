@@ -1347,7 +1347,7 @@ func (s *Store) fillExplain(ctx context.Context, set *CandidateSet, req Candidat
 		for _, m := range bucket {
 			if t := p.trace.row(m.ID); t != nil && t.Decay == 0 {
 				t.AgeDays = ageDays(m.CreatedAt, req.Now)
-				t.Decay = DecayFactor(m.Category, m.Retention, m.Pinned, t.AgeDays)
+				t.Decay = DecayFactor(m.Category, m.Content, m.Retention, m.Pinned, t.AgeDays)
 			}
 		}
 	}
@@ -1474,7 +1474,7 @@ func (s *Store) hydrateTail(ctx context.Context, pool []*hybridCandidate, select
 // age decay the window is ordered on, so a backfilled row ranks as if it had
 // been selected.
 func tailScore(m Memory, scores map[string]float64, now time.Time) float64 {
-	return scores[m.ID] * DecayFactor(m.Category, m.Retention, m.Pinned, ageDays(m.CreatedAt, now))
+	return scores[m.ID] * DecayFactor(m.Category, m.Content, m.Retention, m.Pinned, ageDays(m.CreatedAt, now))
 }
 
 // candidateOf pairs a hydrated row with the facts fusion produced for it.
@@ -1482,7 +1482,7 @@ func candidateOf(m Memory, scores map[string]float64, fts ftsLeg, vec vecLeg, no
 	c := Candidate{Memory: m}
 	c.Base = scores[m.ID]
 	c.AgeDays = ageDays(m.CreatedAt, now)
-	c.Decay = DecayFactor(m.Category, m.Retention, m.Pinned, c.AgeDays)
+	c.Decay = DecayFactor(m.Category, m.Content, m.Retention, m.Pinned, c.AgeDays)
 	c.Score = c.Base * c.Decay
 	// -1 marks a leg that did not retrieve the row; rank 0 is a real first
 	// place, and a cosine of 0 is a real measurement of "no similarity".

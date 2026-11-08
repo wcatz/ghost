@@ -320,7 +320,7 @@ func TestMaintenanceFixtureCarriesState(t *testing.T) {
 			}
 		case m.Project == globalProject:
 			globals++
-			if decaysWithAge(m.Category) {
+			if decaysWithAge(m.Category, m.Content) {
 				globalDecaying++
 			}
 		}
@@ -423,12 +423,12 @@ func TestMaintenanceFixtureCarriesState(t *testing.T) {
 	}
 }
 
-// decaysWithAge reports whether a category's decay factor drops below 1 as the
-// row ages. It asks the shipped policy (memory.DecayFactor) rather than
-// restating the category list, so a change to that policy updates this guard
-// with it instead of leaving a second copy to drift.
-func decaysWithAge(category string) bool {
-	return memory.DecayFactor(category, memory.RetentionProject, false, 10_000) < 1
+// decaysWithAge reports whether a row's decay factor drops below 1 as it ages.
+// It asks the shipped policy (memory.DecayFactor) rather than restating the
+// category list, so a change to that policy updates this guard with it instead
+// of leaving a second copy to drift.
+func decaysWithAge(category, content string) bool {
+	return memory.DecayFactor(category, content, memory.RetentionProject, false, 10_000) < 1
 }
 
 // TestMaintenanceSupersedeEdgesMoveLiveWins is the one behavioural assertion in

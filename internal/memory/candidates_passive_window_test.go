@@ -515,7 +515,7 @@ func TestPassiveThresholdScanKeepsTheNewestTiedRows(t *testing.T) {
 	fresh := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
 	// The fixture only tests the tie if the rank IS the importance: a fact on
 	// the project tier must not decay.
-	if f := DecayFactor("fact", RetentionProject, false, ageDays(old.Format("2006-01-02 15:04:05"), now)); f != 1 {
+	if f := DecayFactor("fact", "", RetentionProject, false, ageDays(old.Format("2006-01-02 15:04:05"), now)); f != 1 {
 		t.Fatalf("a project-tier fact decays by %v, so the fixture's rows are not tied on rank", f)
 	}
 	for _, tc := range []struct {

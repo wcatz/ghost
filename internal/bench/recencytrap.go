@@ -88,14 +88,15 @@ func (s TrapScenario) effectiveCategory() string {
 const decayProbeAgeDays = 1000.0
 
 // categoryDecays reports whether the shipped category-aware time decay would
-// ever reorder a row in this category.
+// ever reorder a row of this category and content.
 //
 // The tier is the durable one on purpose: the question is about the CATEGORY
 // half, and a session row also carries a bounded retention decay, so asking
-// with `session` here would classify every category as decaying and answer a
-// different question than the one the label asks.
-func categoryDecays(category string) bool {
-	return memory.DecayFactor(category, memory.RetentionProject, false, decayProbeAgeDays) < 1.0
+// with `session` here would classify every row as decaying and answer a
+// different question than the one the label asks. A fact decays only when its
+// content carries a calendar date.
+func categoryDecays(category, content string) bool {
+	return memory.DecayFactor(category, content, memory.RetentionProject, false, decayProbeAgeDays) < 1.0
 }
 
 // LoadTrapScenarios reads trap scenarios, one JSON per line. A scenario whose
@@ -166,8 +167,8 @@ func RunRecencyTrap(ctx context.Context, scenarios []TrapScenario, p memory.Sear
 	defer store.Close() //nolint:errcheck
 
 	projects := map[bool]string{}
-	projectFor := func(category string) (string, error) {
-		decays := categoryDecays(category)
+	projectFor := func(category, content string) (string, error) {
+		decays := categoryDecays(category, content)
 		project, ok := projects[decays]
 		if !ok {
 			project = "recencytrap"
@@ -191,7 +192,7 @@ func RunRecencyTrap(ctx context.Context, scenarios []TrapScenario, p memory.Sear
 	stamp := newCorpusStamp()
 	for i, sc := range scenarios {
 		category := sc.effectiveCategory()
-		project, err := projectFor(category)
+		project, err := projectFor(category, sc.Correct.Content)
 		if err != nil {
 			return nil, err
 		}
@@ -246,7 +247,7 @@ func RunRecencyTrap(ctx context.Context, scenarios []TrapScenario, p memory.Sear
 			// judge reuses judgeProbe with correct as the "fresh" role.
 			found, wins, top1 := judgeProbe(ranked, seed[i].correctID, seed[i].trapIDs)
 			outcomes = append(outcomes, TrapOutcome{
-				Scenario: sc.Name, Category: category, Decays: categoryDecays(category),
+				Scenario: sc.Name, Category: category, Decays: categoryDecays(category, sc.Correct.Content),
 				CorrectPinned: sc.Pinned, CorrectFound: found, CorrectWins: wins, CorrectTop1: top1,
 			})
 		}

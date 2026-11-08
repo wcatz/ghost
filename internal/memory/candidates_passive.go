@@ -519,12 +519,12 @@ func (s *Store) scanPassiveKeys(ctx context.Context, req CandidateRequest, pol S
 func scanPassiveRankKey(rows *sql.Rows, now time.Time) (passiveRankKey, error) {
 	var key passiveRankKey
 	var pinned int
-	if err := rows.Scan(&key.id, &key.importance, &pinned, &key.category, &key.createdAt, &key.updatedAt, &key.retention); err != nil {
+	if err := rows.Scan(&key.id, &key.importance, &pinned, &key.category, &key.content, &key.createdAt, &key.updatedAt, &key.retention); err != nil {
 		return key, fmt.Errorf("scan passive key: %w", err)
 	}
 	key.pinned = pinned == 1
 	clock := now.UTC().Truncate(time.Second)
-	key.rank = key.importance * DecayFactor(key.category, key.retention, key.pinned, ageDays(key.createdAt, clock))
+	key.rank = key.importance * DecayFactor(key.category, key.content, key.retention, key.pinned, ageDays(key.createdAt, clock))
 	return key, nil
 }
 
@@ -651,7 +651,7 @@ func (s *Store) passiveMaxDecayForBucket(ctx context.Context, pol SlicePolicy, c
 	} else {
 		cat = "gotcha"
 	}
-	return DecayFactor(cat, RetentionProject, false, age)
+	return DecayFactor(cat, "", RetentionProject, false, age)
 }
 
 // passiveCategoryPresent reports whether a population's bucket holds any row of
@@ -723,14 +723,15 @@ func passiveRankKeyLess(a, b passiveRankKey, order string) bool {
 }
 
 // passiveRankKey is one row's rank facts, read by the threshold scan before the
-// row is hydrated. It is a key rather than a Memory so the scan never carries a
-// row's content, and it holds importance as the double the column stores so the
-// tie it breaks is the engine's.
+// row is hydrated. It carries content because the rank's category-aware decay
+// treats a dated fact differently from a timeless one, and it holds importance
+// as the double the column stores so the tie it breaks is the engine's.
 type passiveRankKey struct {
 	id         string
 	pinned     bool
 	importance float64
 	category   string
+	content    string
 	createdAt  string
 	updatedAt  string
 	retention  string
@@ -828,7 +829,7 @@ func passiveKeyScanSQL(pol SlicePolicy, req CandidateRequest, cols passiveColumn
 			args = append(args, stamp, stamp)
 		}
 		return fmt.Sprintf(`
-		SELECT id, importance, pinned, category, created_at, updated_at, %s
+		SELECT id, importance, pinned, category, content, created_at, updated_at, %s
 		FROM memories
 		WHERE %s`, retention, where), args
 	}
@@ -1097,7 +1098,7 @@ func (s *Store) selectPassive(ctx context.Context, memories []Memory, pol SliceP
 		// a tiered row is ordered slightly differently from how it is scored; that
 		// is the same split the query path has, and the score is what the two-pass
 		// selection ranks on.
-		decay := DecayFactor(m.Category, m.Retention, m.Pinned, age)
+		decay := DecayFactor(m.Category, m.Content, m.Retention, m.Pinned, age)
 		scored = append(scored, passiveRow{
 			mem:   m,
 			age:   age,

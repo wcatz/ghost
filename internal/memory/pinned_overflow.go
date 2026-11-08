@@ -189,8 +189,8 @@ func pinnedLess(a, b Memory, projectID string, now time.Time) bool {
 	// Project bucket: decay ranking, then importance, then creation, then id.
 	// Pinned rows have DecayFactor 1, so rank == importance, but keep the
 	// formula for fidelity.
-	ra := float64(a.Importance) * DecayFactor(a.Category, a.Retention, true, ageDays(a.CreatedAt, now))
-	rb := float64(b.Importance) * DecayFactor(b.Category, b.Retention, true, ageDays(b.CreatedAt, now))
+	ra := float64(a.Importance) * DecayFactor(a.Category, a.Content, a.Retention, true, ageDays(a.CreatedAt, now))
+	rb := float64(b.Importance) * DecayFactor(b.Category, b.Content, b.Retention, true, ageDays(b.CreatedAt, now))
 	if ra != rb {
 		return ra > rb
 	}

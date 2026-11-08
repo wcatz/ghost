@@ -537,8 +537,8 @@ func qualifyScopeClause(clause, table string) string {
 func sortAsOfRows(rows []AsOfRow, t time.Time) {
 	sort.SliceStable(rows, func(i, j int) bool {
 		a, b := rows[i], rows[j]
-		as := float64(a.Importance) * DecayFactor(a.Category, RetentionProject, a.Pinned, ageDays(a.CreatedAt, t))
-		bs := float64(b.Importance) * DecayFactor(b.Category, RetentionProject, b.Pinned, ageDays(b.CreatedAt, t))
+		as := float64(a.Importance) * DecayFactor(a.Category, a.Content, RetentionProject, a.Pinned, ageDays(a.CreatedAt, t))
+		bs := float64(b.Importance) * DecayFactor(b.Category, b.Content, RetentionProject, b.Pinned, ageDays(b.CreatedAt, t))
 		if as != bs {
 			return as > bs
 		}
