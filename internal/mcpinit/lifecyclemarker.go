@@ -148,6 +148,12 @@ const (
 // diagnosable fact.
 const NoLLMBackendError = "no CLI LLM backend available; reflect skipped"
 
+// UnsafeProjectIDError is the marker cause for a project whose id cannot be a
+// filename component. The stop hook's spawn guard records it, and the
+// session-start alert recognises it so it asks for an id a lifecycle file can
+// be keyed on instead of offering a retry that cannot work for such an id.
+const UnsafeProjectIDError = "project id is not a safe filename component, so no lifecycle bookkeeping can be keyed on it"
+
 // InterruptedBySignal opens the sentence the lifecycle coordinator records when
 // a signal stops its chain ("interrupted by SIGTERM while running resolve",
 // "... before supersede"). Shared with that writer so the alert can find the
@@ -1203,6 +1209,19 @@ func lifecycleFailureAlert(projectID, projectName string) string {
 	// The line's parts, each rendered under its own cap: the timestamp, the
 	// failed phases, the error that says why. The project is rendered last,
 	// because it is printed TWICE and is what decides whether the line fits.
+	// An id that cannot key lifecycle bookkeeping gets its own sentence: the
+	// generic one offers a retry and points at the CLI binaries, neither of
+	// which can help until the project is renamed.
+	if strings.TrimSpace(m.Error) == UnsafeProjectIDError {
+		rest := lifecycleAlertMaxBytes - len(fmt.Sprintf(lifecycleUnsafeAlertFormat, ""))
+		if rest > lifecycleMarkerProjectMaxBytes {
+			rest = lifecycleMarkerProjectMaxBytes
+		}
+		if rest < 0 {
+			rest = 0
+		}
+		return fmt.Sprintf(lifecycleUnsafeAlertFormat, renderMarkerProject(p, rest))
+	}
 	ts := at.Format(time.RFC3339)
 	phases := renderMarkerPhases(m.PhasesFailed)
 	errLine := renderMarkerError(m.Error)
@@ -1259,17 +1278,22 @@ func lifecycleUnclearableAlert(p string, at time.Time) string {
 	return fmt.Sprintf(lifecycleUnclearableAlertFormat, refusal, p, ts, p)
 }
 
-// lifecycleAlertFormat and lifecycleUnclearableAlertFormat are the two shapes
-// of the session-start alert line. They are constants because the line's
-// budget is measured against them: the cost of the sentence around the parts
-// is what the parts have to share, and a sentence written twice would be two
-// sentences to keep in step.
+// lifecycleAlertFormat, lifecycleUnclearableAlertFormat and
+// lifecycleUnsafeAlertFormat are the shapes of the session-start alert line.
+// They are constants because the line's budget is measured against them: the
+// cost of the sentence around the parts is what the parts have to share, and a
+// sentence written twice would be two sentences to keep in step.
 const (
 	lifecycleAlertFormat = "**Ghost maintenance alert:** last automatic consolidation failed for project %s at %s (phase(s): %s; %s). Memory consolidation is paused until a run succeeds — run `ghost lifecycle --project %s` to retry, and check config cli.*_binary if no LLM CLI was found."
 	// The unclearable form carries the directory's own refusal where the
 	// other carries the error: the directory is the blocker there, not a
 	// phase.
 	lifecycleUnclearableAlertFormat = "**Ghost maintenance alert:** the data directory refuses new files (%s), so lifecycle bookkeeping cannot be written; the failure recorded for project %s at %s can be neither cleared nor confirmed as the current cause. Fix the directory's write access, then run `ghost lifecycle --project %s` to retry."
+	// The unsafe-id form names the one repair that helps: an id a lifecycle
+	// file can be keyed on. It deliberately offers no retry, because a run
+	// for such an id cannot take the per-project lock or record a start
+	// stamp.
+	lifecycleUnsafeAlertFormat = "**Ghost maintenance alert:** project %s cannot be maintained unattended: its id is not a safe filename component, so no lifecycle bookkeeping can be keyed on it. Rename the project id to one a file name can hold."
 )
 
 // lifecycleAlertProject renders the project for an alert line, at the share of

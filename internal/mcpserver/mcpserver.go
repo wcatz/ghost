@@ -4337,8 +4337,10 @@ func (s *Server) registerTools() {
 
 		// Maintenance overdue (#1847): projects that hold consolidatable
 		// memories and have not had a lifecycle run within the configured
-		// interval. The figures are the same data the status diagnostic
-		// reports, so both surfaces cannot disagree.
+		// interval, plus projects whose id cannot key lifecycle bookkeeping
+		// at all and therefore cannot be maintained unattended. The figures
+		// are the same data the status diagnostic reports, so both surfaces
+		// cannot disagree.
 		var overdueParts []string
 		if read.store != nil {
 			dataDir, derr := config.DataDirPath()
@@ -4350,26 +4352,15 @@ func (s *Server) registerTools() {
 				if oerr != nil {
 					overdueParts = append(overdueParts, "\n**Maintenance overdue:** could not be read: "+oerr.Error()+"\n\n")
 				} else if len(overdue) > 0 {
-					if text, ok := mcpinit.FormatOverdueMaintenance(overdue, time.Now()); ok {
-						// Cap to avoid unbounded framing growth; capResponseParts
-						// will trim cuttable parts.
-						lines := strings.Split(strings.TrimRight(text, "\n"), "\n")
-						if len(lines) > 0 {
-							var ob strings.Builder
-							ob.WriteString("\n")
-							ob.WriteString(lines[0])
-							ob.WriteString("\n")
-							max := 20
-							for i := 1; i < len(lines) && i <= max; i++ {
-								ob.WriteString(lines[i])
-								ob.WriteString("\n")
-							}
-							if len(lines)-1 > max {
-								fmt.Fprintf(&ob, "... and %d more\n", len(lines)-1-max)
-							}
-							ob.WriteString("\n")
-							overdueParts = append(overdueParts, ob.String())
+					overdueText, unmaintainableText := mcpinit.FormatOverdueMaintenanceSections(overdue, time.Now())
+					// Cap EACH section separately: a long overdue list must not
+					// push the unmaintainable projects past the cap, or the two
+					// diagnostics would disagree about them.
+					for _, text := range []string{overdueText, unmaintainableText} {
+						if text == "" {
+							continue
 						}
+						overdueParts = append(overdueParts, capMaintenanceSection(text))
 					}
 				}
 			}
@@ -5826,6 +5817,35 @@ func repairInstructions(project string, targets []string) string {
 		sb.WriteString("\nThe target is stamped resolved and no repair command can name it; see the note above.")
 	}
 	return sb.String()
+}
+
+// maxMaintenanceSectionBullets bounds one maintenance section's bullet list.
+// The cap is per section, not for the whole maintenance block: the overdue
+// list and the cannot-be-maintained-unattended list are separate findings, and
+// a long first one must not hide the second.
+const maxMaintenanceSectionBullets = 20
+
+// capMaintenanceSection renders one maintenance section, keeping its heading
+// and at most maxMaintenanceSectionBullets bullets and counting the rest. It
+// wraps the section in blank lines for the markdown block.
+func capMaintenanceSection(text string) string {
+	lines := strings.Split(strings.TrimRight(text, "\n"), "\n")
+	if len(lines) == 0 {
+		return ""
+	}
+	var ob strings.Builder
+	ob.WriteString("\n")
+	ob.WriteString(lines[0])
+	ob.WriteString("\n")
+	for i := 1; i < len(lines) && i <= maxMaintenanceSectionBullets; i++ {
+		ob.WriteString(lines[i])
+		ob.WriteString("\n")
+	}
+	if len(lines)-1 > maxMaintenanceSectionBullets {
+		fmt.Fprintf(&ob, "... and %d more\n", len(lines)-1-maxMaintenanceSectionBullets)
+	}
+	ob.WriteString("\n")
+	return ob.String()
 }
 
 // joinTokens renders stored ids for a tool answer, each through assemble.Token

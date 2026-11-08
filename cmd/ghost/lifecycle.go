@@ -819,6 +819,34 @@ func consolidationContext(parent context.Context, timeout time.Duration) (contex
 	return context.WithTimeout(parent, timeout)
 }
 
+// consolidateBounded runs one consolidation under the bound that
+// reflection.consolidation_timeout_minutes puts on it and reports the error
+// that must stop the run before it applies. The check after the call reads the
+// consolidation context, not the maintenance context it derives from: that is
+// where the deadline lives, and a bare mechanical tier returns its result
+// without ever consulting the context, so an expired bound would otherwise be
+// invisible and the pass would be applied and reported as a success.
+//
+// A context that has ended for either reason is fatal. Cancellation is the
+// operator stopping the command; a deadline is the bound this call was given.
+// Neither may fall through to a rewrite of the corpus.
+func consolidateBounded(ctx context.Context, consolidator reflection.Consolidator, input reflection.ReflectionInput, timeout time.Duration) (reflection.ReflectionResult, error) {
+	consolidateCtx, cancel := consolidationContext(ctx, timeout)
+	defer cancel()
+
+	result, err := consolidator.Consolidate(consolidateCtx, input)
+	if err != nil {
+		return reflection.ReflectionResult{}, fmt.Errorf("consolidation failed: %w", err)
+	}
+	if err := consolidateCtx.Err(); err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return reflection.ReflectionResult{}, fmt.Errorf("consolidation did not finish within its deadline: %w", err)
+		}
+		return reflection.ReflectionResult{}, fmt.Errorf("consolidation cancelled: %w", err)
+	}
+	return result, nil
+}
+
 const (
 	// phaseGracePeriod is how long a phase has to exit after its deadline's
 	// SIGTERM before its whole process group is force-killed.
@@ -1916,21 +1944,16 @@ func runReflect() {
 		AllowDrops: allowDrops,
 	}
 
-	consolidateCtx, cancel := consolidationContext(ctx, cfg.Reflection.ConsolidationTimeout())
-	defer cancel()
-
-	result, err := consolidator.Consolidate(consolidateCtx, input)
+	// The bound is reflection.consolidation_timeout_minutes, carried by
+	// consolidateBounded's own context. A cancelled run must not apply: the
+	// tier guard inside a tiered list makes a cancellation fatal there, and
+	// consolidateBounded covers the consolidators that are not one — a bare
+	// mechanical tier returns a result without ever looking at the context —
+	// so neither a command the operator stopped nor a pass that outlived its
+	// deadline can rewrite the corpus and exit 0.
+	result, err := consolidateBounded(ctx, consolidator, input, cfg.Reflection.ConsolidationTimeout())
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: consolidation failed: %v\n", err)
-		os.Exit(1)
-	}
-	// A cancelled run must not apply. The tier guard inside a tiered list makes
-	// a cancellation fatal there; this covers the consolidators that are not
-	// one — a bare mechanical tier returns a result without ever looking at the
-	// context — so a command the operator stopped cannot rewrite the corpus and
-	// exit 0.
-	if ctx.Err() != nil {
-		fmt.Fprintf(os.Stderr, "error: consolidation cancelled: %v\n", ctx.Err())
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
 
