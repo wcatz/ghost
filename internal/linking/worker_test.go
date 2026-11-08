@@ -298,11 +298,7 @@ func TestRun_SurvivesPanicInTickerSweep(t *testing.T) {
 }
 
 func TestSweepOnceTrimsExistingOverCapRelatedDegree(t *testing.T) {
-	dir, err := os.MkdirTemp("/srv/m2-oc/ghost/tmp-i1955", "cap-sweep")
-	if err != nil {
-		t.Fatalf("MkdirTemp: %v", err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "ghost.db")
 
 	db, err := memory.OpenDB(dbPath)
@@ -313,7 +309,7 @@ func TestSweepOnceTrimsExistingOverCapRelatedDegree(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	s := memory.NewStore(db, logger)
 	ctx := context.Background()
-	if err := s.EnsureProject(ctx, testProject, "/srv/m2-oc/ghost/tmp-i1955/cap-sweep-project", "test"); err != nil {
+	if err := s.EnsureProject(ctx, testProject, filepath.Join(dir, "project"), "test"); err != nil {
 		t.Fatalf("EnsureProject: %v", err)
 	}
 
