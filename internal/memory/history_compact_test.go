@@ -2481,6 +2481,9 @@ var inertPhaseRows = map[string]struct {
 	// on is the phase rather than the row.
 	phaseImport:   {},
 	phaseBaseline: {},
+	// MoveMemory rewrites project_id and records the move as an event with
+	// from/to project ids; it does not move updated_at.
+	phaseMove: {},
 }
 
 // nonStampMovingPhases is every phase the schema knows about that is NOT one whose
