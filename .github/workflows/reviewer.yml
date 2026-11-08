@@ -44,11 +44,22 @@ jobs:
     # leaves opencode/big-pickle ninth, which costs nothing in CI since its
     # provider refuses CI calls anyway.
     #
-    # PAID_MODEL is deliberately one low-cost Go coding model, not a list and
-    # not Kimi: DeepSeek V4.1 Flash is the current opencode-go route, chosen
-    # after Muse Spark 1.3 Contributor hit the Go usage limit while the free
-    # tier refused every anonymous CI call. The secret is injected only around
-    # its invocation.
+    # PAID_MODELS is the ordered keyed fallback, tried one at a time until one
+    # produces a valid findings document. Each entry must be an opencode-go
+    # model and never Kimi. It is a list because a single paid model was a
+    # single point of failure twice. Muse Spark 1.3 Contributor hit the Go
+    # usage limit, and on 2026-11-08 DeepSeek V4.1 Flash failed with
+    # "Insufficient account funds". Every PR's review-gate then stayed red,
+    # because the anonymous free tier refused every CI call too.
+    #
+    # The order puts the contributor route first. It still answered while the
+    # account balance was empty, so it is tried even when the anonymous free
+    # path failed as an outage (see "free models are unreachable" below); it
+    # may still count against the Go usage window. The billed models after it
+    # are skipped in that case, to preserve the balance. Only the cheap tier
+    # is listed: the expensive Go models are left out on purpose. PAID_MODEL
+    # is the single-model form, and it is read only when PAID_MODELS is empty.
+    # The secret is injected only around these invocations.
     # Job scope, because shell variables do not survive between steps.
     env:
       MODELS: >-
@@ -61,6 +72,12 @@ jobs:
         opencode/space-bunny-free
         opencode/muse-spark-1.3-contributor-free
         opencode/big-pickle
+      # vars.REVIEWER_PAID_MODELS, when set, replaces the default order.
+      # An external model tracker can publish the keyed models that answered
+      # its last probe, so the order follows live health rather than this
+      # file. The entry check below still refuses any id
+      # that is not a non-Kimi opencode-go model, whatever the variable says.
+      PAID_MODELS: ${{ vars.REVIEWER_PAID_MODELS || 'opencode-go/iceman-contributor-free opencode-go/deepseek-v4.1-flash' }}
       PAID_MODEL: opencode-go/deepseek-v4.1-flash
     # Must stay above the bounded model-selection phase (15 min), the free
     # review phase (80 min), the paid fallback phase (25 min), and the
@@ -1118,11 +1135,28 @@ jobs:
             exit 0
           fi
           REVIEW_PROMPT="$(cat "${RUNNER_TEMP}/reviewer-prompt.txt")"
-          if [[ "${PAID_MODEL:-}" != opencode-go/* || "${PAID_MODEL:-}" == *kimi* ]]; then
+          # The keyed route: PAID_MODELS in order, or PAID_MODEL alone when
+          # the list is empty. Every entry must be a non-Kimi opencode-go id.
+          # One bad entry refuses the whole fallback rather than skipping it,
+          # because a typo here should be noticed, not quietly routed around.
+          declare -a paid_models=()
+          if [ -n "${PAID_MODELS:-}" ]; then
+            read -r -a paid_models <<< "${PAID_MODELS}"
+          elif [ -n "${PAID_MODEL:-}" ]; then
+            paid_models=("${PAID_MODEL}")
+          fi
+          if [ "${#paid_models[@]}" -eq 0 ]; then
             printf 'paid_status=failed\n' >> "$GITHUB_OUTPUT"
             echo "::error::paid fallback must be a non-Kimi opencode-go model — refusing the fallback"
             exit 0
           fi
+          for candidate in "${paid_models[@]}"; do
+            if [[ "$candidate" != opencode-go/* || "$candidate" == *kimi* ]]; then
+              printf 'paid_status=failed\n' >> "$GITHUB_OUTPUT"
+              echo "::error::paid fallback must be a non-Kimi opencode-go model — refusing the fallback"
+              exit 0
+            fi
+          done
 
           failure_file="${RUNNER_TEMP}/free-review-failure.txt"
           if [ -s "$failure_file" ]; then
@@ -1136,8 +1170,10 @@ jobs:
           # During a free-model outage the free candidates all failed on a
           # rate limit or a dropped connection. Spending the paid Go quota
           # on every such head drains it on retries of the same outage, so
-          # the paid fallback is not invoked then: the run stays pending
-          # and the scheduled retry picks it up when the free tier recovers.
+          # the BILLED fallback models are not invoked then. Only the
+          # zero-cost keyed entries run, and if none answers the run stays
+          # pending and the scheduled retry picks it up when the free tier
+          # recovers.
           free_is_outage=0
           if [ -s "$failure_file" ]; then
             if python3 -I - "$RUNNER_TEMP/base-scripts" "$failure_file" <<'PY' >/dev/null 2>&1
@@ -1155,49 +1191,89 @@ jobs:
               free_is_outage=1
             fi
           fi
-          if [ "$free_is_outage" = 1 ]; then
+          # On a free-tier outage only the zero-cost (*-free) keyed entries
+          # run. They spend no account funds, so the reason for skipping the
+          # fallback does not apply to them. The billed entries are still
+          # skipped then, to preserve the Go quota.
+          declare -a run_models=()
+          for candidate in "${paid_models[@]}"; do
+            if [ "$free_is_outage" = 1 ] && [[ "$candidate" != *-free ]]; then
+              continue
+            fi
+            run_models+=("$candidate")
+          done
+          if [ "${#run_models[@]}" -eq 0 ]; then
             printf 'paid_status=failed\n' >> "$GITHUB_OUTPUT"
             echo "::notice::free models are unreachable; skipping the paid fallback to preserve the Go quota"
             exit 0
           fi
           # The reason is not printed: it is provider output, and the log
           # says which path failed and which model is taking over.
-          echo "::warning::the free review path failed: $(workflow_escape "$free_failure_reason"); using paid fallback ${PAID_MODEL}"
+          echo "::warning::the free review path failed: $(workflow_escape "$free_failure_reason"); using paid fallback ${run_models[*]}"
 
-          : > model-reply.txt
-          : > model-stderr.txt
-          : > model-validation.err
-          paid_status=0
           # Half the free slope: the paid route is a single fast model, but
           # it still has to read the whole diff. 9 s/KB gives the 68 KB case
-          # a 2x budget over the 600s it died at, capped at 1200s.
+          # a 2x budget over the 600s it died at, capped at 1200s. The
+          # attempts share one deadline (23 min) that sits under the step's
+          # 25-minute ceiling, so a slow first model cannot get the step
+          # killed before a later model has run or the failure is recorded.
           diff_bytes=$(wc -c < pr.diff 2>/dev/null || echo 0)
           diff_kb=$(( (diff_bytes + 1023) / 1024 ))
           paid_timeout=$(( 600 + diff_kb * 9 ))
           if [ "$paid_timeout" -gt 1200 ]; then
             paid_timeout=1200
           fi
-          OPENCODE_DISABLE_PROJECT_CONFIG=1 \
-            timeout --foreground "${paid_timeout}s" opencode run --standalone \
-            --agent ghost-reviewer -m "$PAID_MODEL" --format json \
-            "$REVIEW_PROMPT" > model-reply.txt 2> model-stderr.txt || paid_status=$?
-          printf 'paid_timed_out=%s\n' "$([ "$paid_status" -eq 124 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
-          valid_reply=0
-          if [ "$paid_status" -eq 0 ] && [ -s model-reply.txt ] \
-             && jq -s -e 'length > 0 and all(.[]; .type != "error")' \
-                model-reply.txt >/dev/null 2>&1; then
-            if validate_reply model-reply.txt 2> model-validation.err; then
-              valid_reply=1
+          paid_deadline=$(( $(date +%s) + 1380 ))
+          : > model-reply.txt
+          : > model-stderr.txt
+          : > model-validation.err
+          PAID_MODEL="${run_models[0]}"
+          paid_status=1
+          for PAID_MODEL in "${run_models[@]}"; do
+            remaining=$(( paid_deadline - $(date +%s) ))
+            if [ "$remaining" -le 30 ]; then
+              echo "::warning::paid fallback budget spent before ${PAID_MODEL}"
+              break
             fi
-          fi
-          if [ "$valid_reply" -eq 1 ]; then
-            printf 'paid_status=success\n' >> "$GITHUB_OUTPUT"
-            echo "review produced by paid fallback ${PAID_MODEL}"
-            echo "model reply: $(wc -c < model-reply.txt) bytes"
-            jq -r '"\(.type)|\(.part.type // "-")|\(.part.tool // "-")"' model-reply.txt 2>/dev/null \
-              | sort | uniq -c | sed 's/^/  /' || true
-            exit 0
-          fi
+            attempt_timeout=$paid_timeout
+            if [ "$attempt_timeout" -gt "$remaining" ]; then
+              attempt_timeout=$remaining
+            fi
+            : > model-reply.txt
+            : > model-stderr.txt
+            : > model-validation.err
+            paid_status=0
+            OPENCODE_DISABLE_PROJECT_CONFIG=1 \
+              timeout --foreground "${attempt_timeout}s" opencode run --standalone \
+              --agent ghost-reviewer -m "$PAID_MODEL" --format json \
+              "$REVIEW_PROMPT" > model-reply.txt 2> model-stderr.txt || paid_status=$?
+            valid_reply=0
+            if [ "$paid_status" -eq 0 ] && [ -s model-reply.txt ] \
+               && jq -s -e 'length > 0 and all(.[]; .type != "error")' \
+                  model-reply.txt >/dev/null 2>&1; then
+              if validate_reply model-reply.txt 2> model-validation.err; then
+                valid_reply=1
+              fi
+            fi
+            if [ "$valid_reply" -eq 1 ]; then
+              printf 'paid_timed_out=false\n' >> "$GITHUB_OUTPUT"
+              printf 'paid_status=success\n' >> "$GITHUB_OUTPUT"
+              echo "review produced by paid fallback ${PAID_MODEL}"
+              echo "model reply: $(wc -c < model-reply.txt) bytes"
+              jq -r '"\(.type)|\(.part.type // "-")|\(.part.tool // "-")"' model-reply.txt 2>/dev/null \
+                | sort | uniq -c | sed 's/^/  /' || true
+              exit 0
+            fi
+            # An agent that did not register is fatal for every model, so
+            # stop here and let the shared handling below report it.
+            if grep -Fqi 'agent not found' model-reply.txt model-stderr.txt 2>/dev/null; then
+              break
+            fi
+            echo "::warning::paid fallback ${PAID_MODEL} did not produce a valid review; trying the next keyed model"
+          done
+          # Everything below describes the LAST attempt: its event stream,
+          # stderr and exit status are what the classification reads.
+          printf 'paid_timed_out=%s\n' "$([ "$paid_status" -eq 124 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
 
           # Whether the model acted is ONE tested rule, and it is read
           # from the TRUSTED copy of the scripts: the event stream AND
