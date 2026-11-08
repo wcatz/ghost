@@ -793,7 +793,7 @@ func reportReflectionExclusions(w io.Writer, store *memory.Store) {
 		st, err := store.ReflectionExclusionStats(ctx, p.ID)
 		if err != nil {
 			_, _ = fmt.Fprintf(w, "  ! %s (%s): consolidation exclusion could not be read: %v\n",
-				assemble.Label(p.Name), assemble.Token(p.ID), err)
+				maintenanceProjectLabel(p.Name), maintenanceProjectID(p.ID), err)
 			continue
 		}
 		if st.Total == 0 {
@@ -801,7 +801,7 @@ func reportReflectionExclusions(w io.Writer, store *memory.Store) {
 		}
 		pct := float64(st.Frozen) * 100 / float64(st.Total)
 		_, _ = fmt.Fprintf(w, "  - %s (%s): %d memories — %d frozen (%.0f%% excluded from consolidation: pinned %d, persistent %d, manual %d, builtin %d, resolved %d; %d consolidatable)\n",
-			assemble.Label(p.Name), assemble.Token(p.ID), st.Total, st.Frozen, pct,
+			maintenanceProjectLabel(p.Name), maintenanceProjectID(p.ID), st.Total, st.Frozen, pct,
 			st.Pinned, st.Persistent, st.Manual, st.Builtin, st.Resolved, st.Consolidatable)
 	}
 }
@@ -833,13 +833,7 @@ func reportReflectOverBound(w io.Writer, store *memory.Store) {
 	for _, p := range projects {
 		n, err := store.CountConsolidatableMemories(ctx, p.ID)
 		if err != nil {
-			nm := p.Name
-			if ph, ok := memory.TokenGuardPlaceholder("project", nm); ok {
-				nm = ph
-			} else {
-				nm = assemble.Label(nm)
-			}
-			_, _ = fmt.Fprintf(w, "  ! reflect: project %s (%s) consolidatable count could not be read\n", nm, assemble.Token(p.ID))
+			_, _ = fmt.Fprintf(w, "  ! reflect: project %s (%s) consolidatable count could not be read\n", maintenanceProjectLabel(p.Name), maintenanceProjectID(p.ID))
 			continue
 		}
 		if n > reflection.MaxConsolidationInput {
@@ -852,13 +846,7 @@ func reportReflectOverBound(w io.Writer, store *memory.Store) {
 	_, _ = fmt.Fprintf(w, "  ! reflect: %d project(s) above the %d consolidatable-memory limit for a single consolidation and skipped by unattended reflect — to consolidate, bring to at most %d: `ghost resolve <project> --apply` or `ghost prune --project <project> --apply` (pinned, manual and persistent memories do not count). Then run `ghost reflect <project> --apply`.\n",
 		len(overs), reflection.MaxConsolidationInput, reflection.MaxConsolidationInput)
 	for _, o := range overs {
-		nm := o.name
-		if ph, ok := memory.TokenGuardPlaceholder("project", nm); ok {
-			nm = ph
-		} else {
-			nm = assemble.Label(nm)
-		}
-		_, _ = fmt.Fprintf(w, "    - %s (%s): %d consolidatable memories\n", nm, assemble.Token(o.id), o.count)
+		_, _ = fmt.Fprintf(w, "    - %s (%s): %d consolidatable memories\n", maintenanceProjectLabel(o.name), maintenanceProjectID(o.id), o.count)
 	}
 }
 

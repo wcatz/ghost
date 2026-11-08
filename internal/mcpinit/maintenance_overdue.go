@@ -135,6 +135,26 @@ func splitMaintenanceProjects(projects []OverdueProject) (overdue, unsafe []Over
 	return overdue, unsafe
 }
 
+// maintenanceProjectLabel renders a stored project name for a maintenance
+// diagnostic line: a token-shaped name is withheld behind the guard
+// placeholder, any other name is escaped by assemble.Label.
+func maintenanceProjectLabel(name string) string {
+	if placeholder, withheld := memory.TokenGuardPlaceholder("project", name); withheld {
+		return placeholder
+	}
+	return assemble.Label(name)
+}
+
+// maintenanceProjectID renders a stored project id for a maintenance
+// diagnostic line: a token-shaped id is withheld behind the guard
+// placeholder, any other id is rendered by assemble.Token.
+func maintenanceProjectID(id string) string {
+	if placeholder, withheld := memory.TokenGuardPlaceholder("project", id); withheld {
+		return placeholder
+	}
+	return assemble.Token(id)
+}
+
 // overdueDiagnosticLines renders the overdue section as markdown lines,
 // without a trailing newline. Empty when no project is overdue.
 func overdueDiagnosticLines(overdue []OverdueProject, now time.Time) []string {
@@ -164,7 +184,7 @@ func overdueDiagnosticLines(overdue []OverdueProject, now time.Time) []string {
 			}
 		}
 		lines = append(lines, fmt.Sprintf("- %s (%s): %d consolidatable memories, last run %s",
-			assemble.Label(o.Name), assemble.Token(o.ID), o.Count, age))
+			maintenanceProjectLabel(o.Name), maintenanceProjectID(o.ID), o.Count, age))
 	}
 	return lines
 }
@@ -187,7 +207,7 @@ func unmaintainableDiagnosticLines(unsafe []OverdueProject) []string {
 	lines := []string{header}
 	for _, o := range unsafe {
 		lines = append(lines, fmt.Sprintf("- %s (%s): %d consolidatable memories",
-			assemble.Label(o.Name), assemble.Token(o.ID), o.Count))
+			maintenanceProjectLabel(o.Name), maintenanceProjectID(o.ID), o.Count))
 	}
 	return lines
 }
