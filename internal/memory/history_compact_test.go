@@ -2264,7 +2264,7 @@ func TestCompactHistoryReadsEveryColumnTheVersionStores(t *testing.T) {
 	if !wantPhases(historyVersionColumns, want) {
 		t.Errorf("historyVersionColumns = %v, want %v", historyVersionColumns, want)
 	}
-	wantEvent := []string{"memory_id", "project_id", "phase", "agent", "session_id", "related_id", "merged_content"}
+	wantEvent := []string{"memory_id", "project_id", "phase", "agent", "session_id", "related_id", "merged_content", "from_project_id", "to_project_id"}
 	if !wantPhases(historyEventColumns, wantEvent) {
 		t.Errorf("historyEventColumns = %v, want %v", historyEventColumns, wantEvent)
 	}

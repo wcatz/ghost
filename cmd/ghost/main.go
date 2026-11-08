@@ -62,6 +62,7 @@ var commandGroups = []commandGroup{
 	{path: "mcp", subs: []string{"init", "status", "wiring"}, defaultAction: true},
 	{path: "backup", subs: []string{"verify"}, defaultAction: true},
 	{path: "maintenance", subs: []string{"status", "clean-scratch"}},
+	{path: "memory", subs: []string{"move"}},
 	{path: "obsidian", subs: []string{"export", "sync"}},
 	{path: "opencode", subs: []string{"cleanup-sessions"}},
 	{path: "project", subs: []string{"bind", "delete", "merge"}},
@@ -186,6 +187,14 @@ func dispatchCommand(argv []string) int {
 			return 0
 		case "lifecycle":
 			return runLifecycle()
+		case "memory":
+			sub, given := subArg(argv, 1)
+			switch sub {
+			case "move":
+				runMemoryMove()
+				return 0
+			}
+			return usageError("memory", sub, given, memoryUsage)
 		case "project":
 			sub, given := subArg(argv, 1)
 			switch sub {

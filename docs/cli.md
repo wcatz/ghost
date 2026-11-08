@@ -637,6 +637,29 @@ The dry run is a read-only preview built from the same query every apply batch r
 
 Two consequences worth knowing, both the same reason: a tier is a claim about a memory's owner rather than part of its text, and most things that replay text do not carry one. `ghost export` / `ghost import` DO: every exported record names the tier it holds, and an import reads it back, but under the same rule as `source` and pin state. By default an import downgrades it to `project` — consolidatable, and never pruned — and only `--trust-provenance` restores it as stated, with a derived expiry for a `session` row because the artifact carries no `expires_at` (see [`ghost import`](#ghost-import)). A record that states no tier, such as one from an artifact written before the field existed, imports as `project`. And a memory a consolidation WRITES inherits its tier rather than inventing one: the successor takes the longest tier any row it replaces held, because a tier the model never chose is not a protection but a tier a source already carried must not be shortened. A merge of `session` rows comes out `session` with a derived expiry, a merge that consumes a `persistent` row comes out `persistent`, and only a consolidation that replaces no rows falls back to the `project` default. `ghost reflect --restore` puts back whatever tier the snapshot recorded, even over a tier a later save or fold raised. A snapshot written before the tier column (schema v26, `retention_captured = 0`) recorded none, so the row comes back at `project` — the one honest answer for a row arriving from nowhere — and the report says how many covered rows it could not put a tier back for; the change log records no tier at all either way.
 
+## Memory operations
+
+### `ghost memory move <memory-id>`
+
+Moves a memory between projects while keeping its identity and the records that describe it:
+
+```bash
+ghost memory move <memory-id> --project <from> --to <to>
+ghost memory move <memory-id> --project <from> --to <to> --dry-run
+ghost memory move <memory-id> --project <from> --to <to> --confirm
+```
+
+| Flag | Meaning |
+|---|---|
+| `--project <name-or-id>` | Source project the memory belongs to (required). |
+| `--to <name-or-id>` | Destination project (required). Accepts `_global` or `global` for the global project. |
+| `--confirm` | Required to move a pinned or `persistent` memory. |
+| `--dry-run` | Preview the move without writing any changes. |
+
+The memory keeps its id, links, flags, evidence, provenance, full-text index and embedding. Its `memory_history` rows are reassigned to the destination project and a `move` history row is appended recording the source and destination projects; `updated_at` is not changed. `retrieval_audit` rows stay with the call that produced them and are not moved. The move works from a project to another project, from a project to `_global`, and from `_global` to a project.
+
+The command refuses to move into the same project, refuses an unknown source or target project, and refuses to move a pinned or `persistent` memory unless `--confirm` is passed. A `--dry-run` reports the move it would make and writes nothing.
+
 ## Project operations
 
 ### `ghost project delete <name-or-id>`

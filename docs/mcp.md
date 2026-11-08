@@ -1,6 +1,6 @@
 # MCP surface
 
-Ghost exposes 23 tools, 4 resources, and 2 prompts over standard MCP. The server runs over stdio, so the client launches the `ghost mcp` process and communicates through JSON-RPC.
+Ghost exposes 24 tools, 4 resources, and 2 prompts over standard MCP. The server runs over stdio, so the client launches the `ghost mcp` process and communicates through JSON-RPC.
 
 ## Tools
 
@@ -14,6 +14,7 @@ Ghost exposes 23 tools, 4 resources, and 2 prompts over standard MCP. The server
 | Memory | `ghost_memory_delete` | Delete one memory by ID |
 | Memory | `ghost_memory_flag` | Record that this memory is wrong or stale, with a short reason: an append-only objection that changes nothing by itself — resolve and reflect count it as negative evidence, and the reason stays in the store. Its `session_id` is the transport's only (`provenanceFor`), so under Claude Code a flag records no session while the `retrieval_record` beside it carries a session id whenever one can be named — the host's own under Claude Code, the same id the stop hook's payload carries — so the audit can match the call to the scan that judged it (#922) |
 | Memory | `ghost_memory_pin` | Pin or unpin a memory; a pinned memory is guaranteed a slot on every passive surface (session start, `ghost_project_context`, the project and global resources) ahead of ranking, still subject to validity, scope and resolution, but the guarantee is bounded by the bucket cap (15 for a project, 8 for _global) — pins beyond that are ranked among themselves and the lowest-ranked would be cut, and a block says how many pinned rows it cut when they outnumber the cap; `ghost_memory_pin` and `ghost_memory_save` with `pin=true` report when the project's pinned set now exceeds the bucket and which pins the block would cut, and `ghost_health` lists every project that exceeds its bucket with the count and cut ids; a pinned row is not rendered shorter to fit more pins, the preview is already condensed (on `ghost_project_context`, the response byte budget also cuts every unpinned row before a pinned one, and says how many of its cut rows were pinned); an `as_of` reading replays the past and reserves nothing |
+| Memory | `ghost_memory_move` | Move a memory between projects, including into or out of `_global`, keeping its ID, links, history, flags, evidence, provenance and embeddings. Refuses an unknown target project. A pinned or persistent memory is refused unless `confirm` is true. With `dry_run` true, reports what would move and writes nothing. |
 | Memory | `ghost_memory_promote` | Promote a project memory to `_global`; the move carries the memory and its history, and a later project restore leaves the promoted row alone because the project no longer owns it |
 | Memory | `ghost_save_global` | Save a memory that applies to all projects; takes the same `retention` argument |
 | Memory | `ghost_resolve` | Mark resolved evidence after source-matched classification |
@@ -201,7 +202,7 @@ with the `⚠` line the compact form adds under the source it is about.
 
 An agent debugging "search returns things I did not use" is exactly who needs
 this, and it is here rather than in a tool of its own because every caller
-already fetches `ghost_health` — the count is 23 with `ghost_memory_flag`, and
+already fetches `ghost_health` — the count is 24 with `ghost_memory_move`, and
 this block does not change it.
 
 Seven things the block is careful about, each because the cheaper version is a

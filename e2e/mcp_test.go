@@ -376,6 +376,42 @@ var toolChecks = map[string]func(t *testing.T, s *sandbox, cs *mcp.ClientSession
 		}
 	},
 
+	"ghost_memory_move": func(t *testing.T, s *sandbox, cs *mcp.ClientSession, _ string) {
+		call(t, cs, "ghost_memory_save", map[string]any{
+			"project_id": "move-dest-proj",
+			"content":    "destination project exists",
+		})
+		id := parseID(t, call(t, cs, "ghost_memory_save", map[string]any{
+			"project_id": e2eProject,
+			"content":    "a note to move between projects",
+			"category":   "fact",
+		}))
+
+		dry := call(t, cs, "ghost_memory_move", map[string]any{
+			"project_id": e2eProject,
+			"memory_id":  id,
+			"to_project": "move-dest-proj",
+			"dry_run":    true,
+		})
+		mustContain(t, "move dry-run", dry, "Dry run")
+		if n := s.queryInt(t, `SELECT COUNT(*) FROM memories WHERE id = ? AND project_id = ?`, id, e2eProject); n != 1 {
+			t.Fatalf("dry-run moved memory %s", id)
+		}
+
+		out := call(t, cs, "ghost_memory_move", map[string]any{
+			"project_id": e2eProject,
+			"memory_id":  id,
+			"to_project": "move-dest-proj",
+		})
+		mustContain(t, "move", out, "moved")
+		if n := s.queryInt(t, `SELECT COUNT(*) FROM memories WHERE id = ? AND project_id = ?`, id, "move-dest-proj"); n != 1 {
+			t.Fatalf("memory %s was not moved to move-dest-proj", id)
+		}
+		if n := s.queryInt(t, `SELECT COUNT(*) FROM memory_history WHERE memory_id = ? AND phase = 'move'`, id); n != 1 {
+			t.Fatalf("move wrote %d history row(s), want 1", n)
+		}
+	},
+
 	"ghost_memory_delete": func(t *testing.T, s *sandbox, cs *mcp.ClientSession, _ string) {
 		id := parseID(t, call(t, cs, "ghost_memory_save", map[string]any{
 			"project_id": e2eProject,

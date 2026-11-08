@@ -430,14 +430,14 @@ CREATE TABLE IF NOT EXISTS memory_history (
     -- (resolved_at stamped or cleared), supersede / unsupersede (an active
     -- supersedes edge now points at this memory, or stopped), restore (a
     -- snapshot restore), import (a portable artifact), delete (the row is being
-    -- removed). A CHECK rather than a convention: a phase no reader knows is a
-    -- phase that can never be filtered, and a typo must not create a new one
-    -- silently.
+    -- removed), move (the memory moved between projects). A CHECK rather than a
+    -- convention: a phase no reader knows is a phase that can never be filtered,
+    -- and a typo must not create a new one silently.
     phase       TEXT NOT NULL
                 CHECK (phase IN (
                     'save', 'update', 'reflect', 'merge', 'resolve',
                     'unresolve', 'supersede', 'unsupersede', 'restore',
-                    'import', 'delete', 'baseline'
+                    'import', 'delete', 'baseline', 'move'
                 )),
     -- Who PERFORMED the write, when the write path knows: the save/merge/import
     -- paths carry a Provenance, the lifecycle passes (reflect, resolve,
@@ -459,6 +459,10 @@ CREATE TABLE IF NOT EXISTS memory_history (
     -- and without this column the only record of it was the database itself,
     -- before this table existed.
     merged_content TEXT,
+    -- The source and destination projects of a move (phaseMove). NULL for every
+    -- other phase.
+    from_project_id TEXT,
+    to_project_id   TEXT,
     -- The state this memory held once the write landed. nullable because a
     -- delete row is written from the last live state and an older build could
     -- leave gaps, not because a memory has no state.

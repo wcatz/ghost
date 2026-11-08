@@ -55,14 +55,16 @@ var historyVersionColumns = []string{"content", "category", "importance", "resol
 // historyEventColumns are the columns describing the EVENT rather than the state:
 // which memory it is about, which project paid for it, which write path performed
 // it, who did, and the event's other end — related_id, the id that replaced a
-// deleted row or whose edge claims it, and merged_content, the wording a FoldOnly
-// fold dropped. None is part of "the state the memory held", which is why the
+// deleted row or whose edge claims it, merged_content, the wording a FoldOnly
+// fold dropped, and from_project_id/to_project_id, which record a move between
+// projects. None is part of "the state the memory held", which is why the
 // predicate does not compare them and why the two naming ANOTHER memory are
 // checked for emptiness instead: such a row is a thread a reader follows from one
 // memory's history into its successor's (#648), and it records a claim, not a
 // state.
 var historyEventColumns = []string{
 	"memory_id", "project_id", "phase", "agent", "session_id", "related_id", "merged_content",
+	"from_project_id", "to_project_id",
 }
 
 // historyRowColumns are the row's own identity and the time it was recorded.

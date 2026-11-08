@@ -1686,6 +1686,68 @@ func (s *Server) promoteMemory(ctx context.Context, projectID, memoryID string) 
 	return msg, nil
 }
 
+// moveMemory validates ownership and moves a memory between projects, returning
+// the user-facing result message. Dry runs report what would move without
+// writing. Pinned or persistent memories require explicit confirmation.
+func (s *Server) moveMemory(ctx context.Context, req *mcp.CallToolRequest, projectID, memoryID, toProject string, confirm, dryRun bool) (string, error) {
+	if projectID == "" || memoryID == "" || toProject == "" {
+		return "", fmt.Errorf("project_id, memory_id and to_project are required")
+	}
+	resolvedFrom, _, err := s.store.ResolveProject(ctx, projectID)
+	if err != nil {
+		return "", fmt.Errorf("resolve project: %w", err)
+	}
+	if resolvedFrom == "" {
+		return "", fmt.Errorf("project %s not found", memory.RefusalArg("project_id", projectID))
+	}
+	resolvedTo := toProject
+	if toProject == memory.GlobalProjectID || toProject == "_global" || toProject == "global" {
+		resolvedTo = memory.GlobalProjectID
+	} else {
+		id, _, err := s.store.ResolveProject(ctx, toProject)
+		if err != nil {
+			return "", fmt.Errorf("resolve target project: %w", err)
+		}
+		if id == "" {
+			return "", fmt.Errorf("target project %s not found", memory.RefusalArg("to_project", toProject))
+		}
+		resolvedTo = id
+	}
+
+	mems, err := s.store.GetByIDs(ctx, []string{memoryID})
+	if err != nil {
+		return "", fmt.Errorf("lookup failed: %w", err)
+	}
+	if len(mems) == 0 {
+		return "", fmt.Errorf("memory %s not found", memory.RefusalArg("memory_id", memoryID))
+	}
+	if mems[0].ProjectID != resolvedFrom {
+		return "", fmt.Errorf("memory %s does not belong to project %s", memory.RefusalArg("memory_id", memoryID), memory.RefusalArg("project_id", projectID))
+	}
+
+	_, err = s.store.MoveMemory(ctx, resolvedFrom, memoryID, resolvedTo, memory.MoveMemoryOptions{
+		Confirm:    confirm,
+		DryRun:     dryRun,
+		Provenance: provenanceFor(req),
+	})
+	if err != nil {
+		return "", fmt.Errorf("move failed: %w", err)
+	}
+	if dryRun {
+		return fmt.Sprintf("Dry run: would move memory %s from %s to %s. No changes written.",
+			assemble.Token(memoryID), assemble.Token(resolvedFrom), assemble.Token(resolvedTo)), nil
+	}
+	s.notifyMemoryRow(ctx, resolvedFrom)
+	s.notifyMemoryRow(ctx, resolvedTo)
+	msg := fmt.Sprintf("Memory moved (id: %s) from %s to %s.", assemble.Token(memoryID), assemble.Token(resolvedFrom), assemble.Token(resolvedTo))
+	msg += longMemoryHint(mems[0].Content)
+	msg += repoFactHint(mems[0].Content, mems[0].Category)
+	if resolvedTo == memory.GlobalProjectID {
+		msg += globalStatusHint(mems[0].Content, mems[0].ValidUntil)
+	}
+	return msg, nil
+}
+
 // withdrawSupersedesLink is the handler behind ghost_link_withdraw. It is the
 // same core `ghost supersede --withdraw` calls (internal/supersede.Withdraw), so
 // an agent and an operator repairing an edge take the same path, resolve the
@@ -3179,6 +3241,34 @@ func (s *Server) registerTools() {
 		},
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args promoteArgs) (*mcp.CallToolResult, any, error) {
 		msg, err := s.promoteMemory(ctx, args.ProjectID, args.MemoryID)
+		if err != nil {
+			return nil, nil, err
+		}
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{&mcp.TextContent{Text: msg}},
+		}, nil, nil
+	})
+
+	// ghost_memory_move — move a memory between projects.
+	type moveMemoryArgs struct {
+		ProjectID string `json:"project_id" jsonschema:"Project name the memory currently belongs to (required for ownership check)"`
+		MemoryID  string `json:"memory_id" jsonschema:"ID of the memory to move"`
+		ToProject string `json:"to_project" jsonschema:"Destination project name, or _global/global for the global project"`
+		Confirm   bool   `json:"confirm,omitempty" jsonschema:"Required to move a pinned or persistent memory"`
+		DryRun    bool   `json:"dry_run,omitempty" jsonschema:"Preview the move without writing any changes"`
+	}
+
+	mcp.AddTool(s.mcp, &mcp.Tool{
+		Name:        "ghost_memory_move",
+		Title:       "Move Memory",
+		Description: "Move a memory between projects, or between a project and _global, while keeping its ID, links, history, flags, evidence, provenance and embeddings. Use ghost_memory_promote instead when the destination is specifically _global and you only need promote semantics. A pinned or persistent memory requires confirm=true. dry_run=true previews the move without writing. retrieval_audit rows stay with the call that produced them.",
+		Annotations: &mcp.ToolAnnotations{
+			DestructiveHint: boolPtr(false),
+			IdempotentHint:  false,
+			OpenWorldHint:   boolPtr(false),
+		},
+	}, func(ctx context.Context, req *mcp.CallToolRequest, args moveMemoryArgs) (*mcp.CallToolResult, any, error) {
+		msg, err := s.moveMemory(ctx, req, args.ProjectID, args.MemoryID, args.ToProject, args.Confirm, args.DryRun)
 		if err != nil {
 			return nil, nil, err
 		}

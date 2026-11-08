@@ -25,6 +25,7 @@ var ghostPermissions = []string{
 	"mcp__ghost__ghost_memories_list",
 	"mcp__ghost__ghost_memory_delete",
 	"mcp__ghost__ghost_memory_flag",
+	"mcp__ghost__ghost_memory_move",
 	"mcp__ghost__ghost_memory_pin",
 	"mcp__ghost__ghost_memory_promote",
 	"mcp__ghost__ghost_memory_save",

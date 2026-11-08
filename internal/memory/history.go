@@ -60,6 +60,9 @@ const (
 	// phaseBaseline: what the memory said before this build ever recorded a
 	// history row for it. See recordBaselineHistoryTx.
 	phaseBaseline = "baseline"
+	// phaseMove: the memory was moved between projects. The row records the
+	// destination project's state and names the source and destination projects.
+	phaseMove = "move"
 )
 
 // allHistoryPhases is every phase the schema knows about, in the order the
@@ -76,6 +79,7 @@ func allHistoryPhases() []string {
 	return []string{
 		phaseSave, phaseUpdate, phaseReflect, phaseMerge, phaseResolve, phaseUnresolve,
 		phaseSupersede, phaseUnsupersede, phaseRestore, phaseImport, phaseDelete, phaseBaseline,
+		phaseMove,
 	}
 }
 
@@ -279,6 +283,9 @@ type HistoryEntry struct {
 	// stores that text as a linked copy with its own save row, so it is empty
 	// there and this is not a second copy of that copy.
 	MergedContent string `json:"merged_content,omitempty"`
+	// FromProjectID and ToProjectID record a move between projects (phaseMove).
+	FromProjectID string `json:"from_project_id,omitempty"`
+	ToProjectID   string `json:"to_project_id,omitempty"`
 }
 
 // historyEvent is one event to record. The zero value records a state snapshot
@@ -292,6 +299,9 @@ type historyEvent struct {
 	relatedID string
 	// mergedContent is the folded-in text a merge did not keep as a row.
 	mergedContent string
+	// fromProjectID and toProjectID record a move between projects (phaseMove).
+	fromProjectID string
+	toProjectID   string
 }
 
 // appendHistoryTx records one event for memoryID in the caller's transaction.
@@ -368,9 +378,10 @@ func appendHistoryEventsTx(ctx context.Context, tx *sql.Tx, events []historyEven
 // disagree with it.
 func appendHistoryGroupTx(ctx context.Context, tx *sql.Tx, e historyEvent, ids []string) error {
 	placeholders := make([]string, 0, len(ids))
-	args := make([]interface{}, 0, len(ids)+5)
+	args := make([]interface{}, 0, len(ids)+7)
 	args = append(args, e.phase, nullIfEmpty(e.prov.Agent), nullIfEmpty(e.prov.SessionID),
-		nullIfEmpty(e.relatedID), nullIfEmpty(e.mergedContent))
+		nullIfEmpty(e.relatedID), nullIfEmpty(e.mergedContent),
+		nullIfEmpty(e.fromProjectID), nullIfEmpty(e.toProjectID))
 	for _, id := range ids {
 		placeholders = append(placeholders, "?")
 		args = append(args, id)
@@ -388,8 +399,9 @@ func appendHistoryGroupTx(ctx context.Context, tx *sql.Tx, e historyEvent, ids [
 	res, err := tx.ExecContext(ctx, `
 		INSERT INTO memory_history
 			(memory_id, project_id, phase, agent, session_id, related_id, merged_content,
+			 from_project_id, to_project_id,
 			 content, category, importance, resolved_at, source, recorded_at)
-		SELECT id, project_id, ?, ?, ?, ?, ?, `+historyContentExpr()+`,
+		SELECT id, project_id, ?, ?, ?, ?, ?, ?, ?, `+historyContentExpr()+`,
 		       category, importance, resolved_at, source, `+recordedAt+`
 		FROM memories WHERE id IN (`+strings.Join(placeholders, ",")+`)`, args...)
 	if err != nil {
@@ -1164,7 +1176,8 @@ func (s *Store) MemoryHistory(ctx context.Context, memoryID string, limit int) (
 	// would make the changelog a coin toss among them.
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, memory_id, project_id, recorded_at, phase, agent, session_id, related_id,
-		       merged_content, content, category, importance, resolved_at, source
+		       merged_content, from_project_id, to_project_id,
+		       content, category, importance, resolved_at, source
 		FROM memory_history
 		WHERE memory_id = ?
 		ORDER BY rowid DESC
@@ -1177,9 +1190,9 @@ func (s *Store) MemoryHistory(ctx context.Context, memoryID string, limit int) (
 	var desc []HistoryEntry
 	for rows.Next() {
 		var e HistoryEntry
-		var agent, sessionID, relatedID, mergedContent, resolvedAt sql.NullString
+		var agent, sessionID, relatedID, mergedContent, fromProject, toProject, resolvedAt sql.NullString
 		if err := rows.Scan(&e.ID, &e.MemoryID, &e.ProjectID, &e.RecordedAt, &e.Phase,
-			&agent, &sessionID, &relatedID, &mergedContent,
+			&agent, &sessionID, &relatedID, &mergedContent, &fromProject, &toProject,
 			&e.Content, &e.Category, &e.Importance, &resolvedAt, &e.Source,
 		); err != nil {
 			return nil, fmt.Errorf("scan memory history: %w", err)
@@ -1188,6 +1201,8 @@ func (s *Store) MemoryHistory(ctx context.Context, memoryID string, limit int) (
 		e.SessionID = sessionID.String
 		e.RelatedID = relatedID.String
 		e.MergedContent = mergedContent.String
+		e.FromProjectID = fromProject.String
+		e.ToProjectID = toProject.String
 		if resolvedAt.Valid {
 			v := resolvedAt.String
 			e.ResolvedAt = &v
