@@ -157,6 +157,76 @@ func TestReclaimedLifecycleClaimRecordsTheUnfinishedRun(t *testing.T) {
 	}
 }
 
+// TestOverCapClaimCountsAsNoClaim: a regular file over the read bound is no
+// claim, so it is not a killed run. isAlive already reads it that way; the
+// session-start alert and the reclaim marker must agree, or a junk file
+// dated before the start stamp fabricates a paused consolidation.
+func TestOverCapClaimCountsAsNoClaim(t *testing.T) {
+	dataHome := isolatedHome(t)
+	seedProject(t, dataHome, "proj-123", "/tmp/my-project", "My Project")
+	claimPath := filepath.Join(dataHome, "ghost", "lifecycle-proj-123.pid")
+	if err := os.WriteFile(claimPath, []byte(strings.Repeat("x", maxPIDFileBytes+100)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(claimPath, time.Now().Add(-time.Hour), time.Now().Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	writeStartStamp(t, dataHome, "proj-123", time.Now())
+
+	if alive := isAlive(claimPath); alive {
+		t.Fatalf("isAlive = true for an over-cap file, want false")
+	}
+	if alert := lifecycleFailureAlert("proj-123", "My Project"); alert != "" {
+		t.Errorf("an over-cap claim raised an alert: %s", alert)
+	}
+	release, ok, err := AcquireLifecycleLock("proj-123")
+	if err != nil || !ok {
+		t.Fatalf("AcquireLifecycleLock = ok %v, err %v; want the claim", ok, err)
+	}
+	defer release()
+	if marker := readMarkerAtPath(filepath.Join(dataHome, "ghost", LifecycleFailureMarkerFile("proj-123"))); marker != nil {
+		t.Errorf("reclaiming an over-cap claim recorded a marker: %s", marker.Error)
+	}
+	if alert := lifecycleFailureAlert("proj-123", "My Project"); alert != "" {
+		t.Errorf("an over-cap claim raised an alert after reclaim: %s", alert)
+	}
+}
+
+// TestMalformedClaimCountsAsNoClaim: a regular file that does not parse as a
+// pid is no claim, so it is not a killed run. Same agreement as the over-cap
+// case: isAlive reads a malformed payload as no claim, and the alert and the
+// reclaim marker must do the same.
+func TestMalformedClaimCountsAsNoClaim(t *testing.T) {
+	dataHome := isolatedHome(t)
+	seedProject(t, dataHome, "proj-123", "/tmp/my-project", "My Project")
+	claimPath := filepath.Join(dataHome, "ghost", "lifecycle-proj-123.pid")
+	if err := os.WriteFile(claimPath, []byte("not-a-pid"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(claimPath, time.Now().Add(-time.Hour), time.Now().Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	writeStartStamp(t, dataHome, "proj-123", time.Now())
+
+	if alive := isAlive(claimPath); alive {
+		t.Fatalf("isAlive = true for a malformed claim, want false")
+	}
+	if alert := lifecycleFailureAlert("proj-123", "My Project"); alert != "" {
+		t.Errorf("a malformed claim raised an alert: %s", alert)
+	}
+	release, ok, err := AcquireLifecycleLock("proj-123")
+	if err != nil || !ok {
+		t.Fatalf("AcquireLifecycleLock = ok %v, err %v; want the claim", ok, err)
+	}
+	defer release()
+	if marker := readMarkerAtPath(filepath.Join(dataHome, "ghost", LifecycleFailureMarkerFile("proj-123"))); marker != nil {
+		t.Errorf("reclaiming a malformed claim recorded a marker: %s", marker.Error)
+	}
+	if alert := lifecycleFailureAlert("proj-123", "My Project"); alert != "" {
+		t.Errorf("a malformed claim raised an alert after reclaim: %s", alert)
+	}
+}
+
 // TestReclaimedClaimNewerThanTheStampRecordsNoMarker is the same pairing on
 // the reclaim path: a claim newer than the start stamp is a run that died
 // before it stamped, and the run reclaiming it must not write a marker for it.

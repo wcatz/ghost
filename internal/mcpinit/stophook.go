@@ -956,9 +956,10 @@ func claimPidFile(pidPath string) (bool, error) {
 // the dead claim's OWN timestamp, because the claim file is replaced by this
 // process's own as part of taking the slot.
 //
-// A dead claim is reported only for a REGULAR file naming no live process. A
-// missing path is a first claim and a non-regular one cannot be a claim at
-// all; neither is a run that left anything unfinished.
+// A dead claim is reported only for a REGULAR file naming a parseable pid for
+// no live process. A missing path is a first claim and a non-regular or
+// unparseable one cannot be a claim at all — including one over the read
+// bound — and neither is a run that left anything unfinished.
 func claimPidFileReclaim(pidPath string) (claimed bool, reclaimedAt time.Time, err error) {
 	lockFile, err := os.OpenFile(pidPath+".lock", os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
@@ -983,7 +984,13 @@ func claimPidFileReclaim(pidPath string) (claimed bool, reclaimedAt time.Time, e
 				_ = priorFile.Close()
 				return false, time.Time{}, nil
 			}
-			reclaimedAt = prior.ModTime()
+			// Only a parseable pid can be a dead claim. An over-cap or
+			// malformed file is no claim, as isAlive already reads it,
+			// and leaves reclaimedAt zero so no unfinished-run marker
+			// is written for it.
+			if pidInFile(pidPath) != 0 {
+				reclaimedAt = prior.ModTime()
+			}
 		}
 		_ = priorFile.Close()
 	}
