@@ -431,6 +431,14 @@ func statusEnv(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("GHOST_EMBEDDING_ENABLED", "false")
+	// A port nothing listens on and the compiled default model and width, so a
+	// test that turns embedding back on cannot reach a real Ollama on the host
+	// or look for a model the host configured. Tests that need a stub set the
+	// URL themselves; the model and dimensions match the config files they
+	// write.
+	t.Setenv("GHOST_OLLAMA_URL", "http://127.0.0.1:1")
+	t.Setenv("GHOST_EMBEDDING_MODEL", "nomic-embed-text:v1.5")
+	t.Setenv("GHOST_EMBEDDING_DIMENSIONS", "768")
 	// opencode's env config layers must be empty by default: the tests that
 	// need them set them explicitly, and a leaked value from the host would
 	// otherwise decide which config file the registration check reads.
@@ -1407,7 +1415,14 @@ func TestStatusOpencode_EmptyStoreHealthy(t *testing.T) {
   dimensions: 768
   enabled: true
 `, ollama.URL))
+	// The environment layer outranks the config file, so a host's own
+	// GHOST_OLLAMA_URL / GHOST_EMBEDDING_MODEL / GHOST_EMBEDDING_DIMENSIONS
+	// would redirect the probe away from the stub and fail the run on a host
+	// with an Ollama configured. Pin them to the stub's values.
 	t.Setenv("GHOST_EMBEDDING_ENABLED", "true")
+	t.Setenv("GHOST_OLLAMA_URL", ollama.URL)
+	t.Setenv("GHOST_EMBEDDING_MODEL", "nomic-embed-text:v1.5")
+	t.Setenv("GHOST_EMBEDDING_DIMENSIONS", "768")
 	binDir := writeStubGhost(t)
 	t.Setenv("PATH", binDir)
 
@@ -1678,6 +1693,7 @@ func TestStatus_OllamaDownDurationReported(t *testing.T) {
   enabled: true
 `, url))
 	t.Setenv("GHOST_EMBEDDING_ENABLED", "true")
+	t.Setenv("GHOST_OLLAMA_URL", url)
 
 	ghostDir := filepath.Join(os.Getenv("XDG_DATA_HOME"), "ghost")
 	if err := os.MkdirAll(ghostDir, 0o700); err != nil {
@@ -1722,6 +1738,7 @@ func TestStatus_OllamaDownDurationSuppressedWhenReachable(t *testing.T) {
   enabled: true
 `, ollama.URL, model))
 	t.Setenv("GHOST_EMBEDDING_ENABLED", "true")
+	t.Setenv("GHOST_OLLAMA_URL", ollama.URL)
 
 	ghostDir := filepath.Join(os.Getenv("XDG_DATA_HOME"), "ghost")
 	if err := os.MkdirAll(ghostDir, 0o700); err != nil {
@@ -1797,6 +1814,7 @@ func TestStatus_OllamaDownDurationSuppressedWhenInconclusive(t *testing.T) {
   enabled: true
 `, wedged.URL, model))
 	t.Setenv("GHOST_EMBEDDING_ENABLED", "true")
+	t.Setenv("GHOST_OLLAMA_URL", wedged.URL)
 
 	ghostDir := filepath.Join(os.Getenv("XDG_DATA_HOME"), "ghost")
 	if err := os.MkdirAll(ghostDir, 0o700); err != nil {

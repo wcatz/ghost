@@ -303,6 +303,47 @@ jobs:
       - name: Build
         run: go build -o /dev/null ./cmd/ghost
 
+  # A symlinked HOME and TMPDIR leg. Four tests on main compared path strings
+  # or read the embedding/opencode environment without resolving symlinks, and
+  # passed only because CI's own directories are physical; a local gate that
+  # subtracts merge-base failures excused them on every run. This job runs the
+  # same suite with HOME and TMPDIR reached through a symlink, so that class of
+  # test fails here instead of on a developer's laptop.
+  #
+  # NOT a matrix leg on build-and-test, for the same reason as ubuntu-26-canary:
+  # a matrix reports the job name with the axis suffix and main-branch-protection
+  # would wait for a context that never arrives. It is a separate, non-required
+  # check beside the required one, and it deliberately does NOT use
+  # continue-on-error, so a real breakage is a red X rather than a green tick
+  # over a failed test.
+  symlinked-home:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      # The symlink is created in the step rather than named in env:, because
+      # env: is resolved before the step runs. RUNNER_TEMP is physical, so the
+      # link is the only symlinked component and the suite still resolves
+      # against a real directory. GHOST_OLLAMA_URL is pointed at a dead port
+      # the way a host with Ollama configured presents it, so a status test
+      # that fails to pin its own URL fails here rather than only on that host.
+      - name: Test with HOME and TMPDIR behind a symlink
+        run: |
+          real="$RUNNER_TEMP/ghost-symlink-real"
+          link="$RUNNER_TEMP/ghost-symlink"
+          rm -rf "$real" "$link"
+          mkdir -p "$real/home" "$real/tmp"
+          ln -s "$real" "$link"
+          export HOME="$link/home"
+          export TMPDIR="$link/tmp"
+          export GOTMPDIR="$link/tmp"
+          export GHOST_OLLAMA_URL=http://127.0.0.1:1
+          go test -count=1 -timeout 35m ./...
+
   # Real-Windows verification of the whole internal/mcpinit suite:
   # cross-platform correctness of every test in this package on native
   # Windows, both arches — the coupling test (runs the assemble scripts),

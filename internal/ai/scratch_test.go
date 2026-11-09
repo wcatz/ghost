@@ -170,10 +170,10 @@ printf '%s\n' '{"type":"text","part":{"type":"text","text":"KEEP"}}'`,
 				t.Fatalf("saw %d child invocation(s), want at least %d — a probe that never ran leaves the probe path untested", len(children), harness.minimum)
 			}
 			for i, child := range children {
-				if child.pwd == "" || child.pwd == workingDir(t) {
+				if child.pwd == "" || resolvedComparable(t, child.pwd) == resolvedComparable(t, workingDir(t)) {
 					t.Errorf("child %d ran with pwd %q, want a private invocation dir", i, child.pwd)
 				}
-				if got := filepath.Dir(child.pwd); got != root {
+				if got := resolvedComparable(t, filepath.Dir(child.pwd)); got != resolvedComparable(t, root) {
 					t.Errorf("child %d ran in %q, want a direct child of the fallback root %q", i, child.pwd, root)
 				}
 				if want := "ghost-" + string(harness.kind) + "-"; !strings.HasPrefix(filepath.Base(child.pwd), want) {
@@ -184,7 +184,7 @@ printf '%s\n' '{"type":"text","part":{"type":"text","text":"KEEP"}}'`,
 					"TMP":    child.tmp,
 					"TEMP":   child.temp,
 				} {
-					if got != child.pwd {
+					if resolvedComparable(t, got) != resolvedComparable(t, child.pwd) {
 						t.Errorf("child %d saw %s=%q, want the invocation dir %q", i, key, got, child.pwd)
 					}
 				}
@@ -221,6 +221,26 @@ func workingDir(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return dir
+}
+
+// resolvedComparable resolves p so two spellings of one directory compare
+// equal. The invocation dir is released before the report is read, so a path
+// under it may no longer exist; in that case its parent is resolved and the
+// base name rejoined, which is the same directory the child reported. Every
+// comparison goes through this because the child's $PWD is the kernel's
+// physical path while the harness sets the temp variables to the spelling it
+// was given — a host whose temp dir is reached through a symlink would
+// otherwise compare two spellings of one directory and fail.
+func resolvedComparable(t *testing.T, p string) string {
+	t.Helper()
+	if resolved, err := filepath.EvalSymlinks(p); err == nil {
+		return resolved
+	}
+	parent, err := filepath.EvalSymlinks(filepath.Dir(p))
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%q): %v", p, err)
+	}
+	return filepath.Join(parent, filepath.Base(p))
 }
 
 // childReport is one fake child's own account of where it ran.
