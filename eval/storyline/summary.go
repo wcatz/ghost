@@ -146,7 +146,7 @@ func formatSummary(cells []cell, runs int) string {
 		fmt.Fprintf(&b, "## %s — %s (n=%d per arm)\n\n", story.Key, story.Title, runs)
 		b.WriteString("| arm | runs | answer carries | stale/mistake used | judge yes (advisory) | block delivered | block bytes per session |\n")
 		b.WriteString("|-----|------|----------------|--------------------|----------------------|-----------------|-------------------------|\n")
-		for _, arm := range []string{armWithGhost, armWithoutGhost} {
+		for _, arm := range []string{armWithGhost, armFlatNotes, armWithoutGhost} {
 			var results []*Result
 			errored, noReport := 0, 0
 			for _, c := range cells {
@@ -185,6 +185,9 @@ func formatSummary(cells []cell, runs int) string {
 			}
 			if arm == armWithoutGhost {
 				delivered = "n/a (empty block)"
+			}
+			if arm == armFlatNotes {
+				delivered = "n/a (every note)"
 			}
 			runsCol := fmt.Sprintf("%d", t.runs)
 			if t.errors > 0 {

@@ -8,6 +8,12 @@
 // is KEEP on its face: it states a rule or an unfinished problem, so dropping it
 // from session-start injection is the exact harm the pass is supposed to avoid.
 //
+// A commit-anchored fix announcement ("Fixed in commit <hash>: …") is the
+// same harm from the other side: it states the current behaviour — what the
+// code now does, whether the crash still happens — so it is the resolution of
+// the crash it fixes, not resolved evidence itself. Resolving it alongside
+// the crash leaves a fresh session with nothing about the fix.
+//
 // The veto is deliberately one-directional. A false veto costs one noisy memory
 // in the ranked surface — visible, searchable, one wasted injection slot — while
 // a missed veto costs a rule an agent will break or work it will repeat. So the
@@ -55,6 +61,17 @@ var (
 		{"unresolved", regexp.MustCompile(`(?i)\bunresolved\b`)},
 		{"todo", regexp.MustCompile(`(?i)\btodo\b`)},
 	}
+
+	// keepVetoFixLanded marks a note that names the commit a fix landed in.
+	// The commit anchor is the point: a version- or PR-anchored "fixed in"
+	// note is the changelog shape resolve exists to retire, while a
+	// commit-anchored one is how a crash's fix is recorded as the current
+	// behaviour. This list stays out of VetoKeepImperative (supersede's
+	// rule veto) and out of the piggyback's way: a fix that a regression
+	// has superseded is retired by that edge, which the veto does not guard.
+	keepVetoFixLanded = []vetoPattern{
+		{"fixed in commit", regexp.MustCompile(`(?i)\bfixed in commit\b`)},
+	}
 )
 
 // VetoKeep reports whether content carries a deterministic KEEP signal, and
@@ -73,6 +90,11 @@ func VetoKeep(content string) (reason string, vetoed bool) {
 		return reason, true
 	}
 	for _, p := range keepVetoOpenMarkers {
+		if p.re.MatchString(content) {
+			return p.pattern, true
+		}
+	}
+	for _, p := range keepVetoFixLanded {
 		if p.re.MatchString(content) {
 			return p.pattern, true
 		}

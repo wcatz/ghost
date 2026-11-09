@@ -12,7 +12,7 @@
 // Usage:
 //
 //	go run ./eval/storyline [-storyline reversed-decision|a,b|all] [-repo .] [-keep]
-//	    [-without-ghost] [-runs 1] [-judge] [-model opencode/big-pickle]
+//	    [-without-ghost] [-flat-notes] [-runs 1] [-judge] [-model opencode/big-pickle]
 //	    [-ollama http://localhost:11434]
 //	    [-drain-timeout 3m] [-auth-file path/to/auth.json]
 //	    [-results-dir eval/storyline/results] [-fake-harness]
