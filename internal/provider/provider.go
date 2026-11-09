@@ -40,6 +40,7 @@ type MemoryStore interface {
 	// memory.GlobalProjectID. Pinned or persistent rows require opts.Confirm.
 	// opts.DryRun reports what would happen without writing.
 	MoveMemory(ctx context.Context, fromProjectID, memoryID, toProjectID string, opts memory.MoveMemoryOptions) (memory.MoveMemoryResult, error)
+	ResolveMoveTarget(ctx context.Context, to string) (string, error)
 
 	// Queries
 	GetTopMemories(ctx context.Context, projectID string, limit int) ([]memory.Memory, error)

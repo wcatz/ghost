@@ -658,6 +658,8 @@ ghost memory move <memory-id> --project <from> --to <to> --confirm
 
 The memory keeps its id, links, flags, evidence, provenance, full-text index and embedding. Its `memory_history` rows are reassigned to the destination project and a `move` history row is appended recording the source and destination projects; `updated_at` is not changed. `retrieval_audit` rows stay with the call that produced them and are not moved. The move works from a project to another project, from a project to `_global`, and from `_global` to a project.
 
+The `move` history row records the performer as `operator` in its `agent` column, the same stamp `ghost resolve --mark` writes; a move made through the MCP tool records the calling agent instead.
+
 The command refuses to move into the same project, refuses an unknown source or target project, and refuses to move a pinned or `persistent` memory unless `--confirm` is passed. A `--dry-run` reports the move it would make and writes nothing.
 
 ## Project operations

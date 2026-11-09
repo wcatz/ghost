@@ -7,6 +7,23 @@ import (
 	"fmt"
 )
 
+// ResolveMoveTarget resolves a move destination to a project id. "_global" and
+// "global" name the global bucket; anything else is resolved as a project
+// reference and must exist.
+func (s *Store) ResolveMoveTarget(ctx context.Context, to string) (string, error) {
+	if to == GlobalProjectID || to == "global" {
+		return GlobalProjectID, nil
+	}
+	id, _, err := s.ResolveProject(ctx, to)
+	if err != nil {
+		return "", fmt.Errorf("resolve target project: %w", err)
+	}
+	if id == "" {
+		return "", fmt.Errorf("target project %s not found", RefusalArg("to", to))
+	}
+	return id, nil
+}
+
 // MoveMemoryOptions controls a move between projects.
 type MoveMemoryOptions struct {
 	// Confirm allows moving a pinned or persistent memory. Without it, the move is refused.

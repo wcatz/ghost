@@ -79,20 +79,6 @@ func parseMemoryMoveArgs(args []string) (memoryMoveArgs, error) {
 	return out, nil
 }
 
-func resolveMoveTarget(ctx context.Context, store *memory.Store, to string) (string, error) {
-	if to == memory.GlobalProjectID || to == "_global" || to == "global" {
-		return memory.GlobalProjectID, nil
-	}
-	id, _, err := store.ResolveProject(ctx, to)
-	if err != nil {
-		return "", fmt.Errorf("resolve target project: %w", err)
-	}
-	if id == "" {
-		return "", fmt.Errorf("target project %s not found", memory.RefusalArg("to", to))
-	}
-	return id, nil
-}
-
 func runMemoryMove() {
 	args, err := parseMemoryMoveArgs(os.Args[3:])
 	if err != nil {
@@ -114,15 +100,16 @@ func runMemoryMove() {
 		os.Exit(1)
 	}
 
-	resolvedTo, err := resolveMoveTarget(ctx, store, args.to)
+	resolvedTo, err := store.ResolveMoveTarget(ctx, args.to)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
 
 	res, err := store.MoveMemory(ctx, resolvedFrom, args.memoryID, resolvedTo, memory.MoveMemoryOptions{
-		Confirm: args.confirm,
-		DryRun:  args.dryRun,
+		Confirm:    args.confirm,
+		DryRun:     args.dryRun,
+		Provenance: memory.Provenance{Agent: markPerformer},
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)

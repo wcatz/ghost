@@ -1700,18 +1700,9 @@ func (s *Server) moveMemory(ctx context.Context, req *mcp.CallToolRequest, proje
 	if resolvedFrom == "" {
 		return "", fmt.Errorf("project %s not found", memory.RefusalArg("project_id", projectID))
 	}
-	resolvedTo := toProject
-	if toProject == memory.GlobalProjectID || toProject == "_global" || toProject == "global" {
-		resolvedTo = memory.GlobalProjectID
-	} else {
-		id, _, err := s.store.ResolveProject(ctx, toProject)
-		if err != nil {
-			return "", fmt.Errorf("resolve target project: %w", err)
-		}
-		if id == "" {
-			return "", fmt.Errorf("target project %s not found", memory.RefusalArg("to_project", toProject))
-		}
-		resolvedTo = id
+	resolvedTo, err := s.store.ResolveMoveTarget(ctx, toProject)
+	if err != nil {
+		return "", err
 	}
 
 	mems, err := s.store.GetByIDs(ctx, []string{memoryID})
