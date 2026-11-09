@@ -21,6 +21,7 @@ type config struct {
 	keep       bool
 	judge      bool
 	without    bool
+	notes      bool
 	runs       int
 	model      string
 	ollamaURL  string
@@ -38,6 +39,7 @@ func main() {
 	flag.BoolVar(&cfg.keep, "keep", false, "keep the scratch dir (the store, the built binary and the logs) after the run")
 	flag.BoolVar(&cfg.judge, "judge", false, "add the opt-in LLM judge over the final session's answer")
 	flag.BoolVar(&cfg.without, "without-ghost", false, "also run the without-Ghost arm: the same scripts, model and saves, with an empty session block, reported side by side with the Ghost arm")
+	flag.BoolVar(&cfg.notes, "flat-notes", false, "also run the flat-notes arm: the same scripts, model and saves, with every record saved so far handed over as a plain notes file (a host's built-in file memory), reported beside the other arms")
 	flag.IntVar(&cfg.runs, "runs", 1, "runs per arm per storyline; the issue's target numbers are quoted for 10")
 	flag.StringVar(&cfg.model, "model", "", "opencode model for the sessions (empty keeps Ghost's own default, opencode/big-pickle)")
 	flag.StringVar(&cfg.ollamaURL, "ollama", "http://localhost:11434", "Ollama base URL for the reachability check")
@@ -101,6 +103,9 @@ func run(cfg config) error {
 	if cfg.fake && cfg.judge {
 		return fmt.Errorf("-judge asks a model, and -fake-harness runs without one")
 	}
+	if cfg.fake && cfg.notes {
+		return fmt.Errorf("-flat-notes grades answers only, and -fake-harness answers with a fixed string")
+	}
 	if cfg.runs < 1 {
 		return fmt.Errorf("-runs must be at least 1, got %d", cfg.runs)
 	}
@@ -155,6 +160,9 @@ func run(cfg config) error {
 	if cfg.without {
 		arms = append(arms, armWithoutGhost)
 	}
+	if cfg.notes {
+		arms = append(arms, armFlatNotes)
+	}
 	var cells []cell
 	for _, story := range stories {
 		// Runs are the outer loop and the arms the inner one, so a run's two arms
@@ -192,7 +200,7 @@ func run(cfg config) error {
 	}
 
 	// The exit code is the Ghost arm's: its gating checks failing is a finding.
-	// The without-Ghost arm is the control, so a miss there is the measurement
+	// The without-Ghost and flat-notes arms are baselines, so a miss there is the measurement
 	// and does not decide the exit code; an error in it still does, because a
 	// control that did not run measures nothing.
 	failed := exitFailures(cells)
@@ -204,7 +212,8 @@ func run(cfg config) error {
 
 // runCell is one run of one arm in its own scratch tree: its own data dir, its
 // own work dir, its own ghost mcp process. Both arms get the same sandbox, the
-// same environment and the same model; they differ in Run.WithoutGhost alone.
+// same environment and the same model; they differ in Run.WithoutGhost and
+// Run.FlatNotes alone.
 func runCell(ctx context.Context, cfg config, sandboxRoot, bin, fakeBin, model string, story Storyline, arm string, n int) (*Result, error) {
 	scratch, err := os.MkdirTemp(sandboxRoot, fmt.Sprintf("storyline-%s-%s-%d-*", story.Key, arm, n))
 	if err != nil {
@@ -268,6 +277,7 @@ func runCell(ctx context.Context, cfg config, sandboxRoot, bin, fakeBin, model s
 		Agent:        agent,
 		Judge:        judge,
 		WithoutGhost: arm == armWithoutGhost,
+		FlatNotes:    arm == armFlatNotes,
 		FakeHarness:  cfg.fake,
 		Timeout:      cfg.timeout,
 		StageGap:     stageGap,

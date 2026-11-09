@@ -58,7 +58,9 @@ type Check struct {
 //
 // In the without-Ghost arm the block is empty by construction, so the delivery
 // lines and the store lines say nothing the arm's definition does not already
-// say, and only the answer lines are graded.
+// say, and only the answer lines are graded. The flat-notes arm is graded the
+// same way: its block is every saved record by construction, and the question
+// it answers is whether an agent handed the raw notes answers as well.
 func grade(res *Result) []Check {
 	var out []Check
 	s := res.Story
@@ -67,7 +69,7 @@ func grade(res *Result) []Check {
 		stages = stages[:len(res.Sessions)]
 	}
 	for i, sess := range res.Sessions {
-		if !res.WithoutGhost {
+		if !res.baseline() {
 			out = append(out, injectionPresent(sess))
 			for _, key := range stages[i].Expect {
 				out = append(out, carryForward(sess, mustRecord(s, key)))
@@ -80,7 +82,7 @@ func grade(res *Result) []Check {
 				out = append(out, expiredWithheld(sessionName(sess.Index), sess.Block, old))
 			}
 		}
-		if !res.WithoutGhost {
+		if !res.baseline() {
 			for _, key := range stages[i].Withheld {
 				out = append(out, withheld(sessionName(sess.Index), sess.Block, mustRecord(s, key)))
 			}
@@ -101,7 +103,7 @@ func grade(res *Result) []Check {
 			out = append(out, answerAvoids(sess, c))
 		}
 	}
-	if res.WithoutGhost {
+	if res.baseline() {
 		return applyKnown(s, out)
 	}
 	// The final block is graded on its own, because it is the one a reader of the
@@ -838,7 +840,7 @@ func writeReportAs(dir, file string, res *Result, model string) (string, error) 
 		fmt.Fprintf(&b, "answer:\n\n```\n%s\n```\n\n", strings.TrimSpace(sess.Answer))
 	}
 
-	if !res.WithoutGhost {
+	if !res.baseline() {
 		fmt.Fprintf(&b, "\n## stage: ghost supersede --apply\n\n```\n%s```\n", res.Supersede)
 		fmt.Fprintf(&b, "\n## stage: ghost resolve --apply\n\n```\n%s```\n", res.Resolve)
 		fmt.Fprintf(&b, "\n## final injection (%d bytes)\n\n```\n%s```\n", len(res.FinalBlock), res.FinalBlock)
