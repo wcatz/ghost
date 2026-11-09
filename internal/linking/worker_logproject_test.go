@@ -40,6 +40,8 @@ func (scriptedLinkStore) SearchVectorScoped(context.Context, string, []float32, 
 	return []memory.ScoredMemory{{MemoryID: "mem-b", Score: 0.99}}, nil
 }
 
+func (scriptedLinkStore) TrimOverCapRelatedDegrees(context.Context) error { return nil }
+
 func (scriptedLinkStore) CreateLink(context.Context, string, string, string, float32, string) error {
 	return nil
 }

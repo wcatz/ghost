@@ -949,3 +949,233 @@ func TestExportProjectIDBeatsAnotherProjectsName(t *testing.T) {
 		t.Errorf("the project whose NAME matched was mirrored too: %v", err)
 	}
 }
+
+// tokenShapedProjectID is a project id an imported or older store can hold:
+// the import check refuses control characters, backticks and delimiters but
+// never asks the token guard, so a GitHub token-shaped value is storable
+// verbatim and the exporter has to withhold it on the way out.
+func tokenShapedProjectID() string {
+	return "ghp_" + strings.Repeat("a", 36)
+}
+
+func seedTruncationProject(t *testing.T, store *memory.Store, projectID, name string) {
+	t.Helper()
+	ctx := context.Background()
+	if err := store.EnsureProject(ctx, projectID, "/tmp/"+name, name); err != nil {
+		t.Fatal(err)
+	}
+	for _, content := range []string{"First fact", "Second fact", "Third fact"} {
+		if _, err := store.Create(ctx, projectID, memory.Memory{Category: "fact", Content: content, Importance: 0.8, Source: "mcp"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i, title := range []string{"First decision", "Second decision"} {
+		if _, _, _, err := store.RecordDecision(ctx, projectID, title, "Use A", "Because A", []string{"B"}, nil); err != nil {
+			t.Fatalf("record decision %d: %v", i, err)
+		}
+	}
+	for i, title := range []string{"First task", "Second task"} {
+		if _, err := store.CreateTask(ctx, projectID, title, "Do it", 2); err != nil {
+			t.Fatalf("create task %d: %v", i, err)
+		}
+	}
+}
+
+// TestExportWithholdsTokenShapedProjectIDFromTruncationWarnings pins the
+// warn half of the stored-id rule: a stored project id that is token-shaped
+// must not reach the log file raw, while the warning still names the kind and
+// the fact that the list was cut.
+func TestExportWithholdsTokenShapedProjectIDFromTruncationWarnings(t *testing.T) {
+	store := seedStore(t)
+	ctx := context.Background()
+	tokenID := tokenShapedProjectID()
+	seedTruncationProject(t, store, tokenID, "tokenwarn")
+
+	var buf logBuffer
+	ex := &Exporter{Store: store, Logger: slog.New(slog.NewTextHandler(&buf, nil)), listLimit: 2}
+	vault := filepath.Join(t.TempDir(), "vault")
+	if err := ex.Export(ctx, vault, tokenID); err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	logged := buf.String()
+	if strings.Contains(logged, tokenID) {
+		t.Errorf("truncation warning echoed a token-shaped stored project id: %s", logged)
+	}
+	if !strings.Contains(logged, "withheld") || !strings.Contains(logged, "GitHub personal access token") {
+		t.Errorf("truncation warning did not withhold the token-shaped id by its format: %s", logged)
+	}
+	for _, kind := range []string{"memories", "decisions", "tasks"} {
+		if !strings.Contains(logged, "list truncated at limit") || !strings.Contains(logged, "kind="+kind) {
+			t.Errorf("truncation warning for %s missing from log: %s", kind, logged)
+		}
+	}
+}
+
+// TestExportNamesOrdinaryProjectIDInTruncationWarnings is the other half:
+// an ordinary stored id stays readable so the warning still says which
+// project was cut. Without it a renderer that withheld every id would pass
+// the test above.
+func TestExportNamesOrdinaryProjectIDInTruncationWarnings(t *testing.T) {
+	store := seedStore(t)
+	ctx := context.Background()
+	const ordinaryID = "ordinary-project-id"
+	seedTruncationProject(t, store, ordinaryID, "ordinarywarn")
+
+	var buf logBuffer
+	ex := &Exporter{Store: store, Logger: slog.New(slog.NewTextHandler(&buf, nil)), listLimit: 2}
+	vault := filepath.Join(t.TempDir(), "vault")
+	if err := ex.Export(ctx, vault, ordinaryID); err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	logged := buf.String()
+	if !strings.Contains(logged, ordinaryID) {
+		t.Errorf("truncation warning withheld an ordinary stored id: %s", logged)
+	}
+	if strings.Contains(logged, "withheld") {
+		t.Errorf("truncation warning withheld an ordinary stored id: %s", logged)
+	}
+}
+
+// TestExportWithholdsOverLimitProjectIDFromTruncationWarnings pins the bound
+// half: a stored id longer than one refusal repeats is withheld with its
+// length, not treated as ordinary.
+func TestExportWithholdsOverLimitProjectIDFromTruncationWarnings(t *testing.T) {
+	store := seedStore(t)
+	ctx := context.Background()
+	longID := strings.Repeat("a", 300)
+	seedTruncationProject(t, store, longID, "longwarn")
+
+	var buf logBuffer
+	ex := &Exporter{Store: store, Logger: slog.New(slog.NewTextHandler(&buf, nil)), listLimit: 2}
+	vault := filepath.Join(t.TempDir(), "vault")
+	if err := ex.Export(ctx, vault, longID); err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	logged := buf.String()
+	if strings.Contains(logged, longID) {
+		t.Errorf("truncation warning echoed an over-limit stored project id")
+	}
+	if !strings.Contains(logged, "withheld") || !strings.Contains(logged, "bytes") {
+		t.Errorf("truncation warning did not withhold the over-limit id by its length: %s", logged)
+	}
+}
+
+func TestExportWithholdsTokenShapedStoredIDsInErrorPrefixes(t *testing.T) {
+	tokenID := tokenShapedProjectID()
+	withheldProject := `"<project_id withheld: it holds a GitHub personal access token>"`
+	withheldMemory := `"<memory_id withheld: it holds a GitHub personal access token>"`
+
+	t.Run("load", func(t *testing.T) {
+		db, store := seedStoreWithDB(t)
+		ctx := context.Background()
+		if err := store.EnsureProject(ctx, tokenID, "/tmp/tokenload", "tokenload"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.ExecContext(ctx, `DROP TABLE memories`); err != nil {
+			t.Fatal(err)
+		}
+		vault := filepath.Join(t.TempDir(), "vault")
+		ex := &Exporter{Store: store, Logger: slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))}
+		err := ex.Export(ctx, vault, tokenID)
+		if err == nil {
+			t.Fatal("want the load failure, got nil")
+		}
+		if strings.Contains(err.Error(), tokenID) {
+			t.Errorf("load failure echoed a token-shaped stored project id: %v", err)
+		}
+		if !strings.Contains(err.Error(), "load memories for "+withheldProject) {
+			t.Errorf("load failure did not withhold the token-shaped id by its format: %v", err)
+		}
+	})
+	t.Run("links", func(t *testing.T) {
+		db, store := seedStoreWithDB(t)
+		ctx := context.Background()
+		plantMemory(t, db, "ghost", tokenID, "A body long enough to be a real memory about the exporter.")
+		if _, err := db.ExecContext(ctx, `DROP TABLE memory_links`); err != nil {
+			t.Fatal(err)
+		}
+		vault := filepath.Join(t.TempDir(), "vault")
+		ex := &Exporter{Store: store, Logger: slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))}
+		err := ex.Export(ctx, vault, "ghost")
+		if err == nil {
+			t.Fatal("want the links failure, got nil")
+		}
+		if strings.Contains(err.Error(), tokenID) {
+			t.Errorf("links failure echoed a token-shaped stored memory id: %v", err)
+		}
+		if !strings.Contains(err.Error(), "links for "+withheldMemory) {
+			t.Errorf("links failure did not withhold the token-shaped id by its format: %v", err)
+		}
+	})
+	t.Run("decisions", func(t *testing.T) {
+		db, store := seedStoreWithDB(t)
+		ctx := context.Background()
+		if err := store.EnsureProject(ctx, tokenID, "/tmp/tokendec", "tokendec"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.Create(ctx, tokenID, memory.Memory{Category: "fact", Content: "A fact", Importance: 0.8, Source: "mcp"}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.ExecContext(ctx, `DROP TABLE decisions`); err != nil {
+			t.Fatal(err)
+		}
+		vault := filepath.Join(t.TempDir(), "vault")
+		ex := &Exporter{Store: store, Logger: slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))}
+		err := ex.Export(ctx, vault, tokenID)
+		if err == nil {
+			t.Fatal("want the decisions failure, got nil")
+		}
+		if strings.Contains(err.Error(), tokenID) {
+			t.Errorf("decisions failure echoed a token-shaped stored project id: %v", err)
+		}
+		if !strings.Contains(err.Error(), "decisions for "+withheldProject) {
+			t.Errorf("decisions failure did not withhold the token-shaped id by its format: %v", err)
+		}
+	})
+	t.Run("tasks", func(t *testing.T) {
+		db, store := seedStoreWithDB(t)
+		ctx := context.Background()
+		if err := store.EnsureProject(ctx, tokenID, "/tmp/tokentask", "tokentask"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.Create(ctx, tokenID, memory.Memory{Category: "fact", Content: "A fact", Importance: 0.8, Source: "mcp"}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.ExecContext(ctx, `DROP TABLE tasks`); err != nil {
+			t.Fatal(err)
+		}
+		vault := filepath.Join(t.TempDir(), "vault")
+		ex := &Exporter{Store: store, Logger: slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))}
+		err := ex.Export(ctx, vault, tokenID)
+		if err == nil {
+			t.Fatal("want the tasks failure, got nil")
+		}
+		if strings.Contains(err.Error(), tokenID) {
+			t.Errorf("tasks failure echoed a token-shaped stored project id: %v", err)
+		}
+		if !strings.Contains(err.Error(), "tasks for "+withheldProject) {
+			t.Errorf("tasks failure did not withhold the token-shaped id by its format: %v", err)
+		}
+	})
+}
+
+func TestExportNamesOrdinaryStoredIDsInErrorPrefixes(t *testing.T) {
+	const ordinaryID = "ordinary-project-id"
+	db, store := seedStoreWithDB(t)
+	ctx := context.Background()
+	if err := store.EnsureProject(ctx, ordinaryID, "/tmp/ordinaryload", "ordinaryload"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `DROP TABLE memories`); err != nil {
+		t.Fatal(err)
+	}
+	vault := filepath.Join(t.TempDir(), "vault")
+	ex := &Exporter{Store: store, Logger: slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))}
+	err := ex.Export(ctx, vault, ordinaryID)
+	if err == nil {
+		t.Fatal("want the load failure, got nil")
+	}
+	if want := `load memories for "` + ordinaryID + `"`; !strings.Contains(err.Error(), want) {
+		t.Errorf("load failure did not name an ordinary stored id quoted: %v", err)
+	}
+}

@@ -515,7 +515,7 @@ func TestPassiveThresholdScanKeepsTheNewestTiedRows(t *testing.T) {
 	fresh := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
 	// The fixture only tests the tie if the rank IS the importance: a fact on
 	// the project tier must not decay.
-	if f := DecayFactor("fact", RetentionProject, false, ageDays(old.Format("2006-01-02 15:04:05"), now)); f != 1 {
+	if f := DecayFactor("fact", "", RetentionProject, false, ageDays(old.Format("2006-01-02 15:04:05"), now)); f != 1 {
 		t.Fatalf("a project-tier fact decays by %v, so the fixture's rows are not tied on rank", f)
 	}
 	for _, tc := range []struct {
@@ -945,5 +945,60 @@ func TestPassiveMaxDecayIndexSeekPlans(t *testing.T) {
 	}
 	if strings.Contains(got, "SCAN memories") || strings.Contains(got, "USE TEMP B-TREE") {
 		t.Fatalf("cat plan not seek: %s", got)
+	}
+}
+
+// TestPassiveThresholdScanRanksDatedFactsOnTheDecayCurve holds the one place the
+// SQL-derived dated flag feeds the Go rank. An old dated fact and an old timeless
+// fact of equal importance are the same row to every column the scan reads except
+// the flag, so a scan that took the flag as always false would rank them equal and
+// keep the dated one. With the flag read, the dated fact decays (0.5 × 0.3 = 0.15)
+// below a younger gotcha (0.3 × ~1.0), the window of two keeps the timeless fact
+// and the gotcha, and it is the window the SQL ORDER BY keeps.
+func TestPassiveThresholdScanRanksDatedFactsOnTheDecayCurve(t *testing.T) {
+	db, err := OpenDB(filepath.Join(t.TempDir(), "dated.db"))
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	st := NewStore(db, nil)
+	if err := st.EnsureProject(context.Background(), "proj", "proj", "proj"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	old := time.Date(2023, 1, 1, 0, 0, 0, 0, time.UTC).Format("2006-01-02 15:04:05")
+	fresh := time.Date(2026, 1, 30, 0, 0, 0, 0, time.UTC).Format("2006-01-02 15:04:05")
+	for _, r := range []struct {
+		id, cat, content string
+		imp              float64
+		created          string
+	}{
+		{"timeless", "fact", "the ledger uses double entry bookkeeping", 0.5, old},
+		{"dated", "fact", "the ledger cutover finished on 2023-01-01", 0.5, old},
+		{"younger", "gotcha", "a younger row of lower importance", 0.3, fresh},
+	} {
+		if _, err := db.Exec(
+			`INSERT INTO memories (id, project_id, category, content, source, importance, pinned, created_at, updated_at)
+			 VALUES (?, 'proj', ?, ?, 'manual', ?, 0, ?, ?)`,
+			r.id, r.cat, r.content, r.imp, r.created, r.created,
+		); err != nil {
+			t.Fatalf("insert %s: %v", r.id, err)
+		}
+	}
+	cols, err := passiveColumnsFor(st)
+	if err != nil {
+		t.Fatalf("passiveColumnsFor: %v", err)
+	}
+	pol := projectPassivePolicy()
+	pol.OverFetch = 2
+	req := passiveRequest("proj", pol)
+	got, err := st.passiveWindow(context.Background(), req, pol, cols)
+	if err != nil {
+		t.Fatalf("passiveWindow: %v", err)
+	}
+	if want := []string{"timeless", "younger"}; !eqStrings(idsOfMemories(got), want) {
+		t.Fatalf("window = %v, want %v: the dated fact must rank on the decay curve below the younger row", idsOfMemories(got), want)
+	}
+	if want := legacyPassiveWindow(t, st, pol, req, cols); !eqStrings(idsOfMemories(got), want) {
+		t.Fatalf("window %v differs from the SQL order %v", idsOfMemories(got), want)
 	}
 }

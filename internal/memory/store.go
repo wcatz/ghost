@@ -4838,10 +4838,11 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 // low-importance category member, this tie is why.
 // Pinned is a full decay exemption (factor 1.0), not a multiplier on top of
 // the decayed/floored score — a pinned memory always scores at its raw
-// importance regardless of age or category. It's a no-op for
-// preference/convention/fact, which already never decay, and for every tier but
-// session: the tier factor is the one that has to multiply rather than stand in,
-// because a session row decays by its category AND by how long it is wanted.
+// importance regardless of age or category. preference and convention never
+// decay; a fact never decays unless its content carries a calendar date, in
+// which case it decays on the pattern/architecture curve. The tier factor is the
+// one that has to multiply rather than stand in, because a session row decays by
+// its category AND by how long it is wanted.
 //
 // A var, not a const, because the tier half is built from the Go constants that
 // define its floor — see retentionDecayFactorSQL. Every reader interpolates it
@@ -4877,8 +4878,10 @@ func decayRankingSQL(hasTier bool) string {
 	importance
 	* CASE
 		WHEN pinned = 1 THEN 1.0
-		WHEN category IN ('preference', 'convention', 'fact') THEN 1.0
-		WHEN category IN ('pattern', 'architecture') THEN
+		WHEN category IN ('preference', 'convention') THEN 1.0
+		WHEN category = 'fact' AND content NOT GLOB '*[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]*' THEN 1.0
+		WHEN category IN ('pattern', 'architecture')
+			OR (category = 'fact' AND content GLOB '*[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]*') THEN
 			MAX(0.3, 1.0 / (1.0 + (julianday('now') - julianday(created_at)) / 45.0))
 		ELSE
 			MAX(0.15, 1.0 / (1.0 + (julianday('now') - julianday(created_at)) / 30.0))

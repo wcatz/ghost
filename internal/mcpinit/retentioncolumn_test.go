@@ -99,8 +99,10 @@ func TestDecayRankingSQLWithTierKeepsTheCategoryHalf(t *testing.T) {
 	// The category curve is the shared part: every term of it is present in both.
 	for _, term := range []string{
 		"WHEN pinned = 1 THEN 1.0",
-		"WHEN category IN ('preference', 'convention', 'fact') THEN 1.0",
-		"WHEN category IN ('pattern', 'architecture') THEN",
+		"WHEN category IN ('preference', 'convention') THEN 1.0",
+		"WHEN category = 'fact' AND content NOT GLOB '*[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]*' THEN 1.0",
+		"WHEN category IN ('pattern', 'architecture')",
+		"OR (category = 'fact' AND content GLOB '*[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]*') THEN",
 		"MAX(0.3, 1.0 / (1.0 + (julianday('now') - julianday(created_at)) / 45.0))",
 		"MAX(0.15, 1.0 / (1.0 + (julianday('now') - julianday(created_at)) / 30.0))",
 	} {

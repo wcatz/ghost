@@ -421,7 +421,7 @@ func TestRankFactsDecayIsTheRankingsOwn(t *testing.T) {
 	if f == nil || f.Decay == 0 {
 		t.Fatalf("the ranking recorded no decay for the gotcha row: %+v", f)
 	}
-	if want := DecayFactor("gotcha", RetentionProject, false, f.AgeDays); f.Decay != want {
+	if want := DecayFactor("gotcha", "", RetentionProject, false, f.AgeDays); f.Decay != want {
 		t.Errorf("decay = %v, want DecayFactor at the recorded age %v = %v", f.Decay, f.AgeDays, want)
 	}
 	if f.Decay >= 1.0 || f.AgeDays < 99 || f.AgeDays > 101 {

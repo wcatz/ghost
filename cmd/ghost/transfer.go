@@ -1517,6 +1517,14 @@ func printImportReport(out io.Writer, path string, report portable.ImportReport,
 
 // runImport implements `ghost import <file.jsonl> [--apply] [--trust-provenance]`.
 //
+// The artifact is opened and judged first, and only a file this build can read
+// as a whole reaches the store. bootstrap creates the config file, migrates the
+// database and seeds the builtin rows, so opening the store before reading the
+// file made a refused artifact leave a migrated store behind. A whole-file
+// refusal now leaves the data directory untouched; a damaged line still reaches
+// the report, because that is a per-record problem rather than a refusal of the
+// file.
+//
 // The store is opened read-write only when the run will write. A dry run opens
 // read-only, so it cannot migrate a database whose schema is behind or seed the
 // builtin rows — see openImportStore for why that is not a detail. An import
@@ -1536,17 +1544,49 @@ func runImport() {
 		os.Exit(1)
 	}
 
-	store, err := openImportStore(opts.Apply)
+	artifact, store, err := openImportRun(opts.File, opts.Apply)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
 	defer store.Close() //nolint:errcheck
 
-	if err := runImportCore(context.Background(), store, opts.File, importOptionsFrom(opts), os.Stdout); err != nil {
+	if err := runImportReader(context.Background(), store, opts.File, artifact, importOptionsFrom(opts), os.Stdout); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// openImportRun opens the artifact and the store for an import run, in that
+// order. The artifact is read and judged as a whole before the store exists, so
+// a refusal leaves no config file and no database behind. The parsed artifact
+// carries the bytes the run then applies, which is what lets a pipe or a FIFO be
+// imported at all: neither can be rewound and read a second time.
+func openImportRun(path string, apply bool) (*portable.Artifact, *memory.Store, error) {
+	a, err := openImportArtifact(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	store, err := openImportStore(apply)
+	if err != nil {
+		return nil, nil, err
+	}
+	return a, store, nil
+}
+
+// openImportArtifact opens an artifact and reads it once, refusing a file this
+// build cannot read as a whole. The parsed artifact is handed back for the run
+// to apply, so the source is never read twice.
+func openImportArtifact(path string) (*portable.Artifact, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("no artifact at %s — write one with ghost export", path)
+		}
+		return nil, fmt.Errorf("open %s: %w", path, err)
+	}
+	defer f.Close() //nolint:errcheck
+	return portable.Parse(f)
 }
 
 // importOptionsFrom converts the parsed flags into the run's options. The two
@@ -1561,16 +1601,17 @@ func importOptionsFrom(opts importOptions) portable.ImportOptions {
 // temp-dir store, without argument parsing, the config load or a process exit —
 // and without re-executing the test binary.
 func runImportCore(ctx context.Context, store *memory.Store, path string, opts portable.ImportOptions, out io.Writer) error {
-	f, err := os.Open(path)
+	a, err := openImportArtifact(path)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return fmt.Errorf("no artifact at %s — write one with ghost export", path)
-		}
-		return fmt.Errorf("open %s: %w", path, err)
+		return err
 	}
-	defer f.Close() //nolint:errcheck
+	return runImportReader(ctx, store, path, a, opts, out)
+}
 
-	report, err := portable.Import(ctx, store, f, opts, func(r portable.RecordResult) {
+// runImportReader imports one already-parsed artifact and prints the per-record
+// outcome and the summary.
+func runImportReader(ctx context.Context, store *memory.Store, path string, a *portable.Artifact, opts portable.ImportOptions, out io.Writer) error {
+	report, err := a.Import(ctx, store, opts, func(r portable.RecordResult) {
 		// A per-record write failure is reported inline and not propagated: the
 		// summary and the exit code carry the outcome, and a report that stopped
 		// at the first such failure would hide the records that did land.

@@ -490,7 +490,7 @@ So on the 24 premise probes — the ones that presuppose the outdated state and 
 
 ### Category-aware time decay (default on, reorder-only)
 
-`SearchParams.DecayEnabled` (default true) applies the category-aware time-decay factor `decayFactor(category, pinned, ageDays)` — the Go mirror of `DecayRankingSQL` — to reorder the result window after truncation: results are truncated to `limit` by base score first (fused RRF score, or the FTS-only synthesized score `1/(RRFK+rank+1)`), then the surviving window is reordered by `base × decayFactor`. `decayFactor` is `1.0` for pinned memories and for `preference`/`convention`/`fact` (never decay); `MAX(0.3, 1/(1+ageDays/45))` for `pattern`/`architecture` (τ=45); `MAX(0.15, 1/(1+ageDays/30))` for every other category (τ=30). Age is read from `created_at` only (never `updated_at`); an unparseable timestamp is treated as ancient so it can never spuriously win. Decay is ordering-only: it never changes membership, which is what keeps findability intact — see the reorder-only rationale in `docs/superpowers/specs/2026-08-20-search-time-decay-design.md` (the synthesized FTS base spans ~1.3× over the window while decay spans ~5.4×, so multiplying before truncation lets decay override relevance and drops rank-1 relevant fresh answers for unrelated younger memories).
+`SearchParams.DecayEnabled` (default true) applies the category-aware time-decay factor `DecayFactor(category, content, retention, pinned, ageDays)` — the Go mirror of `DecayRankingSQL` — to reorder the result window after truncation: results are truncated to `limit` by base score first (fused RRF score, or the FTS-only synthesized score `1/(RRFK+rank+1)`), then the surviving window is reordered by `base × decayFactor`. `decayFactor` is `1.0` for pinned memories and for `preference`/`convention` and for a `fact` whose content carries no `YYYY-MM-DD` date (never decay); a dated `fact` decays on the `pattern`/`architecture` curve; `MAX(0.3, 1/(1+ageDays/45))` for `pattern`/`architecture` (τ=45); `MAX(0.15, 1/(1+ageDays/30))` for every other category (τ=30). Age is read from `created_at` only (never `updated_at`); an unparseable timestamp is treated as ancient so it can never spuriously win. Decay is ordering-only: it never changes membership, which is what keeps findability intact — see the reorder-only rationale in `docs/superpowers/specs/2026-08-20-search-time-decay-design.md` (the synthesized FTS base spans ~1.3× over the window while decay spans ~5.4×, so multiplying before truncation lets decay override relevance and drops rank-1 relevant fresh answers for unrelated younger memories).
 
 With decay on, the staleness suite **flips from fresh-wins 0.083 to 1.000** (`TestStalenessDecayProof`; the `dependency`-category fixture makes decay observable). It is provably inert on the graded benchmarks: those datasets seed via `store.Create`, which never sets `created_at`, so every candidate shares a timestamp and the decay factor is identical across them — no reorder possible (`TestDecayDoesNotPerturbGradedBench`).
 
@@ -514,15 +514,16 @@ category               decays     n  wins(off)   wins(on)     delta     @1(on)  
 architecture           yes        2      1.000      0.500    -0.500      0.500      1.000 (1)
 decision               yes        2      0.500      0.500    +0.000      0.500      1.000 (1)
 dependency             yes        3      1.000      0.333    -0.667      0.333      1.000 (1)
+fact (dated)           yes        1      1.000      0.000    -1.000      0.000              -
 gotcha                 yes        3      0.667      0.333    -0.333      0.333      1.000 (1)
 pattern                yes        2      1.000      0.500    -0.500      0.500      1.000 (1)
 fact                   no        14      0.929      0.929    +0.000      0.929              -
-decaying (pooled)      yes       12      0.833      0.417    -0.417      0.417      1.000 (5)
+decaying (pooled)      yes       13      0.846      0.385    -0.462      0.385      1.000 (5)
 never-decay (pooled)   no        14      0.929      0.929    +0.000      0.929              -
-all probes             mixed     26      0.885      0.692    -0.192      0.692      1.000 (5)
+all probes             mixed     27      0.889      0.667    -0.222      0.667      1.000 (5)
 ```
 
-The never-decay row is unchanged and is now asserted invariant scenario by scenario — that invariance is the frontier's claim and it holds. The decaying rows are its cost: **an old-but-correct memory competing with a fresh distractor in a category decay actually reorders loses the contest, 0.833 → 0.417.** That is decay working as designed rather than a defect, so it is reported rather than gated, and it is the number a reader needs in order to weigh the default.
+The never-decay row is unchanged and is now asserted invariant scenario by scenario — that invariance is the frontier's claim and it holds. The decaying rows are its cost: **an old-but-correct memory competing with a fresh distractor in a category decay actually reorders loses the contest, 0.846 → 0.385.** That is decay working as designed rather than a defect, so it is reported rather than gated, and it is the number a reader needs in order to weigh the default. A `fact` whose content carries a `YYYY-MM-DD` date is a dated status note and decays on the pattern/architecture curve, so it is reported as its own `fact (dated)` row in the decaying class (`TestRecencyTrapDatedFactIsItsOwnRow`); the undated `fact` row stays the never-decay half. The one dated scenario is a single probe, so its 1.000 → 0.000 is the direction of the rule and not a rate.
 
 Two guarantees about those rows are asserted because production makes them. The old memory is still **retrieved** under decay — reordering never changes window membership, so what decay costs is a rank and not the answer. And a **pinned** one still takes the top slot against a fresh *unpinned* distractor in the same category: the `pinned(on)` column is 1.000 in every decaying category and over all five pinned probes, and it is a column of the report rather than a name list in a test because pinning is the only control a user has over a category that decays — if the ranker multiplied a pinned row down, that control would be decorative. The column is a ratio over the pinned probes *in that row*, so a row with no pinned probe prints no claim rather than a misleading 0.000. The two classes are seeded into separate projects so neither one's window depends on how many scenarios the other contributes; pooling them let adding these fixtures push a never-decay scenario's answer out of the top-10 window, and keeping them apart is also what makes the never-decay row the number the tables above quote.
 
@@ -531,7 +532,7 @@ Two guarantees about those rows are asserted because production makes them. The 
 ```text
                         staleness fresh-wins   recency-trap correct-wins (never-decay half)
 both off                0.083                  0.929
-decay on (DefaultSearchParams)          1.000                  0.929   ← decay alone flips staleness, trap untouched (never-decay half: fact never decays)
+decay on (DefaultSearchParams)          1.000                  0.929   ← decay alone flips staleness, trap untouched (never-decay half: an undated fact never decays)
 supersede demote on     1.000                  0.929   ← likewise, trap untouched (never-decay half: no supersession edge)
 both on (shipped default)              1.000                  0.929
 ```

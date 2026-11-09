@@ -570,6 +570,176 @@ func TestUpdateJudgesAnOmittedCategoryAgainstTheStoredRow(t *testing.T) {
 	}
 }
 
+// #1953: the dated-global heuristic matches an ISO date inside the first
+// sentence/scan window, not only at column 0, while keeping attributed
+// preferences quiet and storing the row unchanged.
+func TestGlobalStatusHintMatchesDateInsideFirstSentence(t *testing.T) {
+	srv, session := newCapSession(t)
+
+	for _, tc := range []struct {
+		name    string
+		content string
+	}{
+		{
+			name:    "on date prefix",
+			content: "On 2026-10-16, the staging cluster was rotated to new credentials.",
+		},
+		{
+			name:    "component release with embedded date",
+			content: "ghost v1.4.0 (released 2026-10-16, includes the migration fix)",
+		},
+		{
+			name:    "component attribution colon form as status",
+			content: "ghost (2026-10-16): is now running the patched scheduler in production.",
+		},
+		{
+			name:    "as of date",
+			content: "The production indexer is healthy again as of 2026-10-16.",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			res := callTool(t, session, "ghost_save_global", map[string]any{
+				"content":  tc.content,
+				"category": "fact",
+			})
+			resp := resultText(res)
+			if !strings.Contains(resp, "Global memory saved (id: ") {
+				t.Fatalf("global save response reports no stored id: %q", resp)
+			}
+			if !strings.Contains(resp, "ADVISORY") {
+				t.Fatalf("dated global status without valid_until must advise: %q", resp)
+			}
+			if !strings.Contains(resp, "session start") {
+				t.Fatalf("advisory must mention session start: %q", resp)
+			}
+			id, ok := extractID(resp)
+			if !ok {
+				t.Fatalf("no id in response: %q", resp)
+			}
+			mems, err := srv.store.GetByIDs(context.Background(), []string{id})
+			if err != nil || len(mems) != 1 {
+				t.Fatalf("GetByIDs(%q): err=%v n=%d", id, err, len(mems))
+			}
+			if mems[0].Content != tc.content {
+				t.Fatalf("stored content changed: got %q want %q", mems[0].Content, tc.content)
+			}
+		})
+	}
+}
+
+func TestGlobalStatusHintKeepsAttributedPreferencesQuiet(t *testing.T) {
+	_, session := newCapSession(t)
+
+	for _, tc := range []struct {
+		name    string
+		content string
+	}{
+		{
+			name:    "comma attribution with prefer",
+			content: "Wayne, 2026-10-16: prefer tabs over spaces",
+		},
+		{
+			name:    "paren attribution with always",
+			content: "Wayne (2026-10-16): always run targeted package tests first",
+		},
+		{
+			name:    "paren attribution with never",
+			content: "Wayne (2026-10-16): never push without review",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			res := callTool(t, session, "ghost_save_global", map[string]any{
+				"content":  tc.content,
+				"category": "preference",
+			})
+			resp := resultText(res)
+			if !strings.Contains(resp, "Global memory saved (id: ") {
+				t.Fatalf("global save response reports no stored id: %q", resp)
+			}
+			if strings.Contains(resp, "ADVISORY") {
+				t.Fatalf("dated preference attributed to a person must not advise: %q", resp)
+			}
+		})
+	}
+}
+
+func TestGlobalStatusHintAttributedPlainStatusStillAdvises(t *testing.T) {
+	_, session := newCapSession(t)
+
+	res := callTool(t, session, "ghost_save_global", map[string]any{
+		"content":  "Wayne (2026-10-16): is now running the patched scheduler in production.",
+		"category": "fact",
+	})
+	resp := resultText(res)
+	if !strings.Contains(resp, "Global memory saved (id: ") {
+		t.Fatalf("global save response reports no stored id: %q", resp)
+	}
+	if !strings.Contains(resp, "ADVISORY") {
+		t.Fatalf("an attributed line that is plainly status must still advise: %q", resp)
+	}
+}
+
+func TestGlobalStatusHintDateOutsideScanWindowDoesNotAdvise(t *testing.T) {
+	_, session := newCapSession(t)
+
+	// Date appears well past the scan window and not in a status-leading form.
+	content := strings.Repeat("durable guidance note ", 10) + "recorded for reference 2026-10-16 only"
+	res := callTool(t, session, "ghost_save_global", map[string]any{
+		"content":  content,
+		"category": "fact",
+	})
+	resp := resultText(res)
+	if !strings.Contains(resp, "Global memory saved (id: ") {
+		t.Fatalf("global save response reports no stored id: %q", resp)
+	}
+	if strings.Contains(resp, "ADVISORY") {
+		t.Fatalf("a date outside the scan window must not advise: %q", resp)
+	}
+}
+
+func TestGlobalStatusHintScanWindowBoundary(t *testing.T) {
+	// A non-word separator places the ISO date so its start byte straddles the
+	// 120-byte scan boundary. A start below the boundary must fire even when the
+	// full date extends past it; a start at or beyond the boundary must not.
+	at115 := "On " + strings.Repeat("x", 111) + " 2026-10-16: status update"
+	if idx := strings.Index(at115, "2026-10-16"); idx != 115 {
+		t.Fatalf("test setup: date starts at %d, want 115", idx)
+	}
+	if got := globalStatusHint(at115, nil); got == "" {
+		t.Fatalf("date starting at byte 115 must advise, got no advisory")
+	}
+
+	at121 := "On " + strings.Repeat("x", 117) + " 2026-10-16: status update"
+	if idx := strings.Index(at121, "2026-10-16"); idx != 121 {
+		t.Fatalf("test setup: date starts at %d, want 121", idx)
+	}
+	if got := globalStatusHint(at121, nil); got != "" {
+		t.Fatalf("date starting at byte 121 must not advise, got %q", got)
+	}
+}
+
+func TestPromoteGlobalStatusHintMatchesEmbeddedDate(t *testing.T) {
+	srv, session := newCapSession(t)
+	ctx := context.Background()
+	id, err := srv.store.Create(ctx, "abc123", memory.Memory{
+		Category: "fact", Content: "On 2026-10-16, deployments were paused for the release freeze.", Source: "mcp", Importance: 0.7, Tags: []string{},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	res := callTool(t, session, "ghost_memory_promote", map[string]any{
+		"project_id": "test-project",
+		"memory_id":  id,
+	})
+	resp := resultText(res)
+	if !strings.Contains(resp, "promoted to global scope") {
+		t.Fatalf("promote response unexpected: %q", resp)
+	}
+	if !strings.Contains(resp, "ADVISORY") {
+		t.Fatalf("embedded-date global status on promote must advise: %q", resp)
+	}
+}
+
 // #1832: long save advisory. Over LongMemoryThreshold (800) bytes it advises,
 // at or below does not. The advisory is guide-only, the row is stored unchanged,
 // and it composes with repoFactHint.

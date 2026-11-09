@@ -666,6 +666,11 @@ func spawnLifecycleIfConfigured(cwd, source string, signals func() *audit.Signal
 	if projectID == "" || projectName == "" {
 		return
 	}
+	// _global has no unattended fold, so a home-directory session routed to it
+	// through routing.default_project must not spawn a lifecycle run for it.
+	if projectID == memory.GlobalProjectID {
+		return
+	}
 
 	// The project id is interpolated into a filename inside dataDir, and ids
 	// are not constrained by the store: an MCP client may pass an arbitrary
@@ -836,7 +841,7 @@ func recordReflectSkipMarker(cwd string, stderr io.Writer) {
 	defer db.Close() //nolint:errcheck
 	store := memory.NewStore(db, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	projectID, _ := resolveSessionProject(context.Background(), store, cwd)
-	if projectID == "" {
+	if projectID == "" || projectID == memory.GlobalProjectID {
 		return
 	}
 	if err := WriteLifecycleFailure(projectID, []string{"reflect"}, NoLLMBackendError); err != nil && stderr != nil {
@@ -951,9 +956,10 @@ func claimPidFile(pidPath string) (bool, error) {
 // the dead claim's OWN timestamp, because the claim file is replaced by this
 // process's own as part of taking the slot.
 //
-// A dead claim is reported only for a REGULAR file naming no live process. A
-// missing path is a first claim and a non-regular one cannot be a claim at
-// all; neither is a run that left anything unfinished.
+// A dead claim is reported only for a REGULAR file naming a parseable pid for
+// no live process. A missing path is a first claim and a non-regular or
+// unparseable one cannot be a claim at all — including one over the read
+// bound — and neither is a run that left anything unfinished.
 func claimPidFileReclaim(pidPath string) (claimed bool, reclaimedAt time.Time, err error) {
 	lockFile, err := os.OpenFile(pidPath+".lock", os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
@@ -978,7 +984,13 @@ func claimPidFileReclaim(pidPath string) (claimed bool, reclaimedAt time.Time, e
 				_ = priorFile.Close()
 				return false, time.Time{}, nil
 			}
-			reclaimedAt = prior.ModTime()
+			// Only a parseable pid can be a dead claim. An over-cap or
+			// malformed file is no claim, as isAlive already reads it,
+			// and leaves reclaimedAt zero so no unfinished-run marker
+			// is written for it.
+			if pidInFile(pidPath) != 0 {
+				reclaimedAt = prior.ModTime()
+			}
 		}
 		_ = priorFile.Close()
 	}

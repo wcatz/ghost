@@ -29,7 +29,7 @@ func loadTrapTestdata(t *testing.T) []TrapScenario {
 func decayingScenarios(scenarios []TrapScenario) []TrapScenario {
 	var out []TrapScenario
 	for _, sc := range scenarios {
-		if categoryDecays(sc.effectiveCategory()) {
+		if categoryDecays(sc.effectiveCategory(), sc.Correct.Content) {
 			out = append(out, sc)
 		}
 	}
@@ -45,7 +45,7 @@ func decayingScenarios(scenarios []TrapScenario) []TrapScenario {
 func neverDecayScenarios(scenarios []TrapScenario) []TrapScenario {
 	var out []TrapScenario
 	for _, sc := range scenarios {
-		if !categoryDecays(sc.effectiveCategory()) {
+		if !categoryDecays(sc.effectiveCategory(), sc.Correct.Content) {
 			out = append(out, sc)
 		}
 	}
@@ -77,7 +77,7 @@ func TestRecencyTrapAtDefault(t *testing.T) {
 	cw := TrapCorrectWins(outcomes)
 	t.Logf("trap correct-wins at default (never-decay scenarios only): %.3f", cw)
 	if cw < 0.9 {
-		t.Errorf("at default the correct old memory should win nearly always (fact never decays), got %.3f", cw)
+		t.Errorf("at default the correct old memory should win nearly always (a timeless fact never decays), got %.3f", cw)
 	}
 }
 
@@ -134,7 +134,7 @@ func trapTop1ByScenario(outcomes []TrapOutcome) map[string]bool {
 func decayingCount(scenarios []TrapScenario) int {
 	n := 0
 	for _, sc := range scenarios {
-		if categoryDecays(sc.effectiveCategory()) {
+		if categoryDecays(sc.effectiveCategory(), sc.Correct.Content) {
 			n++
 		}
 	}
@@ -168,7 +168,7 @@ func TestRecencyTrapDecayingCategories(t *testing.T) {
 		byCategory[sc.effectiveCategory()]++
 	}
 	for _, cat := range []string{"decision", "gotcha", "dependency", "architecture", "pattern"} {
-		if !categoryDecays(cat) {
+		if !categoryDecays(cat, "") {
 			t.Fatalf("fixture category %q no longer decays; the report's never-decay/decaying split is stale", cat)
 		}
 		if byCategory[cat] == 0 {
@@ -240,7 +240,7 @@ func TestRecencyTrapDecayingCategories(t *testing.T) {
 	// category added to the trap fixture on the never-decay side cannot quietly
 	// become a decaying one.
 	for _, sc := range scenarios {
-		if categoryDecays(sc.effectiveCategory()) {
+		if categoryDecays(sc.effectiveCategory(), sc.Correct.Content) {
 			continue
 		}
 		if onByName[sc.Name] != offByName[sc.Name] {
@@ -255,7 +255,7 @@ func TestRecencyTrapDecayingCategories(t *testing.T) {
 	// that is the failure #561 is about.
 	changed := 0
 	for _, sc := range scenarios {
-		if !categoryDecays(sc.effectiveCategory()) {
+		if !categoryDecays(sc.effectiveCategory(), sc.Correct.Content) {
 			continue
 		}
 		if onByName[sc.Name] != offByName[sc.Name] {
@@ -327,7 +327,38 @@ func TestDecayFrontier(t *testing.T) {
 	// ...and must NOT hurt old-but-correct facts (trap suite is fact category,
 	// which never decays — its correct-wins should stay flat).
 	if rows[1].trapWins < rows[0].trapWins-0.02 {
-		t.Errorf("expected trap correct-wins to stay flat under decay (fact never decays): off %.3f on %.3f",
+		t.Errorf("expected trap correct-wins to stay flat under decay (a timeless fact never decays): off %.3f on %.3f",
 			rows[0].trapWins, rows[1].trapWins)
+	}
+}
+
+// TestRecencyTrapDatedFactIsItsOwnRow holds the dated-fact half of the fixture:
+// a fact whose content carries a calendar date decays, so it must be counted in
+// the decaying class under its own row, apart from the undated facts decay never
+// touches. Pooled under one `fact` row the two classes would read as one number.
+func TestRecencyTrapDatedFactIsItsOwnRow(t *testing.T) {
+	scenarios := loadTrapTestdata(t)
+	dated := 0
+	for _, sc := range scenarios {
+		if sc.effectiveCategory() == "fact" && memory.ContentCarriesDate(sc.Correct.Content) {
+			dated++
+		}
+	}
+	if dated == 0 {
+		t.Fatal("no dated-fact trap scenario: the dated half of the fact rule is unmeasured")
+	}
+	outcomes, err := RunRecencyTrap(context.Background(), scenarios, memory.DefaultSearchParams())
+	if err != nil {
+		t.Fatalf("RunRecencyTrap: %v", err)
+	}
+	rows := map[string]TrapSummary{}
+	for _, s := range SummarizeTrap(outcomes) {
+		rows[s.Category] = s
+	}
+	if r, ok := rows["fact (dated)"]; !ok || !r.Decays || r.Probes < dated {
+		t.Errorf("dated-fact row = %+v (present %v), want a decaying row with >= %d probes", r, ok, dated)
+	}
+	if r, ok := rows["fact"]; !ok || r.Decays {
+		t.Errorf("undated fact row = %+v (present %v), want a never-decay row", r, ok)
 	}
 }

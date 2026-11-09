@@ -28,6 +28,9 @@ const (
 //   - the lowest-ranked row goes first, and an UNPINNED row before any pinned
 //     one (Budget.KeepPinned — a pin is a slot guarantee, so the cap takes it
 //     last);
+//   - a bucket reserve (Budget.ReserveByProject) is kept when other rows can be
+//     cut instead; if honouring the reserve would prevent meeting the cap, the
+//     reserve gives way so the byte cap is still met;
 //   - the block is measured again after every drop, because the framing grows
 //     with every cut and a cap measured against a stale framing is the bug
 //     this pass exists to avoid;
@@ -83,17 +86,60 @@ func FitItems(items []Item, budget Budget, measure func([]Item) int, allCutFrami
 			}
 			return items, FitNoRowsLeft
 		}
-		// The lowest-ranked row, and an UNPINNED one before any pinned one:
-		// a pin is a slot guarantee, so the cap takes it last.
-		at := len(items) - 1
-		if budget.KeepPinned {
-			for i := at; i >= 0; i-- {
-				if !items[i].Pinned {
-					at = i
-					break
-				}
-			}
+		at := fitCutIndex(items, budget)
+		if at < 0 {
+			return items, FitNoRowsLeft
 		}
 		items = cut(items, at)
 	}
+}
+
+// fitCutIndex selects the index of the row to cut: the lowest-ranked row, an
+// UNPINNED row before any pinned one when KeepPinned is set, and never a row
+// whose removal would take a reserved bucket below its minimum when another cut
+// is possible. If no reserve-respecting cut exists, the reserve gives way so the
+// byte cap can still be met. It returns -1 when no row can be cut.
+func fitCutIndex(items []Item, budget Budget) int {
+	counts := reserveCounts(items, budget.ReserveByProject)
+	for _, respect := range []bool{true, false} {
+		c, r := counts, budget.ReserveByProject
+		if !respect {
+			c, r = nil, nil
+		}
+		if budget.KeepPinned {
+			if at := findCutCandidate(items, c, r, false); at >= 0 {
+				return at
+			}
+		}
+		if at := findCutCandidate(items, c, r, true); at >= 0 {
+			return at
+		}
+	}
+	return -1
+}
+
+func reserveCounts(items []Item, reserve map[string]int) map[string]int {
+	if len(reserve) == 0 {
+		return nil
+	}
+	counts := make(map[string]int, len(reserve))
+	for _, it := range items {
+		if _, ok := reserve[it.ProjectID]; ok {
+			counts[it.ProjectID]++
+		}
+	}
+	return counts
+}
+
+func findCutCandidate(items []Item, counts, reserve map[string]int, allowPinned bool) int {
+	for i := len(items) - 1; i >= 0; i-- {
+		if !allowPinned && items[i].Pinned {
+			continue
+		}
+		if min, ok := reserve[items[i].ProjectID]; ok && counts[items[i].ProjectID] <= min {
+			continue
+		}
+		return i
+	}
+	return -1
 }

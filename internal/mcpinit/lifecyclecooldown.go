@@ -50,14 +50,16 @@ const UnfinishedLifecycleRunError = "the previous run did not finish; the coordi
 // and never finished. It reads the two files a run leaves at that point: the
 // cooldown stamp (written once the run has work to do) and the per-project pid
 // claim, which a run releases only on its way out with an outcome recorded.
-// Both present and the claim naming no live process is a run that was killed.
+// Both present and the claim naming a parseable pid for no live process is a
+// run that was killed. A claim over the read bound or naming no parseable pid
+// is no claim at all — the same answer isAlive gives — not a killed run.
 //
 // The stamp is required, not incidental: a run killed between the claim and the
 // stamp burned no cooldown window, so the next stop hook retries at once and
 // there is nothing paused to report. A live claim is a run in progress, not a
 // failure. Every path is fail-silent: a missing, unreadable or non-regular file
-// is not evidence, and this is called from the session-start alert where a
-// bookkeeping problem must never become an error.
+// or an unparseable claim is not evidence, and this is called from the
+// session-start alert where a bookkeeping problem must never become an error.
 func unfinishedLifecycleRun(dataDir, projectID string) (time.Time, bool) {
 	if dataDir == "" || projectID == "" || !safeProjectIDComponent(projectID) {
 		return time.Time{}, false
@@ -81,6 +83,12 @@ func unfinishedLifecycleRun(dataDir, projectID string) (time.Time, bool) {
 		return time.Time{}, false
 	}
 	if isAlive(claimPath) {
+		return time.Time{}, false
+	}
+	// A claim that does not parse as a pid (or is over the read bound) is no
+	// claim, not a dead one: isAlive already reads it as no claim, and only a
+	// dead claim can be a killed run.
+	if pidInFile(claimPath) == 0 {
 		return time.Time{}, false
 	}
 	// The stamp must BELONG to this claim. The stamp file is never removed, so

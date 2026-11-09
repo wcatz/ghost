@@ -21,6 +21,7 @@ type linkStore interface {
 	SearchVectorScoped(ctx context.Context, projectID string, queryVec []float32, limit int, scope map[string]string) ([]memory.ScoredMemory, error)
 	CreateLink(ctx context.Context, sourceID, targetID, relation string, strength float32, source string) error
 	MarkLinkScanned(ctx context.Context, memoryID string, scanned []float32) error
+	TrimOverCapRelatedDegrees(ctx context.Context) error
 }
 
 // Worker periodically links embedded memories to their nearest neighbors.
@@ -72,8 +73,13 @@ func (w *Worker) safeSweepOnce(ctx context.Context) {
 	w.SweepOnce(ctx)
 }
 
-// SweepOnce links unscanned embedded memories across all projects.
+// SweepOnce links unscanned embedded memories across all projects. It first
+// trims any memory whose live related degree exceeds the cap, repairing rows
+// that accumulated links before the cap existed.
 func (w *Worker) SweepOnce(ctx context.Context) {
+	if err := w.store.TrimOverCapRelatedDegrees(ctx); err != nil {
+		w.logger.Error("linking: trim over-cap related degrees", "error", err)
+	}
 	projects, err := w.store.ListProjects(ctx)
 	if err != nil {
 		w.logger.Error("linking: list projects", "error", err)

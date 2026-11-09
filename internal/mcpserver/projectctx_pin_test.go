@@ -290,6 +290,24 @@ func TestAGlobalCutWithNoGlobalRowShownDoesNotConjureTheGlobalHeading(t *testing
 	}
 }
 
+// TestProjectContextPinnedLineZeroShown: when pinned rows are cut and none are
+// shown, the note must not claim the shown rows are best-ranked.
+func TestProjectContextPinnedLineZeroShown(t *testing.T) {
+	got := projectContextPinnedLine(3, "global ", 0)
+	if got == "" {
+		t.Fatal("want a pinned-cut line when rows were cut")
+	}
+	if strings.Contains(got, "the ones shown are the best-ranked of them") {
+		t.Fatalf("zero-shown pinned-cut line must not claim shown rows are best-ranked: %q", got)
+	}
+	if !strings.Contains(got, "none of them is shown in this block") {
+		t.Fatalf("zero-shown pinned-cut line missing zero-shown explanation: %q", got)
+	}
+	if !strings.Contains(got, "3 pinned global memories cut") {
+		t.Fatalf("zero-shown pinned-cut line missing count: %q", got)
+	}
+}
+
 // TestASupersededPinnedRowIsMarkedAndRanksAfterItsReplacement: on the tool and
 // the resource the pin keeps a slot behind the row that replaced it, and the
 // line names the replacement.

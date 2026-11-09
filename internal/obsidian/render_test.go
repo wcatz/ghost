@@ -58,9 +58,6 @@ related: ["[[other-note-beef0000]]"]
 > [!info] Mirrored from Ghost — edits here are not synced back.
 
 Embedding backfill bug: ticker only swept seen projects.
-
-## Related
-- [[other-note-beef0000]] — related (0.83)
 `
 	if got != want {
 		t.Errorf("renderMemory mismatch:\n--- got ---\n%s\n--- want ---\n%s", got, want)
@@ -279,19 +276,26 @@ func TestRenderMemoryTypedEdges(t *testing.T) {
 	}
 	got := renderMemory(m, links, fileFor)
 
-	// ## Related prose first (Errorf, not Fatalf) so a missing frontmatter
-	// key below cannot mask a prose regression. Prose still lists every
-	// link including contradicts, mystery, and the directed link where m
-	// is target.
+	// ## Related lists only links frontmatter cannot show: directed links where
+	// m is the target (no frontmatter key on this endpoint) and relations
+	// outside the typed edge keys. Typed, resolvable links emitted to
+	// frontmatter appear there only.
 	for _, prose := range []string{
-		"- [[old-note-dead0000]] — supersedes (0.90)",
-		"- [[zebra-note-aaaa0000]] — contradicts (0.65)",
 		"- [[upstream-cafe0000]] — causes (0.70)",
 		"- [[other-note-beef0000]] — mystery (0.10)",
-		"- [[alpha-note-third0000]] — related (0.50)",
 	} {
 		if !strings.Contains(got, prose) {
 			t.Errorf("## Related missing %q:\n%s", prose, got)
+		}
+	}
+	for _, gone := range []string{
+		"- [[old-note-dead0000]] — supersedes (0.90)",
+		"- [[zebra-note-aaaa0000]] — contradicts (0.65)",
+		"- [[alpha-note-third0000]] — related (0.50)",
+		"- [[detail-note-fifth0000]] — elaborates (0.60)",
+	} {
+		if strings.Contains(got, gone) {
+			t.Errorf("## Related must not duplicate frontmatter link %q:\n%s", gone, got)
 		}
 	}
 
@@ -397,5 +401,71 @@ func TestRenderMemoryTypedEdgesTargetEndpoint(t *testing.T) {
 	// Prose still shows the directed edge from the target's point of view.
 	if !strings.Contains(got, "- [[upstream-cafe0000]] — supersedes (0.90)") {
 		t.Errorf("prose must still list directed link touching m:\n%s", got)
+	}
+}
+
+// TestRenderMemoryNoRelatedSectionWhenAllTypedAndResolvable: a note whose
+// links are all typed edge relations and whose targets all resolve in the vault
+// carries those links in frontmatter only; the body has no ## Related section.
+func TestRenderMemoryNoRelatedSectionWhenAllTypedAndResolvable(t *testing.T) {
+	const self = "74a37cba00112233"
+	m := memory.Memory{
+		ID: self, ProjectID: "ghost", Category: "fact",
+		Content: "All links resolvable", Importance: 0.5, Source: "mcp",
+		CreatedAt: "2026-07-10 10:00:00", UpdatedAt: "2026-07-10 10:00:00",
+	}
+	links := []memory.Link{
+		{SourceID: self, TargetID: "beef000011223344", Relation: "related", Strength: 0.83},
+		{SourceID: self, TargetID: "dead000011223344", Relation: "supersedes", Strength: 0.9},
+		{SourceID: "aaaa000011223344", TargetID: self, Relation: "elaborates", Strength: 0.6},
+	}
+	fileFor := map[string]string{
+		"beef000011223344": "other-note-beef0000.md",
+		"dead000011223344": "old-note-dead0000.md",
+		"aaaa000011223344": "detail-note-aaaa0000.md",
+	}
+	got := renderMemory(m, links, fileFor)
+	if strings.Contains(got, "## Related") {
+		t.Errorf("typed resolvable links must not render ## Related:\n%s", got)
+	}
+	for _, want := range []string{
+		`related: ["[[other-note-beef0000]]"]`,
+		`supersedes: ["[[old-note-dead0000]]"]`,
+		`elaborates: ["[[detail-note-aaaa0000]]"]`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("frontmatter missing %q:\n%s", want, got)
+		}
+	}
+}
+
+// TestRenderMemoryRelatedListsOnlyUnresolvedTarget: when a note has both a
+// typed resolvable link and an unresolved target, ## Related lists only the
+// unresolved target.
+func TestRenderMemoryRelatedListsOnlyUnresolvedTarget(t *testing.T) {
+	const self = "74a37cba00112233"
+	m := memory.Memory{
+		ID: self, ProjectID: "ghost", Category: "fact",
+		Content: "Mixed links", Importance: 0.5, Source: "mcp",
+		CreatedAt: "2026-07-10 10:00:00", UpdatedAt: "2026-07-10 10:00:00",
+	}
+	links := []memory.Link{
+		{SourceID: self, TargetID: "beef000011223344", Relation: "related", Strength: 0.83},
+		{SourceID: self, TargetID: "dead000011223344", Relation: "supersedes", Strength: 0.9},
+	}
+	fileFor := map[string]string{"beef000011223344": "other-note-beef0000.md"}
+	got := renderMemory(m, links, fileFor)
+	if !strings.Contains(got, "## Related") {
+		t.Fatalf("expected ## Related for unresolved target:\n%s", got)
+	}
+	if !strings.Contains(got, "- dead0000 — supersedes (0.90)") {
+		t.Errorf("unresolved target must appear in ## Related:\n%s", got)
+	}
+	if strings.Contains(got, "[[other-note-beef0000]] — related") {
+		t.Errorf("typed resolvable link must not appear in ## Related:\n%s", got)
+	}
+	// Frontmatter still carries the resolvable link.
+	if !strings.Contains(got, `related: ["[[other-note-beef0000]]"]`) {
+		t.Errorf("frontmatter missing resolvable link:\n%s", got)
 	}
 }

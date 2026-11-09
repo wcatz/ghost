@@ -76,3 +76,5 @@ func TestSweepOnceLeavesMemoryUnscannedWithoutUsableVector(t *testing.T) {
 		t.Errorf("SearchVectorScoped called %d times with no vector, want 0", got)
 	}
 }
+
+func (s *nilVectorStore) TrimOverCapRelatedDegrees(context.Context) error { return nil }

@@ -2,6 +2,8 @@ package memory
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -343,5 +345,204 @@ func TestEmbeddingAndLinkStats(t *testing.T) {
 	}
 	if links != 1 || scans != 1 {
 		t.Errorf("LinkStats = links %d scans %d, want 1 and 1", links, scans)
+	}
+}
+
+func liveRelatedDegree(t *testing.T, s *Store, id string) int {
+	t.Helper()
+	links, err := s.GetLinks(context.Background(), id)
+	if err != nil {
+		t.Fatalf("GetLinks(%s): %v", id, err)
+	}
+	n := 0
+	for _, l := range links {
+		if l.Relation == "related" {
+			n++
+		}
+	}
+	return n
+}
+
+func TestCreateLinkCapsRelatedDegree(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	hub := makeMemory(t, s, "hub memory")
+	others := make([]string, MaxRelatedDegree+5)
+	for i := range others {
+		others[i] = makeMemory(t, s, fmt.Sprintf("neighbor %d", i))
+		// Descending strengths so the first MaxRelatedDegree are strongest.
+		strength := 0.99 - float32(i)*0.001
+		if err := s.CreateLink(ctx, hub, others[i], "related", strength, "auto"); err != nil {
+			t.Fatalf("CreateLink %d: %v", i, err)
+		}
+	}
+	if got := liveRelatedDegree(t, s, hub); got != MaxRelatedDegree {
+		t.Fatalf("hub related degree = %d, want %d", got, MaxRelatedDegree)
+	}
+	links, err := s.GetLinks(ctx, hub)
+	if err != nil {
+		t.Fatalf("GetLinks: %v", err)
+	}
+	kept := map[string]bool{}
+	for _, l := range links {
+		if l.Relation != "related" {
+			continue
+		}
+		other := l.SourceID
+		if other == hub {
+			other = l.TargetID
+		}
+		kept[other] = true
+	}
+	// The strongest MaxRelatedDegree (lowest indices) must survive.
+	for i := 0; i < MaxRelatedDegree; i++ {
+		if !kept[others[i]] {
+			t.Errorf("strong link to neighbor %d (strength %.3f) was invalidated; weakest should be dropped", i, 0.99-float32(i)*0.001)
+		}
+	}
+	for i := MaxRelatedDegree; i < len(others); i++ {
+		if kept[others[i]] {
+			t.Errorf("weak link to neighbor %d (strength %.3f) survived; degree cap should invalidate it", i, 0.99-float32(i)*0.001)
+		}
+	}
+}
+
+func TestCreateLinkCapsRelatedDegreeOnBothEndpoints(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	a := makeMemory(t, s, "endpoint a")
+	b := makeMemory(t, s, "endpoint b")
+	// Fill a to capacity with strong links.
+	for i := 0; i < MaxRelatedDegree; i++ {
+		peer := makeMemory(t, s, fmt.Sprintf("a peer %d", i))
+		if err := s.CreateLink(ctx, a, peer, "related", 0.95, "auto"); err != nil {
+			t.Fatalf("fill a: %v", err)
+		}
+	}
+	// A weak link between a and b should not survive on a.
+	if err := s.CreateLink(ctx, a, b, "related", 0.70, "auto"); err != nil {
+		t.Fatalf("CreateLink a-b: %v", err)
+	}
+	links, err := s.GetLinks(ctx, a)
+	if err != nil {
+		t.Fatalf("GetLinks(a): %v", err)
+	}
+	for _, l := range links {
+		other := l.SourceID
+		if other == a {
+			other = l.TargetID
+		}
+		if other == b {
+			t.Fatal("weak a-b link survived on endpoint a despite degree cap")
+		}
+	}
+	if got := liveRelatedDegree(t, s, a); got != MaxRelatedDegree {
+		t.Fatalf("a degree = %d, want %d", got, MaxRelatedDegree)
+	}
+}
+
+func TestCapRelatedDegreePlanUsesIndexes(t *testing.T) {
+	s := testStore(t)
+	rows, err := s.db.QueryContext(context.Background(),
+		"EXPLAIN QUERY PLAN "+capRelatedDegreeSQL,
+		"00000000000000000000000000000000", MaxRelatedDegree)
+	if err != nil {
+		t.Fatalf("explain: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var plan []string
+	for rows.Next() {
+		var id, parent, unused int
+		var detail string
+		if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		plan = append(plan, detail)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("rows: %v", err)
+	}
+	if len(plan) == 0 {
+		t.Fatal("empty plan")
+	}
+	for _, d := range plan {
+		if strings.Contains(d, "SCAN memory_links") {
+			t.Errorf("cap plan scans memory_links: %q\n%s", d, strings.Join(plan, "\n"))
+		}
+	}
+	var sawSource, sawTarget bool
+	for _, d := range plan {
+		sawSource = sawSource || strings.Contains(d, "idx_links_source")
+		sawTarget = sawTarget || strings.Contains(d, "idx_links_target")
+	}
+	if !sawSource || !sawTarget {
+		t.Errorf("cap plan does not use both link indexes (source %v, target %v):\n%s", sawSource, sawTarget, strings.Join(plan, "\n"))
+	}
+}
+
+func TestTrimOverCapRelatedDegrees(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	hub := makeMemory(t, s, "over-cap hub")
+	others := make([]string, MaxRelatedDegree+10)
+	for i := range others {
+		others[i] = makeMemory(t, s, fmt.Sprintf("trim neighbor %d", i))
+		src, tgt := hub, others[i]
+		if src > tgt {
+			src, tgt = tgt, src
+		}
+		strength := 0.99 - float32(i)*0.001
+		if _, err := s.db.ExecContext(ctx, `
+			INSERT INTO memory_links (source_id, target_id, relation, strength, source)
+			VALUES (?, ?, 'related', ?, 'auto')
+		`, src, tgt, strength); err != nil {
+			t.Fatalf("seed link %d: %v", i, err)
+		}
+	}
+	if got := liveRelatedDegree(t, s, hub); got != MaxRelatedDegree+10 {
+		t.Fatalf("seeded degree = %d, want %d", got, MaxRelatedDegree+10)
+	}
+	if err := s.TrimOverCapRelatedDegrees(ctx); err != nil {
+		t.Fatalf("TrimOverCapRelatedDegrees: %v", err)
+	}
+	if got := liveRelatedDegree(t, s, hub); got != MaxRelatedDegree {
+		t.Fatalf("trimmed degree = %d, want %d", got, MaxRelatedDegree)
+	}
+	links, err := s.GetLinks(ctx, hub)
+	if err != nil {
+		t.Fatalf("GetLinks: %v", err)
+	}
+	kept := map[string]bool{}
+	for _, l := range links {
+		if l.Relation != "related" {
+			continue
+		}
+		other := l.SourceID
+		if other == hub {
+			other = l.TargetID
+		}
+		kept[other] = true
+	}
+	for i := 0; i < MaxRelatedDegree; i++ {
+		if !kept[others[i]] {
+			t.Errorf("strong link to trim neighbor %d was invalidated", i)
+		}
+	}
+	for i := MaxRelatedDegree; i < len(others); i++ {
+		if kept[others[i]] {
+			t.Errorf("weak link to trim neighbor %d survived", i)
+		}
+	}
+	var invalidated int
+	row := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM memory_links
+		WHERE relation = 'related' AND invalidated_at IS NOT NULL
+		  AND (source_id = ? OR target_id = ?)
+	`, hub, hub)
+	if err := row.Scan(&invalidated); err != nil {
+		t.Fatalf("count invalidated: %v", err)
+	}
+	if invalidated != 10 {
+		t.Fatalf("invalidated = %d, want 10", invalidated)
 	}
 }

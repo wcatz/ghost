@@ -332,6 +332,9 @@ func (s *Store) candidatesPassive(ctx context.Context, req CandidateRequest, set
 	// project other than "table absent" is a real error; a project with no
 	// negative evidence leaves its rows carrying the zero value.
 	//
+	// Only the memory ids this window carries are read (#1920), because the
+	// assembler renders only those rows.
+	//
 	// The read uses the same handle as the rows above (s.queryDB()), not the
 	// same read transaction: each call to usefulnessByMemory issues independent
 	// statements outside an explicit transaction, so interleaving writes can
@@ -339,15 +342,8 @@ func (s *Store) candidatesPassive(ctx context.Context, req CandidateRequest, set
 	// second transaction here would deadlock on the single-connection pool while
 	// the caller holds the snapshot.
 	usefulness := map[string]UsefulnessEvidence{}
-	projects := map[string]struct{}{}
-	for i := range rows {
-		projects[rows[i].ProjectID] = struct{}{}
-	}
-	for proj := range projects {
-		if strings.TrimSpace(proj) == "" {
-			continue
-		}
-		ev, uErr := s.usefulnessByMemory(ctx, s.queryDB(), proj)
+	for proj, ids := range usefulnessIDsByProject(rows) {
+		ev, uErr := s.usefulnessByMemoryIDs(ctx, s.queryDB(), proj, ids)
 		if uErr != nil {
 			if isMissingTable(uErr) {
 				s.logger.Debug("candidates: passive usefulness read found no table", "error", uErr)
@@ -458,8 +454,9 @@ func passiveKeyScanReads() int64 { return passiveKeyScanVisited.Load() }
 // pinned rows nothing unpinned can enter it, so the second scan is skipped.
 //
 // The window holds KEYS, not rows: the scan reads only the columns the rank
-// needs, and the full rows are hydrated once, for the window's k rows, so the
-// bucket's content is never read at all.
+// needs, and the full rows are hydrated once, for the window's k rows. Only a
+// dated flag is derived in SQL for the rank; the bucket's content is never
+// carried into Go.
 func (s *Store) passiveWindow(ctx context.Context, req CandidateRequest, pol SlicePolicy, cols passiveColumns) ([]Memory, error) {
 	pinned, err := s.scanPassiveKeys(ctx, req, pol, cols, true, nil)
 	if err != nil {
@@ -519,12 +516,14 @@ func (s *Store) scanPassiveKeys(ctx context.Context, req CandidateRequest, pol S
 func scanPassiveRankKey(rows *sql.Rows, now time.Time) (passiveRankKey, error) {
 	var key passiveRankKey
 	var pinned int
-	if err := rows.Scan(&key.id, &key.importance, &pinned, &key.category, &key.createdAt, &key.updatedAt, &key.retention); err != nil {
+	var dated int
+	if err := rows.Scan(&key.id, &key.importance, &pinned, &key.category, &dated, &key.createdAt, &key.updatedAt, &key.retention); err != nil {
 		return key, fmt.Errorf("scan passive key: %w", err)
 	}
 	key.pinned = pinned == 1
+	key.dated = dated == 1
 	clock := now.UTC().Truncate(time.Second)
-	key.rank = key.importance * DecayFactor(key.category, key.retention, key.pinned, ageDays(key.createdAt, clock))
+	key.rank = key.importance * decayFactorDated(key.category, key.dated, key.retention, key.pinned, ageDays(key.createdAt, clock))
 	return key, nil
 }
 
@@ -651,7 +650,7 @@ func (s *Store) passiveMaxDecayForBucket(ctx context.Context, pol SlicePolicy, c
 	} else {
 		cat = "gotcha"
 	}
-	return DecayFactor(cat, RetentionProject, false, age)
+	return DecayFactor(cat, "", RetentionProject, false, age)
 }
 
 // passiveCategoryPresent reports whether a population's bucket holds any row of
@@ -723,14 +722,20 @@ func passiveRankKeyLess(a, b passiveRankKey, order string) bool {
 }
 
 // passiveRankKey is one row's rank facts, read by the threshold scan before the
-// row is hydrated. It is a key rather than a Memory so the scan never carries a
-// row's content, and it holds importance as the double the column stores so the
-// tie it breaks is the engine's.
+// row is hydrated. It carries a dated flag, derived in SQL, because the rank's
+// category-aware decay treats a dated fact differently from a timeless one, and
+// it holds importance as the double the column stores so the tie it breaks is
+// the engine's. The bucket's content is never carried into Go here, but the
+// engine does read it: the GLOB behind the flag runs over `content` for each
+// scanned row of category fact (the `category = 'fact' AND` guard short-circuits
+// every other row), so the scan's read count, which counts rows, does not see
+// that cost. It is accepted so the scan and every other rank share one rule.
 type passiveRankKey struct {
 	id         string
 	pinned     bool
 	importance float64
 	category   string
+	dated      bool
 	createdAt  string
 	updatedAt  string
 	retention  string
@@ -828,7 +833,7 @@ func passiveKeyScanSQL(pol SlicePolicy, req CandidateRequest, cols passiveColumn
 			args = append(args, stamp, stamp)
 		}
 		return fmt.Sprintf(`
-		SELECT id, importance, pinned, category, created_at, updated_at, %s
+		SELECT id, importance, pinned, category, (category = 'fact' AND content GLOB '*[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]*') AS dated, created_at, updated_at, %s
 		FROM memories
 		WHERE %s`, retention, where), args
 	}
@@ -1097,7 +1102,7 @@ func (s *Store) selectPassive(ctx context.Context, memories []Memory, pol SliceP
 		// a tiered row is ordered slightly differently from how it is scored; that
 		// is the same split the query path has, and the score is what the two-pass
 		// selection ranks on.
-		decay := DecayFactor(m.Category, m.Retention, m.Pinned, age)
+		decay := DecayFactor(m.Category, m.Content, m.Retention, m.Pinned, age)
 		scored = append(scored, passiveRow{
 			mem:   m,
 			age:   age,
