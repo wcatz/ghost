@@ -120,6 +120,66 @@ func (r *ImportReport) count(m map[string]int, kind string) {
 	m[kind]++
 }
 
+// Artifact is one parsed artifact: the records an import will apply and the
+// lines it collected as per-record refusals. Parse returns it, and its Import
+// method applies it, so a caller can read an artifact once and still both judge
+// it before opening a store and import the same bytes afterwards. That matters
+// for a source that cannot be rewound: a pipe or a FIFO has no start to seek
+// back to, and reading it twice is not an option.
+type Artifact struct {
+	recs       []parsedRecord
+	unreadable []unreadable
+}
+
+// Parse reads an artifact and refuses one this build cannot read as a whole,
+// without a store. It is the file-level half of Import — the header, every
+// line's JSON, the record types and the payload each type names — so a caller
+// that must not open a store before the artifact is judged can ask this first
+// and only then open it.
+//
+// A line-level problem is not a refusal here, exactly as it is not one in
+// Import: an unparseable line or an id this build will not store is collected
+// and reported by the run, and the records around it still import. Parse
+// therefore returns an error only for the problems that stop Import before any
+// record is written.
+func Parse(r io.Reader) (*Artifact, error) {
+	recs, unreadable, err := readRecords(r)
+	if err != nil {
+		return nil, err
+	}
+	if err := checkRecordTypes(recs); err != nil {
+		return nil, err
+	}
+	return &Artifact{recs: recs, unreadable: unreadable}, nil
+}
+
+// checkRecordTypes refuses a record type this build does not know and a line
+// whose payloads do not match its type. Both are whole-file refusals: a type
+// this build cannot read is a file from a newer build or a different format,
+// and importing the payload a mismatched type names would drop the other one.
+//
+// It is called by Parse before a store is opened and by planRecords before a
+// record is planned, so the two callers cannot disagree about which files are
+// readable.
+func checkRecordTypes(recs []parsedRecord) error {
+	for _, p := range recs {
+		switch p.rec.Type {
+		case TypeProject, TypeMemory, TypeTask, TypeDecision, TypeLink:
+		default:
+			// Refused rather than skipped. A record type this build does not
+			// know is a file from a newer build or a different format, and
+			// dropping it would import a store that is missing data the file
+			// plainly contains.
+			return fmt.Errorf("line %d: unknown record type %s — this ghost build reads %q, %q, %q, %q and %q records",
+				p.line, memory.RefusalArg("type", p.rec.Type), TypeProject, TypeMemory, TypeTask, TypeDecision, TypeLink)
+		}
+		if err := requirePayload(p); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // Import reads an artifact and, when apply is true, inserts the records the
 // store does not already have.
 //
@@ -158,29 +218,44 @@ func (r *ImportReport) count(m map[string]int, kind string) {
 // of a damaged artifact is still worth having, and the rejected line is reported
 // rather than swallowed.
 func Import(ctx context.Context, s *memory.Store, r io.Reader, opts ImportOptions, onRecord func(RecordResult)) (ImportReport, error) {
-	report := ImportReport{
+	report := newImportReport(opts)
+	a, err := Parse(r)
+	if err != nil {
+		return report, err
+	}
+	return a.Import(ctx, s, opts, onRecord)
+}
+
+// newImportReport is the zero report for one run, with its counts allocated so
+// a caller can print it even when the file was refused before any record was
+// planned.
+func newImportReport(opts ImportOptions) ImportReport {
+	return ImportReport{
 		Applied: opts.Apply,
 		Created: map[string]int{},
 		Skipped: map[string]int{},
 	}
+}
 
-	recs, unreadable, err := readRecords(r)
-	if err != nil {
-		return report, err
-	}
+// Import applies an artifact Parse has already read and judged. It is the run
+// half of Import, split out so a caller that had to refuse the file before
+// opening a store can import the very bytes it judged rather than reading a
+// source a second time — which a pipe or FIFO cannot provide.
+func (a *Artifact) Import(ctx context.Context, s *memory.Store, opts ImportOptions, onRecord func(RecordResult)) (ImportReport, error) {
+	report := newImportReport(opts)
 
 	// A dry run has to project the records onto the store in the same order an
 	// apply run would, because "would this be created" depends on what earlier
 	// records create — a project, most of all. Projecting the whole set first
 	// and then replaying it means one ordering, used by both modes.
-	plan, err := planRecords(recs, s, ctx, opts)
+	plan, err := planRecords(a.recs, s, ctx, opts)
 	if err != nil {
 		return report, err
 	}
 	// The unreadable lines are reported first, before any record is applied, so
 	// the reader sees every one of them at the top rather than after the run
 	// that skipped them.
-	for _, bad := range unreadable {
+	for _, bad := range a.unreadable {
 		report.Rejected++
 		report.Errors = append(report.Errors, bad.err)
 		if onRecord != nil {
@@ -546,6 +621,9 @@ func planRecords(recs []parsedRecord, s *memory.Store, ctx context.Context, opts
 		tasks     []parsedRecord
 		decisions []parsedRecord
 	)
+	if err := checkRecordTypes(recs); err != nil {
+		return nil, err
+	}
 	for _, p := range recs {
 		switch p.rec.Type {
 		case TypeProject:
@@ -558,16 +636,6 @@ func planRecords(recs []parsedRecord, s *memory.Store, ctx context.Context, opts
 			tasks = append(tasks, p)
 		case TypeDecision:
 			decisions = append(decisions, p)
-		default:
-			// Refused rather than skipped. A record type this build does not
-			// know is a file from a newer build or a different format, and
-			// dropping it would import a store that is missing data the file
-			// plainly contains.
-			return nil, fmt.Errorf("line %d: unknown record type %s — this ghost build reads %q, %q, %q, %q and %q records",
-				p.line, memory.RefusalArg("type", p.rec.Type), TypeProject, TypeMemory, TypeTask, TypeDecision, TypeLink)
-		}
-		if err := requirePayload(p); err != nil {
-			return nil, err
 		}
 	}
 

@@ -667,7 +667,9 @@ id is routinely a filesystem path and
 `ghost export` writes it into the artifact, so bounding it would make `ghost
 import` refuse a file `ghost export` had just written. An id is a primary key, so
 a shortened one would name a *different row* — a memory under a key the artifact
-never chose, colliding with whatever genuinely holds it.
+never chose, colliding with whatever genuinely holds it. A whole-file refusal is
+made before any store is opened, so a malformed artifact cannot create or migrate
+one; a single record's refusal is reported and the run continues.
 
 **Free text is refused at WRITE time when it is blank or malformed.** The tools
 that store free text — `ghost_memory_save`, `ghost_save_global` and
