@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -2584,5 +2585,40 @@ func TestSupersedeDecisionRepointToSuccessorWithNoCompanion(t *testing.T) {
 		if l.Relation == "supersedes" && l.SourceID == bComp && l.TargetID == aComp {
 			t.Errorf("stale supersedes edge from prior successor companion %s still active", bComp)
 		}
+	}
+}
+
+// TestRepointCompanionInvalidationReportsRowsAffectedError is a structural test
+// for the stale-edge invalidation inside repointRetiredCompanionsTx. It is
+// structural because the property is about WHERE the statement sits rather than
+// what it returns: the SQLite driver this build ships always reports a count,
+// so no behavioural test can make RowsAffected fail, and the only wrong shape
+// is an ignored error — which would leave the edge invalidated with no
+// unsupersede history row. Comments are blanked, for the reason the sibling
+// structural tests give: a comment naming the error handling is not the handling.
+func TestRepointCompanionInvalidationReportsRowsAffectedError(t *testing.T) {
+	src, err := os.ReadFile("decisions.go")
+	if err != nil {
+		t.Fatalf("read decisions.go: %v", err)
+	}
+	text := string(src)
+	i := strings.Index(text, "func repointRetiredCompanionsTx(")
+	if i < 0 {
+		t.Fatalf("func repointRetiredCompanionsTx not found")
+	}
+	j := strings.Index(text[i:], "\n}\n")
+	if j < 0 {
+		t.Fatalf("end of func repointRetiredCompanionsTx not found")
+	}
+	body := blankLineComments(text[i : i+j])
+
+	if strings.Contains(body, ", _ := res.RowsAffected") || strings.Contains(body, ", _ = res.RowsAffected") {
+		t.Errorf("stale-edge invalidation ignores the RowsAffected error: it must be returned so an invalidation is never left without its history row")
+	}
+	if !strings.Contains(body, "n, err := res.RowsAffected()") {
+		t.Errorf("stale-edge invalidation does not read the affected count into err")
+	}
+	if !strings.Contains(body, "return fmt.Errorf(\"invalidate stale supersedes link rows:") {
+		t.Errorf("stale-edge invalidation does not return the RowsAffected error from the transaction")
 	}
 }

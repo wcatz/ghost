@@ -1138,7 +1138,17 @@ func repointRetiredCompanionsTx(ctx context.Context, tx *sql.Tx, retired []strin
 				if err != nil {
 					return fmt.Errorf("invalidate stale supersedes link: %w", err)
 				}
-				if n, _ := res.RowsAffected(); n > 0 {
+				n, err := res.RowsAffected()
+				if err != nil {
+					// The error, not a zero count. This runs inside the supersede
+					// transaction that has not committed, so swallowing it would fall through to
+					// the deferred rollback, discard the stamp, and tell the caller the edge is
+					// still live — the same reasoning InvalidateLink gives for its own in-transaction
+					// arm. Failing the call is the answer that does not claim something the
+					// database may have done.
+					return fmt.Errorf("invalidate stale supersedes link rows: %w", err)
+				}
+				if n > 0 {
 					if err := appendHistoryEventsTx(ctx, tx, []historyEvent{{
 						phase:     phaseUnsupersede,
 						relatedID: priorCompanion,
