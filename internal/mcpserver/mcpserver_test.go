@@ -3386,3 +3386,39 @@ func TestServerAdvertisedCapabilities(t *testing.T) {
 		t.Errorf("expected resources capability with listChanged and subscribe, got %+v", caps.Resources)
 	}
 }
+
+func TestMoveMemoryRefusals(t *testing.T) {
+	srv := testServer(t)
+	ctx := context.Background()
+	if err := srv.store.EnsureProject(ctx, "def456", "/tmp/second", "second-project"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	id, err := srv.store.Create(ctx, "abc123", memory.Memory{
+		Category: "fact", Content: "belongs to the first project", Source: "mcp", Importance: 0.5, Tags: []string{},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	t.Run("refuses a memory the named project does not own", func(t *testing.T) {
+		_, err := srv.moveMemory(ctx, nil, "second-project", id, "test-project", false, false)
+		if err == nil || !strings.Contains(err.Error(), "does not belong to project") {
+			t.Fatalf("err = %v, want a does-not-belong refusal", err)
+		}
+		mems, _ := srv.store.GetByIDs(ctx, []string{id})
+		if mems[0].ProjectID != "abc123" {
+			t.Errorf("project = %q after a refused move, want abc123", mems[0].ProjectID)
+		}
+	})
+
+	t.Run("refuses an unknown target project", func(t *testing.T) {
+		_, err := srv.moveMemory(ctx, nil, "test-project", id, "no-such-project", false, false)
+		if err == nil || !strings.Contains(err.Error(), "not found") {
+			t.Fatalf("err = %v, want a target-not-found refusal", err)
+		}
+		mems, _ := srv.store.GetByIDs(ctx, []string{id})
+		if mems[0].ProjectID != "abc123" {
+			t.Errorf("project = %q after a refused move, want abc123", mems[0].ProjectID)
+		}
+	})
+}

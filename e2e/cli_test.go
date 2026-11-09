@@ -138,6 +138,8 @@ var cliCommands = []cliCommand{
 			"help and through the refusal a wrong flag produces."},
 	{path: "context", help: "Usage: ghost context", run: runContextCommand},
 	{path: "maintenance", help: "Usage: ghost maintenance", run: runMaintenanceCommands},
+	{path: "memory", help: "Usage: ghost memory", run: runMemoryCommand},
+	{path: "memory move", help: "Usage: ghost memory move", run: runMemoryMoveCommand},
 	{path: "project", help: "Usage: ghost project", run: runProjectCommand},
 	{path: "project delete", help: "Usage: ghost project delete", run: runProjectDeleteCommand},
 	{path: "project merge", help: "Usage: ghost project merge", run: runProjectMergeCommand},
@@ -3496,4 +3498,43 @@ func mustAtoi(t *testing.T, what, s string) int {
 		t.Fatalf("%s: %q is not a number: %v", what, s, err)
 	}
 	return n
+}
+
+// runMemoryCommand is the real invocation behind the `memory` row: the bare
+// verb is a usage error naming the subcommands.
+func runMemoryCommand(t *testing.T, s *sandbox) {
+	t.Helper()
+	r := s.mustFail("memory")
+	mustMatch(t, "bare `ghost memory`", r.stderr, "(?i)Usage: ghost memory")
+	mustMatch(t, "bare `ghost memory`", r.stderr, "(?i)move")
+}
+
+// runMemoryMoveCommand is the real invocation behind the `memory move` row.
+func runMemoryMoveCommand(t *testing.T, s *sandbox) {
+	t.Helper()
+	cs := s.mcpSession(t)
+	call(t, cs, "ghost_memory_save", map[string]any{
+		"project_id": "cli-move-dest",
+		"content":    "destination project exists for cli move",
+	})
+	id := parseID(t, call(t, cs, "ghost_memory_save", map[string]any{
+		"project_id": e2eProject,
+		"content":    "a memory the cli moves between projects",
+		"category":   "fact",
+	}))
+
+	dry := s.mustRun("memory", "move", id, "--project", e2eProject, "--to", "cli-move-dest", "--dry-run")
+	mustContain(t, "memory move (dry-run)", dry.stdout, "Dry run")
+	if n := s.queryInt(t, `SELECT COUNT(*) FROM memories WHERE id = ? AND project_id = ?`, id, e2eProject); n != 1 {
+		t.Fatalf("dry-run moved memory %s", id)
+	}
+
+	r := s.mustRun("memory", "move", id, "--project", e2eProject, "--to", "cli-move-dest")
+	mustContain(t, "memory move", r.stdout, "Moved memory")
+	if n := s.queryInt(t, `SELECT COUNT(*) FROM memories WHERE id = ? AND project_id = ?`, id, "cli-move-dest"); n != 1 {
+		t.Fatalf("memory %s was not moved to cli-move-dest", id)
+	}
+	if n := s.queryInt(t, `SELECT COUNT(*) FROM memory_history WHERE memory_id = ? AND phase = 'move'`, id); n != 1 {
+		t.Fatalf("cli move wrote %d history row(s), want 1", n)
+	}
 }

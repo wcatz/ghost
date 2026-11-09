@@ -35,6 +35,12 @@ type MemoryStore interface {
 	DeleteWithOptions(ctx context.Context, id string, opts memory.DeleteOptions) error
 	UpdateMemory(ctx context.Context, projectID, id string, content, category *string, importance *float32, tags []string) error
 	PromoteToGlobal(ctx context.Context, projectID, id string) error
+	// MoveMemory moves a memory between projects, keeping identity, links,
+	// evidence, provenance and history consistent. toProjectID may be
+	// memory.GlobalProjectID. Pinned or persistent rows require opts.Confirm.
+	// opts.DryRun reports what would happen without writing.
+	MoveMemory(ctx context.Context, fromProjectID, memoryID, toProjectID string, opts memory.MoveMemoryOptions) (memory.MoveMemoryResult, error)
+	ResolveMoveTarget(ctx context.Context, field, to string) (string, error)
 
 	// Queries
 	GetTopMemories(ctx context.Context, projectID string, limit int) ([]memory.Memory, error)

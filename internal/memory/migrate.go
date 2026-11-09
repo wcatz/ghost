@@ -13,7 +13,7 @@ import (
 // Bump it and append to migrations whenever initSQL changes in a way that
 // CREATE TABLE IF NOT EXISTS cannot deliver to existing databases (new columns,
 // CHECK values, foreign keys, dropped tables).
-const schemaVersion = 30
+const schemaVersion = 31
 
 // SchemaVersion returns the schema version this build of Ghost expects, which is
 // the value a fully migrated database carries in PRAGMA user_version.
@@ -93,6 +93,7 @@ var migrations = []func(*sql.Tx) error{
 	migrateV28,
 	migrateV29,
 	migrateV30,
+	migrateV31,
 }
 
 // migrate brings an existing database up to schemaVersion. Fresh databases
@@ -2078,6 +2079,68 @@ func migrateV29(tx *sql.Tx) error {
 func migrateV30(tx *sql.Tx) error {
 	if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_memories_project_created ON memories(project_id, created_at DESC)`); err != nil {
 		return fmt.Errorf("create idx_memories_project_created: %w", err)
+	}
+	return nil
+}
+
+// migrateV31 widens memory_history for the move phase: the phase CHECK gains
+// 'move' and the table records the source and destination projects of a move.
+// SQLite cannot ALTER a CHECK constraint, so this rebuilds the table. The copy
+// is straight: existing rows carry NULL for the new columns.
+//
+// This rebuild deliberately avoids ALTER TABLE ... RENAME (option a): with
+// legacy_alter_table off (modern SQLite default), RENAME reparses every trigger
+// in the schema, so it fails in partial-schema migration states where an
+// unrelated trigger such as vector_epoch_mem_ai references a table that is not
+// present (e.g. memory_embeddings absent in migration tests). PRAGMA
+// legacy_alter_table (option b) is not assumed to be safe/effective in the
+// migration's connection+transaction context, so the step creates a temp table,
+// copies rows into it, drops and recreates memory_history with the final DDL,
+// copies rows back, drops the temp table, and recreates the index without any
+// RENAME.
+func migrateV31(tx *sql.Tx) error {
+	const historyV31DDL = `(
+    id          TEXT PRIMARY KEY DEFAULT (hex(randomblob(16))),
+    memory_id   TEXT NOT NULL,
+    project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    recorded_at TEXT NOT NULL DEFAULT (datetime('now')),
+    phase       TEXT NOT NULL
+                CHECK (phase IN (
+                    'save', 'update', 'reflect', 'merge', 'resolve',
+                    'unresolve', 'supersede', 'unsupersede', 'restore',
+                    'import', 'delete', 'baseline', 'move'
+                )),
+    agent       TEXT,
+    session_id  TEXT,
+    related_id  TEXT,
+    merged_content TEXT,
+    from_project_id TEXT,
+    to_project_id   TEXT,
+    content     TEXT,
+    category    TEXT,
+    importance  REAL,
+    resolved_at TEXT,
+    source      TEXT
+)`
+	copyCols := `id, memory_id, project_id, recorded_at, phase, agent, session_id, related_id, merged_content,
+		     content, category, importance, resolved_at, source`
+	stmts := []string{
+		`CREATE TABLE memory_history_move_v31 ` + historyV31DDL,
+		`INSERT INTO memory_history_move_v31 (` + copyCols + `)
+		SELECT ` + copyCols + `
+		FROM memory_history`,
+		`DROP TABLE memory_history`,
+		`CREATE TABLE memory_history ` + historyV31DDL,
+		`INSERT INTO memory_history (` + copyCols + `)
+		SELECT ` + copyCols + `
+		FROM memory_history_move_v31`,
+		`DROP TABLE memory_history_move_v31`,
+		`CREATE INDEX IF NOT EXISTS idx_history_memory ON memory_history(memory_id, recorded_at)`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("%q: %w", s[:min(40, len(s))], err)
+		}
 	}
 	return nil
 }

@@ -62,6 +62,7 @@ func TestToolAnnotationsPinned(t *testing.T) {
 		"ghost_memory_update":   {why: "every edit appends a history row and moves updated_at"},
 		"ghost_resolve":         {why: "each run classifies afresh through the harness and is billed"},
 		"ghost_memory_promote":  {why: "a repeat is refused rather than converging; not claimed idempotent"},
+		"ghost_memory_move":     {why: "moves a memory between projects; a repeat is refused once it has moved"},
 		// Writers whose repeat converges on the same state.
 		"ghost_memory_pin":    {idempotent: true, why: "sets pinned to a value"},
 		"ghost_task_update":   {idempotent: true, why: "sets fields to values"},

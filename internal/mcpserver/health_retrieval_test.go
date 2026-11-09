@@ -285,15 +285,15 @@ func TestHealthRetrievalBlockIsAdditive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListTools: %v", err)
 	}
-	// 23 is the count docs/mcp.md, docs/architecture.md, docs/README.md and
+	// 24 is the count docs/mcp.md, docs/architecture.md, docs/README.md and
 	// overview.html all state in prose. Nothing here registers a tool, and this
 	// assertion is what proves it.
-	if len(res.Tools) != 23 {
+	if len(res.Tools) != 24 {
 		names := make([]string, 0, len(res.Tools))
 		for _, tool := range res.Tools {
 			names = append(names, tool.Name)
 		}
-		t.Errorf("the server registers %d tools (%s), want 23 — the count the docs state", len(res.Tools), strings.Join(names, ", "))
+		t.Errorf("the server registers %d tools (%s), want 24 — the count the docs state", len(res.Tools), strings.Join(names, ", "))
 	}
 	for _, tool := range res.Tools {
 		if tool.Name == "ghost_health" {

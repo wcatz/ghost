@@ -589,6 +589,7 @@ var valueFlagOwners = map[string][]string{
 	"parseReflectArgs":         {"reflect"},
 	"parseSupersedeArgs":       {"supersede"},
 	"parseResolveArgs":         {"resolve"},
+	"parseMemoryMoveArgs":      {"memory move"},
 	"parseObsidianFlags":       {"obsidian"},
 	"parseBackupArgs":          {"backup"},
 	"parseExportArgs":          {"export"},
