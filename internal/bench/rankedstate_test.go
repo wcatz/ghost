@@ -99,7 +99,7 @@ func TestRankedStateFixtureCarriesState(t *testing.T) {
 	edges, depth := 0, 0
 	for _, m := range ds.Memories {
 		if m.AgeDays > 0 {
-			if categoryDecays(m.Category) {
+			if categoryDecays(m.Category, m.Content) {
 				agedDecaying[m.AgeDays] = true
 			} else {
 				agedNeverDecay[m.AgeDays] = true
@@ -159,7 +159,7 @@ func TestRankedStateFixtureCarriesState(t *testing.T) {
 	for _, m := range ds.Memories {
 		for _, older := range m.Supersedes {
 			gap := byKey[older].AgeDays - m.AgeDays
-			if categoryDecays(m.Category) && gap >= wideAgeGapDays {
+			if categoryDecays(m.Category, m.Content) && gap >= wideAgeGapDays {
 				decaySensitive++
 			} else {
 				demoteAlone++

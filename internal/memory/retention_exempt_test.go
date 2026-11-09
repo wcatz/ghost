@@ -341,8 +341,8 @@ func TestTheSessionDecayIsBoundedAndNamedInExplain(t *testing.T) {
 	// about: identical in every other respect, a session row never beats the
 	// durable row it duplicates.
 	for _, age := range []float64{0, 3, 30, 365} {
-		session := DecayFactor("fact", RetentionSession, false, age)
-		durable := DecayFactor("fact", RetentionProject, false, age)
+		session := DecayFactor("fact", "", RetentionSession, false, age)
+		durable := DecayFactor("fact", "", RetentionProject, false, age)
 		if session > durable {
 			t.Errorf("at age %v a session row scores %v, above the durable %v", age, session, durable)
 		}
@@ -382,7 +382,7 @@ func TestTheSessionDecayMatchesTheSQLItRanks(t *testing.T) {
 				if goAge < 0 {
 					goAge = 0
 				}
-				goFactor := DecayFactor(cat, RetentionSession, pinned, goAge)
+				goFactor := DecayFactor(cat, cat, RetentionSession, pinned, goAge)
 				if diff := sqlFactor - goFactor; diff > eps || diff < -eps {
 					t.Errorf("category=%s age=%d pinned=%v: SQL=%v Go=%v", cat, age, pinned, sqlFactor, goFactor)
 				}
