@@ -222,7 +222,8 @@ func (s *Store) SupersedeDecision(ctx context.Context, projectID, oldID, newID s
 // A companion already retired (by an earlier replacement) has its supersedes
 // edge and history updated to name the new replacement when the decision is
 // repointed, and any stale edge from the previous replacement is invalidated.
-// Repointing the same pair again records nothing new.
+// Re-running the same pair records nothing new, including after a caller
+// withdrew the companion edge.
 //
 // Both IDs must belong to projectID and must differ; a decision cannot
 // supersede itself. Re-running the same pair is a clean no-op, so re-running is
@@ -312,7 +313,9 @@ func supersedeDecisionTx(ctx context.Context, tx *sql.Tx, projectID, oldID, newI
 	if priorSuccessor == newID {
 		priorSuccessor = ""
 	}
-	repoint := currentSupersededBy != ""
+	// Only a change of successor is a repoint. Re-running the same pair must
+	// stay a no-op, so an edge the caller withdrew is not written back.
+	repoint := currentSupersededBy != "" && currentSupersededBy != newID
 
 	res, err := tx.ExecContext(ctx, `
 		UPDATE decisions
@@ -735,10 +738,11 @@ func checkReservedSourceRef(ref string) error {
 // clean success while a memory that still states the reversed decision kept
 // ranking (#1283).
 //
-// retired names the already-resolved single companion of decisionID: it was
-// retired by an earlier supersede and is not re-stamped, but a repoint that
-// changes the decision's successor must still update its history and edge to
-// name the new replacement.
+// retired names the already-resolved single companion of decisionID: it is not
+// re-stamped, but a repoint that changes the decision's successor must still
+// update its history and edge to name the new replacement. It may have been
+// resolved for any reason; retireDecisionCompanionTx writes onto it only when
+// retiredBySupersedeTx says a supersede retired it.
 func findDecisionCompanionsTx(ctx context.Context, tx *sql.Tx, projectID, decisionID string) (found, retired, ambiguous, shared, declined []string, err error) {
 	// The writer tools refuse the reserved prefix, but an import carries
 	// source_ref verbatim, so the link is trusted only for a decision-category
@@ -896,6 +900,28 @@ func findDecisionCompanionsTx(ctx context.Context, tx *sql.Tx, projectID, decisi
 	return nil, nil, ambiguous, shared, declined, nil
 }
 
+// retiredBySupersedeTx keeps the resolved companions in ids that carry a
+// 'supersede' history row, the mark a supersede chain leaves when it retires a
+// companion with a replacement to name. A companion resolved for another reason
+// has no such row and is left alone by a repoint. One a supersede retired with
+// no replacement companion carries only a 'resolve' row, indistinguishable from
+// a resolve pass, so it is not repointed either.
+func retiredBySupersedeTx(ctx context.Context, tx *sql.Tx, ids []string) ([]string, error) {
+	var out []string
+	for _, id := range ids {
+		var n int
+		if err := tx.QueryRowContext(ctx,
+			`SELECT count(*) FROM memory_history WHERE memory_id = ? AND phase = ?`,
+			id, phaseSupersede).Scan(&n); err != nil {
+			return nil, fmt.Errorf("read companion history: %w", err)
+		}
+		if n > 0 {
+			out = append(out, id)
+		}
+	}
+	return out, nil
+}
+
 // linksAnotherUnsupersededDecisionTx reports whether ref links a decision other
 // than decisionID that is not superseded. A link to a decision this store does
 // not hold counts as not superseded: nothing says it was reversed, and retiring a
@@ -1026,7 +1052,9 @@ func retireDecisionCompanionTx(ctx context.Context, tx *sql.Tx, projectID, oldID
 	// imported decision) leaves the reason unstated rather than naming an id
 	// that is not a memory. See replacementCompanionTx for a replacement whose
 	// link more than one live row carries.
-	newCompanion, err := replacementCompanionTx(ctx, tx, projectID, newID)
+	// A replacement whose own companion was already retired is named only on a
+	// repoint; a plain supersede keeps naming live companions alone.
+	newCompanion, err := replacementCompanionTx(ctx, tx, projectID, newID, repoint)
 	if err != nil {
 		return out, err
 	}
@@ -1039,10 +1067,14 @@ func retireDecisionCompanionTx(ctx context.Context, tx *sql.Tx, projectID, oldID
 		if repoint {
 			var priorCompanion string
 			if priorSuccessor != "" {
-				priorCompanion, err = replacementCompanionTx(ctx, tx, projectID, priorSuccessor)
+				priorCompanion, err = replacementCompanionTx(ctx, tx, projectID, priorSuccessor, true)
 				if err != nil {
 					return out, err
 				}
+			}
+			retired, err = retiredBySupersedeTx(ctx, tx, retired)
+			if err != nil {
+				return out, err
 			}
 			if err := repointRetiredCompanionsTx(ctx, tx, retired, newCompanion, priorCompanion); err != nil {
 				return out, err
@@ -1191,6 +1223,11 @@ func repointRetiredCompanionsTx(ctx context.Context, tx *sql.Tx, retired []strin
 // replacementCompanionTx is the row a retired companion's 'supersedes' edge and
 // history name: the replacement decision's companion.
 //
+// allowRetired lets the answer be the replacement's own already-retired
+// companion when it has no live one. Only a repoint passes it: a plain
+// supersede onto a replacement whose companion was retired names no edge, as
+// before.
+//
 // It is findDecisionCompanionsTx's answer when that is one row. When it is not —
 // the replacement's own link is carried by its RecordDecision row AND by a live
 // reflect successor, the two-carrier shape a guard re-add leaves — the lookup's
@@ -1200,7 +1237,7 @@ func repointRetiredCompanionsTx(ctx context.Context, tx *sql.Tx, retired []strin
 // retired with a 'resolve' history row and no edge, which the rules above keep
 // for a replacement with no companion at all. Only when no single such row
 // exists is the edge left out, as before.
-func replacementCompanionTx(ctx context.Context, tx *sql.Tx, projectID, decisionID string) (string, error) {
+func replacementCompanionTx(ctx context.Context, tx *sql.Tx, projectID, decisionID string, allowRetired bool) (string, error) {
 	found, retired, ambiguous, _, _, err := findDecisionCompanionsTx(ctx, tx, projectID, decisionID)
 	if err != nil {
 		return "", err
@@ -1208,7 +1245,7 @@ func replacementCompanionTx(ctx context.Context, tx *sql.Tx, projectID, decision
 	if len(found) > 0 {
 		return found[0], nil
 	}
-	if len(retired) > 0 {
+	if allowRetired && len(retired) > 0 {
 		return retired[0], nil
 	}
 	var logged []string

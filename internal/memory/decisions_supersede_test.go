@@ -2588,6 +2588,133 @@ func TestSupersedeDecisionRepointToSuccessorWithNoCompanion(t *testing.T) {
 	}
 }
 
+// recordABC records three decisions and returns their ids and companions.
+func recordABC(t *testing.T, s *Store) (a, b, c, aComp, bComp, cComp string) {
+	t.Helper()
+	ctx := context.Background()
+	var err error
+	if a, aComp, _, err = s.RecordDecision(ctx, testProject, "Use Redis", "Redis", "fast", nil, nil); err != nil {
+		t.Fatalf("RecordDecision (A): %v", err)
+	}
+	if b, bComp, _, err = s.RecordDecision(ctx, testProject, "Use Postgres", "Postgres", "durable", nil, nil); err != nil {
+		t.Fatalf("RecordDecision (B): %v", err)
+	}
+	if c, cComp, _, err = s.RecordDecision(ctx, testProject, "Use SQLite", "SQLite", "simple", nil, nil); err != nil {
+		t.Fatalf("RecordDecision (C): %v", err)
+	}
+	return
+}
+
+func activeSupersedes(t *testing.T, s *Store, from, to string) bool {
+	t.Helper()
+	links, err := s.GetLinks(context.Background(), to)
+	if err != nil {
+		t.Fatalf("GetLinks: %v", err)
+	}
+	for _, l := range links {
+		if l.Relation == "supersedes" && l.SourceID == from && l.TargetID == to {
+			return true
+		}
+	}
+	return false
+}
+
+// TestSupersedeDecisionSamePairKeepsAWithdrawnEdgeWithdrawn pins that re-running
+// the same pair is a no-op even after the companion edge was withdrawn on
+// purpose: it neither re-creates the edge nor appends a history row.
+func TestSupersedeDecisionSamePairKeepsAWithdrawnEdgeWithdrawn(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	a, b, _, aComp, bComp, _ := recordABC(t, s)
+
+	if err := s.SupersedeDecision(ctx, testProject, a, b); err != nil {
+		t.Fatalf("SupersedeDecision(A, B): %v", err)
+	}
+	if _, err := s.InvalidateLink(ctx, bComp, aComp, "supersedes"); err != nil {
+		t.Fatalf("InvalidateLink: %v", err)
+	}
+	before, err := s.MemoryHistory(ctx, aComp, 0)
+	if err != nil {
+		t.Fatalf("MemoryHistory: %v", err)
+	}
+	if err := s.SupersedeDecision(ctx, testProject, a, b); err != nil {
+		t.Fatalf("SupersedeDecision(A, B) again: %v", err)
+	}
+	after, err := s.MemoryHistory(ctx, aComp, 0)
+	if err != nil {
+		t.Fatalf("MemoryHistory after: %v", err)
+	}
+	if len(after) != len(before) {
+		t.Errorf("history rows %d after the same pair re-ran, want %d", len(after), len(before))
+	}
+	if activeSupersedes(t, s, bComp, aComp) {
+		t.Errorf("re-running the same pair re-created the withdrawn edge %s -> %s", bComp, aComp)
+	}
+}
+
+// TestSupersedeDecisionRepointLeavesACompanionResolvedForAnotherReason pins that
+// a companion resolved without any supersede history is not given an edge or a
+// history row when its decision is later repointed.
+func TestSupersedeDecisionRepointLeavesACompanionResolvedForAnotherReason(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	a, b, c, aComp, _, cComp := recordABC(t, s)
+
+	if _, err := s.db.Exec(`UPDATE memories SET resolved_at = datetime('now') WHERE id = ?`, aComp); err != nil {
+		t.Fatalf("resolve A's companion: %v", err)
+	}
+	if err := s.SupersedeDecision(ctx, testProject, a, b); err != nil {
+		t.Fatalf("SupersedeDecision(A, B): %v", err)
+	}
+	if err := s.SupersedeDecision(ctx, testProject, b, c); err != nil {
+		t.Fatalf("SupersedeDecision(B, C): %v", err)
+	}
+	before, err := s.MemoryHistory(ctx, aComp, 0)
+	if err != nil {
+		t.Fatalf("MemoryHistory: %v", err)
+	}
+	if err := s.SupersedeDecision(ctx, testProject, a, c); err != nil {
+		t.Fatalf("SupersedeDecision(A, C) repoint: %v", err)
+	}
+	after, err := s.MemoryHistory(ctx, aComp, 0)
+	if err != nil {
+		t.Fatalf("MemoryHistory after: %v", err)
+	}
+	if len(after) != len(before) {
+		t.Errorf("history rows %d after the repoint, want %d: the companion was not retired by a supersede", len(after), len(before))
+	}
+	if activeSupersedes(t, s, cComp, aComp) {
+		t.Errorf("repoint wrote an edge %s -> %s onto a companion no supersede retired", cComp, aComp)
+	}
+}
+
+// TestPlainSupersedeDoesNotNameARetiredReplacementCompanion pins that the
+// retired-companion fallback is confined to a repoint: superseding A by a B
+// that was already superseded by C, with A not yet superseded, keeps naming no
+// edge from B's retired companion, as a plain supersede always has.
+func TestPlainSupersedeDoesNotNameARetiredReplacementCompanion(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	a, b, c, aComp, bComp, _ := recordABC(t, s)
+
+	if err := s.SupersedeDecision(ctx, testProject, b, c); err != nil {
+		t.Fatalf("SupersedeDecision(B, C): %v", err)
+	}
+	if err := s.SupersedeDecision(ctx, testProject, a, b); err != nil {
+		t.Fatalf("SupersedeDecision(A, B): %v", err)
+	}
+	if activeSupersedes(t, s, bComp, aComp) {
+		t.Errorf("a plain supersede wrote an edge from B's retired companion %s to %s", bComp, aComp)
+	}
+	hist, err := s.MemoryHistory(ctx, aComp, 0)
+	if err != nil {
+		t.Fatalf("MemoryHistory: %v", err)
+	}
+	if last := hist[len(hist)-1]; last.Phase != phaseResolve || last.RelatedID != "" {
+		t.Errorf("last history is phase=%q related=%q, want a bare %q row", last.Phase, last.RelatedID, phaseResolve)
+	}
+}
+
 // TestRepointCompanionInvalidationReportsRowsAffectedError is a structural test
 // for the stale-edge invalidation inside repointRetiredCompanionsTx. It is
 // structural because the property is about WHERE the statement sits rather than
