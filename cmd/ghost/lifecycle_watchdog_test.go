@@ -33,13 +33,25 @@ const phaseIgnoresTerm = "trap '' TERM; while :; do sleep 0.05; done"
 // phaseExitsLeavingHelper is a phase that takes the deadline's SIGTERM and
 // exits, while a helper it started in its own group ignores that signal and
 // stays behind. cmd.Wait returns once the phase is reaped, with the group
-// still inhabited by the helper.
-func phaseExitsLeavingHelper(helperPidFile string) string {
+// still inhabited by the helper. exitedFile is written by the TERM trap, so
+// a test can tell the phase's own exit from the watchdog's later kill.
+func phaseExitsLeavingHelper(helperPidFile, exitedFile string) string {
 	return fmt.Sprintf(
-		"trap 'exit 0' TERM; "+
+		"trap ': > \"%[2]s\"; exit 0' TERM; "+
 			"(trap '' TERM; i=0; while [ $i -lt 2400 ]; do sleep 0.05; i=$((i + 1)); done) </dev/null >/dev/null 2>&1 & "+
 			"echo $! > %[1]s.tmp && mv %[1]s.tmp %[1]s; "+
-			"i=0; while [ $i -lt 2400 ]; do sleep 0.05; i=$((i + 1)); done", helperPidFile)
+			"i=0; while [ $i -lt 2400 ]; do sleep 0.05; i=$((i + 1)); done", helperPidFile, exitedFile)
+}
+
+// phaseRecordsPidAndExits is a phase that publishes its own pid — the leader
+// of its process group, which setPhaseProcessGroup makes it — and exits on
+// the deadline's SIGTERM. A test reads the pid to place a helper in the
+// phase's group, the way a real phase leaves one behind.
+func phaseRecordsPidAndExits(pidFile, exitedFile string) string {
+	return fmt.Sprintf(
+		"echo $$ > \"%[1]s\"; "+
+			"trap ': > \"%[2]s\"; exit 0' TERM; "+
+			"i=0; while [ $i -lt 2400 ]; do sleep 0.05; i=$((i + 1)); done", pidFile, exitedFile)
 }
 
 // phaseWithSweptHarness is the script for the process layout a real phase has,
@@ -664,7 +676,7 @@ func TestTheSweepIsAwaitedAfterAPhaseTimeout(t *testing.T) {
 		grace   = 2 * time.Second
 	)
 	helperPidFile := filepath.Join(t.TempDir(), "helper.pid")
-	ctx, cancel, cmd := newPhaseCmd(timeout, phaseExitsLeavingHelper(helperPidFile))
+	ctx, cancel, cmd := newPhaseCmd(timeout, phaseExitsLeavingHelper(helperPidFile, filepath.Join(t.TempDir(), "exited")))
 	defer cancel()
 	registerPhaseSweep(t, cmd, helperPidFile)
 
@@ -717,5 +729,107 @@ func TestTheSweepIsAwaitedAfterAPhaseTimeout(t *testing.T) {
 	}
 	if elapsed < grace/2 {
 		t.Errorf("the sweep wait returned after %s, before the grace period was up: it did not wait for the watchdog", elapsed)
+	}
+}
+
+// TestTheNextPhaseWaitsForThePreviousPhasesGroupSweep drives the phase loop
+// itself — lifecycleChain.runPhases, the code the coordinator runs — with a
+// grace period short enough to watch, and pins the order the fix exists
+// for: a phase that timed out and left its group inhabited is swept before
+// the next phase starts.
+//
+// The first phase publishes its pid and exits on the deadline's SIGTERM.
+// The test then places a helper in that phase's group, the way a real phase
+// leaves one behind: the helper ignores SIGTERM, so the deadline's signal
+// ends the phase and not the group. The second phase records its start, so
+// the test can see whether it started beside the helper or after the sweep.
+//
+// The helper is this test's own child, in the phase's group, so the test
+// reaps it and its death is unambiguous — a helper the phase parented would
+// be reparented to init on the phase's exit and linger as a zombie, which
+// still answers a liveness probe.
+func TestTheNextPhaseWaitsForThePreviousPhasesGroupSweep(t *testing.T) {
+	const (
+		timeout = 400 * time.Millisecond
+		grace   = 800 * time.Millisecond
+	)
+	dir := t.TempDir()
+	phasePidFile := filepath.Join(dir, "phase.pid")
+	firstExited := filepath.Join(dir, "first.exited")
+	secondStarted := filepath.Join(dir, "second.started")
+
+	chain := &lifecycleChain{
+		rootCtx:     context.Background(),
+		projectName: "chainproj",
+		exe:         "sh",
+		grace:       grace,
+		poll:        5 * time.Millisecond,
+	}
+	phases := []lifecyclePhase{
+		{name: "first", args: []string{"-c", phaseRecordsPidAndExits(phasePidFile, firstExited)}, timeout: timeout},
+		{name: "second", args: []string{"-c", "echo started > " + secondStarted}, timeout: time.Hour},
+	}
+
+	var failed []string
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		chain.runPhases(phases, func(phase, _ string) { failed = append(failed, phase) })
+	}()
+
+	// The phase's own pid, so the helper can join its group before the
+	// deadline lands.
+	phasePid := readPid(t, phasePidFile)
+	if phasePid <= 0 {
+		t.Fatal("the first phase did not publish its pid")
+	}
+	helper := exec.Command("/bin/sh", "-c", "trap '' TERM; i=0; while [ $i -lt 2400 ]; do sleep 0.05; i=$((i + 1)); done")
+	helper.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: phasePid}
+	if err := helper.Start(); err != nil {
+		t.Fatalf("start the helper in the phase's group: %v", err)
+	}
+	helperDone := make(chan struct{})
+	go func() {
+		defer close(helperDone)
+		_ = helper.Wait()
+	}()
+	t.Cleanup(func() {
+		select {
+		case <-helperDone:
+		default:
+			_ = helper.Process.Kill()
+			<-helperDone
+		}
+	})
+
+	// The phase has exited on the deadline's SIGTERM; the helper is still
+	// in its group, because the kill is the grace period away.
+	waitForPath(t, nil, firstExited, "the first phase to exit", 10*time.Second)
+	select {
+	case <-helperDone:
+		t.Fatal("the helper died before the grace period was up; this case is not covered")
+	default:
+	}
+
+	// The second phase starts only after the escalation has swept the
+	// first phase's group, so its marker cannot appear before the grace
+	// period has run, and the helper must be gone when it does.
+	startedAt := time.Now()
+	waitForPath(t, nil, secondStarted, "the second phase to start", 20*time.Second)
+	if elapsed := time.Since(startedAt); elapsed < grace/2 {
+		t.Errorf("the second phase started %s after the first phase exited, before the %s grace period was up: the loop did not wait for the sweep", elapsed, grace)
+	}
+	select {
+	case <-helperDone:
+	case <-time.After(500 * time.Millisecond):
+		t.Error("the helper was still running when the second phase started: the loop did not wait for the sweep")
+	}
+
+	<-done
+	if len(failed) != 1 || failed[0] != "first" {
+		t.Errorf("recordFailure called for %v, want exactly [first]: the timed-out phase is the one that failed", failed)
+	}
+	if chain.phasesRan != 1 {
+		t.Errorf("phasesRan = %d, want 1: the failed phase is not a completed one", chain.phasesRan)
 	}
 }

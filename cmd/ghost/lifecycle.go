@@ -284,134 +284,20 @@ func runLifecycle() int {
 	// phase's output, the only record of what it was doing when it stopped.
 	var interruptedRunning, interruptedNext, interruptedTail string
 
-	for _, ph := range lifecyclePhases(cfg, projectName, llmOK) {
-		// A signal that landed BETWEEN phases stops the chain here. The phase
-		// below never started, so it has no failure of its own to record, and
-		// starting it under a cancelled context would only spawn a process that
-		// dies with "context canceled" — a marker blaming a phase that never
-		// ran, which is the misattribution this record is careful about.
-		if rootCtx.Err() != nil {
-			interruptedNext = ph.name
-			lifecycleLogf(projectName, "interrupted before %s; not starting the remaining phases", ph.name)
-			break
-		}
-		phaseArgs := append([]string{}, ph.args...)
-		if source != "" {
-			phaseArgs = append(phaseArgs, "--source", source)
-		}
-		// One context per branch, so nothing is created and then abandoned. Each
-		// derives from rootCtx, so a signal to the coordinator cancels the phase
-		// in flight — the same cancel a deadline causes — and stops the chain.
-		var ctx context.Context
-		var cancel context.CancelFunc
-		if ph.timeout > 0 {
-			ctx, cancel = context.WithTimeout(rootCtx, ph.timeout)
-		} else {
-			ctx, cancel = context.WithCancel(rootCtx)
-		}
-		cmd := exec.CommandContext(ctx, exe, phaseArgs...)
-		// A deadline must not SIGKILL a phase mid-write: the phase runs in its
-		// own process group, gets a SIGTERM first — which its own handler turns
-		// into the end of each harness it spawned, every one in a group of its
-		// own — and only the phase's group is force-killed if it misses the
-		// grace period.
-		setPhaseProcessGroup(cmd)
-		cmd.Cancel = func() error { return terminatePhaseProcess(cmd) }
-		// WaitDelay is a backstop for Wait itself; the group-wide escalation is
-		// the watchdog below, because WaitDelay would kill only the direct child
-		// and leave any other member of the phase's group that ignored SIGTERM
-		// orphaned.
-		cmd.WaitDelay = phaseGracePeriod + 5*time.Second
-		// Tee into a bounded tail. The child's output still reaches the
-		// terminal (and lifecycle.log for a detached run) unchanged — but
-		// runErr.Error() alone is "exit status 1", and that is all the marker
-		// ever recorded. When a phase dies without saying why, the tail is the
-		// only record of what it printed last.
-		tail := newPhaseTail(phaseFailureTailMax)
-		cmd.Stdout = io.MultiWriter(os.Stdout, tail)
-		cmd.Stderr = io.MultiWriter(os.Stderr, tail)
-
-		phaseDone := make(chan struct{})
-
-		start := time.Now()
-		// The watchdog is started only once the phase EXISTS: it signals the
-		// phase's process group, and a goroutine launched before Start reads
-		// cmd.Process while Start is writing it — a race on the one field the
-		// kill is decided by. It also cannot have anything to escalate before
-		// then, since the deadline's Cancel needs a process to signal.
-		var watchdogDone <-chan struct{}
-		runErr := cmd.Start()
-		// Whether the phase ever existed. A Start failure is the phase's own
-		// failure to record; only a phase that actually STARTED can be the one
-		// a signal caught, and a signal that races a failed spawn must not name
-		// a phase that never ran.
-		phaseStarted := runErr == nil
-		if runErr == nil {
-			// The watchdog's return is kept so the loop can wait for this
-			// phase's group sweep before it goes on; see below.
-			done := make(chan struct{})
-			watchdogDone = done
-			go func() {
-				defer close(done)
-				phaseWatchdog(rootCtx, ctx, phaseDone, cmd, phaseEscalation{
-					grace:          phaseGracePeriod,
-					poll:           phaseGroupPollInterval,
-					after:          time.After,
-					groupInhabited: phaseGroupInhabited,
-					kill:           killPhaseProcess,
-				})
-			}()
-			runErr = cmd.Wait()
-		}
-		close(phaseDone)
-		cancel()
-		// A signal to the coordinator cancels rootCtx, which cancels this
-		// phase's context: the phase's Cancel delivers the group SIGTERM, and
-		// the wait above returns the context error even for a phase that exits
-		// zero. No further phase starts under a cancelled context — the run was
-		// asked to stop — and the phase the signal caught is recorded as its own
-		// outcome so the next session start surfaces an alert instead of
-		// silence.
-		//
-		// Every branch below waits for this phase's escalation before it
-		// goes on (awaitPhaseSweep). cmd.Wait returns the moment the phase
-		// is REAPED, but a member of its group that ignored the SIGTERM —
-		// a deadline's or a signal's — is still running. Starting the next
-		// phase beside it would let two phases rewrite the same rows at
-		// once, and if the remaining phases finished quickly the
-		// coordinator could exit before the watchdog fires, leaving that
-		// member with no sweep and the per-project claim released beside
-		// it. The handle is per iteration: one kept outside the loop would
-		// be overwritten by the next phase.
-		if runErr != nil {
-			if phaseStarted && rootCtx.Err() != nil {
-				// The signal caught this phase in flight. It started, so it is
-				// the one phase that may be named, and the SIGNAL — not the
-				// "context canceled" the cancellation produced — is its cause.
-				interruptedRunning, interruptedTail = ph.name, tail.String()
-				lifecycleLogf(projectName, "%s interrupted after %s; not starting the remaining phases", ph.name, time.Since(start).Round(time.Second))
-				awaitPhaseSweep(watchdogDone, time.After)
-				break
-			}
-			// The cause, not the exit status: with no output this becomes
-			// "exit 1; argv: ghost reflect --project x --apply; ghost dev"
-			// instead of the bare "exit status 1" that made 357 log entries
-			// indistinguishable.
-			cause := phaseFailureCause(phaseArgs, runErr, tail.String())
-			recordFailure(ph.name, cause)
-			lifecycleLogf(projectName, "%s failed after %s (continuing): %v", ph.name, time.Since(start).Round(time.Second), runErr)
-			awaitPhaseSweep(watchdogDone, time.After)
-			continue
-		}
-		phasesRan++
-		lifecycleLogf(projectName, "%s completed in %s", ph.name, time.Since(start).Round(time.Second))
-		awaitPhaseSweep(watchdogDone, time.After)
-		// A phase that succeeded while a signal was landing is NOT an
-		// interrupted phase: it ran, and the loop's next iteration records the
-		// interrupt against the phase it never reached. When it was the last
-		// enabled phase, every phase has run and there is nothing left to
-		// record at all — the run was cut short after its work was done.
+	// The chain itself, with the production escalation's timing. The loop is
+	// lifecycleChain.runPhases below, extracted so its wiring — above all the
+	// wait between one phase's reaping and the next phase's start — is
+	// testable without the production grace period or the production binary.
+	chain := &lifecycleChain{
+		rootCtx:     rootCtx,
+		projectName: projectName,
+		exe:         exe,
+		source:      source,
+		grace:       phaseGracePeriod,
+		poll:        phaseGroupPollInterval,
 	}
+	phasesRan, interruptedRunning, interruptedNext, interruptedTail = chain.runPhases(
+		lifecyclePhases(cfg, projectName, llmOK), recordFailure)
 
 	// A signal that stopped the chain is its own outcome rather than a phase's
 	// failure, and it is recorded only when something was actually left
@@ -450,6 +336,198 @@ func runLifecycle() int {
 		return 1
 	}
 	return 0
+}
+
+// lifecyclePhaseOutcome is what one phase's iteration decided for the chain.
+type lifecyclePhaseOutcome int
+
+const (
+	// lifecyclePhaseSucceeded: the phase ran and exited zero.
+	lifecyclePhaseSucceeded lifecyclePhaseOutcome = iota
+	// lifecyclePhaseFailed: the phase failed; the chain continues.
+	lifecyclePhaseFailed
+	// lifecyclePhaseInterrupted: a signal caught the phase in flight; the
+	// chain stops.
+	lifecyclePhaseInterrupted
+)
+
+// lifecycleChain is the coordinator's phase loop: the enabled phases in
+// order, each a child process in its own process group with its own
+// deadline.
+//
+// The grace period and the poll interval are the chain's own rather than the
+// package constants, so a test can drive the loop with a grace short enough
+// to watch rather than the production thirty seconds. Everything else about
+// the escalation — the group question, the kill, the clock — is the
+// production one.
+//
+// It is extracted from runLifecycle so the loop's wiring is testable: the
+// wait between one phase's reaping and the next phase's start is what keeps
+// a timed-out phase's group from being overtaken by the next phase, and a
+// test of the wait helper alone cannot show that the loop calls it.
+type lifecycleChain struct {
+	rootCtx     context.Context
+	projectName string
+	exe         string
+	source      string
+	grace       time.Duration
+	poll        time.Duration
+
+	// The run's bookkeeping, filled by runPhases.
+	phasesRan          int
+	interruptedRunning string
+	interruptedNext    string
+	interruptedTail    string
+}
+
+// runPhases runs the phases in order and returns the run's bookkeeping: how
+// many phases completed, the phase a signal caught in flight, the enabled
+// phase the chain never reached, and the caught phase's output.
+//
+// recordFailure is called for a phase that failed and whose failure the
+// chain continues past.
+func (c *lifecycleChain) runPhases(phases []lifecyclePhase, recordFailure func(phase, msg string)) (int, string, string, string) {
+	for _, ph := range phases {
+		// A signal that landed BETWEEN phases stops the chain here. The phase
+		// below never started, so it has no failure of its own to record, and
+		// starting it under a cancelled context would only spawn a process that
+		// dies with "context canceled" — a marker blaming a phase that never
+		// ran, which is the misattribution this record is careful about.
+		if c.rootCtx.Err() != nil {
+			c.interruptedNext = ph.name
+			lifecycleLogf(c.projectName, "interrupted before %s; not starting the remaining phases", ph.name)
+			break
+		}
+		outcome := c.runPhase(ph, recordFailure)
+		if outcome == lifecyclePhaseInterrupted {
+			break
+		}
+		if outcome == lifecyclePhaseSucceeded {
+			c.phasesRan++
+		}
+	}
+	return c.phasesRan, c.interruptedRunning, c.interruptedNext, c.interruptedTail
+}
+
+// runPhase runs one phase and reports what the chain should do next.
+//
+// The phase's group escalation is awaited on EVERY path, through the defer
+// below, and one call site is what keeps the three exits — a success, a
+// failure, an interrupt — from drifting apart. cmd.Wait returns the moment
+// the phase is REAPED, while a member of its group that ignored the SIGTERM
+// is still running: the next phase must not start beside that member, and a
+// run whose remaining phases finish quickly must not exit before the
+// watchdog fires, or the member is left with no sweep and the per-project
+// claim released beside it.
+func (c *lifecycleChain) runPhase(ph lifecyclePhase, recordFailure func(phase, msg string)) lifecyclePhaseOutcome {
+	phaseArgs := append([]string{}, ph.args...)
+	if c.source != "" {
+		phaseArgs = append(phaseArgs, "--source", c.source)
+	}
+	// One context per branch, so nothing is created and then abandoned. Each
+	// derives from rootCtx, so a signal to the coordinator cancels the phase
+	// in flight — the same cancel a deadline causes — and stops the chain.
+	var ctx context.Context
+	var cancel context.CancelFunc
+	if ph.timeout > 0 {
+		ctx, cancel = context.WithTimeout(c.rootCtx, ph.timeout)
+	} else {
+		ctx, cancel = context.WithCancel(c.rootCtx)
+	}
+	cmd := exec.CommandContext(ctx, c.exe, phaseArgs...)
+	// A deadline must not SIGKILL a phase mid-write: the phase runs in its
+	// own process group, gets a SIGTERM first — which its own handler turns
+	// into the end of each harness it spawned, every one in a group of its
+	// own — and only the phase's group is force-killed if it misses the
+	// grace period.
+	setPhaseProcessGroup(cmd)
+	cmd.Cancel = func() error { return terminatePhaseProcess(cmd) }
+	// WaitDelay is a backstop for Wait itself; the group-wide escalation is
+	// the watchdog below, because WaitDelay would kill only the direct child
+	// and leave any other member of the phase's group that ignored SIGTERM
+	// orphaned.
+	cmd.WaitDelay = c.grace + 5*time.Second
+	// Tee into a bounded tail. The child's output still reaches the
+	// terminal (and lifecycle.log for a detached run) unchanged — but
+	// runErr.Error() alone is "exit status 1", and that is all the marker
+	// ever recorded. When a phase dies without saying why, the tail is the
+	// only record of what it printed last.
+	tail := newPhaseTail(phaseFailureTailMax)
+	cmd.Stdout = io.MultiWriter(os.Stdout, tail)
+	cmd.Stderr = io.MultiWriter(os.Stderr, tail)
+
+	phaseDone := make(chan struct{})
+	var watchdogDone <-chan struct{}
+	// Registered first so it runs LAST: the watchdog must be told the phase
+	// is over (the defer below) before anything waits for it, or the wait
+	// would hold until the deadline instead of returning at once.
+	defer func() {
+		awaitPhaseSweep(watchdogDone, time.After)
+	}()
+	defer func() {
+		close(phaseDone)
+		cancel()
+	}()
+
+	start := time.Now()
+	// The watchdog is started only once the phase EXISTS: it signals the
+	// phase's process group, and a goroutine launched before Start reads
+	// cmd.Process while Start is writing it — a race on the one field the
+	// kill is decided by. It also cannot have anything to escalate before
+	// then, since the deadline's Cancel needs a process to signal.
+	runErr := cmd.Start()
+	// Whether the phase ever existed. A Start failure is the phase's own
+	// failure to record; only a phase that actually STARTED can be the one
+	// a signal caught, and a signal that races a failed spawn must not name
+	// a phase that never ran.
+	phaseStarted := runErr == nil
+	if runErr == nil {
+		done := make(chan struct{})
+		watchdogDone = done
+		go func() {
+			defer close(done)
+			phaseWatchdog(c.rootCtx, ctx, phaseDone, cmd, phaseEscalation{
+				grace:          c.grace,
+				poll:           c.poll,
+				after:          time.After,
+				groupInhabited: phaseGroupInhabited,
+				kill:           killPhaseProcess,
+			})
+		}()
+		runErr = cmd.Wait()
+	}
+	// A signal to the coordinator cancels rootCtx, which cancels this
+	// phase's context: the phase's Cancel delivers the group SIGTERM, and
+	// the wait above returns the context error even for a phase that exits
+	// zero. No further phase starts under a cancelled context — the run was
+	// asked to stop — and the phase the signal caught is recorded as its own
+	// outcome so the next session start surfaces an alert instead of
+	// silence.
+	if runErr != nil {
+		if phaseStarted && c.rootCtx.Err() != nil {
+			// The signal caught this phase in flight. It started, so it is
+			// the one phase that may be named, and the SIGNAL — not the
+			// "context canceled" the cancellation produced — is its cause.
+			c.interruptedRunning, c.interruptedTail = ph.name, tail.String()
+			lifecycleLogf(c.projectName, "%s interrupted after %s; not starting the remaining phases", ph.name, time.Since(start).Round(time.Second))
+			return lifecyclePhaseInterrupted
+		}
+		// The cause, not the exit status: with no output this becomes
+		// "exit 1; argv: ghost reflect --project x --apply; ghost dev"
+		// instead of the bare "exit status 1" that made 357 log entries
+		// indistinguishable.
+		cause := phaseFailureCause(phaseArgs, runErr, tail.String())
+		recordFailure(ph.name, cause)
+		lifecycleLogf(c.projectName, "%s failed after %s (continuing): %v", ph.name, time.Since(start).Round(time.Second), runErr)
+		return lifecyclePhaseFailed
+	}
+	lifecycleLogf(c.projectName, "%s completed in %s", ph.name, time.Since(start).Round(time.Second))
+	// A phase that succeeded while a signal was landing is NOT an
+	// interrupted phase: it ran, and the loop's next iteration records the
+	// interrupt against the phase it never reached. When it was the last
+	// enabled phase, every phase has run and there is nothing left to
+	// record at all — the run was cut short after its work was done.
+	return lifecyclePhaseSucceeded
 }
 
 // phaseSweepTimeout is the backstop on the wait for a phase's escalation.
