@@ -100,7 +100,7 @@ func runMemoryMove() {
 		os.Exit(1)
 	}
 
-	resolvedTo, err := store.ResolveMoveTarget(ctx, args.to)
+	resolvedTo, err := store.ResolveMoveTarget(ctx, "to", args.to)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)

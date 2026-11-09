@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
 
@@ -228,5 +229,43 @@ func TestMoveMemoryPinnedAndPersistentRequireConfirm(t *testing.T) {
 	}
 	if _, err := s.MoveMemory(ctx, dest, persistentID, other, MoveMemoryOptions{Confirm: true}); err != nil {
 		t.Fatalf("confirmed persistent move: %v", err)
+	}
+}
+
+// TestResolveMoveTargetNamesTheCallersArgument pins that a withheld unknown
+// target names the argument the caller sent: "to_project" for the MCP tool,
+// "to" for the CLI flag. Before the parameterisation the helper hard-coded
+// "to", so an MCP refusal for a credential-shaped or over-256-byte
+// to_project read "<to withheld: ...>" instead of "<to_project withheld: ...>".
+func TestResolveMoveTargetNamesTheCallersArgument(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+
+	withheldShapes := []string{
+		"ghp_" + strings.Repeat("a1B2c3D4e5F6", 3) + "AbCd",
+		strings.Repeat("x", ArgEchoMaxBytes+1),
+	}
+	for _, to := range withheldShapes {
+		_, err := s.ResolveMoveTarget(ctx, "to_project", to)
+		if err == nil {
+			t.Fatalf("ResolveMoveTarget(to_project, %d bytes) succeeded for an unknown target", len(to))
+		}
+		if !strings.Contains(err.Error(), "to_project withheld") {
+			t.Errorf("MCP refusal = %q, want it to name to_project as withheld", err.Error())
+		}
+		if strings.Contains(err.Error(), "<to withheld") || strings.Contains(err.Error(), "\"to withheld") {
+			t.Errorf("MCP refusal = %q, names the CLI flag instead of to_project", err.Error())
+		}
+	}
+
+	_, err := s.ResolveMoveTarget(ctx, "to", "ghp_"+strings.Repeat("a1B2c3D4e5F6", 3)+"AbCd")
+	if err == nil {
+		t.Fatal("ResolveMoveTarget(to, ...) succeeded for an unknown target")
+	}
+	if !strings.Contains(err.Error(), "<to withheld") {
+		t.Errorf("CLI refusal = %q, want it to name to as withheld", err.Error())
+	}
+	if strings.Contains(err.Error(), "to_project withheld") {
+		t.Errorf("CLI refusal = %q, names the MCP argument instead of to", err.Error())
 	}
 }

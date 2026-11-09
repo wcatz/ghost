@@ -9,8 +9,10 @@ import (
 
 // ResolveMoveTarget resolves a move destination to a project id. "_global" and
 // "global" name the global bucket; anything else is resolved as a project
-// reference and must exist.
-func (s *Store) ResolveMoveTarget(ctx context.Context, to string) (string, error) {
+// reference and must exist. field names the caller's argument in refusals
+// ("to" for the CLI --to flag, "to_project" for the MCP tool argument), so a
+// withheld value names the argument the caller sent.
+func (s *Store) ResolveMoveTarget(ctx context.Context, field, to string) (string, error) {
 	if to == GlobalProjectID || to == "global" {
 		return GlobalProjectID, nil
 	}
@@ -19,7 +21,7 @@ func (s *Store) ResolveMoveTarget(ctx context.Context, to string) (string, error
 		return "", fmt.Errorf("resolve target project: %w", err)
 	}
 	if id == "" {
-		return "", fmt.Errorf("target project %s not found", RefusalArg("to", to))
+		return "", fmt.Errorf("target project %s not found", RefusalArg(field, to))
 	}
 	return id, nil
 }

@@ -1720,7 +1720,7 @@ func (s *Server) moveMemory(ctx context.Context, req *mcp.CallToolRequest, proje
 	if resolvedFrom == "" {
 		return "", fmt.Errorf("project %s not found", memory.RefusalArg("project_id", projectID))
 	}
-	resolvedTo, err := s.store.ResolveMoveTarget(ctx, toProject)
+	resolvedTo, err := s.store.ResolveMoveTarget(ctx, "to_project", toProject)
 	if err != nil {
 		return "", err
 	}
