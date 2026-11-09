@@ -285,8 +285,9 @@ func TestHealthRetrievalBlockIsAdditive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListTools: %v", err)
 	}
-	// 24 is the count docs/mcp.md states in prose. Nothing here registers a tool,
-	// and this assertion is what proves it.
+	// 24 is the count docs/mcp.md, docs/architecture.md, docs/README.md and
+	// overview.html all state in prose. Nothing here registers a tool, and this
+	// assertion is what proves it.
 	if len(res.Tools) != 24 {
 		names := make([]string, 0, len(res.Tools))
 		for _, tool := range res.Tools {

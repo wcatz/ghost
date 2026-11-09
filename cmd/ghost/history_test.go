@@ -612,6 +612,28 @@ func TestPrintHistoryEntryNamesTheOtherEnd(t *testing.T) {
 	}
 }
 
+// TestPrintHistoryEntryNamesBothEndsOfAMove: a move row without its source and
+// destination says nothing a reader can follow.
+func TestPrintHistoryEntryNamesBothEndsOfAMove(t *testing.T) {
+	var buf bytes.Buffer
+	e := historyEntry("move", "claude-code", "text", "2026-09-27 09:00:00")
+	e.FromProjectID = "proj-a"
+	e.ToProjectID = "proj-b"
+	if err := printHistoryEntry(&buf, e); err != nil {
+		t.Fatalf("printHistoryEntry: %v", err)
+	}
+	if !strings.Contains(buf.String(), "moved: proj-a -> proj-b") {
+		t.Errorf("output does not name both ends of the move:\n%s", buf.String())
+	}
+	var plain bytes.Buffer
+	if err := printHistoryEntry(&plain, historyEntry("save", "claude-code", "text", "2026-09-27 09:00:00")); err != nil {
+		t.Fatalf("printHistoryEntry: %v", err)
+	}
+	if strings.Contains(plain.String(), "moved:") {
+		t.Errorf("a non-move row printed a moved line:\n%s", plain.String())
+	}
+}
+
 // TestPrintHistoryJSONRefusesAnUnknownID: zero lines with exit 0 is the one
 // answer a script cannot act on — "never written", "history pruned by the growth
 // policy" and "the query found nothing" would all look the same. So the JSON form

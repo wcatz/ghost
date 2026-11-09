@@ -385,6 +385,12 @@ func printHistoryEntry(w io.Writer, e memory.HistoryEntry) error {
 			return err
 		}
 	}
+	// A move names both ends, as ids through the same renderer as the related id.
+	if e.FromProjectID != "" || e.ToProjectID != "" {
+		if _, err := fmt.Fprintf(w, "  moved: %s -> %s\n", assemble.Token(e.FromProjectID), assemble.Token(e.ToProjectID)); err != nil {
+			return err
+		}
+	}
 	// The folded-in text is a memory's own wording, from a row a FoldOnly fold
 	// deliberately dropped, and it is the one text field here the write-time
 	// filter never saw: `ghost_history_content` wraps the content column, and
