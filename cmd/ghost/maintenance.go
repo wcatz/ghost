@@ -22,6 +22,10 @@ type maintenanceStatusView struct {
 	Root      string
 	RootBytes int64
 	RootFiles int
+	// RootSkipped counts entries the measurement could not read. They are
+	// bytes nobody measured, so a partial measurement is named as partial,
+	// never printed as the root's total.
+	RootSkipped int
 	// RootMeasureErr is why the scratch root could not be measured. Size fails
 	// only when the root itself cannot be read (or cannot be resolved), so the
 	// counts it returns with the error are a failed measurement and never an
@@ -54,6 +58,10 @@ func printMaintenanceStatus(w io.Writer, v maintenanceStatusView) error {
 		budget = fmt.Sprintf("budget %d bytes", v.Budget)
 	}
 	usage := fmt.Sprintf("%d bytes in %d files", v.RootBytes, v.RootFiles)
+	if v.RootSkipped > 0 {
+		usage = fmt.Sprintf("%d bytes in %d files with %d unreadable entries skipped (partial)",
+			v.RootBytes, v.RootFiles, v.RootSkipped)
+	}
 	if v.RootMeasureErr != nil {
 		// A measurement that failed is not an empty measurement: the counts
 		// scratch.Size returns with its error must not be printed as the
@@ -156,10 +164,11 @@ func runMaintenanceStatus() {
 // The failure is part of the measurement, and it travels with the counts:
 // scratch.Size fails only when the root itself cannot be read, because a
 // partial count would be a claim about bytes it never saw. Size skips
-// unreadable entries inside a readable root, so one unreadable subtree does
-// not make this measurement a failure. A caller that kept only the numbers
-// would report an unmeasured root as an empty one, which is what
-// `ghost maintenance status` used to print.
+// unreadable entries inside a readable root and reports how many it skipped,
+// so one unreadable subtree is a partial measurement — named as such — rather
+// than a failure. A caller that kept only the numbers would report an
+// unmeasured root as an empty one, which is what `ghost maintenance status`
+// used to print.
 //
 // A root that cannot be resolved at all is the same state one step earlier:
 // there is nothing to measure, and the reason is reported rather than a size
@@ -172,12 +181,12 @@ func measureScratchRoot(view *maintenanceStatusView) {
 		return
 	}
 	view.Root = root
-	bytes, files, err := scratch.Size(root)
+	bytes, files, skipped, err := scratch.Size(root)
 	if err != nil {
 		view.RootMeasureErr = err
 		return
 	}
-	view.RootBytes, view.RootFiles = bytes, files
+	view.RootBytes, view.RootFiles, view.RootSkipped = bytes, files, skipped
 }
 
 // parseCleanScratchArgs parses `ghost maintenance clean-scratch` arguments.

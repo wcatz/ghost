@@ -40,9 +40,12 @@ func TestSize_CountsRegularFilesOnly(t *testing.T) {
 		t.Fatalf("symlink: %v", err)
 	}
 
-	gotBytes, gotFiles, err := Size(root)
+	gotBytes, gotFiles, gotSkipped, err := Size(root)
 	if err != nil {
 		t.Fatalf("Size: %v", err)
+	}
+	if gotSkipped != 0 {
+		t.Errorf("Size skipped = %d, want 0 (every entry readable)", gotSkipped)
 	}
 	if gotBytes != 3000 {
 		t.Errorf("Size bytes = %d, want 3000 (symlink target excluded)", gotBytes)
@@ -51,12 +54,12 @@ func TestSize_CountsRegularFilesOnly(t *testing.T) {
 		t.Errorf("Size files = %d, want 2 (symlink excluded)", gotFiles)
 	}
 
-	gotBytes, gotFiles, err = Size(filepath.Join(root, "does-not-exist"))
+	gotBytes, gotFiles, gotSkipped, err = Size(filepath.Join(root, "does-not-exist"))
 	if err != nil {
 		t.Errorf("Size on missing root: err = %v, want nil", err)
 	}
-	if gotBytes != 0 || gotFiles != 0 {
-		t.Errorf("Size on missing root = (%d, %d), want (0, 0)", gotBytes, gotFiles)
+	if gotBytes != 0 || gotFiles != 0 || gotSkipped != 0 {
+		t.Errorf("Size on missing root = (%d, %d, %d), want (0, 0, 0)", gotBytes, gotFiles, gotSkipped)
 	}
 }
 
@@ -437,7 +440,7 @@ func TestSize_MeasuresWhatItCanWithUnreadableSubdir(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chmod(sub, 0o700) })
 
 	logs := captureLogs(t)
-	gotBytes, gotFiles, err := Size(root)
+	gotBytes, gotFiles, gotSkipped, err := Size(root)
 	if err != nil {
 		t.Fatalf("Size: %v", err)
 	}
@@ -446,6 +449,9 @@ func TestSize_MeasuresWhatItCanWithUnreadableSubdir(t *testing.T) {
 	}
 	if gotFiles != 1 {
 		t.Errorf("Size files = %d, want 1 (measure what it can)", gotFiles)
+	}
+	if gotSkipped != 1 {
+		t.Errorf("Size skipped = %d, want 1 (the unreadable subtree)", gotSkipped)
 	}
 	if !strings.Contains(logs.String(), "skipped unreadable entries") {
 		t.Errorf("skipped entries left no trace in the log:\n%s", logs.String())
@@ -545,7 +551,7 @@ func TestSize_UnreadableRootReturnsError(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(root, 0o700) })
 
-	_, _, err := Size(root)
+	_, _, _, err := Size(root)
 	if err == nil {
 		t.Fatal("Size returned no error for an unreadable root")
 	}
@@ -656,5 +662,93 @@ func TestRecordBudgetRun_ReapFailedNotDropped(t *testing.T) {
 	}
 	if !strings.Contains(note, "2 stale entries could not be removed") {
 		t.Errorf("note = %q, want the unremoved count", note)
+	}
+}
+
+// TestEnforceBudget_PartialMeasurementFiresAndRecords: a locked subtree larger
+// than the budget hides bytes nobody measured. The measurable portion may
+// read within budget, but a partial measurement must not be compared
+// silently: the check fires, reaps through the lock, and records a row
+// naming the skipped entries.
+func TestEnforceBudget_PartialMeasurementFiresAndRecords(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("permission bits are not enforced the same way on Windows")
+	}
+	root := t.TempDir()
+	t.Setenv("GHOST_SCRATCH_DIR", root)
+	t.Setenv("GHOST_SCRATCH_MAX_BYTES", "4096")
+	dataHome := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", dataHome)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	if err := os.MkdirAll(filepath.Join(dataHome, "ghost"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	db, err := openTestDB(filepath.Join(dataHome, "ghost", "ghost.db"))
+	if err != nil {
+		t.Fatalf("seed db: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// The measurable portion is small (and would read within budget).
+	if err := os.WriteFile(filepath.Join(root, "small"), []byte("small"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A dead-owner entry behind a lock: its bytes are unmeasured, and it is
+	// stale so the reap can collect it through the lock.
+	stale := filepath.Join(root, "123-0123456789abcdef")
+	if err := os.Mkdir(stale, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stale, ".owner"), []byte("pid=1073741824\ntoken=aa\nstart=gone\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stale, "payload"), make([]byte, 8192), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// The marker cannot be read behind the lock, so the entry is reaped by
+	// the markerless age backstop: its mtime must be older than 24h.
+	old := time.Now().Add(-25 * time.Hour)
+	if err := os.Chtimes(stale, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(stale, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(stale, 0o700) })
+
+	logs := captureLogs(t)
+	res := EnforceBudget()
+
+	if !res.Fired {
+		t.Fatalf("budget check did not fire on a partial measurement: %+v", res)
+	}
+	if res.Skipped != 1 {
+		t.Errorf("Skipped = %d, want 1 (the locked entry directory)", res.Skipped)
+	}
+	if out := logs.String(); !strings.Contains(out, "skipped unreadable entries") {
+		t.Errorf("warning missing the skipped count:\n%s", out)
+	}
+	if _, statErr := os.Lstat(stale); !os.IsNotExist(statErr) {
+		t.Errorf("locked stale entry survived the reap: %v", statErr)
+	}
+	if !res.Recorded {
+		t.Errorf("Recorded = false, want true (fired check must record a row)")
+	}
+
+	db, err = openTestDB(filepath.Join(dataHome, "ghost", "ghost.db"))
+	if err != nil {
+		t.Fatalf("reopen db: %v", err)
+	}
+	defer db.Close() //nolint:errcheck
+	var note string
+	if err := db.QueryRow(`SELECT note FROM maintenance_runs`).Scan(&note); err != nil {
+		t.Fatalf("select note: %v", err)
+	}
+	if !strings.Contains(note, "measurement skipped") {
+		t.Errorf("note = %q, want it to name the skipped entries", note)
 	}
 }

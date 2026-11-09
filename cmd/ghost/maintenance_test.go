@@ -246,6 +246,18 @@ func TestMeasureScratchRootMeasuresWhatItCanPastALockedDirectory(t *testing.T) {
 	if view.RootBytes != 3 || view.RootFiles != 1 {
 		t.Errorf("measured %d bytes in %d files, want 3 bytes in 1 file", view.RootBytes, view.RootFiles)
 	}
+	if view.RootSkipped != 1 {
+		t.Errorf("RootSkipped = %d, want 1 (the locked directory)", view.RootSkipped)
+	}
+
+	// The printed header names the measurement partial, not the root's total.
+	var buf bytes.Buffer
+	if err := printMaintenanceStatus(&buf, view); err != nil {
+		t.Fatalf("printMaintenanceStatus: %v", err)
+	}
+	if !strings.Contains(buf.String(), "3 bytes in 1 files with 1 unreadable entries skipped (partial)") {
+		t.Errorf("partial measurement was printed as a total:\n%s", buf.String())
+	}
 }
 
 // TestMeasureScratchRootReportsAMeasuredRoot: the ordinary case still reports

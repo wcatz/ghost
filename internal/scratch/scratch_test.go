@@ -801,3 +801,44 @@ func TestReap_ReportsUnremovableIDFile(t *testing.T) {
 		t.Errorf("id file vanished although removal failed: %v", statErr)
 	}
 }
+
+// TestMakeRemovable_NeverFollowsASymlink: a symlink where makeRemovable is
+// asked to work must not be followed — the target's mode is untouched and the
+// target's contents are not recursed into.
+func TestMakeRemovable_NeverFollowsASymlink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation requires privileges on Windows")
+	}
+	root := t.TempDir()
+	target := t.TempDir()
+	if err := os.WriteFile(filepath.Join(target, "keep"), []byte("keep me\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(target, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(target, 0o700) })
+
+	link := filepath.Join(root, "linked")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	makeRemovable(link)
+
+	info, err := os.Stat(target)
+	if err != nil {
+		t.Fatalf("stat target: %v", err)
+	}
+	// The target's mode must be unchanged: if makeRemovable had followed the
+	// link it would have been chmod'ed to 0700.
+	if perm := info.Mode().Perm(); perm != 0o555 {
+		t.Errorf("target mode = %o after makeRemovable on the link, want 555 (never followed)", perm)
+	}
+	if _, err := os.Stat(link); err != nil {
+		t.Errorf("link was removed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(target, "keep")); err != nil {
+		t.Errorf("link target's contents were damaged: %v", err)
+	}
+}

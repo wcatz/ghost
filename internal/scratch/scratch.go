@@ -220,8 +220,16 @@ func makeRemovable(path string) {
 	}
 	// Unopenable (a mode-0000 directory): best-effort chmod by path so the
 	// listing below can run; a failure leaves the tree for RemoveAll to
-	// report.
+	// report. Re-verify the path still names a real directory first: a swap
+	// for a symlink after the lstat above must not make the path callbacks
+	// follow the link.
+	if info, err := os.Lstat(path); err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return
+	}
 	_ = os.Chmod(path, 0o700)
+	if info, err := os.Lstat(path); err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return
+	}
 	entries, err := os.ReadDir(path)
 	if err != nil {
 		return

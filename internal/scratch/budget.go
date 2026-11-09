@@ -28,6 +28,10 @@ type BudgetResult struct {
 	BytesAfter  int64
 	ReapedCount int
 	ReapFailed  int
+	// Skipped is the number of entries Size could not read in the initial
+	// measure. A skipped entry is bytes nobody measured, so a partial
+	// measurement is reported as partial, never compared silently.
+	Skipped     int
 	ReapedBytes int64
 	OverBudget  bool // still over budget after reaping
 	Fired       bool // initial measure exceeded the budget (reap path ran)
@@ -38,19 +42,20 @@ type BudgetResult struct {
 	ReapErr error
 }
 
-// Size walks dir and returns the total bytes and count of regular files.
+// Size walks dir and returns the total bytes and count of regular files it
+// could read, plus the number of entries it could not read (skipped).
 //
 // The walk is lstat-based and never follows symlinks: a symlink inside the
-// root contributes neither bytes nor a file count, so a link to a large
+// root contributes neither bytes nor file count, so a link to a large
 // out-of-tree file cannot inflate (or, via removal, deflate) the accounting.
-// A missing directory is (0, 0, nil) — the root may not exist yet, which is
+// A missing directory is (0, 0, 0, nil) — the root may not exist yet, which is
 // not an error anywhere this is used. An entry or subdirectory that cannot be
 // read is skipped so the measurement reflects what it can: one unreadable
 // subtree must not disable a caller's budget check. An unreadable root is
 // returned as an error. Skipped entries leave a debug trace so the hidden
 // bytes stay findable.
-func Size(dir string) (bytes int64, files int, err error) {
-	skipped := 0
+func Size(dir string) (bytes int64, files int, skipped int, err error) {
+	skipped = 0
 	walkErr := filepath.WalkDir(dir, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			if os.IsNotExist(walkErr) && path == dir {
@@ -84,12 +89,12 @@ func Size(dir string) (bytes int64, files int, err error) {
 		return nil
 	})
 	if walkErr != nil {
-		return bytes, files, fmt.Errorf("size %s: %w", dir, walkErr)
+		return bytes, files, skipped, fmt.Errorf("size %s: %w", dir, walkErr)
 	}
 	if skipped > 0 {
 		slog.Debug("scratch size: skipped unreadable entries", "dir", dir, "skipped", skipped)
 	}
-	return bytes, files, nil
+	return bytes, files, skipped, nil
 }
 
 // EnforceBudget runs the per-root scratch budget check BEFORE each harness
@@ -125,19 +130,26 @@ func EnforceBudget() BudgetResult {
 		// only duplicate.
 		return BudgetResult{MaxBytes: maxBytes}
 	}
-	before, _, err := Size(root)
+	before, _, skipped, err := Size(root)
 	if err != nil {
 		slog.Warn("scratch budget: cannot measure root; skipping check",
 			"root", root, "error", err)
 		return BudgetResult{Root: root, MaxBytes: maxBytes}
 	}
 
-	res := BudgetResult{Root: root, MaxBytes: maxBytes, BytesBefore: before, BytesAfter: before}
-	if before <= maxBytes {
+	res := BudgetResult{Root: root, MaxBytes: maxBytes, BytesBefore: before, BytesAfter: before, Skipped: skipped}
+	if skipped > 0 {
+		// A partial measurement may hide bytes over budget: a locked
+		// subtree larger than the budget must not read as within budget.
+		// Fire the check anyway so the reap runs and the run is recorded.
+		slog.Warn("scratch budget: measurement skipped unreadable entries; running check on the measurable portion",
+			"root", root, "skipped", skipped)
+	}
+	if before <= maxBytes && skipped == 0 {
 		return res // within budget: no reap, no warning, no record
 	}
 
-	// Over budget: reap stale entries FIRST, then re-measure.
+	// Over budget (or measured partially): reap stale entries FIRST, then re-measure.
 	res.Fired = true
 	removed, failed, reapErr := Reap(staleAge)
 	res.ReapErr = reapErr
@@ -151,11 +163,16 @@ func EnforceBudget() BudgetResult {
 	}
 	res.ReapedCount = removed
 	res.ReapFailed = failed
-	after, _, sizeErr := Size(root)
+	after, _, afterSkipped, sizeErr := Size(root)
 	if sizeErr != nil {
 		slog.Warn("scratch budget: cannot re-measure root after reap",
 			"root", root, "error", sizeErr)
 		after = before // fall back to the pre-reap measure
+	}
+	if afterSkipped > 0 {
+		slog.Warn("scratch budget: re-measurement skipped unreadable entries",
+			"root", root, "skipped", afterSkipped)
+		res.Skipped = skipped + afterSkipped
 	}
 	res.BytesAfter = after
 	if after < before {
@@ -173,7 +190,8 @@ func EnforceBudget() BudgetResult {
 			"max_bytes", maxBytes,
 			"over_by", after-maxBytes,
 			"reaped", removed,
-			"reap_failed", failed)
+			"reap_failed", failed,
+			"skipped", res.Skipped)
 	}
 
 	res.Recorded = recordBudgetRun(res)
@@ -220,6 +238,13 @@ func recordBudgetRun(res BudgetResult) bool {
 			note = fmt.Sprintf("%s; %d stale entries could not be removed", note, res.ReapFailed)
 		} else {
 			note = fmt.Sprintf("%d stale entries could not be removed", res.ReapFailed)
+		}
+	}
+	if res.Skipped > 0 && res.ReapErr == nil {
+		if note != "" {
+			note = fmt.Sprintf("%s; measurement skipped %d unreadable entries", note, res.Skipped)
+		} else {
+			note = fmt.Sprintf("measurement skipped %d unreadable entries", res.Skipped)
 		}
 	}
 	run := memory.MaintenanceRun{
