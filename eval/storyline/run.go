@@ -129,6 +129,10 @@ type Result struct {
 	// the session block replaced by an empty one. Only the answer lines are graded
 	// (see grade), and the arm's verdict is a measurement, not a finding.
 	WithoutGhost bool
+	// FlatNotes marks the notes-file arm: the same scripts, model and saves, with
+	// the session block replaced by every record saved so far as a plain notes
+	// file (see notesBlock). Graded like the control arm, answer lines only.
+	FlatNotes bool
 	// FakeHarness marks a run whose sessions were answered by a fixed string and
 	// whose classifier was the oracle fake (-fake-harness): the answer lines are
 	// not graded, because they would grade the fake.
@@ -139,15 +143,24 @@ type Result struct {
 
 // Arm names the arm a result came from, for reports and summaries.
 func (r *Result) Arm() string {
+	if r.FlatNotes {
+		return armFlatNotes
+	}
 	if r.WithoutGhost {
 		return armWithoutGhost
 	}
 	return armWithGhost
 }
 
+// baseline reports whether the result is from an arm that did not hand the
+// sessions Ghost's block (without-Ghost or flat-notes): only its answer lines
+// are graded, and its misses are a measurement, never a finding.
+func (r *Result) baseline() bool { return r.WithoutGhost || r.FlatNotes }
+
 const (
 	armWithGhost    = "with-ghost"
 	armWithoutGhost = "without-ghost"
+	armFlatNotes    = "flat-notes"
 )
 
 // Passed reports whether every GATING check passed; an advisory check (the
@@ -221,6 +234,11 @@ type Run struct {
 	// empty block, not a missing hook. The arc stages and the end-state reads are
 	// skipped, because no session of the arm is told what they produce.
 	WithoutGhost bool
+	// FlatNotes runs the notes-file arm: saves and binding as in the Ghost arm,
+	// but each session is handed notesBlock of every record saved before it, in
+	// place of Ghost's block. Like the control arm it skips the probes, the
+	// lifecycle and the arc stages. Exclusive with WithoutGhost.
+	FlatNotes bool
 	// FakeHarness is recorded on the Result; see Result.FakeHarness.
 	FakeHarness bool
 	// Timeout bounds one harness call and one arc stage. Zero means defaultTimeout.
@@ -281,11 +299,18 @@ func (r *Run) Execute(ctx context.Context) (*Result, error) {
 	if err := r.Story.Validate(); err != nil {
 		return nil, err
 	}
+	if r.WithoutGhost && r.FlatNotes {
+		return nil, fmt.Errorf("a run is one arm: WithoutGhost and FlatNotes are exclusive")
+	}
 	if r.Timeout <= 0 {
 		r.Timeout = defaultTimeout
 	}
-	res := &Result{Story: r.Story, WorkDir: r.WorkDir, WithoutGhost: r.WithoutGhost, FakeHarness: r.FakeHarness, SaveOutputs: map[string]string{}, OpeningRaw: map[string]string{}}
+	ghostArm := !r.WithoutGhost && !r.FlatNotes
+	res := &Result{Story: r.Story, WorkDir: r.WorkDir, WithoutGhost: r.WithoutGhost, FlatNotes: r.FlatNotes, FakeHarness: r.FakeHarness, SaveOutputs: map[string]string{}, OpeningRaw: map[string]string{}}
 	order := []string{}
+	// notes is every record saved so far, in save order: the flat-notes arm's
+	// file. It is filled in every arm (it costs nothing) and read in that one.
+	var notes []Record
 	res.Opening = make(map[string]string, len(r.Story.Opening))
 	for _, rec := range r.Story.Opening {
 		id, raw, err := r.saveRaw(ctx, rec)
@@ -293,6 +318,7 @@ func (r *Run) Execute(ctx context.Context) (*Result, error) {
 			return nil, fmt.Errorf("opening record %s: %w", rec.Key, err)
 		}
 		order = append(order, id)
+		notes = append(notes, rec)
 		// Kept on the Result, not only in the local order slice: a storyline may
 		// reverse an opening record, and the grade resolves the edge through both
 		// keys. See Result.Opening.
@@ -315,7 +341,10 @@ func (r *Run) Execute(ctx context.Context) (*Result, error) {
 		// below, so the store is the one the Ghost arm has, and the session is
 		// handed an empty block inside the same prompt framing.
 		var block string
-		if !r.WithoutGhost {
+		if r.FlatNotes {
+			block = notesBlock(notes)
+		}
+		if ghostArm {
 			var err error
 			block, err = r.call(ctx, func(c context.Context) (string, error) {
 				return r.Ghost.Context(c, r.WorkDir, stage.SessionScope)
@@ -325,7 +354,7 @@ func (r *Run) Execute(ctx context.Context) (*Result, error) {
 			}
 		}
 		var probes map[string]string
-		if !r.WithoutGhost && len(stage.Probes) > 0 {
+		if ghostArm && len(stage.Probes) > 0 {
 			// A real session starts minutes after the last one ended, not
 			// milliseconds, so its search reads a store whose embeddings have
 			// caught up. Without the wait the vector leg would miss the newest
@@ -367,6 +396,7 @@ func (r *Run) Execute(ctx context.Context) (*Result, error) {
 			sess.Saved[rec.Key] = id
 			res.SaveOutputs[rec.Key] = raw
 			order = append(order, id)
+			notes = append(notes, rec)
 		}
 		if len(stage.Records) > 0 {
 			r.lastStageSave = time.Now()
@@ -376,14 +406,14 @@ func (r *Run) Execute(ctx context.Context) (*Result, error) {
 			i+1, len(r.Story.Stages), len(block), len(answer), len(stage.Records))
 		// The last stage's lifecycle is the arc's own, below, so a Lifecycle
 		// flag there would only run it twice.
-		if stage.Lifecycle && !r.WithoutGhost && i < len(r.Story.Stages)-1 {
+		if stage.Lifecycle && ghostArm && i < len(r.Story.Stages)-1 {
 			if err := r.midArcLifecycle(ctx, res, order, i); err != nil {
 				return nil, err
 			}
 		}
 	}
 
-	if !r.WithoutGhost {
+	if ghostArm {
 		if err := r.arcStages(ctx, res, order); err != nil {
 			return nil, err
 		}

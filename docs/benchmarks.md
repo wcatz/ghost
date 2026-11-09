@@ -1149,6 +1149,25 @@ go run ./eval/storyline -storyline all -without-ghost -runs 10 \
   -model opencode-go/glm-5.3-flash -opencode-auth-file ~/.local/share/opencode/auth.json
 ```
 
+**The flat-notes arm.** An empty block is the floor, not the alternative: a host
+with built-in file memory (a project notes file and a user-level one, loaded at
+session start) hands the agent every note it kept. `-flat-notes` runs that
+baseline as a third arm on the same build, model, scripts and saves: each session
+is handed every record saved before it, oldest first, as a plain markdown notes
+file inside the same prompt framing. It is generous on purpose, so a Ghost win
+means something. Nothing is filtered (an expired or replaced line stays until
+someone edits it out, as in a real notes file), but a record's `valid_until` and
+scope are written beside it the way a person would ("(valid until 2025-01-31)",
+"(applies to environment=staging)"), and a global record goes under a user-level
+heading. What it leaves out is Ghost's own work: ids, categories, replacement
+marks, ranking and any budget. It is graded like the without-Ghost arm, on the
+answer lines only, and its misses never decide the exit code. `-flat-notes` is
+refused with `-fake-harness`, which answers with a fixed string. The arcs inject
+under 3 KB, so this arm measures whether Ghost's marking beats raw chronology on
+reversals and expiry, not scale. Read the "stale/mistake used" column per arc.
+Whether Ghost's selection beats a notes file the host truncates needs an arc with
+hundreds of memories, which none of these is.
+
 **Targets, not measurements.** These are the numbers a 10-run table is read
 against; none of them has been measured, no results artifact ships, and nothing
 gates on them:
