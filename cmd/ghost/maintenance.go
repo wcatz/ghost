@@ -22,10 +22,10 @@ type maintenanceStatusView struct {
 	Root      string
 	RootBytes int64
 	RootFiles int
-	// RootMeasureErr is why the scratch root could not be measured. scratch.Size
-	// returns (0, 0, err) when its walk meets an entry it cannot read, so the
-	// zeros that come back with the error are a FAILED measurement and never an
-	// empty root: the header names the failure instead of printing the zeros
+	// RootMeasureErr is why the scratch root could not be measured. Size fails
+	// only when the root itself cannot be read (or cannot be resolved), so the
+	// counts it returns with the error are a failed measurement and never an
+	// empty root: the header names the failure instead of printing the counts
 	// as the root's size.
 	RootMeasureErr error
 	Budget         int64
@@ -56,8 +56,8 @@ func printMaintenanceStatus(w io.Writer, v maintenanceStatusView) error {
 	usage := fmt.Sprintf("%d bytes in %d files", v.RootBytes, v.RootFiles)
 	if v.RootMeasureErr != nil {
 		// A measurement that failed is not an empty measurement: the counts
-		// scratch.Size returns with its error are zeros, and printing them as
-		// the root's size reports an unmeasured root as an empty one — which
+		// scratch.Size returns with its error must not be printed as the
+		// root's size, or an unmeasured root reads as an empty one — which
 		// is what this line used to do, silently and with exit 0.
 		usage = fmt.Sprintf("could not be measured: %s", assemble.Label(v.RootMeasureErr.Error()))
 	}
@@ -154,11 +154,12 @@ func runMaintenanceStatus() {
 // measureScratchRoot fills the view's scratch-root fields from the live root.
 //
 // The failure is part of the measurement, and it travels with the counts:
-// scratch.Size returns (0, 0, err) when its walk meets an entry it cannot
-// read — a directory the owner cannot enter, a file it cannot stat — because a
-// partial count would be a claim about bytes it never saw. So a caller that
-// kept only the numbers would report an unmeasured root as an empty one, which
-// is what `ghost maintenance status` used to print.
+// scratch.Size fails only when the root itself cannot be read, because a
+// partial count would be a claim about bytes it never saw. Size skips
+// unreadable entries inside a readable root, so one unreadable subtree does
+// not make this measurement a failure. A caller that kept only the numbers
+// would report an unmeasured root as an empty one, which is what
+// `ghost maintenance status` used to print.
 //
 // A root that cannot be resolved at all is the same state one step earlier:
 // there is nothing to measure, and the reason is reported rather than a size

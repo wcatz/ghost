@@ -1,6 +1,7 @@
 package scratch
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -11,6 +12,9 @@ import (
 
 	"github.com/wcatz/ghost/internal/procstat"
 )
+
+// errForcedRemoval is the failure the removal seams are pinned to return.
+var errForcedRemoval = errors.New("removal forced to fail by test")
 
 // writeOwnerDir creates a scratch-dir stand-in named name under root with an
 // optional .owner marker, so Reap's classification can be tested without Open.
@@ -740,5 +744,60 @@ func TestReap_RemovesDeadOwnerEntryWithRestrictiveSubdir(t *testing.T) {
 	}
 	if _, statErr := os.Stat(dir); !os.IsNotExist(statErr) {
 		t.Fatalf("entry survived Reap (stat err %v)", statErr)
+	}
+}
+
+// TestReap_ReportsUnremovableEntry: an entry whose removal fails is counted as
+// failed (not silently dropped): removed == 0, failed == 1, and no error for
+// the caller, with the entry still on disk.
+func TestReap_ReportsUnremovableEntry(t *testing.T) {
+	const deadPid = 1 << 30
+	root := t.TempDir()
+	t.Setenv("GHOST_SCRATCH_DIR", root)
+
+	dir := writeOwnerDir(t, root, "999-0123456789abcdef", "pid="+strconv.Itoa(deadPid)+"\ntoken=aa\nstart=gone\n")
+	prev := removeTree
+	removeTree = func(string) error { return errForcedRemoval }
+	t.Cleanup(func() { removeTree = prev })
+
+	removed, failed, err := Reap(time.Hour)
+	if err != nil {
+		t.Fatalf("Reap: %v", err)
+	}
+	if removed != 0 || failed != 1 {
+		t.Errorf("Reap = (removed=%d, failed=%d), want (0, 1)", removed, failed)
+	}
+	if _, statErr := os.Lstat(dir); statErr != nil {
+		t.Errorf("entry vanished although removal failed: %v", statErr)
+	}
+}
+
+// TestReap_ReportsUnremovableIDFile: the stale follow-up id file whose
+// removal fails is counted as failed, not silently dropped.
+func TestReap_ReportsUnremovableIDFile(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("GHOST_SCRATCH_DIR", root)
+
+	path := filepath.Join(root, "supersede-reassess-proj-20260101T000000Z-123-0123456789abcdef.ids")
+	if err := os.WriteFile(path, []byte("# one id\naaaaaaaa1111111111111111111111\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-90 * 24 * time.Hour)
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatal(err)
+	}
+	prev := removeFile
+	removeFile = func(string) error { return errForcedRemoval }
+	t.Cleanup(func() { removeFile = prev })
+
+	removed, failed, err := Reap(0)
+	if err != nil {
+		t.Fatalf("Reap: %v", err)
+	}
+	if removed != 0 || failed != 1 {
+		t.Errorf("Reap = (removed=%d, failed=%d), want (0, 1)", removed, failed)
+	}
+	if _, statErr := os.Lstat(path); statErr != nil {
+		t.Errorf("id file vanished although removal failed: %v", statErr)
 	}
 }

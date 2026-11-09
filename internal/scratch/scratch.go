@@ -173,6 +173,11 @@ func ownerMarkerText(pid int, token, start string, haveStart bool) string {
 	return "pid=" + strconv.Itoa(pid) + "\ntoken=" + token + "\nstart=" + start + "\n"
 }
 
+// removeTree and removeFile are variables so tests can force removal to fail
+// deterministically. Production code never reassigns them.
+var removeTree = os.RemoveAll
+var removeFile = os.Remove
+
 // Path returns the directory's absolute path.
 func (d *Dir) Path() string { return d.path }
 
@@ -183,11 +188,39 @@ func (d *Dir) Path() string { return d.path }
 // until the directory is writable and traversable. It is best-effort: a path
 // that still cannot be read after the chmod is left for the caller's removal
 // to report.
+//
+// The chmod goes through an open descriptor where the directory can be opened
+// (O_NOFOLLOW refuses a symlink swapped in after the lstat), so chmod follows
+// no link. A directory mode 0000 cannot be opened at all, so that case falls
+// back to a path chmod — the lstat above refused a link at the path, and the
+// root is Ghost-owned (0700), so the window is the owner's own processes.
 func makeRemovable(path string) {
 	info, err := os.Lstat(path)
 	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 		return
 	}
+	if f, err := os.OpenFile(path, ownerOpenFlags, 0); err == nil {
+		defer func() { _ = f.Close() }()
+		if fi, err := f.Stat(); err != nil || !fi.IsDir() {
+			return
+		}
+		if err := f.Chmod(0o700); err != nil {
+			return
+		}
+		entries, err := f.ReadDir(-1)
+		if err != nil {
+			return
+		}
+		for _, entry := range entries {
+			if entry.IsDir() {
+				makeRemovable(filepath.Join(path, entry.Name()))
+			}
+		}
+		return
+	}
+	// Unopenable (a mode-0000 directory): best-effort chmod by path so the
+	// listing below can run; a failure leaves the tree for RemoveAll to
+	// report.
 	_ = os.Chmod(path, 0o700)
 	entries, err := os.ReadDir(path)
 	if err != nil {
@@ -293,7 +326,7 @@ func Reap(maxAge time.Duration) (removed, failed int, err error) {
 		// os.Remove below removes one file and never descends.
 		if info.Mode().IsRegular() && isReassessIDFile(entry.Name()) {
 			if now.Sub(info.ModTime()) > idFileStaleAge {
-				if rmErr := os.Remove(path); rmErr == nil {
+				if rmErr := removeFile(path); rmErr == nil {
 					removed++
 				} else if !os.IsNotExist(rmErr) {
 					failed++
@@ -332,7 +365,7 @@ func Reap(maxAge time.Duration) (removed, failed int, err error) {
 			}
 		}
 		makeRemovable(path)
-		if rmErr := os.RemoveAll(path); rmErr == nil {
+		if rmErr := removeTree(path); rmErr == nil {
 			removed++
 		} else if !os.IsNotExist(rmErr) {
 			failed++

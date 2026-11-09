@@ -47,8 +47,10 @@ type BudgetResult struct {
 // not an error anywhere this is used. An entry or subdirectory that cannot be
 // read is skipped so the measurement reflects what it can: one unreadable
 // subtree must not disable a caller's budget check. An unreadable root is
-// returned as an error.
+// returned as an error. Skipped entries leave a debug trace so the hidden
+// bytes stay findable.
 func Size(dir string) (bytes int64, files int, err error) {
+	skipped := 0
 	walkErr := filepath.WalkDir(dir, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			if os.IsNotExist(walkErr) && path == dir {
@@ -57,6 +59,7 @@ func Size(dir string) (bytes int64, files int, err error) {
 			if path == dir {
 				return walkErr // unreadable root: the measurement cannot proceed
 			}
+			skipped++
 			if d != nil && d.IsDir() {
 				return fs.SkipDir // unreadable subdirectory: measure what we can
 			}
@@ -70,6 +73,7 @@ func Size(dir string) (bytes int64, files int, err error) {
 			if os.IsNotExist(err) {
 				return nil // vanished mid-walk
 			}
+			skipped++
 			return nil // cannot stat: skip it, measure what we can
 		}
 		if !info.Mode().IsRegular() {
@@ -81,6 +85,9 @@ func Size(dir string) (bytes int64, files int, err error) {
 	})
 	if walkErr != nil {
 		return bytes, files, fmt.Errorf("size %s: %w", dir, walkErr)
+	}
+	if skipped > 0 {
+		slog.Debug("scratch size: skipped unreadable entries", "dir", dir, "skipped", skipped)
 	}
 	return bytes, files, nil
 }

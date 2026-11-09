@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -65,7 +66,7 @@ func captureLogs(t *testing.T) *bytes.Buffer {
 	t.Helper()
 	var buf bytes.Buffer
 	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	t.Cleanup(func() { slog.SetDefault(prev) })
 	return &buf
 }
@@ -435,6 +436,7 @@ func TestSize_MeasuresWhatItCanWithUnreadableSubdir(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(sub, 0o700) })
 
+	logs := captureLogs(t)
 	gotBytes, gotFiles, err := Size(root)
 	if err != nil {
 		t.Fatalf("Size: %v", err)
@@ -444,6 +446,9 @@ func TestSize_MeasuresWhatItCanWithUnreadableSubdir(t *testing.T) {
 	}
 	if gotFiles != 1 {
 		t.Errorf("Size files = %d, want 1 (measure what it can)", gotFiles)
+	}
+	if !strings.Contains(logs.String(), "skipped unreadable entries") {
+		t.Errorf("skipped entries left no trace in the log:\n%s", logs.String())
 	}
 }
 
@@ -543,5 +548,113 @@ func TestSize_UnreadableRootReturnsError(t *testing.T) {
 	_, _, err := Size(root)
 	if err == nil {
 		t.Fatal("Size returned no error for an unreadable root")
+	}
+}
+
+// TestEnforceBudget_ReportsUnremovableStaleEntries: a stale entry whose
+// removal fails makes the fired budget check report ReapFailed and record a
+// maintenance_runs row that names the entries it could not remove.
+func TestEnforceBudget_ReportsUnremovableStaleEntries(t *testing.T) {
+	const deadPid = 1 << 30
+	root := t.TempDir()
+	t.Setenv("GHOST_SCRATCH_DIR", root)
+	t.Setenv("GHOST_SCRATCH_MAX_BYTES", "512")
+	dataHome := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", dataHome)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	if err := os.MkdirAll(filepath.Join(dataHome, "ghost"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	db, err := openTestDB(filepath.Join(dataHome, "ghost", "ghost.db"))
+	if err != nil {
+		t.Fatalf("seed db: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	stale := writeOwnerDir(t, root, "123-0123456789abcdef", "pid="+strconv.Itoa(deadPid)+"\ntoken=aa\nstart=gone\n")
+	if err := os.WriteFile(filepath.Join(stale, "payload"), make([]byte, 1024), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	prev := removeTree
+	removeTree = func(string) error { return errForcedRemoval }
+	t.Cleanup(func() { removeTree = prev })
+
+	logs := captureLogs(t)
+	res := EnforceBudget()
+
+	if !res.Fired {
+		t.Fatalf("budget check did not fire: %+v", res)
+	}
+	if res.ReapedCount != 0 || res.ReapFailed != 1 {
+		t.Errorf("reaped = (%d, failed %d), want (0, 1)", res.ReapedCount, res.ReapFailed)
+	}
+	if !res.Recorded {
+		t.Errorf("Recorded = false, want true")
+	}
+	for _, want := range []string{"could not remove stale entries", "failed=1"} {
+		if !strings.Contains(logs.String(), want) {
+			t.Errorf("log missing %q; slog output:\n%s", want, logs.String())
+		}
+	}
+
+	db, err = openTestDB(filepath.Join(dataHome, "ghost", "ghost.db"))
+	if err != nil {
+		t.Fatalf("reopen db: %v", err)
+	}
+	defer db.Close() //nolint:errcheck
+	var note string
+	if err := db.QueryRow(`SELECT note FROM maintenance_runs`).Scan(&note); err != nil {
+		t.Fatalf("select note: %v", err)
+	}
+	if !strings.Contains(note, "1 stale entries could not be removed") {
+		t.Errorf("note = %q, want it to name the unremoved stale entries", note)
+	}
+}
+
+// TestRecordBudgetRun_ReapFailedNotDropped: the note a recorded run carries
+// names the entries the reap could not remove.
+func TestRecordBudgetRun_ReapFailedNotDropped(t *testing.T) {
+	dataHome := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", dataHome)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	if err := os.MkdirAll(filepath.Join(dataHome, "ghost"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(dataHome, "ghost", "ghost.db")
+	seed, err := openTestDB(dbPath)
+	if err != nil {
+		t.Fatalf("seed db: %v", err)
+	}
+	if err := seed.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	res := BudgetResult{
+		Root:       "/root/scratch",
+		MaxBytes:   512,
+		BytesAfter: 1024,
+		ReapFailed: 2,
+		OverBudget: true,
+	}
+	if !recordBudgetRun(res) {
+		t.Fatalf("recordBudgetRun = false, want a recorded row")
+	}
+
+	db, err := openTestDB(dbPath)
+	if err != nil {
+		t.Fatalf("reopen db: %v", err)
+	}
+	defer db.Close() //nolint:errcheck
+	var note string
+	if err := db.QueryRow(`SELECT note FROM maintenance_runs`).Scan(&note); err != nil {
+		t.Fatalf("select note: %v", err)
+	}
+	if !strings.Contains(note, "2 stale entries could not be removed") {
+		t.Errorf("note = %q, want the unremoved count", note)
 	}
 }
