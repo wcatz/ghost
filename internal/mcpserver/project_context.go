@@ -262,11 +262,14 @@ func itemLines(items []assemble.Item) []string {
 
 // projectContextPinnedLine is the parenthetical a section ends with when pinned
 // rows were cut, and "" for none. A pin is a slot guarantee, so a pinned row is
-// only ever cut when there are more of them than the cap holds; the rows shown are
-// then the best-ranked of the pinned ones.
-func projectContextPinnedLine(n int, whose string) string {
+// only ever cut when there are more of them than the cap holds; when rows are
+// shown they are the best-ranked of the pinned ones.
+func projectContextPinnedLine(n int, whose string, shown int) string {
 	if n <= 0 {
 		return ""
+	}
+	if shown == 0 {
+		return fmt.Sprintf("(%d pinned %smemories cut: the pinned rows alone exceed the cap, and none of them is shown in this block. Call ghost_memories_list to see the rest.)\n", n, whose)
 	}
 	return fmt.Sprintf("(%d pinned %smemories cut: the pinned rows alone exceed the cap, and the ones shown are the "+
 		"best-ranked of them. Call ghost_memories_list to see the rest.)\n", n, whose)
@@ -278,7 +281,7 @@ func projectContextPinnedLine(n int, whose string) string {
 // a section its heading, so when the project's own section has no rows its count
 // is returned as foldedOwn instead, to lead the `## Global` section's note, still
 // named as the project's. globalLine is the `_global` rows' own count.
-func projectContextPinnedLines(res assemble.Result, projectID string, own []assemble.Item) (ownLine, foldedOwn, globalLine string) {
+func projectContextPinnedLines(res assemble.Result, projectID string, own, globals []assemble.Item) (ownLine, foldedOwn, globalLine string) {
 	if res.Trace == nil {
 		return "", "", ""
 	}
@@ -286,8 +289,8 @@ func projectContextPinnedLines(res assemble.Result, projectID string, own []asse
 	if projectID == memory.GlobalProjectID {
 		ownCut = 0
 	}
-	ownLine = projectContextPinnedLine(ownCut, "")
-	globalLine = projectContextPinnedLine(res.Trace.PinnedCut[memory.GlobalProjectID], "global ")
+	ownLine = projectContextPinnedLine(ownCut, "", len(own))
+	globalLine = projectContextPinnedLine(res.Trace.PinnedCut[memory.GlobalProjectID], "global ", len(globals))
 	if len(own) == 0 {
 		// Under a heading whose rows are another project's, the section-local
 		// sentence ("the ones shown are the best-ranked of them") would claim a set
@@ -475,7 +478,7 @@ func (s *Server) projectContextGlobalRows(ctx context.Context, limit int, alread
 		}
 		// This section's own cap is the one that decided what the section holds, so
 		// its count replaces the union window's rather than adding to it.
-		line = projectContextPinnedLine(cut, "global ")
+		line = projectContextPinnedLine(cut, "global ", len(rows))
 	}
 	return rows, line
 }
@@ -826,7 +829,7 @@ func (s *Server) projectContextBlock(ctx context.Context, projectID, asked strin
 			return "", err
 		}
 		own, globals = projectContextSplit(memories.Items)
-		ownLine, foldedOwn, globalLine := projectContextPinnedLines(memories, projectID, own)
+		ownLine, foldedOwn, globalLine := projectContextPinnedLines(memories, projectID, own, globals)
 		if len(globals) == 0 && globalLine != "" {
 			// The mirror of the fold above: no `_global` row is on the page, so the
 			// count must not conjure the Global heading or claim shown rows. It

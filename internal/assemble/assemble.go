@@ -182,6 +182,12 @@ type Budget struct {
 	// guaranteed to be (a behavioral reservation and a supersede reorder both
 	// place unpinned rows above it).
 	KeepPinned bool
+	// ReserveByProject keeps at least the stated number of items per Item.ProjectID
+	// in the answer when items from other buckets can be cut instead. The response-fit
+	// pass must not take a reserved bucket below its minimum. KeepPinned still
+	// prefers cutting unpinned rows before pinned rows when selecting among
+	// candidates that do not violate a reserve.
+	ReserveByProject map[string]int
 }
 
 // Condition is the retrieval condition. It is an alias so a request and the

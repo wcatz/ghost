@@ -248,3 +248,90 @@ func TestKeepPinnedCutsUnpinnedRowsFirst(t *testing.T) {
 		t.Errorf("cut order %q, want U3,U2,U1: lowest-ranked unpinned first", got)
 	}
 }
+
+// TestReserveByProjectKeepsGlobalBucketFromZero: the response-fit pass must not
+// empty a reserved bucket to zero when other buckets can be cut, and it prefers
+// keeping pinned rows in that bucket.
+func TestReserveByProjectKeepsGlobalBucketFromZero(t *testing.T) {
+	var cands []memory.Candidate
+	for i, id := range []string{"P1", "P2", "P3"} {
+		c := ranked(id, i, strings.Repeat("x", 100))
+		c.ProjectID = "proj"
+		cands = append(cands, c)
+	}
+	for i, id := range []string{"G1", "GP"} {
+		c := ranked(id, 10+i, strings.Repeat("x", 100))
+		c.ProjectID = memory.GlobalProjectID
+		c.Pinned = id == "GP"
+		cands = append(cands, c)
+	}
+	req := baseRequest()
+	req.Budget.MaxItems = 10
+	req.Budget.KeepPinned = true
+	req.Budget.MaxBytes = 150
+	req.Budget.ReserveByProject = map[string]int{memory.GlobalProjectID: 1}
+	req.Budget.Measure = func(items []Item, _ *Trace) int { return 100 * len(items) }
+	res := run(t, &fakeRetriever{set: ftsOnlySet(cands...)}, req)
+	gotGlobals := 0
+	hasPinnedGlobal := false
+	for _, it := range res.Items {
+		if it.ProjectID == memory.GlobalProjectID {
+			gotGlobals++
+			if it.Pinned {
+				hasPinnedGlobal = true
+			}
+		}
+	}
+	if gotGlobals == 0 {
+		t.Fatalf("kept %v, want at least one global row; the fit pass must not empty the reserved global bucket", itemIDs(res.Items))
+	}
+	if !hasPinnedGlobal {
+		t.Fatalf("kept %v, want the pinned global row preserved first", itemIDs(res.Items))
+	}
+}
+
+// TestReserveGivesWayWhenASingleGlobalRowCannotStay: a reserved bucket row is
+// cut last, but it is still cut when keeping it would leave the block over the
+// byte cap.
+func TestReserveGivesWayWhenASingleGlobalRowCannotStay(t *testing.T) {
+	c := ranked("G1", 0, strings.Repeat("x", 100))
+	c.ProjectID = memory.GlobalProjectID
+	req := baseRequest()
+	req.Budget.MaxItems = 10
+	req.Budget.KeepPinned = true
+	req.Budget.MaxBytes = 10
+	req.Budget.FramingCeiling = 1000
+	req.Budget.ReserveByProject = map[string]int{memory.GlobalProjectID: 1}
+	req.Budget.Measure = func(items []Item, _ *Trace) int { return 100 * len(items) }
+	res := run(t, &fakeRetriever{set: ftsOnlySet(c)}, req)
+	if len(res.Items) != 0 {
+		t.Fatalf("kept %v, want no rows: the reserved global row cannot fit the byte cap", itemIDs(res.Items))
+	}
+	if tally := CountsFor(res.Trace, memory.GlobalProjectID, 0); tally.ByteCut != 1 {
+		t.Errorf("global tally ByteCut=%d, want 1", tally.ByteCut)
+	}
+}
+
+// TestReserveWithoutKeepPinnedCutsOtherBucketFirst: with KeepPinned off the
+// reserve still holds, and a pinned flag plays no part in which row is cut.
+func TestReserveWithoutKeepPinnedCutsOtherBucketFirst(t *testing.T) {
+	var cands []memory.Candidate
+	for i, id := range []string{"P1", "P2"} {
+		c := ranked(id, i, strings.Repeat("x", 100))
+		c.ProjectID = "proj"
+		cands = append(cands, c)
+	}
+	g := ranked("G1", 10, strings.Repeat("x", 100))
+	g.ProjectID = memory.GlobalProjectID
+	cands = append(cands, g)
+	req := baseRequest()
+	req.Budget.MaxItems = 10
+	req.Budget.KeepPinned = false
+	req.Budget.MaxBytes = 100
+	req.Budget.ReserveByProject = map[string]int{memory.GlobalProjectID: 1}
+	req.Budget.Measure = func(items []Item, _ *Trace) int { return 100 * len(items) }
+	res := run(t, &fakeRetriever{set: ftsOnlySet(cands...)}, req)
+	if got := strings.Join(itemIDs(res.Items), ","); got != "G1" {
+		t.Errorf("kept %q, want only G1: the lowest-ranked project rows go before the reserved global row", got)
+	}
+}

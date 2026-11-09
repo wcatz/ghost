@@ -666,7 +666,13 @@ func sessionCountsLine(tally assemble.BucketTally, rankPhrase, toolPhrase string
 	// A pin is a slot guarantee, so pinned rows are the last to be cut and only
 	// the cap itself can cut one. Said apart from the ranking's cut, because
 	// those rows were not outranked: there were more of them than the bucket has
-	// places for, and the ones shown are the best-ranked of the pinned rows.
+	// places for, and the ones shown are the best-ranked of the pinned rows. When
+	// none are shown, that claim would be false, so the note states that none of
+	// the pinned rows reached the block.
+	if tally.Shown == 0 {
+		return fmt.Sprintf("%s; %d pinned memories cut: the pinned rows alone exceed the cap, and none of them are shown above",
+			line, tally.PinnedCut)
+	}
 	return fmt.Sprintf("%s; %d pinned memories cut: the pinned rows alone exceed the cap, and the ones shown are the best-ranked of them",
 		line, tally.PinnedCut)
 }
@@ -967,9 +973,10 @@ func renderHistoricalSessionContext(cwd string, asOf time.Time) string {
 	// none, and a framing already over the host's own limit keeps its rows
 	// rather than being cut for nothing.
 	items, _ = assemble.FitItems(items, assemble.Budget{
-		MaxBytes:       sessionStartByteCap,
-		KeepPinned:     true,
-		FramingCeiling: sessionHostLimit,
+		MaxBytes:         sessionStartByteCap,
+		KeepPinned:       true,
+		FramingCeiling:   sessionHostLimit,
+		ReserveByProject: sessionGlobalReserve(),
 	}, func(rows []assemble.Item) int { return len(render(rows, tally)) }, allCutFraming, cut, nil, false)
 	block := render(items, tally)
 	if readErr != "" {

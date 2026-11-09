@@ -69,6 +69,15 @@ type sessionFrame struct {
 	interactionCount int
 }
 
+// sessionGlobalReserve is the session-start minimum for the global bucket: the
+// response-fit pass keeps at least this many rows when other rows can be cut,
+// and cuts it last, only when the hard host limit cannot otherwise be met.
+// Pinned rows are preferred because the fit pass cuts unpinned rows first when
+// KeepPinned is set.
+func sessionGlobalReserve() map[string]int {
+	return map[string]int{memory.GlobalProjectID: 1}
+}
+
 // sessionPassiveBudget is the ONE statement of what the session-start block
 // selects, and it is the only place the two bucket policies are written down.
 //
@@ -136,7 +145,10 @@ func sessionPassiveBudget(cfg *config.Config, projectID string) assemble.Budget 
 		// in a block that competes for attention across every project.
 		DropDemotedLosers: true,
 	})
-	return assemble.Budget{Slices: slices}
+	return assemble.Budget{
+		Slices:           slices,
+		ReserveByProject: sessionGlobalReserve(),
+	}
 }
 
 // sessionTally is the two buckets' fates as the session-start block needs them,
@@ -323,6 +335,10 @@ func loadSessionPassive(ctx context.Context, store *memory.Store, cfg *config.Co
 	}
 	budget.MaxBytes = sessionStartByteCap
 	budget.KeepPinned = true
+	// The global bucket keeps a reserved minimum so the response-fit pass cannot
+	// empty it when project rows consume the byte cap. Pinned rows are preferred
+	// because KeepPinned cuts unpinned rows first.
+	budget.ReserveByProject = sessionGlobalReserve()
 	// The host's own limit: a framing that reaches it even with every row cut
 	// cannot be helped by cutting rows, so those rows are kept instead of cut for
 	// nothing. Decided once by the fit pass, against the all-cut framing.
