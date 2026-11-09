@@ -83,24 +83,25 @@ func TestVetoKeepLetsGenuineEvidenceThrough(t *testing.T) {
 // fails too, so the list stays the audited set.
 func TestVetoKeepPatternList(t *testing.T) {
 	byName := map[string]*regexp.Regexp{}
-	for _, p := range append(append([]vetoPattern{}, keepVetoImperatives...), keepVetoOpenMarkers...) {
+	for _, p := range append(append(append([]vetoPattern{}, keepVetoImperatives...), keepVetoOpenMarkers...), keepVetoFixLanded...) {
 		byName[p.pattern] = p.re
 	}
 	// pattern -> the shortest note that carries it and nothing else.
 	want := map[string]string{
-		"never":         "never run restore on one spindle",
-		"do not":        "do not restart mithril-sync by hand",
-		"don't":         "don\u2019t restart mithril-sync by hand",
-		"must":          "the env var must be unset",
-		"always":        "always archive the backup set first",
-		"required":      "a rebase is required before the push",
-		"not yet":       "the delete-blob path is not yet fixed",
-		"outstanding":   "outstanding: nobody checked the restore path",
-		"still pending": "the reward-import fix is still pending review",
-		"still open":    "the safety lesson is still open",
-		"still stale":   "still stale: the runbook image tag",
-		"unresolved":    "the env-var precedence question is unresolved",
-		"todo":          "todo: document the one-spindle restore",
+		"never":           "never run restore on one spindle",
+		"do not":          "do not restart mithril-sync by hand",
+		"don't":           "don\u2019t restart mithril-sync by hand",
+		"must":            "the env var must be unset",
+		"always":          "always archive the backup set first",
+		"required":        "a rebase is required before the push",
+		"not yet":         "the delete-blob path is not yet fixed",
+		"outstanding":     "outstanding: nobody checked the restore path",
+		"still pending":   "the reward-import fix is still pending review",
+		"still open":      "the safety lesson is still open",
+		"still stale":     "still stale: the runbook image tag",
+		"unresolved":      "the env-var precedence question is unresolved",
+		"todo":            "todo: document the one-spindle restore",
+		"fixed in commit": "fixed in commit abc1234: the totals map is initialised before the loop",
 	}
 
 	if len(byName) != len(want) {
@@ -223,5 +224,91 @@ func TestVetoKeepReasonNamesThePattern(t *testing.T) {
 	}
 	if !strings.Contains(strings.ToLower(reason), "stale") {
 		t.Errorf("reason = %q, want the matched pattern text", reason)
+	}
+}
+
+// TestVetoKeepFixInCommitIsKept: a note that names the commit that landed a
+// fix states the current behaviour, not history — it is the resolution of the
+// crash it fixes, not resolved evidence itself. The classifier must never be
+// asked about it, because a model that reads it as a changelog buries the fix
+// with the crash.
+func TestVetoKeepFixInCommitIsKept(t *testing.T) {
+	fix := "Fixed in commit 4f2a9c1: the exporter initialises the per-tenant totals map before the loop, so a tenant with no usage rows no longer crashes the nightly export; the job has been green since."
+	reason, vetoed := VetoKeep(fix)
+	if !vetoed {
+		t.Errorf("VetoKeep(fix) = false, want a KEEP veto for a fix-in-commit note")
+	}
+	if reason != "fixed in commit" {
+		t.Errorf("reason = %q, want the matched pattern text", reason)
+	}
+	// Case-insensitive like the shouting-rule patterns: memories shout their fixes too.
+	if _, vetoed := VetoKeep("FIXED IN COMMIT abc1234: the totals map is initialised before the loop"); !vetoed {
+		t.Errorf("VetoKeep(shouting fix) = false, want a veto (patterns are case-insensitive)")
+	}
+}
+
+// TestVetoKeepFixInPRStillReachesClassifier: the veto is commit-anchored on
+// purpose. A PR- or version-anchored "fixed in" note is the changelog shape
+// resolve exists to retire, so it must still be judged, not settled free.
+func TestVetoKeepFixInPRStillReachesClassifier(t *testing.T) {
+	for _, content := range []string{
+		"fixed in PR #210, dead ranking bonus removed",
+		"Changelog: connection leak fixed in v0.9.3 (PR #398). Concluded work.",
+	} {
+		if reason, vetoed := VetoKeep(content); vetoed {
+			t.Errorf("VetoKeep(%q) = %q, want no veto (only the commit anchor is a fix veto)", content, reason)
+		}
+	}
+}
+
+// TestRunKeepsFixInCommitWhileRetiringCrash: the regressed-fix shape. The fix
+// note supersedes the crash note, so the piggyback retires the crash; the fix
+// note itself must stay live even when the classifier would resolve it.
+func TestRunKeepsFixInCommitWhileRetiringCrash(t *testing.T) {
+	crash := memory.Memory{ID: "crash", Category: "gotcha",
+		Content: "The nightly export panics with 'assignment to entry in nil map' when a tenant has no usage rows; the job exits 2 and the warehouse misses that night's load."}
+	fix := memory.Memory{ID: "fix", Category: "fact",
+		Content: "Fixed in commit 4f2a9c1: the exporter initialises the per-tenant totals map before the loop, so a tenant with no usage rows no longer crashes the nightly export; the job has been green since."}
+	owner := memory.Memory{ID: "owner", Category: "fact",
+		Content: "tally-exporter is the nightly job that exports per-tenant usage to the billing warehouse."}
+	store := &fakeStore{
+		candidates: []memory.Memory{owner, crash, fix},
+		links: []memory.Link{{
+			SourceID: "fix", TargetID: "crash", Relation: "supersedes", Source: "llm",
+		}},
+	}
+	// The classifier would resolve the fix note; the veto must stop it.
+	cls := &fakeClassifier{drop: map[string]bool{fix.Content: true}}
+
+	res, confirmed, err := Run(context.Background(), store, cls, "proj", true, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Loaded != 3 {
+		t.Errorf("res.Loaded = %d, want 3", res.Loaded)
+	}
+	if res.Candidates != 1 {
+		t.Errorf("res.Candidates = %d, want 1 (only the fix note carries a resolution keyword)", res.Candidates)
+	}
+	if res.Superseded != 1 {
+		t.Errorf("res.Superseded = %d, want 1 (the crash is retired by the supersedes edge)", res.Superseded)
+	}
+	if res.Vetoed != 1 {
+		t.Errorf("res.Vetoed = %d, want 1 (the fix note is settled KEEP)", res.Vetoed)
+	}
+	if res.Confirmed != 0 {
+		t.Errorf("res.Confirmed = %d, want 0 (the fix note must not be resolved by the classifier)", res.Confirmed)
+	}
+	if cls.calls != 0 {
+		t.Errorf("classifier calls = %d, want 0 (the fix note is vetoed before the call)", cls.calls)
+	}
+	if len(confirmed) != 1 || confirmed[0].ID != "crash" {
+		t.Errorf("confirmed = %v, want [crash] only", confirmed)
+	}
+	if len(store.resolved) != 1 || store.resolved[0] != "crash" {
+		t.Errorf("resolved = %v, want [crash] only", store.resolved)
+	}
+	if res.Resolved != 1 {
+		t.Errorf("res.Resolved = %d, want 1", res.Resolved)
 	}
 }
