@@ -357,14 +357,13 @@ func TestBindProjectPathIsIdempotentThroughASymlink(t *testing.T) {
 	}
 }
 
-// TestBindProjectPathRewritesAnAliasedPath — a project recorded under a
-// symlink's own spelling is rewritten to the physical path, and the rewrite is
-// reported. It has to be: the resolver narrows its candidate query on the
-// stored TEXT, so an alias and its target share no prefix, and a session
-// reporting the physical directory — which is what a shell's working directory
-// is — would find nothing. Leaving the alias in place would leave the project
-// exactly as unresolvable as bind was called to fix it.
-func TestBindProjectPathRewritesAnAliasedPath(t *testing.T) {
+// TestBindProjectPathLeavesAnAliasedPathAlone — a project recorded under a
+// symlink's own spelling is the same binding as its target, so re-binding the
+// target changes nothing and leaves the alias in place. The resolver compares
+// recorded paths in resolved form, so the alias is found whichever spelling a
+// session reports; rewriting it would only make a re-run look like a repair and
+// print the redirect follow-up for a directory that never moved.
+func TestBindProjectPathLeavesAnAliasedPathAlone(t *testing.T) {
 	ctx := context.Background()
 	s := bindStore(t)
 	sentinelProject(t, s, "infra", "infrastructure")
@@ -378,14 +377,17 @@ func TestBindProjectPathRewritesAnAliasedPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BindProjectPath: %v", err)
 	}
-	if !got.PathChanged {
-		t.Errorf("rewriting the alias to the physical path is a change: %+v", got)
+	if got.Changed() {
+		t.Errorf("the alias and its target are one directory: %+v", got)
 	}
-	if recorded := projectPath(t, s, "infra"); recorded != physical(t, real) {
-		t.Errorf("stored path = %q, want the physical path %q", recorded, physical(t, real))
+	if recorded := projectPath(t, s, "infra"); recorded != link {
+		t.Errorf("stored path = %q, want the alias left alone (%q)", recorded, link)
 	}
 	if id, _, err := s.ResolveProject(ctx, real); err != nil || id != "infra" {
 		t.Errorf("ResolveProject of the physical directory = (%q, %v), want infra", id, err)
+	}
+	if id, _, err := s.ResolveProject(ctx, link); err != nil || id != "infra" {
+		t.Errorf("ResolveProject of the alias = (%q, %v), want infra", id, err)
 	}
 }
 
@@ -438,34 +440,32 @@ func TestBindPathOnlyParentClaimsItsSubtree(t *testing.T) {
 	}
 }
 
-// TestBindProjectPathRepairsAnUnmatchableSpelling — a row some earlier writer
-// left with a trailing separator is invisible to the candidate query: its
-// three clauses all compare against the stored TEXT, and "/x/checkout/" is
-// neither equal to the session's "/x/checkout" nor a prefix of it followed by
-// "/". Such a project is not in the unbound notice either — the shape test
-// passes — so bind is the only thing that can repair it, and it must: it has to
-// write the spelling the query can return rather than decide the two are the
-// same location and change nothing.
-func TestBindProjectPathRepairsAnUnmatchableSpelling(t *testing.T) {
+// TestBindProjectPathLeavesAnEquivalentSpellingAlone — a row some earlier
+// writer left with a trailing separator resolves to the same directory as the
+// cleaned path, so re-binding it changes nothing. The resolver compares
+// recorded paths in resolved form, so the spelling is already matchable;
+// rewriting it would only make a re-run look like a repair.
+func TestBindProjectPathLeavesAnEquivalentSpellingAlone(t *testing.T) {
 	ctx := context.Background()
 	s := bindStore(t)
 	dir := t.TempDir()
-	if err := s.EnsureProject(ctx, "infra", dir+string(filepath.Separator), "infrastructure"); err != nil {
+	stored := dir + string(filepath.Separator)
+	if err := s.EnsureProject(ctx, "infra", stored, "infrastructure"); err != nil {
 		t.Fatalf("EnsureProject with a trailing separator: %v", err)
 	}
 
 	got, err := s.BindProjectPath(ctx, "infra", dir, "")
 	if err != nil {
-		t.Fatalf("bind must repair an unmatchable spelling, got %v", err)
+		t.Fatalf("BindProjectPath: %v", err)
 	}
-	if !got.PathChanged {
-		t.Errorf("writing the matchable spelling is a change: %+v", got)
+	if got.Changed() {
+		t.Errorf("a trailing separator is the same directory: %+v", got)
 	}
-	if recorded := projectPath(t, s, "infra"); recorded != physical(t, dir) {
-		t.Errorf("stored path = %q, want the spelling resolution can match (%q)", recorded, physical(t, dir))
+	if recorded := projectPath(t, s, "infra"); recorded != stored {
+		t.Errorf("stored path = %q, want the recorded spelling left alone (%q)", recorded, stored)
 	}
 	if id, _, err := s.ResolveProject(ctx, dir); err != nil || id != "infra" {
-		t.Errorf("ResolveProject(%q) = (%q, %v), want the repaired project", dir, id, err)
+		t.Errorf("ResolveProject(%q) = (%q, %v), want infra", dir, id, err)
 	}
 }
 
@@ -816,8 +816,10 @@ func TestBindProjectPathRefusesDifferentRemote(t *testing.T) {
 	if !errors.Is(err, ErrBindRemoteConflict) {
 		t.Fatalf("err = %v, want ErrBindRemoteConflict", err)
 	}
-	if got := projectPath(t, s, "infra"); got != firstDir {
-		t.Errorf("the refused bind changed the path to %q", got)
+	// Compared in resolved form: bind records the physical path, and a host
+	// whose temp dir is reached through a symlink spells it two ways.
+	if got, want := projectPath(t, s, "infra"), physical(t, firstDir); got != want {
+		t.Errorf("the refused bind changed the path to %q, want %q", got, want)
 	}
 	if remote := projectRemote(t, s, "infra"); remote != "github.com/owner/infra" {
 		t.Errorf("the refused bind changed the remote to %q", remote)
