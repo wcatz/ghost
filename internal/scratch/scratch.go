@@ -192,8 +192,11 @@ func (d *Dir) Path() string { return d.path }
 // The chmod goes through an open descriptor where the directory can be opened
 // (O_NOFOLLOW refuses a symlink swapped in after the lstat), so chmod follows
 // no link. A directory mode 0000 cannot be opened at all, so that case falls
-// back to a path chmod — the lstat above refused a link at the path, and the
-// root is Ghost-owned (0700), so the window is the owner's own processes.
+// back to a path chmod, re-verifying the path is still the SAME non-symlink
+// directory before every path-based call — same device and inode, so a swap
+// for a symlink or a renamed directory cannot make the callbacks follow a
+// link or touch a stranger. The root is Ghost-owned (0700), so the window is
+// the owner's own processes.
 func makeRemovable(path string) {
 	info, err := os.Lstat(path)
 	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
@@ -220,14 +223,15 @@ func makeRemovable(path string) {
 	}
 	// Unopenable (a mode-0000 directory): best-effort chmod by path so the
 	// listing below can run; a failure leaves the tree for RemoveAll to
-	// report. Re-verify the path still names a real directory first: a swap
-	// for a symlink after the lstat above must not make the path callbacks
-	// follow the link.
-	if info, err := os.Lstat(path); err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+	// report. Re-verify the path is still the same real directory first: a
+	// swap for a symlink after the lstat above must not make the path
+	// callbacks follow the link, and a renamed directory must not be
+	// traversed by accident.
+	if err := sameRealDir(path, info); err != nil {
 		return
 	}
 	_ = os.Chmod(path, 0o700)
-	if info, err := os.Lstat(path); err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+	if err := sameRealDir(path, info); err != nil {
 		return
 	}
 	entries, err := os.ReadDir(path)

@@ -802,6 +802,56 @@ func TestReap_ReportsUnremovableIDFile(t *testing.T) {
 	}
 }
 
+// TestSameRealDir_RefusesSymlinkAndRename: the fallback verifier must treat
+// a symlink swapped in, or a different directory renamed into place, as
+// "not the directory first lstat'ed" — the path-based chmod and ReadDir must
+// never follow the link or traverse the stranger.
+func TestSameRealDir_RefusesSymlinkAndRename(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation requires privileges on Windows")
+	}
+	root := t.TempDir()
+	dir := filepath.Join(root, "dir")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	want, err := os.Lstat(dir)
+	if err != nil {
+		t.Fatalf("lstat: %v", err)
+	}
+	if err := sameRealDir(dir, want); err != nil {
+		t.Fatalf("sameRealDir on the unchanged directory: %v", err)
+	}
+
+	target := filepath.Join(root, "target")
+	if err := os.Mkdir(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(dir, filepath.Join(root, "moved")); err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	if err := os.Symlink(target, dir); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	if err := sameRealDir(dir, want); err == nil {
+		t.Fatal("sameRealDir accepted a symlink swapped in for the directory")
+	}
+	if err := os.Remove(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	other := filepath.Join(root, "other")
+	if err := os.Mkdir(other, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(other, dir); err != nil {
+		t.Fatalf("rename other: %v", err)
+	}
+	if err := sameRealDir(dir, want); err == nil {
+		t.Fatal("sameRealDir accepted a different directory renamed into place")
+	}
+}
+
 // TestMakeRemovable_NeverFollowsASymlink: a symlink where makeRemovable is
 // asked to work must not be followed — the target's mode is untouched and the
 // target's contents are not recursed into.
