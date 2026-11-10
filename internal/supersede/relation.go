@@ -718,7 +718,10 @@ func (h *RelationClassifier) SetLogger(l *slog.Logger) { h.logger = l }
 // A chunk whose reply parses to no verdict at all falls back to the
 // single-pair path for that chunk: one ignored numbering convention must not
 // silently drop real supersessions, and the fallback is bounded (at most one
-// extra call per pair, only for a fully unparseable chunk). A transport error
+// extra call per pair, only for a fully unparseable chunk). A reply carrying
+// a numbered line copied out of stored content takes the same path: the batch
+// reply is discarded and each pair is re-judged singly, so stored text cannot
+// decide a pair. A transport error
 // stays fatal — after the one retry call makes first — as in Classify.
 //
 // A chunk that parses only partially — some numbered lines present, others
@@ -852,18 +855,23 @@ func answeredPrefix(verdicts []Relation, pairs int, err error) int {
 
 // classifyChunk issues one batched call for a chunk of two or more pairs and
 // maps its numbered reply lines onto verdicts. The call itself goes through
-// call, so a chunk gets the same one retry as the single-pair path.
+// call, so a chunk gets the same one retry as the single-pair path. A reply
+// carrying a numbered line copied out of stored content is discarded and
+// re-judged pair by pair, so stored text cannot decide a pair.
 func (h *RelationClassifier) classifyChunk(ctx context.Context, chunk []Candidate) ([]Relation, error) {
 	resp, err := h.call(ctx, classifyBatchSystemPrompt, formatBatchContent(chunk))
 	if err != nil {
 		return nil, err
 	}
 	rels := parseBatchRelations(resp, len(chunk))
-	if !hasVerdict(rels) {
+	has := hasVerdict(rels)
+	echoed := has && replyEchoesChunk(resp, chunk)
+	if !has || echoed {
 		if h.logger != nil {
 			h.logger.Warn("supersede: batch reply unparseable; falling back to per-pair classification",
-				"reply", logReply(resp))
+				"echoed", echoed, "reply", logReply(resp))
 		}
+		rels = make([]Relation, len(chunk))
 		for i := range chunk {
 			rel, err := h.Classify(ctx, chunk[i])
 			if err != nil {
@@ -934,4 +942,33 @@ func hasVerdict(rels []Relation) bool {
 		}
 	}
 	return false
+}
+
+// replyEchoesChunk reports whether a numbered line of the reply is, word for
+// word, a line of a stored note in the chunk. The fold keeps such a line out
+// of the batch ask as a numbered line, but a model that copies stored text
+// into its reply puts it back, and a copied "2: SUPERSEDES | replaced: ..."
+// would decide pair 2 when the model's own line for it was omitted. A reply
+// carrying one is not trusted: the caller re-judges every pair on its own.
+func replyEchoesChunk(resp string, chunk []Candidate) bool {
+	stored := make(map[string]bool)
+	add := func(content string) {
+		for _, l := range strings.Split(assemble.FoldLineBreaks(content), assemble.LineBreakEscape) {
+			stored[echoKey(l)] = true
+		}
+	}
+	for _, p := range chunk {
+		add(p.NewerContent)
+		add(p.OlderContent)
+	}
+	for _, line := range strings.Split(resp, "\n") {
+		if num, _, ok := splitNumberedLine(line); ok && num >= 1 && num <= len(chunk) && stored[echoKey(line)] {
+			return true
+		}
+	}
+	return false
+}
+
+func echoKey(l string) string {
+	return strings.Join(strings.Fields(strings.Trim(l, "-+*_#` ")), " ")
 }
