@@ -602,7 +602,7 @@ func TestTheFollowupIDFileIsReclaimedAfterItsWindow(t *testing.T) {
 	// Reap(0) gives the caller no age bound of its own, so whatever collects the
 	// file has to be the file's OWN window — the same call the budget check's
 	// repro uses.
-	removed, err := scratch.Reap(0)
+	removed, _, err := scratch.Reap(0)
 	if err != nil {
 		t.Fatalf("Reap: %v", err)
 	}

@@ -1,6 +1,7 @@
 package scratch
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -11,6 +12,9 @@ import (
 
 	"github.com/wcatz/ghost/internal/procstat"
 )
+
+// errForcedRemoval is the failure the removal seams are pinned to return.
+var errForcedRemoval = errors.New("removal forced to fail by test")
 
 // writeOwnerDir creates a scratch-dir stand-in named name under root with an
 // optional .owner marker, so Reap's classification can be tested without Open.
@@ -240,7 +244,7 @@ func TestReap_ClassifiesEntries(t *testing.T) {
 				}
 			}
 
-			removed, err := Reap(time.Hour)
+			removed, _, err := Reap(time.Hour)
 			if err != nil {
 				t.Fatalf("Reap: %v", err)
 			}
@@ -313,7 +317,7 @@ func TestReap_LeavesForeignEntriesAlone(t *testing.T) {
 				}
 			}
 
-			removed, err := Reap(time.Hour)
+			removed, _, err := Reap(time.Hour)
 			if err != nil {
 				t.Fatalf("Reap: %v", err)
 			}
@@ -390,7 +394,7 @@ func TestReap_LeavesMarkerlessEntriesWithImpossiblePidsAlone(t *testing.T) {
 		t.Fatalf("chtimes %s: %v", ownFile, err)
 	}
 
-	removed, err := Reap(time.Hour)
+	removed, _, err := Reap(time.Hour)
 	if err != nil {
 		t.Fatalf("Reap: %v", err)
 	}
@@ -479,7 +483,7 @@ func TestReap_LeavesSymlinksAlone(t *testing.T) {
 		t.Fatalf("dangling symlink: %v", err)
 	}
 
-	removed, err := Reap(0)
+	removed, _, err := Reap(0)
 	if err != nil {
 		t.Fatalf("Reap: %v", err)
 	}
@@ -579,7 +583,7 @@ func TestReap_ReclaimsOnlyStaleReassessIDFiles(t *testing.T) {
 				t.Fatalf("chtimes: %v", err)
 			}
 
-			removed, err := Reap(0)
+			removed, _, err := Reap(0)
 			if err != nil {
 				t.Fatalf("Reap: %v", err)
 			}
@@ -605,7 +609,7 @@ func TestReap_UnusableRootReturnsError(t *testing.T) {
 	}
 	t.Setenv("GHOST_SCRATCH_DIR", filepath.Join(blocker, "scratch"))
 
-	removed, err := Reap(time.Hour)
+	removed, _, err := Reap(time.Hour)
 	if err == nil {
 		t.Fatal("expected an error for an unusable scratch root")
 	}
@@ -666,5 +670,225 @@ func TestOwnerMarker_RefusesOversized(t *testing.T) {
 	pid, start, ok = ownerMarker(dir)
 	if ok {
 		t.Fatalf("ownerMarker accepted an oversized marker: pid=%d start=%q", pid, start)
+	}
+}
+
+// TestRelease_RemovesTreeWithRestrictiveSubdir: a scratch dir that contains a
+// subtree the process left without write permission (module caches leave 0555
+// directories) must still be removed by Release. Reproduction for issue #1960.
+func TestRelease_RemovesTreeWithRestrictiveSubdir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("permission bits are not enforced the same way on Windows")
+	}
+	root := t.TempDir()
+	t.Setenv("GHOST_SCRATCH_DIR", root)
+
+	d, err := Open()
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	sub := filepath.Join(d.Path(), "sub")
+	if err := os.Mkdir(sub, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sub, "f"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(sub, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(sub, 0o700) })
+
+	d.Release()
+	if _, err := os.Stat(d.Path()); !os.IsNotExist(err) {
+		t.Fatalf("Release left dir behind (stat err %v)", err)
+	}
+}
+
+// TestReap_RemovesDeadOwnerEntryWithRestrictiveSubdir: an aged dead-owner
+// scratch entry containing an unremovable subtree (0555 directory) must be
+// removed by Reap, counted as removed, and not reported as failed. Reproduction
+// for issue #1960.
+func TestReap_RemovesDeadOwnerEntryWithRestrictiveSubdir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("permission bits are not enforced the same way on Windows")
+	}
+	const deadPid = 1 << 30
+	root := t.TempDir()
+	t.Setenv("GHOST_SCRATCH_DIR", root)
+
+	name := "999-0123456789abcdef"
+	dir := writeOwnerDir(t, root, name, "pid="+strconv.Itoa(deadPid)+"\ntoken=aa\nstart=gone\n")
+	sub := filepath.Join(dir, "sub")
+	if err := os.Mkdir(sub, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sub, "f"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(sub, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(sub, 0o700) })
+	old := time.Now().Add(-25 * time.Hour)
+	if err := os.Chtimes(dir, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	removed, failed, err := Reap(time.Hour)
+	if err != nil {
+		t.Fatalf("Reap: %v", err)
+	}
+	if removed != 1 || failed != 0 {
+		t.Errorf("Reap = (removed=%d, failed=%d), want (1, 0)", removed, failed)
+	}
+	if _, statErr := os.Stat(dir); !os.IsNotExist(statErr) {
+		t.Fatalf("entry survived Reap (stat err %v)", statErr)
+	}
+}
+
+// TestReap_ReportsUnremovableEntry: an entry whose removal fails is counted as
+// failed (not silently dropped): removed == 0, failed == 1, and no error for
+// the caller, with the entry still on disk.
+func TestReap_ReportsUnremovableEntry(t *testing.T) {
+	const deadPid = 1 << 30
+	root := t.TempDir()
+	t.Setenv("GHOST_SCRATCH_DIR", root)
+
+	dir := writeOwnerDir(t, root, "999-0123456789abcdef", "pid="+strconv.Itoa(deadPid)+"\ntoken=aa\nstart=gone\n")
+	prev := removeTree
+	removeTree = func(string) error { return errForcedRemoval }
+	t.Cleanup(func() { removeTree = prev })
+
+	removed, failed, err := Reap(time.Hour)
+	if err != nil {
+		t.Fatalf("Reap: %v", err)
+	}
+	if removed != 0 || failed != 1 {
+		t.Errorf("Reap = (removed=%d, failed=%d), want (0, 1)", removed, failed)
+	}
+	if _, statErr := os.Lstat(dir); statErr != nil {
+		t.Errorf("entry vanished although removal failed: %v", statErr)
+	}
+}
+
+// TestReap_ReportsUnremovableIDFile: the stale follow-up id file whose
+// removal fails is counted as failed, not silently dropped.
+func TestReap_ReportsUnremovableIDFile(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("GHOST_SCRATCH_DIR", root)
+
+	path := filepath.Join(root, "supersede-reassess-proj-20260101T000000Z-123-0123456789abcdef.ids")
+	if err := os.WriteFile(path, []byte("# one id\naaaaaaaa1111111111111111111111\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-90 * 24 * time.Hour)
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatal(err)
+	}
+	prev := removeFile
+	removeFile = func(string) error { return errForcedRemoval }
+	t.Cleanup(func() { removeFile = prev })
+
+	removed, failed, err := Reap(0)
+	if err != nil {
+		t.Fatalf("Reap: %v", err)
+	}
+	if removed != 0 || failed != 1 {
+		t.Errorf("Reap = (removed=%d, failed=%d), want (0, 1)", removed, failed)
+	}
+	if _, statErr := os.Lstat(path); statErr != nil {
+		t.Errorf("id file vanished although removal failed: %v", statErr)
+	}
+}
+
+// TestSameRealDir_RefusesSymlinkAndRename: the fallback verifier must treat
+// a symlink swapped in, or a different directory renamed into place, as
+// "not the directory first lstat'ed" — the path-based chmod and ReadDir must
+// never follow the link or traverse the stranger.
+func TestSameRealDir_RefusesSymlinkAndRename(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation requires privileges on Windows")
+	}
+	root := t.TempDir()
+	dir := filepath.Join(root, "dir")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	want, err := os.Lstat(dir)
+	if err != nil {
+		t.Fatalf("lstat: %v", err)
+	}
+	if err := sameRealDir(dir, want); err != nil {
+		t.Fatalf("sameRealDir on the unchanged directory: %v", err)
+	}
+
+	target := filepath.Join(root, "target")
+	if err := os.Mkdir(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(dir, filepath.Join(root, "moved")); err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	if err := os.Symlink(target, dir); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	if err := sameRealDir(dir, want); err == nil {
+		t.Fatal("sameRealDir accepted a symlink swapped in for the directory")
+	}
+	if err := os.Remove(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	other := filepath.Join(root, "other")
+	if err := os.Mkdir(other, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(other, dir); err != nil {
+		t.Fatalf("rename other: %v", err)
+	}
+	if err := sameRealDir(dir, want); err == nil {
+		t.Fatal("sameRealDir accepted a different directory renamed into place")
+	}
+}
+
+// TestMakeRemovable_NeverFollowsASymlink: a symlink where makeRemovable is
+// asked to work must not be followed — the target's mode is untouched and the
+// target's contents are not recursed into.
+func TestMakeRemovable_NeverFollowsASymlink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation requires privileges on Windows")
+	}
+	root := t.TempDir()
+	target := t.TempDir()
+	if err := os.WriteFile(filepath.Join(target, "keep"), []byte("keep me\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(target, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(target, 0o700) })
+
+	link := filepath.Join(root, "linked")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	makeRemovable(link)
+
+	info, err := os.Stat(target)
+	if err != nil {
+		t.Fatalf("stat target: %v", err)
+	}
+	// The target's mode must be unchanged: if makeRemovable had followed the
+	// link it would have been chmod'ed to 0700.
+	if perm := info.Mode().Perm(); perm != 0o555 {
+		t.Errorf("target mode = %o after makeRemovable on the link, want 555 (never followed)", perm)
+	}
+	if _, err := os.Stat(link); err != nil {
+		t.Errorf("link was removed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(target, "keep")); err != nil {
+		t.Errorf("link target's contents were damaged: %v", err)
 	}
 }

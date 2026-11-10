@@ -215,9 +215,13 @@ func ensureScratchSpace(w io.Writer, dryRun bool) {
 		_, _ = fmt.Fprintf(w, "  ! scratch root unavailable: %v (continuing)\n", err)
 		return
 	}
-	removed, err := scratch.Reap(24 * time.Hour)
+	removed, failed, err := scratch.Reap(24 * time.Hour)
 	if err != nil {
 		_, _ = fmt.Fprintf(w, "  ! scratch root %s not reaped: %v (continuing)\n", root, err)
+		return
+	}
+	if failed > 0 {
+		_, _ = fmt.Fprintf(w, "  ✓ scratch root %s (reaped %d stale dirs, %d could not be removed)\n", root, removed, failed)
 		return
 	}
 	_, _ = fmt.Fprintf(w, "  ✓ scratch root %s (reaped %d stale dirs)\n", root, removed)

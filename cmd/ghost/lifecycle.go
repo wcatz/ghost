@@ -184,8 +184,10 @@ func runLifecycle() int {
 	// otherwise accumulate between lifecycles; reap before this run's own
 	// children start creating new ones. A reap failure is a warning, not a
 	// stop: the phases are the point of this process and they converge.
-	if removed, reapErr := scratch.Reap(24 * time.Hour); reapErr != nil {
+	if removed, failed, reapErr := scratch.Reap(24 * time.Hour); reapErr != nil {
 		lifecycleLogf(projectName, "warning: scratch reap failed: %v", reapErr)
+	} else if failed > 0 {
+		lifecycleLogf(projectName, "scratch reap removed=%d failed=%d", removed, failed)
 	} else {
 		lifecycleLogf(projectName, "scratch reap removed=%d", removed)
 	}

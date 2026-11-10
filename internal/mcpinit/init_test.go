@@ -1955,3 +1955,59 @@ func TestWriteRedirects_IdempotentOnSecondRun(t *testing.T) {
 		t.Fatalf("unexpected rewrite on second run: %s", out.String())
 	}
 }
+
+// TestEnsureScratchSpace_ReportsUnremovableStaleDirs: stale scratch entries
+// whose trees cannot be removed are reported in the init output, so a leak is
+// visible rather than silent. Removal is made to fail by a writer that keeps
+// adding files to the entry while the reap runs, so the final directory
+// removal finds it non-empty; the test retries the whole setup until the
+// reporting line appears (a single attempt can win the race).
+func TestEnsureScratchSpace_ReportsUnremovableStaleDirs(t *testing.T) {
+	attempts := 10
+	for attempt := 0; attempt < attempts; attempt++ {
+		root := t.TempDir()
+		t.Setenv("GHOST_SCRATCH_DIR", root)
+
+		entry := filepath.Join(root, "999-0123456789abcdef")
+		if err := os.Mkdir(entry, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(entry, ".owner"), []byte("pid=1073741824\ntoken=aa\nstart=gone\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		stop := make(chan struct{})
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			for i := 0; ; i++ {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				_ = os.WriteFile(filepath.Join(entry, "c"+fmt.Sprint(i)), []byte("x"), 0o600)
+				if i > 50000 {
+					return
+				}
+			}
+		}()
+
+		var buf bytes.Buffer
+		ensureScratchSpace(&buf, false)
+		close(stop)
+		<-done
+
+		out := buf.String()
+		if strings.Contains(out, "1 could not be removed") {
+			if !strings.Contains(out, root) {
+				t.Errorf("init output missing the root:\n%s", out)
+			}
+			if _, err := os.Lstat(entry); err != nil {
+				t.Errorf("entry vanished although it could not be removed: %v", err)
+			}
+			return
+		}
+	}
+	t.Fatal("init never reported an unremovable stale dir in 10 attempts")
+}

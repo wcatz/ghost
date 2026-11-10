@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -38,9 +40,12 @@ func TestSize_CountsRegularFilesOnly(t *testing.T) {
 		t.Fatalf("symlink: %v", err)
 	}
 
-	gotBytes, gotFiles, err := Size(root)
+	gotBytes, gotFiles, gotSkipped, err := Size(root)
 	if err != nil {
 		t.Fatalf("Size: %v", err)
+	}
+	if gotSkipped != 0 {
+		t.Errorf("Size skipped = %d, want 0 (every entry readable)", gotSkipped)
 	}
 	if gotBytes != 3000 {
 		t.Errorf("Size bytes = %d, want 3000 (symlink target excluded)", gotBytes)
@@ -49,12 +54,12 @@ func TestSize_CountsRegularFilesOnly(t *testing.T) {
 		t.Errorf("Size files = %d, want 2 (symlink excluded)", gotFiles)
 	}
 
-	gotBytes, gotFiles, err = Size(filepath.Join(root, "does-not-exist"))
+	gotBytes, gotFiles, gotSkipped, err = Size(filepath.Join(root, "does-not-exist"))
 	if err != nil {
 		t.Errorf("Size on missing root: err = %v, want nil", err)
 	}
-	if gotBytes != 0 || gotFiles != 0 {
-		t.Errorf("Size on missing root = (%d, %d), want (0, 0)", gotBytes, gotFiles)
+	if gotBytes != 0 || gotFiles != 0 || gotSkipped != 0 {
+		t.Errorf("Size on missing root = (%d, %d, %d), want (0, 0, 0)", gotBytes, gotFiles, gotSkipped)
 	}
 }
 
@@ -64,7 +69,7 @@ func captureLogs(t *testing.T) *bytes.Buffer {
 	t.Helper()
 	var buf bytes.Buffer
 	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	t.Cleanup(func() { slog.SetDefault(prev) })
 	return &buf
 }
@@ -409,4 +414,555 @@ func TestEnforceBudget_DisabledWhenZero(t *testing.T) {
 // way bootstrap does, so budget-record tests exercise the real schema.
 func openTestDB(dbPath string) (*sql.DB, error) {
 	return memory.OpenDB(dbPath)
+}
+
+// TestSize_MeasuresWhatItCanWithUnreadableSubdir: an unreadable directory
+// inside the root must not prevent Size from measuring the rest of the tree.
+// Reproduction for issue #1960.
+func TestSize_MeasuresWhatItCanWithUnreadableSubdir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("permission bits are not enforced the same way on Windows")
+	}
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "a.bin"), make([]byte, 1000), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sub := filepath.Join(root, "sub")
+	if err := os.Mkdir(sub, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sub, "hidden.bin"), make([]byte, 2000), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(sub, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(sub, 0o700) })
+
+	logs := captureLogs(t)
+	gotBytes, gotFiles, gotSkipped, err := Size(root)
+	if err != nil {
+		t.Fatalf("Size: %v", err)
+	}
+	if gotBytes != 1000 {
+		t.Errorf("Size bytes = %d, want 1000 (measure what it can)", gotBytes)
+	}
+	if gotFiles != 1 {
+		t.Errorf("Size files = %d, want 1 (measure what it can)", gotFiles)
+	}
+	if gotSkipped != 1 {
+		t.Errorf("Size skipped = %d, want 1 (the unreadable subtree)", gotSkipped)
+	}
+	if !strings.Contains(logs.String(), "skipped unreadable entries") {
+		t.Errorf("skipped entries left no trace in the log:\n%s", logs.String())
+	}
+}
+
+// TestEnforceBudget_MeasuresWhatItCanWithUnreadableSubdir: an unreadable
+// subtree inside the root must not disable the budget check. When the
+// measurable portion is over budget, the check fires and records a row.
+// Reproduction for issue #1960.
+func TestEnforceBudget_MeasuresWhatItCanWithUnreadableSubdir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("permission bits are not enforced the same way on Windows")
+	}
+	root := t.TempDir()
+	t.Setenv("GHOST_SCRATCH_DIR", root)
+	t.Setenv("GHOST_SCRATCH_MAX_BYTES", "512")
+	dataHome := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", dataHome)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	if err := os.MkdirAll(filepath.Join(dataHome, "ghost"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	db, err := openTestDB(filepath.Join(dataHome, "ghost", "ghost.db"))
+	if err != nil {
+		t.Fatalf("seed db: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Measurable content over budget.
+	stale := filepath.Join(root, "123-0123456789abcdef")
+	if err := os.Mkdir(stale, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stale, "payload"), make([]byte, 1024), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-25 * time.Hour)
+	if err := os.Chtimes(stale, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	// Unreadable subtree that must not disable the check.
+	blocked := filepath.Join(root, "blocked")
+	if err := os.Mkdir(blocked, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(blocked, "x"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(blocked, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(blocked, 0o700) })
+
+	logs := captureLogs(t)
+	res := EnforceBudget()
+
+	if !res.Fired {
+		t.Fatalf("budget check skipped because of an unreadable entry: %+v; logs:\n%s", res, logs.String())
+	}
+	if out := logs.String(); strings.Contains(out, "cannot measure root; skipping check") {
+		t.Errorf("check was skipped on unreadable entry:\n%s", out)
+	}
+	if !res.Recorded {
+		t.Errorf("Recorded = false, want true (fired check must record a row)")
+	}
+	// The stale measurable entry should have been reaped.
+	if _, statErr := os.Stat(stale); !os.IsNotExist(statErr) {
+		t.Errorf("stale dir survived (stat err %v)", statErr)
+	}
+}
+
+// TestSize_UnreadableRootReturnsError: an unreadable scratch root cannot be
+// measured, so Size returns an error rather than a partial measurement.
+func TestSize_UnreadableRootReturnsError(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("permission bits are not enforced the same way on Windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: a mode-0o000 directory is still readable")
+	}
+	parent := t.TempDir()
+	root := filepath.Join(parent, "scratchroot")
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "a"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(root, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(root, 0o700) })
+
+	_, _, _, err := Size(root)
+	if err == nil {
+		t.Fatal("Size returned no error for an unreadable root")
+	}
+}
+
+// TestEnforceBudget_ReportsUnremovableStaleEntries: a stale entry whose
+// removal fails makes the fired budget check report ReapFailed and record a
+// maintenance_runs row that names the entries it could not remove.
+func TestEnforceBudget_ReportsUnremovableStaleEntries(t *testing.T) {
+	const deadPid = 1 << 30
+	root := t.TempDir()
+	t.Setenv("GHOST_SCRATCH_DIR", root)
+	t.Setenv("GHOST_SCRATCH_MAX_BYTES", "512")
+	dataHome := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", dataHome)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	if err := os.MkdirAll(filepath.Join(dataHome, "ghost"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	db, err := openTestDB(filepath.Join(dataHome, "ghost", "ghost.db"))
+	if err != nil {
+		t.Fatalf("seed db: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	stale := writeOwnerDir(t, root, "123-0123456789abcdef", "pid="+strconv.Itoa(deadPid)+"\ntoken=aa\nstart=gone\n")
+	if err := os.WriteFile(filepath.Join(stale, "payload"), make([]byte, 1024), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	prev := removeTree
+	removeTree = func(string) error { return errForcedRemoval }
+	t.Cleanup(func() { removeTree = prev })
+
+	logs := captureLogs(t)
+	res := EnforceBudget()
+
+	if !res.Fired {
+		t.Fatalf("budget check did not fire: %+v", res)
+	}
+	if res.ReapedCount != 0 || res.ReapFailed != 1 {
+		t.Errorf("reaped = (%d, failed %d), want (0, 1)", res.ReapedCount, res.ReapFailed)
+	}
+	if !res.Recorded {
+		t.Errorf("Recorded = false, want true")
+	}
+	for _, want := range []string{"could not remove stale entries", "failed=1"} {
+		if !strings.Contains(logs.String(), want) {
+			t.Errorf("log missing %q; slog output:\n%s", want, logs.String())
+		}
+	}
+
+	db, err = openTestDB(filepath.Join(dataHome, "ghost", "ghost.db"))
+	if err != nil {
+		t.Fatalf("reopen db: %v", err)
+	}
+	defer db.Close() //nolint:errcheck
+	var note string
+	if err := db.QueryRow(`SELECT note FROM maintenance_runs`).Scan(&note); err != nil {
+		t.Fatalf("select note: %v", err)
+	}
+	if !strings.Contains(note, "1 stale entries could not be removed") {
+		t.Errorf("note = %q, want it to name the unremoved stale entries", note)
+	}
+}
+
+// TestRecordBudgetRun_ReapFailedNotDropped: the note a recorded run carries
+// names the entries the reap could not remove.
+func TestRecordBudgetRun_ReapFailedNotDropped(t *testing.T) {
+	dataHome := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", dataHome)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	if err := os.MkdirAll(filepath.Join(dataHome, "ghost"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(dataHome, "ghost", "ghost.db")
+	seed, err := openTestDB(dbPath)
+	if err != nil {
+		t.Fatalf("seed db: %v", err)
+	}
+	if err := seed.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	res := BudgetResult{
+		Root:       "/root/scratch",
+		MaxBytes:   512,
+		BytesAfter: 1024,
+		ReapFailed: 2,
+		OverBudget: true,
+	}
+	if !recordBudgetRun(res) {
+		t.Fatalf("recordBudgetRun = false, want a recorded row")
+	}
+
+	db, err := openTestDB(dbPath)
+	if err != nil {
+		t.Fatalf("reopen db: %v", err)
+	}
+	defer db.Close() //nolint:errcheck
+	var note string
+	if err := db.QueryRow(`SELECT note FROM maintenance_runs`).Scan(&note); err != nil {
+		t.Fatalf("select note: %v", err)
+	}
+	if !strings.Contains(note, "2 stale entries could not be removed") {
+		t.Errorf("note = %q, want the unremoved count", note)
+	}
+}
+
+// TestEnforceBudget_PartialMeasurementFiresAndRecords: a locked subtree larger
+// than the budget hides bytes nobody measured. The measurable portion may
+// read within budget, but a partial measurement must not be compared
+// silently: the check fires, reaps through the lock, and records a row
+// naming the skipped entries.
+func TestEnforceBudget_PartialMeasurementFiresAndRecords(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("permission bits are not enforced the same way on Windows")
+	}
+	root := t.TempDir()
+	t.Setenv("GHOST_SCRATCH_DIR", root)
+	t.Setenv("GHOST_SCRATCH_MAX_BYTES", "4096")
+	dataHome := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", dataHome)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	if err := os.MkdirAll(filepath.Join(dataHome, "ghost"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	db, err := openTestDB(filepath.Join(dataHome, "ghost", "ghost.db"))
+	if err != nil {
+		t.Fatalf("seed db: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// The measurable portion is small (and would read within budget).
+	if err := os.WriteFile(filepath.Join(root, "small"), []byte("small"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A dead-owner entry behind a lock: its bytes are unmeasured, and it is
+	// stale so the reap can collect it through the lock.
+	stale := filepath.Join(root, "123-0123456789abcdef")
+	if err := os.Mkdir(stale, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stale, ".owner"), []byte("pid=1073741824\ntoken=aa\nstart=gone\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stale, "payload"), make([]byte, 8192), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// The marker cannot be read behind the lock, so the entry is reaped by
+	// the markerless age backstop: its mtime must be older than 24h.
+	old := time.Now().Add(-25 * time.Hour)
+	if err := os.Chtimes(stale, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(stale, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(stale, 0o700) })
+
+	logs := captureLogs(t)
+	res := EnforceBudget()
+
+	if !res.Fired {
+		t.Fatalf("budget check did not fire on a partial measurement: %+v", res)
+	}
+	if res.Skipped != 1 {
+		t.Errorf("Skipped = %d, want 1 (the locked entry directory)", res.Skipped)
+	}
+	if out := logs.String(); !strings.Contains(out, "skipped unreadable entries") {
+		t.Errorf("warning missing the skipped count:\n%s", out)
+	}
+	if _, statErr := os.Lstat(stale); !os.IsNotExist(statErr) {
+		t.Errorf("locked stale entry survived the reap: %v", statErr)
+	}
+	if !res.Recorded {
+		t.Errorf("Recorded = false, want true (fired check must record a row)")
+	}
+
+	db, err = openTestDB(filepath.Join(dataHome, "ghost", "ghost.db"))
+	if err != nil {
+		t.Fatalf("reopen db: %v", err)
+	}
+	defer db.Close() //nolint:errcheck
+	var note string
+	if err := db.QueryRow(`SELECT note FROM maintenance_runs`).Scan(&note); err != nil {
+		t.Fatalf("select note: %v", err)
+	}
+	if !strings.Contains(note, "measurement skipped") {
+		t.Errorf("note = %q, want it to name the skipped entries", note)
+	}
+}
+
+// TestEnforceBudget_SurvivingLockedEntryCountsOnce: a locked entry the reap
+// leaves in place is skipped by the initial measure AND by the re-measure. It
+// is one unreadable subtree, so Skipped stays at the initial count (1) and the
+// recorded note says 1, not 2.
+func TestEnforceBudget_SurvivingLockedEntryCountsOnce(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("permission bits are not enforced the same way on Windows")
+	}
+	root := t.TempDir()
+	t.Setenv("GHOST_SCRATCH_DIR", root)
+	t.Setenv("GHOST_SCRATCH_MAX_BYTES", "4096")
+	dataHome := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", dataHome)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	if err := os.MkdirAll(filepath.Join(dataHome, "ghost"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	db, err := openTestDB(filepath.Join(dataHome, "ghost", "ghost.db"))
+	if err != nil {
+		t.Fatalf("seed db: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Markerless, Open-shaped and fresh: the reap's age backstop keeps it, so
+	// it is still locked when the budget check re-measures.
+	locked := filepath.Join(root, "123-0123456789abcdef")
+	if err := os.Mkdir(locked, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(locked, "payload"), make([]byte, 8192), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(locked, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o700) })
+
+	res := EnforceBudget()
+
+	if _, statErr := os.Lstat(locked); statErr != nil {
+		t.Fatalf("locked entry did not survive the reap: %v", statErr)
+	}
+	if !res.Fired || !res.Recorded {
+		t.Fatalf("want Fired and Recorded, got %+v", res)
+	}
+	if res.Skipped != 1 {
+		t.Errorf("Skipped = %d, want 1 (one locked entry, counted once)", res.Skipped)
+	}
+
+	db, err = openTestDB(filepath.Join(dataHome, "ghost", "ghost.db"))
+	if err != nil {
+		t.Fatalf("reopen db: %v", err)
+	}
+	defer db.Close() //nolint:errcheck
+	var note string
+	if err := db.QueryRow(`SELECT note FROM maintenance_runs`).Scan(&note); err != nil {
+		t.Fatalf("select note: %v", err)
+	}
+	if !strings.Contains(note, "measurement skipped 1 unreadable entries") {
+		t.Errorf("note = %q, want it to say 1 skipped entry", note)
+	}
+}
+
+// TestEnforceBudget_PartialMeasurementRecordsOncePerOutcome: an entry that
+// stays unreadable under budget fires every spawn's check, but must not add a
+// maintenance_runs row per spawn. The second identical outcome reuses the
+// marker: one row, both runs recorded, and the suppression is warned.
+func TestEnforceBudget_PartialMeasurementRecordsOncePerOutcome(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("permission bits are not enforced the same way on Windows")
+	}
+	root := t.TempDir()
+	t.Setenv("GHOST_SCRATCH_DIR", root)
+	t.Setenv("GHOST_SCRATCH_MAX_BYTES", "1048576") // ample: the partial root reads within budget
+	dataHome := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", dataHome)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	if err := os.MkdirAll(filepath.Join(dataHome, "ghost"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	db, err := openTestDB(filepath.Join(dataHome, "ghost", "ghost.db"))
+	if err != nil {
+		t.Fatalf("seed db: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(filepath.Join(root, "small"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	locked := filepath.Join(root, "locked")
+	if err := os.Mkdir(locked, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(locked, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o700) })
+
+	logs := captureLogs(t)
+	first := EnforceBudget()
+	if !first.Fired {
+		t.Fatalf("partial measurement did not fire: %+v", first)
+	}
+	if !first.Recorded {
+		t.Fatalf("first partial outcome was not recorded: %+v", first)
+	}
+	second := EnforceBudget()
+	if second.Recorded {
+		t.Fatalf("suppressed outcome must not claim a row was written: %+v", second)
+	}
+	if !strings.Contains(logs.String(), "already recorded; suppressing repeated rows") {
+		t.Errorf("suppression was not warned:\n%s", logs.String())
+	}
+
+	db, err = openTestDB(filepath.Join(dataHome, "ghost", "ghost.db"))
+	if err != nil {
+		t.Fatalf("reopen db: %v", err)
+	}
+	defer db.Close() //nolint:errcheck
+	var count int
+	if err := db.QueryRow(`SELECT count(*) FROM maintenance_runs`).Scan(&count); err != nil {
+		t.Fatalf("count maintenance_runs: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("maintenance_runs rows = %d, want 1 (one per outcome, not per spawn)", count)
+	}
+	var note string
+	if err := db.QueryRow(`SELECT note FROM maintenance_runs`).Scan(&note); err != nil {
+		t.Fatalf("select note: %v", err)
+	}
+	if !strings.Contains(note, "not recorded again") {
+		t.Errorf("note = %q, want it to say repeats are not recorded again", note)
+	}
+}
+
+// TestEnforceBudget_PartialOutcomeChangeRecordsNewRow: a partial root that
+// goes from within budget to over budget is a different outcome, so it gets a
+// second row rather than being swallowed by the first.
+func TestEnforceBudget_PartialOutcomeChangeRecordsNewRow(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("permission bits are not enforced the same way on Windows")
+	}
+	root := t.TempDir()
+	t.Setenv("GHOST_SCRATCH_DIR", root)
+	t.Setenv("GHOST_SCRATCH_MAX_BYTES", "1048576")
+	dataHome := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", dataHome)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	if err := os.MkdirAll(filepath.Join(dataHome, "ghost"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	db, err := openTestDB(filepath.Join(dataHome, "ghost", "ghost.db"))
+	if err != nil {
+		t.Fatalf("seed db: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	small := filepath.Join(root, "small")
+	if err := os.WriteFile(small, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	locked := filepath.Join(root, "locked")
+	if err := os.Mkdir(locked, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(locked, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o700) })
+
+	first := EnforceBudget()
+	if !first.Recorded || first.OverBudget {
+		t.Fatalf("first run: want recorded and within budget: %+v", first)
+	}
+	// The measurable portion now exceeds the budget; nothing is stale, so the
+	// reap cannot bring it back under.
+	if err := os.WriteFile(small, make([]byte, 4096), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GHOST_SCRATCH_MAX_BYTES", "1024")
+	second := EnforceBudget()
+	if !second.OverBudget {
+		t.Fatalf("second run: want over budget: %+v", second)
+	}
+	if !second.Recorded {
+		t.Fatalf("a changed partial outcome must be recorded: %+v", second)
+	}
+
+	db, err = openTestDB(filepath.Join(dataHome, "ghost", "ghost.db"))
+	if err != nil {
+		t.Fatalf("reopen db: %v", err)
+	}
+	defer db.Close() //nolint:errcheck
+	var count int
+	if err := db.QueryRow(`SELECT count(*) FROM maintenance_runs`).Scan(&count); err != nil {
+		t.Fatalf("count maintenance_runs: %v", err)
+	}
+	if count != 2 {
+		t.Errorf("maintenance_runs rows = %d, want 2 (within budget, then over budget)", count)
+	}
 }

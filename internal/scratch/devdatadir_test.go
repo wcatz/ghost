@@ -46,7 +46,7 @@ func TestRootRefusesAFollowedDataDirInsteadOfCreatingAScratchRootInIt(t *testing
 
 	// Reap is what the lifecycle calls, and it must fail the same way rather
 	// than report a clean sweep of a root it never had.
-	if _, err := Reap(time.Hour); err == nil {
+	if _, _, err := Reap(time.Hour); err == nil {
 		t.Error("Reap = nil, want the refusal Root reports")
 	}
 	entries, err := os.ReadDir(dataDir)
