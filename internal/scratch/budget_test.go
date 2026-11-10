@@ -753,6 +753,73 @@ func TestEnforceBudget_PartialMeasurementFiresAndRecords(t *testing.T) {
 	}
 }
 
+// TestEnforceBudget_SurvivingLockedEntryCountsOnce: a locked entry the reap
+// leaves in place is skipped by the initial measure AND by the re-measure. It
+// is one unreadable subtree, so Skipped stays at the initial count (1) and the
+// recorded note says 1, not 2.
+func TestEnforceBudget_SurvivingLockedEntryCountsOnce(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("permission bits are not enforced the same way on Windows")
+	}
+	root := t.TempDir()
+	t.Setenv("GHOST_SCRATCH_DIR", root)
+	t.Setenv("GHOST_SCRATCH_MAX_BYTES", "4096")
+	dataHome := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", dataHome)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	if err := os.MkdirAll(filepath.Join(dataHome, "ghost"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	db, err := openTestDB(filepath.Join(dataHome, "ghost", "ghost.db"))
+	if err != nil {
+		t.Fatalf("seed db: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Markerless, Open-shaped and fresh: the reap's age backstop keeps it, so
+	// it is still locked when the budget check re-measures.
+	locked := filepath.Join(root, "123-0123456789abcdef")
+	if err := os.Mkdir(locked, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(locked, "payload"), make([]byte, 8192), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(locked, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o700) })
+
+	res := EnforceBudget()
+
+	if _, statErr := os.Lstat(locked); statErr != nil {
+		t.Fatalf("locked entry did not survive the reap: %v", statErr)
+	}
+	if !res.Fired || !res.Recorded {
+		t.Fatalf("want Fired and Recorded, got %+v", res)
+	}
+	if res.Skipped != 1 {
+		t.Errorf("Skipped = %d, want 1 (one locked entry, counted once)", res.Skipped)
+	}
+
+	db, err = openTestDB(filepath.Join(dataHome, "ghost", "ghost.db"))
+	if err != nil {
+		t.Fatalf("reopen db: %v", err)
+	}
+	defer db.Close() //nolint:errcheck
+	var note string
+	if err := db.QueryRow(`SELECT note FROM maintenance_runs`).Scan(&note); err != nil {
+		t.Fatalf("select note: %v", err)
+	}
+	if !strings.Contains(note, "measurement skipped 1 unreadable entries") {
+		t.Errorf("note = %q, want it to say 1 skipped entry", note)
+	}
+}
+
 // TestEnforceBudget_PartialMeasurementRecordsOncePerOutcome: an entry that
 // stays unreadable under budget fires every spawn's check, but must not add a
 // maintenance_runs row per spawn. The second identical outcome reuses the

@@ -177,7 +177,8 @@ func EnforceBudget() BudgetResult {
 	if afterSkipped > 0 {
 		slog.Warn("scratch budget: re-measurement skipped unreadable entries",
 			"root", root, "skipped", afterSkipped)
-		res.Skipped = skipped + afterSkipped
+		// Not accumulated into res.Skipped: the re-measure walks the same
+		// root, so it can only skip entries the initial walk already counted.
 	}
 	res.BytesAfter = after
 	if after < before {
