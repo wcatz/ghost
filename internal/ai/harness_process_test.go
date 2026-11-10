@@ -266,6 +266,46 @@ func TestHarnessWaitDelaySweepsTheProcessGroup(t *testing.T) {
 	}
 }
 
+// TestCleanupRunnerSuccessIsNotReportedAsATimeoutWhenTheSweepCrossesTheDeadline
+// covers the timeout decision reading the clock the post-run sweep spends. A
+// list that exits 0 just before the deadline leaves a helper that ignores
+// SIGTERM, so the sweep waits out the grace and force-kills it; the deadline
+// fires during that sweep. The call itself succeeded, so it must not be
+// reported as a timeout: the decision is read from the command's own outcome
+// before the sweep, not from the context error after it.
+func TestCleanupRunnerSuccessIsNotReportedAsATimeoutWhenTheSweepCrossesTheDeadline(t *testing.T) {
+	t.Setenv("GHOST_SCRATCH_DIR", t.TempDir())
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "opencode")
+	body := `dir=$(dirname "$0")
+export dir
+if [ "$1:$2" = "session:list" ]; then
+  sh -c 'trap "" TERM; echo $$ > "$dir/helper.pid"; exec sleep 30' >/dev/null 2>&1 &
+  while [ ! -s "$dir/helper.pid" ]; do sleep 0.01; done
+fi
+printf '[]'
+`
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\n"+body), 0o755); err != nil {
+		t.Fatalf("write fake opencode: %v", err)
+	}
+
+	old := sessionCommandTimeout
+	sessionCommandTimeout = time.Second
+	t.Cleanup(func() { sessionCommandTimeout = old })
+
+	runner := openCodeCleanupRunner{binary: bin, tempRoot: t.TempDir()}
+	out, err := runner.run(context.Background(), []string{"session", "list", "--format", "json"})
+	helper := waitForRecordedPid(t, filepath.Join(dir, "helper.pid"))
+	defer killGrandchild(t, helper)
+
+	if err != nil {
+		t.Fatalf("a list that exited 0 was reported as a timeout only because the post-run sweep crossed the deadline: %v", err)
+	}
+	if got := strings.TrimSpace(string(out)); got != "[]" {
+		t.Errorf("cleanup list output = %q, want the fake's []", got)
+	}
+}
+
 // TestOpenCodeCleanupRunnerBoundsAPipeHoldingHelper covers the one harness
 // child that is NOT built by harnessCommand. The cleanup runner builds its own
 // command, because it must reach the user's own opencode store rather than the

@@ -49,11 +49,6 @@ const (
 	// more than any plausible backlog costs only the parse.
 	defaultSessionListLimit = 20000
 
-	// sessionCommandTimeout bounds one opencode invocation: the list, and
-	// every delete attempt. A stalled CLI must not hang the command with no
-	// output, and the bound keeps a hanging delete inside the retry budget.
-	sessionCommandTimeout = 60 * time.Second
-
 	// sessionDeleteAttempts is the total number of tries for one
 	// `session delete` — the first attempt plus its retries. Deletion is
 	// best-effort, so exhausting them is a reported failure, not an abort.
@@ -75,6 +70,12 @@ const (
 	// problem, and neither justifies a delete.
 	sessionFutureSkew = 5 * time.Minute
 )
+
+// sessionCommandTimeout bounds one opencode invocation: the list, and
+// every delete attempt. A stalled CLI must not hang the command with no
+// output, and the bound keeps a hanging delete inside the retry budget.
+// It is a variable only so a test can shorten it; nothing else assigns it.
+var sessionCommandTimeout = 60 * time.Second
 
 // sessionTimestampFloor is the earliest instant a session timestamp may name
 // and still be believed: 2020-01-01T00:00:00Z, well before any session this
@@ -387,8 +388,15 @@ func (r openCodeCleanupRunner) run(ctx context.Context, args []string) ([]byte, 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	err := runHarnessCommand(cmd)
-	if cctx.Err() == context.DeadlineExceeded {
+	err := cmd.Run()
+	// Read the deadline before the post-run group sweep. The sweep can take
+	// seconds (a helper that ignores SIGTERM waits out the grace), so by the
+	// time the sweep returns, a call that finished just before the deadline
+	// can look expired; the command's own outcome decides the timeout, not the
+	// clock the sweep spent.
+	ctxErr := cctx.Err()
+	sweepHarnessProcessGroup(cmd)
+	if err != nil && ctxErr == context.DeadlineExceeded {
 		return nil, fmt.Errorf("opencode %s: timed out after %s", strings.Join(args, " "), sessionCommandTimeout)
 	}
 	if err != nil {
