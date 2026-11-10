@@ -57,7 +57,7 @@ func TestHealthListsOverdueMaintenance(t *testing.T) {
 	}
 	// Ensure the diagnostic read reports overdue.
 	cfg := config.LoadForHook()
-	overdue, err := mcpinit.OverdueMaintenanceProjects(ctx, store, dataDir, time.Now(), cfg.Lifecycle.MinIntervalDuration(), cfg.Reflection.ConsolidationEnabled())
+	overdue, err := mcpinit.OverdueMaintenanceProjects(ctx, store, dataDir, time.Now(), cfg.Lifecycle.MinIntervalDuration(), cfg.Reflection.ClearsConsolidatableSet())
 	if err != nil {
 		t.Fatalf("Overdue: %v", err)
 	}
@@ -212,5 +212,74 @@ func TestHealthCapsOverdueAndUnmaintainableSectionsIndependently(t *testing.T) {
 	}
 	if !strings.Contains(text, unsafeID) {
 		t.Errorf("health does not name the unsafe project:\n%s", text)
+	}
+}
+
+func TestHealthOverdueGateFollowsPhasesThatClearTheSet(t *testing.T) {
+	cases := []struct {
+		name string
+		env  map[string]string
+		want bool
+	}{
+		{"reflect only", map[string]string{"GHOST_REFLECTION_AUTO_REFLECT": "true", "GHOST_REFLECTION_AUTO_RESOLVE": "false", "GHOST_REFLECTION_AUTO_SUPERSEDE": "false"}, true},
+		{"resolve only", map[string]string{"GHOST_REFLECTION_AUTO_REFLECT": "false", "GHOST_REFLECTION_AUTO_RESOLVE": "true", "GHOST_REFLECTION_AUTO_SUPERSEDE": "false"}, true},
+		{"supersede only", map[string]string{"GHOST_REFLECTION_AUTO_REFLECT": "false", "GHOST_REFLECTION_AUTO_RESOLVE": "false", "GHOST_REFLECTION_AUTO_SUPERSEDE": "true"}, false},
+		{"none", map[string]string{"GHOST_REFLECTION_AUTO_REFLECT": "false", "GHOST_REFLECTION_AUTO_RESOLVE": "false", "GHOST_REFLECTION_AUTO_SUPERSEDE": "false"}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tmp := t.TempDir()
+			t.Setenv("XDG_DATA_HOME", filepath.Join(tmp, "data"))
+			t.Setenv("XDG_CONFIG_HOME", filepath.Join(tmp, "config"))
+			t.Setenv("HOME", filepath.Join(tmp, "home"))
+			t.Setenv("USERPROFILE", filepath.Join(tmp, "home"))
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+			if err := os.MkdirAll(filepath.Join(tmp, "home"), 0700); err != nil {
+				t.Fatalf("MkdirAll: %v", err)
+			}
+			dataDir, err := config.DataDir()
+			if err != nil {
+				t.Fatalf("DataDir: %v", err)
+			}
+			if err := os.MkdirAll(dataDir, 0700); err != nil {
+				t.Fatalf("MkdirAll: %v", err)
+			}
+			dbPath := filepath.Join(dataDir, "ghost.db")
+			db, err := memory.OpenDB(dbPath)
+			if err != nil {
+				t.Fatalf("OpenDB: %v", err)
+			}
+			t.Cleanup(func() { _ = db.Close() })
+			readDB, err := memory.OpenReadDB(dbPath)
+			if err != nil {
+				t.Fatalf("OpenReadDB: %v", err)
+			}
+			t.Cleanup(func() { _ = readDB.Close() })
+			logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+			store := memory.NewStoreWithRead(db, readDB, logger)
+			ctx := context.Background()
+			if err := store.EnsureProject(ctx, "idle-proj", "/tmp/idle-proj", "idle-proj"); err != nil {
+				t.Fatalf("EnsureProject: %v", err)
+			}
+			for i := 0; i < 3; i++ {
+				if _, err := store.Create(ctx, "idle-proj", memory.Memory{Category: "fact", Content: "idle memory alpha", Importance: 0.5, Source: "mcp"}); err != nil {
+					t.Fatalf("Create: %v", err)
+				}
+			}
+			srv := New(store, logger, "test")
+			text := ghostHealthText(t, srv)
+			got := strings.Contains(text, "Maintenance overdue")
+			if got != tc.want {
+				t.Fatalf("health overdue section = %v, want %v (%s):\n%s", got, tc.want, tc.name, text)
+			}
+			if strings.Contains(text, "Cannot be maintained unattended") {
+				t.Fatalf("health lists an unmaintainable project (%s):\n%s", tc.name, text)
+			}
+			if tc.want && !strings.Contains(text, "idle-proj") {
+				t.Fatalf("health overdue section does not name the project (%s):\n%s", tc.name, text)
+			}
+		})
 	}
 }

@@ -4441,7 +4441,7 @@ func (s *Server) registerTools() {
 				overdueParts = append(overdueParts, "\n**Maintenance overdue:** could not be read: "+derr.Error()+"\n\n")
 			} else {
 				cfg := config.LoadForHook()
-				overdue, oerr := mcpinit.OverdueMaintenanceProjects(ctx, read.store, dataDir, time.Now(), cfg.Lifecycle.MinIntervalDuration(), cfg.Reflection.ConsolidationEnabled())
+				overdue, oerr := mcpinit.OverdueMaintenanceProjects(ctx, read.store, dataDir, time.Now(), cfg.Lifecycle.MinIntervalDuration(), cfg.Reflection.ClearsConsolidatableSet())
 				if oerr != nil {
 					overdueParts = append(overdueParts, "\n**Maintenance overdue:** could not be read: "+oerr.Error()+"\n\n")
 				} else if len(overdue) > 0 {

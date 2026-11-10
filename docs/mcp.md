@@ -172,7 +172,7 @@ is not currently held. The line names the retry for each project
 (`ghost lifecycle --project <name>`) with the count and the age of the last
 run (`never` when none), rendered with token-shaped project values withheld behind the guard placeholder (ordinary values print unchanged);
 `ghost mcp status` prints the same projects as `! maintenance overdue:` with
-the same counts, so the two diagnostics cannot disagree. A project with no
+the same counts, so the two diagnostics cannot disagree. The list is shown only when the reflect or resolve phase is enabled (`reflection.auto_reflect` or `reflection.auto_resolve`), because those are the phases that remove rows from the consolidatable count — reflect rewrites the set and resolve stamps `resolved_at`; enabling only supersede leaves it empty, since supersede only links rows. A project with no
 consolidatable memories is never overdue. A project whose id is not a safe filename component has consolidatable memories but cannot have lifecycle bookkeeping keyed on it, so it is reported separately under `**Cannot be maintained unattended:**` (status: `! cannot be maintained unattended:`) with its count, its id and the reason, and without the retry that cannot help it; the stop hook records the same refusal as a per-project failure marker. A project above the consolidation input limit is not listed as overdue (it is listed under the Reflect over-bound line with `ghost resolve <project> --apply` or `ghost prune --project <project> --apply`). A read that cannot be made is a missing diagnostic, not a failed check.
 
 
