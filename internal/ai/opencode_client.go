@@ -117,7 +117,7 @@ func (c *OpenCodeClient) run(ctx context.Context, prompt string) (_ string, err 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
+	if err := runHarnessCommand(cmd); err != nil {
 		// A call cut by its own context is a failure, never a declined-tool
 		// success. opencode writes the declined shape as it begins to shut
 		// down, so a deadline or cancellation that lands after the answer text
@@ -174,7 +174,7 @@ func (c *OpenCodeClient) majorVersion(ctx context.Context) int {
 		return 0 // no child could be confined, so there is no version to report
 	}
 	defer release()
-	out, err := probe.Output()
+	out, err := runHarnessCommandOutput(probe)
 	if err != nil {
 		return 0
 	}

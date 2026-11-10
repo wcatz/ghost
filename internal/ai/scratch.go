@@ -1,6 +1,7 @@
 package ai
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
@@ -38,6 +39,30 @@ func boundHarnessProcess(cmd *exec.Cmd) {
 	setHarnessProcessGroup(cmd)
 	cmd.Cancel = func() error { return terminateHarnessProcess(cmd) }
 	cmd.WaitDelay = harnessWaitDelay
+}
+
+// runHarnessCommand runs a child built by boundHarnessProcess and then sweeps
+// its process group. A harness can return from Wait while a helper it started
+// is still running: it exits 0 after sending the helper's stdio to the null
+// device, or a helper holding the stdout pipe outlives WaitDelay expiry. In
+// both cases nothing the caller waits on is left holding the helper, so the
+// group is checked and the same escalate-and-kill sweep the Cancel path uses
+// runs now too — the call's own bound is unchanged, and nothing the harness
+// started outlives the call on either path.
+func runHarnessCommand(cmd *exec.Cmd) error {
+	err := cmd.Run()
+	sweepHarnessProcessGroup(cmd)
+	return err
+}
+
+// runHarnessCommandOutput is runHarnessCommand for a probe whose answer is the
+// child's stdout. It captures stdout on the command and runs through the same
+// sweep, so a capability or version probe cannot leave a helper behind either.
+func runHarnessCommandOutput(cmd *exec.Cmd) ([]byte, error) {
+	var stdout bytes.Buffer
+	cmd.Stdout = &stdout
+	err := runHarnessCommand(cmd)
+	return stdout.Bytes(), err
 }
 
 // harnessCommand builds the subprocess command every LLM harness client runs,

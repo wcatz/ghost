@@ -66,7 +66,7 @@ func (c *CodexClient) run(ctx context.Context, prompt string) (_ string, err err
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
+	if err := runHarnessCommand(cmd); err != nil {
 		return "", fmt.Errorf("codex exec: %w: %s", err, harnessFailureOutput(stdout.String(), stderr.String()))
 	}
 	return strings.TrimSpace(stdout.String()), nil
@@ -493,7 +493,7 @@ func probeCodexFeatures(ctx context.Context, path string, id codexBinaryID) code
 	//     none of them, which IS an answer. `declared` is an empty set, the
 	//     policy is stripped to nothing, and the warning says so plainly.
 	support := codexFeatureSupport{at: time.Now()}
-	if out, err := probe.Output(); err == nil {
+	if out, err := runHarnessCommandOutput(probe); err == nil {
 		// Output that is not a feature table must NOT be read as an
 		// authoritative answer, because a positive verdict is cached for the life
 		// of the process: a header row, a footer count, a progress line, or a

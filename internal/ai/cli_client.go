@@ -178,7 +178,7 @@ func probeClaudeCapabilities(ctx context.Context, path string, id claudeBinaryID
 		return claudeCapabilities{}, fmt.Errorf("claude capability probe: %w", err)
 	}
 	defer release()
-	out, err := probe.Output()
+	out, err := runHarnessCommandOutput(probe)
 	if err != nil {
 		return claudeCapabilities{}, fmt.Errorf("claude capability probe: %w", err)
 	}
@@ -315,7 +315,7 @@ func (c *CLIClient) run(ctx context.Context, prompt string, extraArgs ...string)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
+	if err := runHarnessCommand(cmd); err != nil {
 		return "", fmt.Errorf("claude -p: %w: %s", err, harnessFailureOutput(stdout.String(), stderr.String()))
 	}
 	return stdout.String(), nil

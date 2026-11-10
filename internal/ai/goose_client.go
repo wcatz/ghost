@@ -47,7 +47,7 @@ func (c *GooseClient) run(ctx context.Context, prompt string) (_ string, err err
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
+	if err := runHarnessCommand(cmd); err != nil {
 		return "", fmt.Errorf("goose run: %w: %s", err, harnessFailureOutput(stdout.String(), stderr.String()))
 	}
 	return strings.TrimSpace(stdout.String()), nil
