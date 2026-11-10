@@ -293,18 +293,25 @@ func (s *Store) BindProjectPath(ctx context.Context, id, path, detectedRemote st
 		}
 	}
 
-	// Compared in RESOLVED form, the way lookup compares a recorded path: a
-	// stored path that resolves to the same physical directory is the same
-	// binding, whichever spelling it was written in. A re-run through a symlink
-	// (macOS /tmp → /private/tmp), through the physical path after an import
-	// stored the alias, or against a trailing separator another writer left
-	// behind all report Changed() == false and leave the row alone, so the
+	// Compared in RESOLVED form, the way lookup compares a recorded path, and
+	// only for a recorded path lookup would consider: `storedPathIsUsable`
+	// gates the canonical comparison exactly as `resolveByPath` gates it. A
+	// usable stored path that resolves to the same physical directory is the
+	// same binding, whichever spelling it was written in — a re-run through a
+	// symlink (macOS /tmp → /private/tmp), through the physical path after an
+	// import stored the alias, or against a trailing separator another writer
+	// left behind all report Changed() == false and leave the row alone, so the
 	// redirect follow-up `ghost project bind` prints stays reserved for a
-	// directory that actually moved. A stored path that does not resolve is not
-	// the same binding — it names a directory that is gone — so it is rewritten
-	// like any other change.
-	storedCanon, canonErr := canonicalPath(storedPath)
-	pathChanged := canonErr != nil || storedCanon != physical
+	// directory that actually moved. A stored path that is not usable (a
+	// relative spelling, the bare root, the id sentinel) or that does not
+	// resolve is not the same binding, so it is rewritten like any other
+	// change.
+	pathChanged := storedPath != physical
+	if pathChanged && storedPathIsUsable(storedPath) {
+		if storedCanon, cErr := canonicalPath(storedPath); cErr == nil && storedCanon == physical {
+			pathChanged = false
+		}
+	}
 	newPath := storedPath
 	if pathChanged {
 		newPath = physical

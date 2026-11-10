@@ -469,6 +469,45 @@ func TestBindProjectPathLeavesAnEquivalentSpellingAlone(t *testing.T) {
 	}
 }
 
+// TestBindProjectPathRewritesAnUnusableStoredPath — a recorded path lookup
+// would never match (a relative spelling) is not the same binding even when
+// it resolves to the same directory: resolveByPath gates its canonical
+// comparison on storedPathIsUsable, and bind must too. Without the gate, a
+// project recorded as "link" kept that unusable row, and the resolvability
+// check then refused the bind because the one row that should answer for the
+// directory is a row lookup would never match.
+func TestBindProjectPathRewritesAnUnusableStoredPath(t *testing.T) {
+	ctx := context.Background()
+	s := bindStore(t)
+	sentinelProject(t, s, "infra", "infrastructure")
+	dir := t.TempDir()
+	parent := t.TempDir()
+	link := filepath.Join(parent, "link")
+	if err := os.Symlink(dir, link); err != nil {
+		t.Skipf("this filesystem will not hold a symlink: %v", err)
+	}
+	if err := s.EnsureProject(ctx, "infra", "link", "infrastructure"); err != nil {
+		t.Fatalf("EnsureProject with a relative path: %v", err)
+	}
+	// The relative spelling resolves against the process working directory,
+	// so stand in the directory holding the symlink.
+	t.Chdir(parent)
+
+	got, err := s.BindProjectPath(ctx, "infra", dir, "")
+	if err != nil {
+		t.Fatalf("BindProjectPath: %v", err)
+	}
+	if !got.PathChanged {
+		t.Errorf("an unusable stored path is not the same binding: %+v", got)
+	}
+	if recorded := projectPath(t, s, "infra"); recorded != physical(t, dir) {
+		t.Errorf("stored path = %q, want the usable path %q", recorded, physical(t, dir))
+	}
+	if id, _, err := s.ResolveProject(ctx, dir); err != nil || id != "infra" {
+		t.Errorf("ResolveProject(%q) = (%q, %v), want infra", dir, id, err)
+	}
+}
+
 // shortExistingDir returns an existing directory whose resolved path is ten
 // characters or fewer, or skips: the temp root of a CI host is usually deeper,
 // so a short path has to come from the system directories.
