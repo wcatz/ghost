@@ -460,6 +460,34 @@ func TestBindingPrintsTheMCPInitFollowUp(t *testing.T) {
 			t.Errorf("binding the same directory again changes nothing to follow up, got:\n%s", out.String())
 		}
 	})
+
+	// The same binding reached through a symlink is still the same binding: a
+	// project recorded under an alias is not re-pointed at its target, and a
+	// re-run through the alias prints no redirect follow-up. Without this, a
+	// host whose temp dir is reached through a symlink (macOS /tmp, a linked
+	// HOME) reports a path change and a repair step for a directory that never
+	// moved.
+	t.Run("a re-run through a symlink changes nothing", func(t *testing.T) {
+		store := bindStore(t)
+		real := t.TempDir()
+		link := filepath.Join(t.TempDir(), "alias")
+		if err := os.Symlink(real, link); err != nil {
+			t.Skipf("this filesystem will not hold a symlink: %v", err)
+		}
+		if err := store.EnsureProject(ctx, "infra", link, "infrastructure"); err != nil {
+			t.Fatalf("EnsureProject: %v", err)
+		}
+		var out bytes.Buffer
+		if err := runProjectBindCore(ctx, store, &out, "infra", link, noRemote); err != nil {
+			t.Fatalf("runProjectBindCore: %v", err)
+		}
+		if strings.Contains(out.String(), "ghost mcp init") {
+			t.Errorf("re-binding the same directory through a symlink changes nothing to follow up, got:\n%s", out.String())
+		}
+		if !strings.Contains(out.String(), "already bound:") {
+			t.Errorf("a re-run should report no change, got:\n%s", out.String())
+		}
+	})
 }
 
 // TestUnboundProjectNotice covers the `ghost mcp status` line: it must name

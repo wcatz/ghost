@@ -536,7 +536,11 @@ printf '%s' 'KEEP'
 	if cwd == "" {
 		t.Fatalf("the probe reported no working directory:\n%s", seen)
 	}
-	if cwd == repoRootForProbeTest(t) {
+	// Resolved on both sides: the probe's $PWD is the kernel's physical path,
+	// while the test process's working directory may be reached through a
+	// symlink. Comparing the raw strings would let a probe that DID run in the
+	// repository root pass on such a host.
+	if resolvedComparable(t, cwd) == resolvedComparable(t, repoRootForProbeTest(t)) {
 		t.Errorf("the codex probe ran in the repository root %s, so it could discover Ghost's own rules and config", cwd)
 	}
 }
@@ -2283,11 +2287,17 @@ func TestHarnessPortableChild(t *testing.T) {
 
 func TestOpenCodeVersionProbeUsesHarnessEnvironment(t *testing.T) {
 	setHarnessPolicyParentEnv(t)
+	// The scratch check resolves BOTH sides: the child's $PWD is the kernel's
+	// physical path, while $GHOST_SCRATCH_DIR is the spelling the test handed
+	// the harness. A host whose temp dir is reached through a symlink would
+	// otherwise compare two spellings of one directory and fail the probe,
+	// which majorVersion reads as "no version" and falls back to the V1 argv.
 	bin := fakeHarnessPolicyBinary(t, "opencode", `
 [ -z "$AWS_SECRET_ACCESS_KEY" ] || { echo "version probe leaked AWS secret" >&2; exit 1; }
 [ -z "$GHOST_API_KEY" ] || { echo "version probe leaked Ghost secret" >&2; exit 1; }
 [ "$OPENCODE_API_KEY" = "opencode-secret" ] || { echo "version probe lost OpenCode auth" >&2; exit 1; }
-case "$PWD" in "$GHOST_SCRATCH_DIR"/*) ;; *) echo "version probe ran outside scratch" >&2; exit 1;; esac
+scratch=$(cd "$GHOST_SCRATCH_DIR" && pwd -P) || { echo "version probe cannot resolve scratch" >&2; exit 1; }
+case "$(pwd -P)" in "$scratch"/*) ;; *) echo "version probe ran outside scratch" >&2; exit 1;; esac
 printf '%s\n' 'opencode v2.0.15'
 `)
 

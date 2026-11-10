@@ -165,9 +165,12 @@ func StoredPathIsUsable(stored string) bool { return storedPathIsUsable(stored) 
 // already records for the same checkout.
 //
 // Every refusal happens before the write, and a refusal means nothing changed.
-// Re-binding the same project to the same path is not a refusal: it succeeds,
-// reports Changed() == false, and leaves updated_at alone, so the command in
-// the `ghost mcp status` hint is safe to re-run.
+// Re-binding the same project to the same directory is not a refusal: it
+// succeeds, reports Changed() == false, and leaves updated_at alone, so the
+// command in the `ghost mcp status` hint is safe to re-run. "The same
+// directory" is compared in resolved form, so a stored alias, a trailing
+// separator, or a symlinked re-run is the same binding; a stored path that no
+// longer resolves is not.
 //
 // path must be absolute and must satisfy StoredPathIsUsable; the caller checks
 // that it exists and is a directory, because a caller that cannot look at the
@@ -290,16 +293,25 @@ func (s *Store) BindProjectPath(ctx context.Context, id, path, detectedRemote st
 		}
 	}
 
-	// Compared as EXACT text against the physical path, as a normalisation and
-	// not as a resolvability rule: lookup compares in resolved form, so a row
-	// holding "/x/checkout/" or a backslash spelling already resolves, but
-	// recording the physical spelling keeps every project's stored path in the
-	// one form the bind conflict checks, status and exports compare. Treating
-	// two spellings of one location as "already bound" would leave a row in
-	// its odd spelling for good, because a re-run would find nothing to change.
-	// A row spelled another way is therefore rewritten once to the physical
-	// spelling, which is stable after the first bind.
+	// Compared in RESOLVED form, the way lookup compares a recorded path, and
+	// only for a recorded path lookup would consider: `storedPathIsUsable`
+	// gates the canonical comparison exactly as `resolveByPath` gates it. A
+	// usable stored path that resolves to the same physical directory is the
+	// same binding, whichever spelling it was written in — a re-run through a
+	// symlink (macOS /tmp → /private/tmp), through the physical path after an
+	// import stored the alias, or against a trailing separator another writer
+	// left behind all report Changed() == false and leave the row alone, so the
+	// redirect follow-up `ghost project bind` prints stays reserved for a
+	// directory that actually moved. A stored path that is not usable (a
+	// relative spelling, the bare root, the id sentinel) or that does not
+	// resolve is not the same binding, so it is rewritten like any other
+	// change.
 	pathChanged := storedPath != physical
+	if pathChanged && storedPathIsUsable(storedPath) {
+		if storedCanon, cErr := canonicalPath(storedPath); cErr == nil && storedCanon == physical {
+			pathChanged = false
+		}
+	}
 	newPath := storedPath
 	if pathChanged {
 		newPath = physical
