@@ -294,14 +294,16 @@ func TestOverdueMaintenanceProjects_WordingSingularAndPlural(t *testing.T) {
 	}
 }
 
-func TestOverdueNotListedWhenReflectIsOff(t *testing.T) {
+func TestOverdueGateFollowsPhasesThatClearTheSet(t *testing.T) {
 	cases := []struct {
 		name string
 		env  map[string]string
+		want bool
 	}{
-		{"resolve only", map[string]string{"GHOST_REFLECTION_AUTO_REFLECT": "false", "GHOST_REFLECTION_AUTO_RESOLVE": "true", "GHOST_REFLECTION_AUTO_SUPERSEDE": "false"}},
-		{"supersede only", map[string]string{"GHOST_REFLECTION_AUTO_REFLECT": "false", "GHOST_REFLECTION_AUTO_RESOLVE": "false", "GHOST_REFLECTION_AUTO_SUPERSEDE": "true"}},
-		{"none", map[string]string{"GHOST_REFLECTION_AUTO_REFLECT": "false", "GHOST_REFLECTION_AUTO_RESOLVE": "false", "GHOST_REFLECTION_AUTO_SUPERSEDE": "false"}},
+		{"reflect only", map[string]string{"GHOST_REFLECTION_AUTO_REFLECT": "true", "GHOST_REFLECTION_AUTO_RESOLVE": "false", "GHOST_REFLECTION_AUTO_SUPERSEDE": "false"}, true},
+		{"resolve only", map[string]string{"GHOST_REFLECTION_AUTO_REFLECT": "false", "GHOST_REFLECTION_AUTO_RESOLVE": "true", "GHOST_REFLECTION_AUTO_SUPERSEDE": "false"}, true},
+		{"supersede only", map[string]string{"GHOST_REFLECTION_AUTO_REFLECT": "false", "GHOST_REFLECTION_AUTO_RESOLVE": "false", "GHOST_REFLECTION_AUTO_SUPERSEDE": "true"}, false},
+		{"none", map[string]string{"GHOST_REFLECTION_AUTO_REFLECT": "false", "GHOST_REFLECTION_AUTO_RESOLVE": "false", "GHOST_REFLECTION_AUTO_SUPERSEDE": "false"}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -340,11 +342,15 @@ func TestOverdueNotListedWhenReflectIsOff(t *testing.T) {
 			}
 			var out bytes.Buffer
 			reportOverdueMaintenanceStatus(&out, store, dataDir)
-			if contains(out.String(), "maintenance overdue:") {
-				t.Fatalf("proj listed as overdue with reflect off (%s): %q", tc.name, out.String())
+			got := contains(out.String(), "maintenance overdue:")
+			if got != tc.want {
+				t.Fatalf("overdue listed = %v, want %v (%s): %q", got, tc.want, tc.name, out.String())
 			}
 			if contains(out.String(), "cannot be maintained unattended:") {
-				t.Fatalf("proj listed as unmaintainable with reflect off (%s): %q", tc.name, out.String())
+				t.Fatalf("proj listed as unmaintainable (%s): %q", tc.name, out.String())
+			}
+			if tc.want && !contains(out.String(), "proj") {
+				t.Fatalf("overdue section does not name the project (%s): %q", tc.name, out.String())
 			}
 		})
 	}

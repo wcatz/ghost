@@ -974,7 +974,7 @@ func reportOverdueMaintenanceStatus(w io.Writer, store *memory.Store, dataDir st
 	}
 	cfg := config.LoadForHook()
 	minInterval := cfg.Lifecycle.MinIntervalDuration()
-	overdue, err := OverdueMaintenanceProjects(context.Background(), store, dataDir, time.Now(), minInterval, cfg.Reflection.ConsolidationEnabled())
+	overdue, err := OverdueMaintenanceProjects(context.Background(), store, dataDir, time.Now(), minInterval, cfg.Reflection.ClearsConsolidatableSet())
 	if err != nil {
 		_, _ = fmt.Fprintf(w, "  ! maintenance overdue: could not be read: %s\n", err)
 		return

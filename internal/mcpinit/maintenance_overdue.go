@@ -40,18 +40,19 @@ type OverdueProject struct {
 // so it is returned with UnsafeID set and without a last-run figure rather
 // than being dropped: dropping it hid the project from both diagnostics. A
 // non-positive minInterval means the cooldown is disabled (every project with
-// work and no live claim is due). consolidationEnabled gates the listing: it
-// is the reflect phase's own switch, because that is the phase that reads
-// the consolidatable set this list counts. When false, no run can clear
-// the count and no retry is useful, so the result is nil.
-func OverdueMaintenanceProjects(ctx context.Context, store *memory.Store, dataDir string, now time.Time, minInterval time.Duration, consolidationEnabled bool) ([]OverdueProject, error) {
+// work and no live claim is due). clearsConsolidatableSet gates the listing:
+// it is true when reflect or resolve is enabled, the two phases that remove
+// rows from the consolidatable set this list counts. Supersede only links
+// rows, so a supersede-only configuration leaves the count where it was and
+// the retry it offers would be useless, so the result is nil.
+func OverdueMaintenanceProjects(ctx context.Context, store *memory.Store, dataDir string, now time.Time, minInterval time.Duration, clearsConsolidatableSet bool) ([]OverdueProject, error) {
 	if store == nil {
 		return nil, nil
 	}
 	if dataDir == "" {
 		return nil, nil
 	}
-	if !consolidationEnabled {
+	if !clearsConsolidatableSet {
 		return nil, nil
 	}
 	noCooldown := minInterval <= 0

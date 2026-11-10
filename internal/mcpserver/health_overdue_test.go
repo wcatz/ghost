@@ -57,7 +57,7 @@ func TestHealthListsOverdueMaintenance(t *testing.T) {
 	}
 	// Ensure the diagnostic read reports overdue.
 	cfg := config.LoadForHook()
-	overdue, err := mcpinit.OverdueMaintenanceProjects(ctx, store, dataDir, time.Now(), cfg.Lifecycle.MinIntervalDuration(), cfg.Reflection.ConsolidationEnabled())
+	overdue, err := mcpinit.OverdueMaintenanceProjects(ctx, store, dataDir, time.Now(), cfg.Lifecycle.MinIntervalDuration(), cfg.Reflection.ClearsConsolidatableSet())
 	if err != nil {
 		t.Fatalf("Overdue: %v", err)
 	}
@@ -215,13 +215,16 @@ func TestHealthCapsOverdueAndUnmaintainableSectionsIndependently(t *testing.T) {
 	}
 }
 
-func TestHealthDoesNotListOverdueWhenReflectIsOff(t *testing.T) {
+func TestHealthOverdueGateFollowsPhasesThatClearTheSet(t *testing.T) {
 	cases := []struct {
 		name string
 		env  map[string]string
+		want bool
 	}{
-		{"resolve only", map[string]string{"GHOST_REFLECTION_AUTO_REFLECT": "false", "GHOST_REFLECTION_AUTO_RESOLVE": "true", "GHOST_REFLECTION_AUTO_SUPERSEDE": "false"}},
-		{"supersede only", map[string]string{"GHOST_REFLECTION_AUTO_REFLECT": "false", "GHOST_REFLECTION_AUTO_RESOLVE": "false", "GHOST_REFLECTION_AUTO_SUPERSEDE": "true"}},
+		{"reflect only", map[string]string{"GHOST_REFLECTION_AUTO_REFLECT": "true", "GHOST_REFLECTION_AUTO_RESOLVE": "false", "GHOST_REFLECTION_AUTO_SUPERSEDE": "false"}, true},
+		{"resolve only", map[string]string{"GHOST_REFLECTION_AUTO_REFLECT": "false", "GHOST_REFLECTION_AUTO_RESOLVE": "true", "GHOST_REFLECTION_AUTO_SUPERSEDE": "false"}, true},
+		{"supersede only", map[string]string{"GHOST_REFLECTION_AUTO_REFLECT": "false", "GHOST_REFLECTION_AUTO_RESOLVE": "false", "GHOST_REFLECTION_AUTO_SUPERSEDE": "true"}, false},
+		{"none", map[string]string{"GHOST_REFLECTION_AUTO_REFLECT": "false", "GHOST_REFLECTION_AUTO_RESOLVE": "false", "GHOST_REFLECTION_AUTO_SUPERSEDE": "false"}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -267,11 +270,15 @@ func TestHealthDoesNotListOverdueWhenReflectIsOff(t *testing.T) {
 			}
 			srv := New(store, logger, "test")
 			text := ghostHealthText(t, srv)
-			if strings.Contains(text, "Maintenance overdue") {
-				t.Errorf("health lists overdue maintenance with reflect off (%s):\n%s", tc.name, text)
+			got := strings.Contains(text, "Maintenance overdue")
+			if got != tc.want {
+				t.Fatalf("health overdue section = %v, want %v (%s):\n%s", got, tc.want, tc.name, text)
 			}
 			if strings.Contains(text, "Cannot be maintained unattended") {
-				t.Errorf("health lists unmaintainable project with reflect off (%s):\n%s", tc.name, text)
+				t.Fatalf("health lists an unmaintainable project (%s):\n%s", tc.name, text)
+			}
+			if tc.want && !strings.Contains(text, "idle-proj") {
+				t.Fatalf("health overdue section does not name the project (%s):\n%s", tc.name, text)
 			}
 		})
 	}
