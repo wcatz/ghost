@@ -55,7 +55,6 @@ type BudgetResult struct {
 // returned as an error. Skipped entries leave a debug trace so the hidden
 // bytes stay findable.
 func Size(dir string) (bytes int64, files int, skipped int, err error) {
-	skipped = 0
 	walkErr := filepath.WalkDir(dir, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			if os.IsNotExist(walkErr) && path == dir {
@@ -101,13 +100,16 @@ func Size(dir string) (bytes int64, files int, skipped int, err error) {
 // spawn (harnessCommand is the single call site). The order is fixed:
 //
 //  1. measure the root;
-//  2. only if over scratch.max_bytes: reap stale entries (the existing Reap,
-//     which only ever removes what Ghost provably created);
+//  2. over scratch.max_bytes OR the measurement skipped unreadable entries:
+//     reap stale entries (the existing Reap, which only ever removes what
+//     Ghost provably created);
 //  3. re-measure; still over budget → a LOUD warning naming the root and the
 //     bytes-over, via slog — the same stream harnessCommand's own warnings use;
-//  4. if the check fired at all (initial measure over budget), record the
-//     scratch bytes and reaped counts to maintenance_runs so
-//     `ghost maintenance status` can show them;
+//  4. if the check fired at all (initial measure over budget OR a partial
+//     measurement), record the scratch bytes, skipped count and reaped counts
+//     to maintenance_runs so `ghost maintenance status` can show them — at
+//     most once per measurement outcome, so a stable partial root does not
+//     add a row per spawn;
 //  5. return normally. Every failure path warns and returns — enforcement
 //     must never block a spawn: maintenance is not to be stopped by its own
 //     hygiene, but it must never be quiet either.
@@ -138,14 +140,15 @@ func EnforceBudget() BudgetResult {
 	}
 
 	res := BudgetResult{Root: root, MaxBytes: maxBytes, BytesBefore: before, BytesAfter: before, Skipped: skipped}
-	if skipped > 0 {
+	partial := skipped > 0
+	if partial {
 		// A partial measurement may hide bytes over budget: a locked
 		// subtree larger than the budget must not read as within budget.
 		// Fire the check anyway so the reap runs and the run is recorded.
 		slog.Warn("scratch budget: measurement skipped unreadable entries; running check on the measurable portion",
 			"root", root, "skipped", skipped)
 	}
-	if before <= maxBytes && skipped == 0 {
+	if before <= maxBytes && !partial {
 		return res // within budget: no reap, no warning, no record
 	}
 
@@ -195,8 +198,23 @@ func EnforceBudget() BudgetResult {
 	}
 
 	res.Recorded = recordBudgetRun(res)
+	if partial && res.Recorded {
+		// A stable partial root would otherwise add a row on every spawn.
+		// Record the outcome once; later spawns reuse the marker so the
+		// suppressed repeats are visible in the log rather than silent.
+		recordBudgetRunKey = root
+	}
 	return res
 }
+
+// recordBudgetRunKey is the partial-measurement outcome class whose row was
+// already recorded. It bounds recordBudgetRun to one row per outcome, so an
+// entry that stays unreadable (a live harness dir, one under the 24h age)
+// cannot add a maintenance_runs row per spawn. Empty means no partial
+// outcome has been recorded in this process. The class is the ROOT alone:
+// every partial measurement of one root shares its row, because a repeated
+// reap can change the bytes without new information.
+var recordBudgetRunKey string
 
 // recordBudgetRun writes one maintenance_runs row for a fired budget check.
 // Best-effort by design: a failure is warned (never fatal — the spawn this
@@ -204,7 +222,22 @@ func EnforceBudget() BudgetResult {
 // through the result. The row is written only when the check fired (initial
 // measure over budget), so a lifecycle's hundreds of quiet spawns add zero
 // rows while every reaped or warned spawn lands exactly once.
+//
+// A partial measurement fires the check even within budget, because its
+// skipped entries could hide bytes over the budget. That would add one row
+// per spawn while the entry stays unreadable, so a partial outcome is
+// recorded only once: the row carries the skipped count and the state marker
+// that suppressed the repeats, and the warning names what was not recorded.
 func recordBudgetRun(res BudgetResult) bool {
+	if res.Skipped > 0 && recordBudgetRunKey == res.Root {
+		// This root's partial outcome already has its row. Recording it
+		// again per spawn would grow maintenance_runs without new
+		// information, so reuse the marker and say the repeats are
+		// suppressed.
+		slog.Warn("scratch budget: partial measurement already recorded; suppressing repeated rows",
+			"root", res.Root, "skipped", res.Skipped)
+		return true
+	}
 	dataDir, err := config.DataDirPath()
 	if err != nil {
 		slog.Debug("scratch budget: no data dir, run not recorded", "error", err)
@@ -245,6 +278,13 @@ func recordBudgetRun(res BudgetResult) bool {
 			note = fmt.Sprintf("%s; measurement skipped %d unreadable entries", note, res.Skipped)
 		} else {
 			note = fmt.Sprintf("measurement skipped %d unreadable entries", res.Skipped)
+		}
+	}
+	if res.Skipped > 0 && res.ReapErr == nil {
+		if note != "" {
+			note = fmt.Sprintf("%s; partial measurement recorded once per outcome", note)
+		} else {
+			note = fmt.Sprintf("partial measurement recorded once per outcome")
 		}
 	}
 	run := memory.MaintenanceRun{

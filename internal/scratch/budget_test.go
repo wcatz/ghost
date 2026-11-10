@@ -752,3 +752,79 @@ func TestEnforceBudget_PartialMeasurementFiresAndRecords(t *testing.T) {
 		t.Errorf("note = %q, want it to name the skipped entries", note)
 	}
 }
+
+// TestEnforceBudget_PartialMeasurementRecordsOncePerOutcome: an entry that
+// stays unreadable under budget fires every spawn's check, but must not add a
+// maintenance_runs row per spawn. The second identical outcome reuses the
+// marker: one row, both runs recorded, and the suppression is warned.
+func TestEnforceBudget_PartialMeasurementRecordsOncePerOutcome(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("permission bits are not enforced the same way on Windows")
+	}
+	root := t.TempDir()
+	t.Setenv("GHOST_SCRATCH_DIR", root)
+	t.Setenv("GHOST_SCRATCH_MAX_BYTES", "1048576") // ample: the partial root reads within budget
+	dataHome := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", dataHome)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	if err := os.MkdirAll(filepath.Join(dataHome, "ghost"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	db, err := openTestDB(filepath.Join(dataHome, "ghost", "ghost.db"))
+	if err != nil {
+		t.Fatalf("seed db: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(filepath.Join(root, "small"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	locked := filepath.Join(root, "locked")
+	if err := os.Mkdir(locked, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(locked, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o700) })
+
+	logs := captureLogs(t)
+	first := EnforceBudget()
+	if !first.Fired {
+		t.Fatalf("partial measurement did not fire: %+v", first)
+	}
+	if !first.Recorded {
+		t.Fatalf("first partial outcome was not recorded: %+v", first)
+	}
+	second := EnforceBudget()
+	if !second.Recorded {
+		t.Fatalf("suppressed outcome must report the reused row: %+v", second)
+	}
+	if !strings.Contains(logs.String(), "already recorded; suppressing repeated rows") {
+		t.Errorf("suppression was not warned:\n%s", logs.String())
+	}
+
+	db, err = openTestDB(filepath.Join(dataHome, "ghost", "ghost.db"))
+	if err != nil {
+		t.Fatalf("reopen db: %v", err)
+	}
+	defer db.Close() //nolint:errcheck
+	var count int
+	if err := db.QueryRow(`SELECT count(*) FROM maintenance_runs`).Scan(&count); err != nil {
+		t.Fatalf("count maintenance_runs: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("maintenance_runs rows = %d, want 1 (one per outcome, not per spawn)", count)
+	}
+	var note string
+	if err := db.QueryRow(`SELECT note FROM maintenance_runs`).Scan(&note); err != nil {
+		t.Fatalf("select note: %v", err)
+	}
+	if !strings.Contains(note, "recorded once per outcome") {
+		t.Errorf("note = %q, want it to say the outcome is recorded once", note)
+	}
+}
