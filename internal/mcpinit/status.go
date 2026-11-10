@@ -913,6 +913,12 @@ func reportHistoryGrowth(w io.Writer, store *memory.Store) {
 // a store with duplicates is working as configured and the repair is the fold
 // command, not `ghost mcp init`. A failed read is reported rather than dropped,
 // because an absent line reads as a healthy store.
+//
+// The _global line counts reflection-written rows only, matching the fold it
+// names. Live pairs among every consolidatable _global row — including rows
+// the fold cannot touch — are listed after it under Near duplicates by
+// reportGlobalNearDuplicates, so a backlog of agent-saved rows stays visible
+// here as it is in ghost_health.
 func reportGlobalConsolidation(w io.Writer, store *memory.Store) {
 	all, err := store.GetAll(context.Background(), memory.GlobalProjectID, -1)
 	if err != nil {
@@ -940,6 +946,48 @@ func reportGlobalConsolidation(w io.Writer, store *memory.Store) {
 			folded += len(c.Folded)
 		}
 		_, _ = fmt.Fprintf(w, "  ! _global: %d memories, %d reflection-written consolidatable, %d near-duplicate cluster(s) covering %d rows — run `ghost maintenance consolidate-global --apply` to fold\n", len(all), len(live), len(clusters), folded+len(clusters))
+	}
+	reportGlobalNearDuplicates(w, store)
+}
+
+// maxStatusGlobalNearDuplicatePairs bounds how many _global pairs the status
+// Near duplicates line samples; the total is still reported.
+const maxStatusGlobalNearDuplicatePairs = 5
+
+// reportGlobalNearDuplicates lists live near-duplicate pairs among every
+// consolidatable _global row, however it was written, under Near duplicates.
+// It reads the same predicate ghost_health reads, so the terminal and the
+// agent see the same pairs for one store. It is a `!` line when pairs exist
+// and no line when they do not, like the reflect and overdue lines beside
+// it, and it never takes the health verdict. A failed read is reported
+// rather than dropped.
+func reportGlobalNearDuplicates(w io.Writer, store *memory.Store) {
+	pairs, capped, err := store.NearDuplicatePairsForProject(context.Background(), memory.GlobalProjectID)
+	if err != nil {
+		_, _ = fmt.Fprintf(w, "  ! Near duplicates: _global could not be read: %v\n", err)
+		return
+	}
+	if len(pairs) == 0 {
+		return
+	}
+	sample := pairs
+	more := 0
+	if len(sample) > maxStatusGlobalNearDuplicatePairs {
+		more = len(sample) - maxStatusGlobalNearDuplicatePairs
+		sample = sample[:maxStatusGlobalNearDuplicatePairs]
+	}
+	var parts []string
+	for _, pr := range sample {
+		parts = append(parts, fmt.Sprintf("%s and %s", memory.RefusalArg("memory_id", pr[0]), memory.RefusalArg("memory_id", pr[1])))
+	}
+	line := fmt.Sprintf("  ! Near duplicates: %d live near-duplicate pair(s) in _global: %s", len(pairs), strings.Join(parts, ", "))
+	if more > 0 {
+		line += fmt.Sprintf(" ... and %d more", more)
+	}
+	line += " — run `ghost reflect _global --apply` to consolidate"
+	_, _ = fmt.Fprintln(w, line)
+	if capped {
+		_, _ = fmt.Fprintf(w, "  ! near-duplicate scan capped at %d rows for _global; rows beyond the bound were not considered (scan capped/cut)\n", memory.MaxNearDuplicateScanRows)
 	}
 }
 

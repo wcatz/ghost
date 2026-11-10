@@ -181,4 +181,16 @@ func TestStatusGlobalMCPSourceDoesNotContradictNearDuplicates(t *testing.T) {
 	if strings.Contains(text, "no near-duplicate clusters") {
 		t.Fatalf("_global line must not claim no near-duplicate clusters when pairs exist:\n%s", text)
 	}
+	if !strings.Contains(text, "Near duplicates:") {
+		t.Fatalf("status must list the _global near-duplicate pair under Near duplicates:\n%s", text)
+	}
+	if !strings.Contains(text, "1 live near-duplicate pair(s) in _global") {
+		t.Fatalf("status must count the _global near-duplicate pair:\n%s", text)
+	}
+	if !strings.Contains(text, "ghost reflect _global --apply") {
+		t.Fatalf("status near-duplicates line must name the reflect repair for mcp rows:\n%s", text)
+	}
+	if strings.Contains(text, "consolidate-global --apply") {
+		t.Fatalf("status must not suggest consolidate-global for mcp rows it cannot fold:\n%s", text)
+	}
 }

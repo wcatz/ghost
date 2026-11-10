@@ -161,9 +161,11 @@ has no checkout path so no unattended `ghost lifecycle` run ever reaches it, yet
 its rows are injected into every session. The count is reflection-written only because `ghost maintenance consolidate-global` folds only reflection-written, consolidatable rows; other consolidatable `_global` rows (for example `ghost_save_global` rows) are listed under **Near duplicates:** and consolidated by `ghost reflect _global --apply`. The line matches the `ghost maintenance consolidate-global` dry-run: when there are no reflection-written consolidatable rows it prints `_global: %d memories, 0 reflection-written consolidatable`; when there are reflection-written consolidatable rows but no clusters it prints `_global: %d memories, %d reflection-written consolidatable — nothing to fold`; when clusters exist it prints `_global: %d memories, %d reflection-written consolidatable, %d near-duplicate cluster(s) covering %d rows` — and, when at
 least one cluster exists, a `⚠` line names `ghost maintenance
 consolidate-global --apply` as the repair. A read that fails prints `**_global:**
-could not be read: …` rather than nothing. The same line and the same warning
-appear in `ghost mcp status`, so a terminal and an agent reading one store are
-told the same thing about it.
+could not be read: …` rather than nothing. Status prints the `_global` pairs
+from the same scan as a `! Near duplicates:` line naming `ghost reflect
+_global --apply`. The same line and the same warning appear in `ghost mcp
+status`, so a terminal and an agent reading one store are told the same thing
+about it.
 
 `ghost_health` also reports **maintenance overdue:** projects that hold
 consolidatable memories and have not had lifecycle maintenance within
