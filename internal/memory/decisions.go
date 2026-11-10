@@ -219,10 +219,11 @@ func (s *Store) SupersedeDecision(ctx context.Context, projectID, oldID, newID s
 // had dropped it. See retireDecisionCompanionTx for what retiring means and how
 // the two rows are matched.
 //
-// A companion already retired (by this pair or by an earlier replacement) is
-// left exactly as the first retirement recorded it: its edge and history row
-// keep naming the decision that retired it, and only the decisions row is
-// repointed. History is append-only and ghost_link_withdraw repairs a wrong edge.
+// A companion already retired (by an earlier replacement) has its supersedes
+// edge and history updated to name the new replacement when the decision is
+// repointed, and any stale edge from the previous replacement is invalidated.
+// Re-running the same pair records nothing new, including after a caller
+// withdrew the companion edge.
 //
 // Both IDs must belong to projectID and must differ; a decision cannot
 // supersede itself. Re-running the same pair is a clean no-op, so re-running is
@@ -299,6 +300,22 @@ func supersedeDecisionTx(ctx context.Context, tx *sql.Tx, projectID, oldID, newI
 	if successor != "" && successor != newID {
 		return out, supersedeRefusal{&DecisionSuccessorError{Successor: successor}}
 	}
+	// A repoint changes the successor of an already-superseded decision whose
+	// previous successor is no longer live. Read the current successor before
+	// overwriting it so only that successor's companion edge is adjusted.
+	var currentSupersededBy string
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COALESCE(superseded_by, '') FROM decisions WHERE id = ? AND project_id = ?`,
+		oldID, projectID).Scan(&currentSupersededBy); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return out, fmt.Errorf("supersede decision: lookup %s: %w", RefusalArg("decision_id", oldID), err)
+	}
+	priorSuccessor := currentSupersededBy
+	if priorSuccessor == newID {
+		priorSuccessor = ""
+	}
+	// Only a change of successor is a repoint. Re-running the same pair must
+	// stay a no-op, so an edge the caller withdrew is not written back.
+	repoint := currentSupersededBy != "" && currentSupersededBy != newID
 
 	res, err := tx.ExecContext(ctx, `
 		UPDATE decisions
@@ -317,7 +334,7 @@ func supersedeDecisionTx(ctx context.Context, tx *sql.Tx, projectID, oldID, newI
 		return out, supersedeRefusal{fmt.Errorf("supersede decision: decision %s not found in project %s", RefusalArg("decision_id", oldID), RefusalArg("project_id", projectID))}
 	}
 
-	out, err = retireDecisionCompanionTx(ctx, tx, projectID, oldID, newID)
+	out, err = retireDecisionCompanionTx(ctx, tx, projectID, oldID, newID, priorSuccessor, repoint)
 	if err != nil {
 		return DecisionRetirement{}, fmt.Errorf("supersede decision: retire companion: %w", err)
 	}
@@ -720,7 +737,13 @@ func checkReservedSourceRef(ref string) error {
 // has been fixed twice for: a row the arms cannot see let the supersede answer a
 // clean success while a memory that still states the reversed decision kept
 // ranking (#1283).
-func findDecisionCompanionsTx(ctx context.Context, tx *sql.Tx, projectID, decisionID string) (found, ambiguous, shared, declined []string, err error) {
+//
+// retired names the already-resolved single companion of decisionID: it is not
+// re-stamped, but a repoint that changes the decision's successor must still
+// update its history and edge to name the new replacement. It may have been
+// resolved for any reason; retireDecisionCompanionTx writes onto it only when
+// retiredBySupersedeTx says a supersede retired it.
+func findDecisionCompanionsTx(ctx context.Context, tx *sql.Tx, projectID, decisionID string) (found, retired, ambiguous, shared, declined []string, err error) {
 	// The writer tools refuse the reserved prefix, but an import carries
 	// source_ref verbatim, so the link is trusted only for a decision-category
 	// memory, one with source 'decision_log', or one with source 'reflection'.
@@ -785,7 +808,7 @@ func findDecisionCompanionsTx(ctx context.Context, tx *sql.Tx, projectID, decisi
 		ORDER BY rowid
 	`, projectID, GlobalProjectID, "%"+want+"%")
 	if err != nil {
-		return nil, nil, nil, nil, fmt.Errorf("read linked companions: %w", err)
+		return nil, nil, nil, nil, nil, fmt.Errorf("read linked companions: %w", err)
 	}
 	var linked []linkRow
 	for rows0.Next() {
@@ -793,7 +816,7 @@ func findDecisionCompanionsTx(ctx context.Context, tx *sql.Tx, projectID, decisi
 		var ref string
 		if err := rows0.Scan(&r.id, &r.category, &r.source, &ref, &r.live); err != nil {
 			_ = rows0.Close()
-			return nil, nil, nil, nil, fmt.Errorf("scan linked companion: %w", err)
+			return nil, nil, nil, nil, nil, fmt.Errorf("scan linked companion: %w", err)
 		}
 		if !sourceRefNamesDecision(ref, decisionID) {
 			continue
@@ -810,7 +833,7 @@ func findDecisionCompanionsTx(ctx context.Context, tx *sql.Tx, projectID, decisi
 	}
 	if err := rows0.Err(); err != nil {
 		_ = rows0.Close()
-		return nil, nil, nil, nil, fmt.Errorf("read linked companions: %w", err)
+		return nil, nil, nil, nil, nil, fmt.Errorf("read linked companions: %w", err)
 	}
 	_ = rows0.Close()
 	// A row is shared only while another decision it links is NOT reversed: once
@@ -820,16 +843,16 @@ func findDecisionCompanionsTx(ctx context.Context, tx *sql.Tx, projectID, decisi
 	for i := range linked {
 		multi, err := linksAnotherUnsupersededDecisionTx(ctx, tx, linked[i].ref, decisionID)
 		if err != nil {
-			return nil, nil, nil, nil, err
+			return nil, nil, nil, nil, nil, err
 		}
 		linked[i].multi = multi
 	}
 	if len(linked) == 0 {
 		found, ambiguous, shared, err := findUnlinkedDecisionCompanionTx(ctx, tx, projectID, decisionID)
 		if err != nil {
-			return nil, nil, nil, nil, err
+			return nil, nil, nil, nil, nil, err
 		}
-		return found, ambiguous, shared, declined, nil
+		return found, nil, ambiguous, shared, declined, nil
 	}
 	// A live row that stands for more than one decision — another of which is not
 	// yet superseded — is not this decision's clean companion: retiring it would
@@ -851,9 +874,9 @@ func findDecisionCompanionsTx(ctx context.Context, tx *sql.Tx, projectID, decisi
 	}
 	if len(single) == 1 {
 		if single[0].live {
-			return []string{single[0].id}, nil, shared, declined, nil
+			return []string{single[0].id}, nil, nil, shared, declined, nil
 		}
-		return nil, nil, shared, declined, nil
+		return nil, []string{single[0].id}, nil, shared, declined, nil
 	}
 	if len(single) > 1 {
 		var logged []linkRow
@@ -864,9 +887,9 @@ func findDecisionCompanionsTx(ctx context.Context, tx *sql.Tx, projectID, decisi
 		}
 		if len(logged) == 1 {
 			if logged[0].live {
-				return []string{logged[0].id}, nil, shared, declined, nil
+				return []string{logged[0].id}, nil, nil, shared, declined, nil
 			}
-			return nil, nil, shared, declined, nil
+			return nil, []string{logged[0].id}, nil, shared, declined, nil
 		}
 		for _, r := range single {
 			if r.live {
@@ -874,7 +897,29 @@ func findDecisionCompanionsTx(ctx context.Context, tx *sql.Tx, projectID, decisi
 			}
 		}
 	}
-	return nil, ambiguous, shared, declined, nil
+	return nil, nil, ambiguous, shared, declined, nil
+}
+
+// retiredBySupersedeTx keeps the resolved companions in ids that carry a
+// 'supersede' history row, the mark a supersede chain leaves when it retires a
+// companion with a replacement to name. A companion resolved for another reason
+// has no such row and is left alone by a repoint. One a supersede retired with
+// no replacement companion carries only a 'resolve' row, indistinguishable from
+// a resolve pass, so it is not repointed either.
+func retiredBySupersedeTx(ctx context.Context, tx *sql.Tx, ids []string) ([]string, error) {
+	var out []string
+	for _, id := range ids {
+		var n int
+		if err := tx.QueryRowContext(ctx,
+			`SELECT count(*) FROM memory_history WHERE memory_id = ? AND phase = ?`,
+			id, phaseSupersede).Scan(&n); err != nil {
+			return nil, fmt.Errorf("read companion history: %w", err)
+		}
+		if n > 0 {
+			out = append(out, id)
+		}
+	}
+	return out, nil
 }
 
 // linksAnotherUnsupersededDecisionTx reports whether ref links a decision other
@@ -983,11 +1028,16 @@ func findUnlinkedDecisionCompanionTx(ctx context.Context, tx *sql.Tx, projectID,
 //   - A companion the guard refuses (pinned, persistent) is left live, writes
 //     nothing, and is returned in Declined so the caller can say it still ranks.
 //
-// Idempotence: only live companions are looked up, so a second supersede over
-// the same pair finds nothing to stamp and writes no second history row.
-func retireDecisionCompanionTx(ctx context.Context, tx *sql.Tx, projectID, oldID, newID string) (DecisionRetirement, error) {
+// A repoint changes which decision supersedes an already-retired companion.
+// Its resolved_at stamp is left alone, but its supersedes edge and history are
+// updated to name the new replacement's companion, and any stale supersedes edge
+// from the previous replacement is invalidated.
+//
+// Idempotence: only live companions are stamped, and a repoint that already
+// names the new replacement records nothing new.
+func retireDecisionCompanionTx(ctx context.Context, tx *sql.Tx, projectID, oldID, newID, priorSuccessor string, repoint bool) (DecisionRetirement, error) {
 	var out DecisionRetirement
-	candidates, ambiguous, shared, declined, err := findDecisionCompanionsTx(ctx, tx, projectID, oldID)
+	candidates, retired, ambiguous, shared, declined, err := findDecisionCompanionsTx(ctx, tx, projectID, oldID)
 	if err != nil {
 		return out, err
 	}
@@ -1002,7 +1052,9 @@ func retireDecisionCompanionTx(ctx context.Context, tx *sql.Tx, projectID, oldID
 	// imported decision) leaves the reason unstated rather than naming an id
 	// that is not a memory. See replacementCompanionTx for a replacement whose
 	// link more than one live row carries.
-	newCompanion, err := replacementCompanionTx(ctx, tx, projectID, newID)
+	// A replacement whose own companion was already retired is named only on a
+	// repoint; a plain supersede keeps naming live companions alone.
+	newCompanion, err := replacementCompanionTx(ctx, tx, projectID, newID, repoint)
 	if err != nil {
 		return out, err
 	}
@@ -1012,6 +1064,22 @@ func retireDecisionCompanionTx(ctx context.Context, tx *sql.Tx, projectID, oldID
 	// here, and none is written, rather than a guard no test can reach.
 	retire := candidates
 	if len(retire) == 0 {
+		if repoint {
+			var priorCompanion string
+			if priorSuccessor != "" {
+				priorCompanion, err = replacementCompanionTx(ctx, tx, projectID, priorSuccessor, true)
+				if err != nil {
+					return out, err
+				}
+			}
+			retired, err = retiredBySupersedeTx(ctx, tx, retired)
+			if err != nil {
+				return out, err
+			}
+			if err := repointRetiredCompanionsTx(ctx, tx, retired, newCompanion, priorCompanion); err != nil {
+				return out, err
+			}
+		}
 		return out, nil
 	}
 
@@ -1078,8 +1146,87 @@ func retireDecisionCompanionTx(ctx context.Context, tx *sql.Tx, projectID, oldID
 	return out, nil
 }
 
+// repointRetiredCompanionsTx updates the supersedes edge and history of
+// companions already retired by an earlier supersede so they name the new
+// replacement. The stale supersedes edge from the previous replacement's
+// companion, when known, is invalidated. A supersede history row is appended
+// when the replacement changes. It writes nothing when the correct edge is
+// already in place.
+func repointRetiredCompanionsTx(ctx context.Context, tx *sql.Tx, retired []string, newCompanion, priorCompanion string) error {
+	if len(retired) == 0 {
+		return nil
+	}
+	for _, id := range retired {
+		// Invalidate only the stale supersedes edge from the previous
+		// replacement's companion. Other supersedes edges into this memory are
+		// not produced by this decision's supersede chain and must survive.
+		if priorCompanion != "" && priorCompanion != newCompanion {
+			active, err := linkIsActive(ctx, tx, priorCompanion, id, "supersedes")
+			if err != nil {
+				return fmt.Errorf("read stale supersedes link: %w", err)
+			}
+			if active {
+				res, err := tx.ExecContext(ctx, linkInvalidateSQL, priorCompanion, id, "supersedes")
+				if err != nil {
+					return fmt.Errorf("invalidate stale supersedes link: %w", err)
+				}
+				n, err := res.RowsAffected()
+				if err != nil {
+					// The error, not a zero count. This runs inside the supersede
+					// transaction that has not committed, so swallowing it would fall through to
+					// the deferred rollback, discard the stamp, and tell the caller the edge is
+					// still live — the same reasoning InvalidateLink gives for its own in-transaction
+					// arm. Failing the call is the answer that does not claim something the
+					// database may have done.
+					return fmt.Errorf("invalidate stale supersedes link rows: %w", err)
+				}
+				if n > 0 {
+					if err := appendHistoryEventsTx(ctx, tx, []historyEvent{{
+						phase:     phaseUnsupersede,
+						relatedID: priorCompanion,
+					}}, []string{id}); err != nil {
+						return err
+					}
+				}
+			}
+		}
+		if newCompanion == "" {
+			continue
+		}
+		active, err := linkIsActive(ctx, tx, newCompanion, id, "supersedes")
+		if err != nil {
+			return fmt.Errorf("read existing link: %w", err)
+		}
+		if active {
+			continue
+		}
+		opposed, err := linkIsActive(ctx, tx, id, newCompanion, "supersedes")
+		if err != nil {
+			return fmt.Errorf("read existing link: %w", err)
+		}
+		if opposed {
+			continue
+		}
+		if err := insertLinkTx(ctx, tx, newCompanion, id, "supersedes", 1, "manual", ""); err != nil {
+			return fmt.Errorf("link superseded companion: %w", err)
+		}
+		if err := appendHistoryEventsTx(ctx, tx, []historyEvent{{
+			phase:     phaseSupersede,
+			relatedID: newCompanion,
+		}}, []string{id}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // replacementCompanionTx is the row a retired companion's 'supersedes' edge and
 // history name: the replacement decision's companion.
+//
+// allowRetired lets the answer be the replacement's own already-retired
+// companion when it has no live one. Only a repoint passes it: a plain
+// supersede onto a replacement whose companion was retired names no edge, as
+// before.
 //
 // It is findDecisionCompanionsTx's answer when that is one row. When it is not —
 // the replacement's own link is carried by its RecordDecision row AND by a live
@@ -1090,13 +1237,16 @@ func retireDecisionCompanionTx(ctx context.Context, tx *sql.Tx, projectID, oldID
 // retired with a 'resolve' history row and no edge, which the rules above keep
 // for a replacement with no companion at all. Only when no single such row
 // exists is the edge left out, as before.
-func replacementCompanionTx(ctx context.Context, tx *sql.Tx, projectID, decisionID string) (string, error) {
-	found, ambiguous, _, _, err := findDecisionCompanionsTx(ctx, tx, projectID, decisionID)
+func replacementCompanionTx(ctx context.Context, tx *sql.Tx, projectID, decisionID string, allowRetired bool) (string, error) {
+	found, retired, ambiguous, _, _, err := findDecisionCompanionsTx(ctx, tx, projectID, decisionID)
 	if err != nil {
 		return "", err
 	}
 	if len(found) > 0 {
 		return found[0], nil
+	}
+	if allowRetired && len(retired) > 0 {
+		return retired[0], nil
 	}
 	var logged []string
 	for _, id := range ambiguous {
