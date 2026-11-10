@@ -801,8 +801,8 @@ func TestEnforceBudget_PartialMeasurementRecordsOncePerOutcome(t *testing.T) {
 		t.Fatalf("first partial outcome was not recorded: %+v", first)
 	}
 	second := EnforceBudget()
-	if !second.Recorded {
-		t.Fatalf("suppressed outcome must report the reused row: %+v", second)
+	if second.Recorded {
+		t.Fatalf("suppressed outcome must not claim a row was written: %+v", second)
 	}
 	if !strings.Contains(logs.String(), "already recorded; suppressing repeated rows") {
 		t.Errorf("suppression was not warned:\n%s", logs.String())
@@ -824,7 +824,78 @@ func TestEnforceBudget_PartialMeasurementRecordsOncePerOutcome(t *testing.T) {
 	if err := db.QueryRow(`SELECT note FROM maintenance_runs`).Scan(&note); err != nil {
 		t.Fatalf("select note: %v", err)
 	}
-	if !strings.Contains(note, "recorded once per outcome") {
-		t.Errorf("note = %q, want it to say the outcome is recorded once", note)
+	if !strings.Contains(note, "not recorded again") {
+		t.Errorf("note = %q, want it to say repeats are not recorded again", note)
+	}
+}
+
+// TestEnforceBudget_PartialOutcomeChangeRecordsNewRow: a partial root that
+// goes from within budget to over budget is a different outcome, so it gets a
+// second row rather than being swallowed by the first.
+func TestEnforceBudget_PartialOutcomeChangeRecordsNewRow(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("permission bits are not enforced the same way on Windows")
+	}
+	root := t.TempDir()
+	t.Setenv("GHOST_SCRATCH_DIR", root)
+	t.Setenv("GHOST_SCRATCH_MAX_BYTES", "1048576")
+	dataHome := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", dataHome)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	if err := os.MkdirAll(filepath.Join(dataHome, "ghost"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	db, err := openTestDB(filepath.Join(dataHome, "ghost", "ghost.db"))
+	if err != nil {
+		t.Fatalf("seed db: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	small := filepath.Join(root, "small")
+	if err := os.WriteFile(small, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	locked := filepath.Join(root, "locked")
+	if err := os.Mkdir(locked, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(locked, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o700) })
+
+	first := EnforceBudget()
+	if !first.Recorded || first.OverBudget {
+		t.Fatalf("first run: want recorded and within budget: %+v", first)
+	}
+	// The measurable portion now exceeds the budget; nothing is stale, so the
+	// reap cannot bring it back under.
+	if err := os.WriteFile(small, make([]byte, 4096), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GHOST_SCRATCH_MAX_BYTES", "1024")
+	second := EnforceBudget()
+	if !second.OverBudget {
+		t.Fatalf("second run: want over budget: %+v", second)
+	}
+	if !second.Recorded {
+		t.Fatalf("a changed partial outcome must be recorded: %+v", second)
+	}
+
+	db, err = openTestDB(filepath.Join(dataHome, "ghost", "ghost.db"))
+	if err != nil {
+		t.Fatalf("reopen db: %v", err)
+	}
+	defer db.Close() //nolint:errcheck
+	var count int
+	if err := db.QueryRow(`SELECT count(*) FROM maintenance_runs`).Scan(&count); err != nil {
+		t.Fatalf("count maintenance_runs: %v", err)
+	}
+	if count != 2 {
+		t.Errorf("maintenance_runs rows = %d, want 2 (within budget, then over budget)", count)
 	}
 }

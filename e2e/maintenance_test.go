@@ -48,4 +48,5 @@ func TestMaintenanceStatusMeasuresWhatItCanPastAnUnreadableScratchEntry(t *testi
 	r := s.mustRun("maintenance", "status")
 	mustNotContain(t, "maintenance status with an unreadable scratch entry", r.stdout, "could not be measured")
 	mustMatch(t, "maintenance status with an unreadable scratch entry", r.stdout, `5 bytes in 1 files`)
+	mustContain(t, "maintenance status with an unreadable scratch entry", r.stdout, "(partial)")
 }

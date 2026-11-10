@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/wcatz/ghost/internal/config"
@@ -198,23 +200,30 @@ func EnforceBudget() BudgetResult {
 	}
 
 	res.Recorded = recordBudgetRun(res)
-	if partial && res.Recorded {
-		// A stable partial root would otherwise add a row on every spawn.
-		// Record the outcome once; later spawns reuse the marker so the
-		// suppressed repeats are visible in the log rather than silent.
-		recordBudgetRunKey = root
-	}
 	return res
 }
 
-// recordBudgetRunKey is the partial-measurement outcome class whose row was
-// already recorded. It bounds recordBudgetRun to one row per outcome, so an
-// entry that stays unreadable (a live harness dir, one under the 24h age)
-// cannot add a maintenance_runs row per spawn. Empty means no partial
-// outcome has been recorded in this process. The class is the ROOT alone:
-// every partial measurement of one root shares its row, because a repeated
-// reap can change the bytes without new information.
-var recordBudgetRunKey string
+// partialOutcome is the outcome class of a partial measurement: the root and
+// the facts that change what the row says. A repeat of the same class adds no
+// information, so it is not recorded again; a change of class (a partial root
+// that goes over budget, or starts failing reaps) is new information and is.
+type partialOutcome struct {
+	root       string
+	overBudget bool
+	reapFailed bool
+	reapErr    bool
+}
+
+// partialRecorded is the last partial outcome whose row was written. It bounds
+// a stable partial root (a live harness dir, or one under the 24h age, that
+// stays unreadable) to one row per outcome class instead of one per spawn.
+// The bound is per process: a new ghost process records its own first row.
+// partialMu guards it and is held across the write so concurrent checks
+// cannot both pass the test and both write.
+var (
+	partialMu       sync.Mutex
+	partialRecorded *partialOutcome
+)
 
 // recordBudgetRun writes one maintenance_runs row for a fired budget check.
 // Best-effort by design: a failure is warned (never fatal — the spawn this
@@ -224,20 +233,31 @@ var recordBudgetRunKey string
 // rows while every reaped or warned spawn lands exactly once.
 //
 // A partial measurement fires the check even within budget, because its
-// skipped entries could hide bytes over the budget. That would add one row
-// per spawn while the entry stays unreadable, so a partial outcome is
-// recorded only once: the row carries the skipped count and the state marker
-// that suppressed the repeats, and the warning names what was not recorded.
+// skipped entries could hide bytes over budget. That would add one row per
+// spawn while the entry stays unreadable, so a repeat of the same partial
+// outcome (see partialOutcome) is not recorded again: the warning names the
+// suppression and the function returns false, since no row was written.
 func recordBudgetRun(res BudgetResult) bool {
-	if res.Skipped > 0 && recordBudgetRunKey == res.Root {
-		// This root's partial outcome already has its row. Recording it
-		// again per spawn would grow maintenance_runs without new
-		// information, so reuse the marker and say the repeats are
-		// suppressed.
-		slog.Warn("scratch budget: partial measurement already recorded; suppressing repeated rows",
-			"root", res.Root, "skipped", res.Skipped)
+	if res.Skipped > 0 {
+		key := partialOutcome{root: res.Root, overBudget: res.OverBudget, reapFailed: res.ReapFailed > 0, reapErr: res.ReapErr != nil}
+		partialMu.Lock()
+		defer partialMu.Unlock()
+		if partialRecorded != nil && *partialRecorded == key {
+			slog.Warn("scratch budget: partial measurement already recorded; suppressing repeated rows",
+				"root", res.Root, "skipped", res.Skipped)
+			return false
+		}
+		if !writeBudgetRun(res) {
+			return false
+		}
+		partialRecorded = &key
 		return true
 	}
+	return writeBudgetRun(res)
+}
+
+// writeBudgetRun writes the row and reports whether it was written.
+func writeBudgetRun(res BudgetResult) bool {
 	dataDir, err := config.DataDirPath()
 	if err != nil {
 		slog.Debug("scratch budget: no data dir, run not recorded", "error", err)
@@ -266,27 +286,16 @@ func recordBudgetRun(res BudgetResult) bool {
 	case res.OverBudget:
 		note = fmt.Sprintf("over budget by %d bytes; proceeding", res.BytesAfter-res.MaxBytes)
 	}
-	if res.ReapFailed > 0 && res.ReapErr == nil {
-		if note != "" {
-			note = fmt.Sprintf("%s; %d stale entries could not be removed", note, res.ReapFailed)
-		} else {
-			note = fmt.Sprintf("%d stale entries could not be removed", res.ReapFailed)
-		}
+	parts := []string{note}
+	if res.ReapFailed > 0 {
+		parts = append(parts, fmt.Sprintf("%d stale entries could not be removed", res.ReapFailed))
 	}
-	if res.Skipped > 0 && res.ReapErr == nil {
-		if note != "" {
-			note = fmt.Sprintf("%s; measurement skipped %d unreadable entries", note, res.Skipped)
-		} else {
-			note = fmt.Sprintf("measurement skipped %d unreadable entries", res.Skipped)
-		}
+	if res.Skipped > 0 {
+		parts = append(parts,
+			fmt.Sprintf("measurement skipped %d unreadable entries", res.Skipped),
+			"partial measurement; repeats of this outcome are not recorded again")
 	}
-	if res.Skipped > 0 && res.ReapErr == nil {
-		if note != "" {
-			note = fmt.Sprintf("%s; partial measurement recorded once per outcome", note)
-		} else {
-			note = fmt.Sprintf("partial measurement recorded once per outcome")
-		}
-	}
+	note = strings.Join(parts, "; ")
 	run := memory.MaintenanceRun{
 		Kind:               "scratch-budget",
 		ScratchBytes:       res.BytesAfter,

@@ -193,10 +193,10 @@ func (d *Dir) Path() string { return d.path }
 // (O_NOFOLLOW refuses a symlink swapped in after the lstat), so chmod follows
 // no link. A directory mode 0000 cannot be opened at all, so that case falls
 // back to a path chmod, re-verifying the path is still the SAME non-symlink
-// directory before every path-based call — same device and inode, so a swap
-// for a symlink or a renamed directory cannot make the callbacks follow a
-// link or touch a stranger. The root is Ghost-owned (0700), so the window is
-// the owner's own processes.
+// directory before every path-based call — same device and inode — which
+// narrows the window for a swap to a symlink or a renamed directory but does
+// not close it: the path can still change between the check and the call. The
+// root is Ghost-owned (0700), so the window is the owner's own processes.
 func makeRemovable(path string) {
 	info, err := os.Lstat(path)
 	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
