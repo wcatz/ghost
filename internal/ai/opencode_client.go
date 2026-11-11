@@ -17,27 +17,12 @@ import (
 	"github.com/wcatz/ghost/internal/memory"
 )
 
-// OpenCodeClient drives the `opencode` CLI as a subprocess LLM, the way
-// CLIClient drives `claude -p`. It uses whatever authentication and billing
-// opencode is configured with, so Ghost does not need an ANTHROPIC_API_KEY or
-// a `claude` binary. It implements the same Reflect/Classify shapes as
-// CLIClient (reflector / Provider) and is the CLI-backed LLM tier for the
-// current architecture; there is no direct API tier.
 type OpenCodeClient struct {
 	binary string
-	// model pins the model via -m. Constructor-set, it wins over the
-	// GHOST_OPENCODE_MODEL env var: a long-lived MCP server must apply its
-	// configured pin per-tool without mutating the process environment (which
-	// would leak across tools and concurrent calls). Empty falls back to env,
-	// then to Ghost's explicit default below.
+
 	model string
 }
 
-// DefaultOpenCodeModel is used when neither a constructor pin nor
-// GHOST_OPENCODE_MODEL is set. The child runs with a scrubbed config directory,
-// so relying on the user's OpenCode default would make behavior depend on a
-// config Ghost intentionally does not load. Big Pickle is the validated
-// low-cost classifier model and keeps unpinned calls reproducible.
 const DefaultOpenCodeModel = "opencode/big-pickle"
 
 // NewOpenCodeClient creates an OpenCodeClient that invokes `opencode` on PATH.
@@ -51,25 +36,15 @@ func NewOpenCodeClientWithBinary(binary string) *OpenCodeClient {
 	return &OpenCodeClient{binary: binary}
 }
 
-// NewOpenCodeClientWithBinaryAndModel is NewOpenCodeClientWithBinary plus a
-// constructor-level model pin (e.g. "opencode/big-pickle"). When model is
-// non-empty it takes precedence over GHOST_OPENCODE_MODEL for this client only.
 func NewOpenCodeClientWithBinaryAndModel(binary, model string) *OpenCodeClient {
 	return &OpenCodeClient{binary: binary, model: model}
 }
 
-// Reflect satisfies reflection's reflector interface (see
-// internal/reflection/tier_llm.go). TokenUsage is currently always zero: the
-// CLI adapters do not parse provider usage metadata, and the harness owns its
-// own billing rather than Ghost's token accounting.
 func (c *OpenCodeClient) Reflect(ctx context.Context, prompt string) (string, TokenUsage, error) {
 	text, err := c.run(ctx, prompt)
 	return text, TokenUsage{}, err
 }
 
-// Classify satisfies the Provider interface (see internal/ai/provider.go).
-// opencode run has no --system-prompt flag, so the system prompt is joined into
-// the user message before the subprocess call.
 func (c *OpenCodeClient) Classify(ctx context.Context, systemPrompt, userContent string) (string, error) {
 	return c.run(ctx, systemPrompt+"\n\n"+userContent)
 }
@@ -78,22 +53,7 @@ func (c *OpenCodeClient) run(ctx context.Context, prompt string) (_ string, err 
 	ctx, cancel := boundHarnessCall(ctx)
 	defer cancel()
 	defer func() { err = explainDefaultBound(ctx, err) }()
-	// --format json emits a JSON-lines stream; --pure skips plugins. A
-	// configured model is passed with `-m`; when none is configured, Ghost
-	// passes its explicit Big Pickle default because the child's config dir is
-	// scrubbed below. subprocessEnv (below) confines the
-	// child to a Ghost-owned scratch dir, which doubles as the neutral working
-	// directory (so the subprocess does not load the repo's CLAUDE.md/AGENTS.md,
-	// project opencode.json, or git context — the reflect prompt is
-	// self-contained) and as a fresh empty XDG_CONFIG_HOME (so the child does not
-	// load the user's global opencode config, which would start Ghost's own MCP
-	// server against this process's SQLite DB), and strips ANTHROPIC_API_KEY.
-	//
-	// opencode V2 dropped --pure (it rejects the flag outright) and, without
-	// --standalone, attaches `run` to the user's shared background service —
-	// which loads the user's real config, Ghost's plugin and MCP server
-	// included, defeating the scrub above. V2 therefore gets --standalone,
-	// so the child runs a private server on the scrubbed config instead.
+
 	major := c.majorVersion(ctx)
 	model := c.model
 	if model == "" {
@@ -107,40 +67,23 @@ func (c *OpenCodeClient) run(ctx context.Context, prompt string) (_ string, err 
 		return "", err
 	}
 	defer cleanup()
-	// The prompt goes on stdin, never as an argv element (issue #560): the
-	// kernel caps one argument at 32 pages and a reflect prompt is built from
-	// up to 2000 memories of 8000 bytes, so a large project produced a prompt
-	// that failed the spawn with E2BIG. `opencode run` reads the message from
-	// stdin when no positional message is given (V1 and V2 both), so the
-	// no-tools preamble travels with it rather than as an argument of its own.
+
 	cmd.Stdin = strings.NewReader(openCodeNoToolsPreamble + prompt)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := runHarnessCommand(cmd); err != nil {
-		// A call cut by its own context is a failure, never a declined-tool
-		// success. opencode writes the declined shape as it begins to shut
-		// down, so a deadline or cancellation that lands after the answer text
-		// leaves a stream the salvage below would accept — while the run was
-		// killed, not answered.
+
 		if cause := ctx.Err(); cause != nil {
 			return "", fmt.Errorf("opencode run: %w: %s: %w", err, harnessFailureOutput(stdout.String(), stderr.String()), cause)
 		}
-		// stderr alone was empty for every one of the 357 failures in
-		// lifecycle.log: opencode reports errors on its JSON stream, not the
-		// console (issue #540).
+
 		return "", fmt.Errorf("opencode run: %w: %s", err, harnessFailureOutput(stdout.String(), stderr.String()))
 	}
 	return parseOpenCodeOutput(stdout.String())
 }
 
-// opencodeMajors caches each opencode binary's major version: Ghost spawns one
-// harness process per consolidation, resolve candidate, and supersede pair, so
-// probing `--version` every time would double the process count. Entries are
-// keyed by the resolved binary's identity (path, size, mtime), so a
-// long-lived Ghost process — the MCP server — re-probes after opencode is
-// upgraded in place instead of reusing a stale flag set.
-var opencodeMajors sync.Map // opencodeBinaryID -> int
+var opencodeMajors sync.Map
 
 type opencodeBinaryID struct {
 	path    string
@@ -148,12 +91,6 @@ type opencodeBinaryID struct {
 	modTime time.Time
 }
 
-// majorVersion returns the major version of c.binary via `--version`, cached
-// per binary identity. An unresolvable binary or failed probe is not cached
-// and reports 0, which keeps the V1 invocation — the behavior Ghost had before
-// V2 existed. An answer that parses no major version is not cached either: it
-// is unreadable output rather than a version, so the next call asks again
-// instead of pinning a V2 binary to the V1 argv for the life of the process.
 func (c *OpenCodeClient) majorVersion(ctx context.Context) int {
 	path, err := exec.LookPath(c.binary)
 	if err != nil {
@@ -171,7 +108,7 @@ func (c *OpenCodeClient) majorVersion(ctx context.Context) int {
 	defer cancel()
 	probe, release, err := harnessCommand(pctx, path, []string{"--version"}, os.Environ(), harnessOpencode)
 	if err != nil {
-		return 0 // no child could be confined, so there is no version to report
+		return 0
 	}
 	defer release()
 	out, err := runHarnessCommandOutput(probe)
@@ -180,15 +117,12 @@ func (c *OpenCodeClient) majorVersion(ctx context.Context) int {
 	}
 	major := OpencodeMajorVersion(string(out))
 	if major <= 0 {
-		return 0 // an unparseable answer is not an answer, so do not cache it
+		return 0
 	}
 	opencodeMajors.Store(id, major)
 	return major
 }
 
-// OpencodeMajorVersion extracts the major version from `opencode --version`
-// output ("1.18.32" on V1, "opencode v2.0.14" on V2). Unparseable output
-// returns 0, which callers treat as V1.
 func OpencodeMajorVersion(out string) int {
 	for _, field := range strings.Fields(out) {
 		field = strings.TrimPrefix(field, "v")
@@ -203,17 +137,6 @@ func OpencodeMajorVersion(out string) int {
 	return 0
 }
 
-// openCodeInvocationArgs is the whole argv of an `opencode run` turn for a
-// given major version, kept as a named value so the policy can be pinned as a
-// golden (TestHarnessInvocationArgsAreGoldens covers both the V1 and V2 shapes).
-// The prompt is NOT here: it goes on stdin, because the kernel caps one argv
-// element at 32 pages and a reflect prompt reaches megabytes (issue #560).
-//
-// The version split is not cosmetic. V1 takes `--pure`, which skips plugins;
-// V2 rejects that flag outright and needs `--standalone`, because without it
-// `run` attaches to the user's shared background service — and the SERVER,
-// holding the user's real config, is what loads Ghost's own plugin and MCP
-// registration, defeating the scrub in configureOpenCodeIsolation.
 func openCodeInvocationArgs(major int, model string) []string {
 	if major >= 2 {
 		return []string{"run", "--format", "json", "--standalone", "--title", ghostSessionTitle, "-m", model}
@@ -221,10 +144,6 @@ func openCodeInvocationArgs(major int, model string) []string {
 	return []string{"run", "--format", "json", "--pure", "--title", ghostSessionTitle, "-m", model}
 }
 
-// openCodePolicyFor is the config written into the isolated tree for a given
-// major version. The two differ because V2 cannot use a deny policy at all
-// (openCodeAskConfig), and V1's non-interactive handling of an ask is
-// unverified, so it keeps the stronger deny.
 func openCodePolicyFor(major int) string {
 	if major >= 2 {
 		return openCodeAskConfig
@@ -232,28 +151,6 @@ func openCodePolicyFor(major int) string {
 	return openCodeDenyConfig
 }
 
-// openCodeAskConfig is the isolated child's policy on opencode V2. Every tool
-// is "ask", and V2's non-interactive `run` auto-rejects each ask, so no tool
-// call executes; Ghost never passes an auto-approve flag (--auto, --yolo,
-// --dangerously-skip-permissions). V2 cannot use a deny policy: a deny rule or
-// a disabled tool strips that tool from the request, and when the stripped
-// tool is the shell OpenCode's free tier answers with 403 provider.auth ("free
-// tier can only be used from within OpenCode"), which failed every lifecycle
-// phase. A bisect on 2.0.18 (2026-10-11) found the shell is the only tool the
-// free tier insists on; "ask" for every tool is still the policy here because
-// it is total and needs no per-tool list. An empty MCP map
-// and an empty plugin list keep the user's servers and plugins out of the child.
-//
-// `opencode run` has no flag to disable tools — its only permission flag is
-// `--auto`, which moves in the WRONG direction (it approves everything not
-// explicitly denied) — so the config is the only lever, which is why this lives
-// in the isolated tree Ghost already writes and not in argv.
-//
-// The wildcard is what makes it total, and opencode's own defaults are the
-// reason it is needed: every permission defaults to "allow" when unset, so a
-// config naming a few tools leaves the rest open. A name opencode adds later
-// (a skill, an LSP query, a `question` call) is covered by `*` on the day it
-// ships rather than on the day someone remembers it.
 const openCodeAskConfig = `{
   "$schema": "https://opencode.ai/config.json",
   "permission": {
@@ -263,12 +160,6 @@ const openCodeAskConfig = `{
   "plugin": []
 }`
 
-// openCodeDenyConfig is the policy for opencode V1, whose handling of an ask in
-// a non-interactive run has not been verified: the wildcard permission denies
-// every tool, and the explicit tool map keeps older versions from exposing a
-// built-in tool that predates the wildcard rule (and is still what opencode
-// documents as the legacy spelling of the same policy). The `mcp_*` rule closes
-// the MCP half for a version whose wildcard predates namespaced tool names.
 const openCodeDenyConfig = `{
   "$schema": "https://opencode.ai/config.json",
   "permission": {
@@ -293,29 +184,6 @@ const openCodeDenyConfig = `{
   "plugin": []
 }`
 
-// subprocessEnv builds the opencode child command and environment. It routes
-// through harnessCommand, so the child's working directory, temp-dir
-// variables, and backend-specific environment all follow the same policy as
-// the other three clients. It then replaces the user's home/config roots with
-// an invocation-owned tree and writes a no-tools/no-MCP config. This is
-// deliberately stronger than changing XDG_CONFIG_HOME alone: OpenCode versions
-// differ in which home/config variable they consult, and a user-level MCP
-// server must not be able to start merely because one version ignores the
-// XDG override.
-//
-// Pinning the temp-dir variables matters beyond tidiness: opencode writes a
-// hidden JIT-cache shared object (~4.7 MiB) into its temp dir on every
-// invocation, and Ghost spawns one process per consolidation, per resolve
-// candidate, and per supersede candidate PAIR — hundreds per lifecycle. Left
-// in the shared temp dir those accumulate indefinitely (a single dingo
-// lifecycle measured ~1.4 GB) until the filesystem fills, at which point every
-// LLM-backed phase fails and maintenance silently becomes a no-op. The scratch
-// dir is removed by the returned cleanup, so the cache dies with it.
-//
-// A broken scratch root needs no branch here: harnessCommand falls back to a
-// private MkdirTemp tree itself, so the isolation below always has a working
-// directory and a temp dir to point HOME at, and the call fails only when there
-// is nowhere at all to confine a child to.
 func (c *OpenCodeClient) subprocessEnv(ctx context.Context, args []string, policy string) (*exec.Cmd, func(), error) {
 	cmd, release, err := harnessCommand(ctx, c.binary, args, os.Environ(), harnessOpencode)
 	if err != nil {
@@ -328,33 +196,6 @@ func (c *OpenCodeClient) subprocessEnv(ctx context.Context, args []string, polic
 	return cmd, release, nil
 }
 
-// configureOpenCodeIsolation gives the child a private home and config tree,
-// writes the given tool policy into it, and replaces inherited duplicates with
-// the exact values the child should see. It copies only an existing OpenCode
-// auth.json (never the user's config, plugins, or MCP definitions) when no
-// OPENCODE_API_KEY is supplied; the credential file is then reachable under the
-// invocation-owned data root without reopening the global config tree.
-//
-// The data root is what keeps a lifecycle run out of the user's session list
-// (#588). `opencode run` has no flag to suppress or skip saving a session, so
-// the store's location is the only control: OpenCode resolves its session
-// database from XDG_DATA_HOME (verified against v2.0.15 with `opencode debug
-// paths`, which reports data, db, log and repos under it, and re-checked by
-// TestLiveOpenCodeDebugPathsHonourScratchRoot), so pointing that at the
-// invocation-owned dir is what confines the titled "[ghost]" run to scratch.
-// V2 additionally needs --standalone for this to hold, because without it `run`
-// attaches to the user's shared background service and the SERVER, holding the
-// user's own data dir, is what creates the session.
-//
-// No `opencode session delete` follows a run, because there is nothing left to
-// delete: the store lives in the per-invocation directory whose deferred cleanup
-// removes it, so a session cannot outlive the call that created it (pinned by
-// TestOpenCodeClient_SessionStoreDiesWithTheInvocation). Deleting it first would
-// cost a second OpenCode process per harness call — Ghost spawns one per
-// consolidation, resolve candidate and supersede pair, hundreds per lifecycle —
-// to remove a row from a directory about to be deleted wholesale. The
-// pre-isolation backlog is a different matter and has its own command: `ghost
-// opencode cleanup-sessions` (internal/ai/opencode_cleanup.go).
 func configureOpenCodeIsolation(cmd *exec.Cmd, policy string) error {
 	if cmd.Dir == "" {
 		return fmt.Errorf("opencode scratch directory is empty")
@@ -399,10 +240,6 @@ func configureOpenCodeIsolation(cmd *exec.Cmd, policy string) error {
 	return nil
 }
 
-// copyOpenCodeAuth carries forward only the credential file that OpenCode
-// needs to authenticate. The source is discovered before HOME/XDG_DATA_HOME
-// are replaced, so both a normal login and the evaluation harness's seeded
-// auth.json continue to work without exposing the user's config or MCP tree.
 func copyOpenCodeAuth(env []string, dataDir string) error {
 	if harnessEnvValue(env, "OPENCODE_API_KEY") != "" {
 		return nil
@@ -484,13 +321,8 @@ func setHarnessEnvValue(env []string, key, value string) []string {
 	return append(out, key+"="+value)
 }
 
-// tempDirKeys are the variables that steer a child's temporary files — and so
-// opencode's per-invocation JIT cache — on each platform.
 var tempDirKeys = []string{"TMPDIR", "TMP", "TEMP"}
 
-// isTempDirKey reports whether kv assigns one of tempDirKeys. The comparison is
-// case-insensitive to match Windows, where the same variable may appear as
-// TEMP or Temp.
 func isTempDirKey(kv string) bool {
 	key, _, found := strings.Cut(kv, "=")
 	if !found {
@@ -504,8 +336,6 @@ func isTempDirKey(kv string) bool {
 	return false
 }
 
-// opencodeEvent is the minimal shape of one JSON line in `opencode run --format
-// json` output. Everything else in the line is ignored.
 type opencodeEvent struct {
 	Type string `json:"type"`
 	Part struct {
@@ -518,31 +348,10 @@ type opencodeEvent struct {
 	} `json:"error"`
 }
 
-// openCodeNoToolsPreamble opens every opencode prompt. V2's child advertises
-// its tools (the free tier rejects a request without them, see
-// openCodeAskConfig), and a model that reaches for one gets the call declined
-// and its session shut down, so the model is told up front that it has none.
 const openCodeNoToolsPreamble = "You have no tools in this session. Do not call any tool; answer directly in plain text. "
 
-// maxOpencodeOutputLine bounds one line of an opencode output stream. It is the
-// same ceiling the host transcript reader uses (hostevent.maxTranscriptLine) and
-// it exists for the same reason: lines carry whole agentic turns, so a reflect
-// or resolve answer can be megabytes on one line. The 4 MiB bufio.Scanner cap
-// this replaced refused one with "token too long" — the same failure #632 fixed
-// on the stop-hook side, left in place here — and it read exactly like a
-// malformed stream, so a long answer was reported as a broken harness.
-//
-// A var so a test can lower it rather than push megabytes through the parser;
-// the tests that do must not run in parallel, since the value is process-wide.
 var maxOpencodeOutputLine = 64 << 20
 
-// parseOpenCodeOutput concatenates the text events from an opencode JSON-lines
-// stream into the model's answer, ignoring step_start/step_finish/reasoning. A
-// line that isn't valid JSON, or a line past maxOpencodeOutputLine, is an error
-// rather than a silent skip — a malformed stream means the answer is incomplete,
-// and treating it as a clean reflection output would be wrong. Blank lines are
-// skipped defensively (opencode may emit an empty line mid-stream without it
-// indicating truncation).
 func parseOpenCodeOutput(raw string) (string, error) {
 	var sb strings.Builder
 	sc := bufio.NewScanner(strings.NewReader(raw))

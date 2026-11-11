@@ -6,41 +6,25 @@ import (
 	"os/exec"
 )
 
-// errNoCLIBackend is returned when no subprocess LLM binary is available.
 var errNoCLIBackend = errors.New("no CLI LLM backend available (install claude, opencode, codex, or goose)")
 
-// cliBackend is the shared capability of the subprocess LLM clients.
 type cliBackend interface {
 	Reflect(ctx context.Context, prompt string) (string, TokenUsage, error)
 	Classify(ctx context.Context, systemPrompt, userContent string) (string, error)
 }
 
-// CLIProvider resolves the best available CLI backend — priority: claude >
-// opencode > codex > goose — and delegates to it. It satisfies reflection's
-// reflector interface and ai.Provider. Its claude-first priority makes it an
-// availability probe and an explicit "best on PATH" choice; it must NOT be
-// used as a routing default for a session's harness, where claude silently
-// winning over the calling harness is exactly the bug SourceProvider guards
-// against.
+// CLIProvider selects the best available CLI backend on PATH.
 type CLIProvider struct {
 	backend cliBackend
 	name    string
 }
 
-// NewCLIProvider picks the best backend available on PATH: claude if present,
-// else opencode if present, else codex if present, else goose if present,
-// else an unavailable provider. Prefer NewSourceProviderForSource when routing
-// to a known caller; this cascade is for explicit best-on-PATH use.
+// NewCLIProvider returns a CLIProvider using the best available backend on PATH.
 func NewCLIProvider() *CLIProvider {
 	return NewCLIProviderWithBinaries("", "", "", "")
 }
 
-// NewCLIProviderWithBinaries is NewCLIProvider with explicit binary paths.
-// Binary paths override the PATH lookup when set (and resolvable), so a binary
-// installed outside the current process's PATH still wins; an empty value falls
-// back to the PATH lookup for that backend. Priority: claude > opencode > codex > goose.
-// It exists as an availability probe and explicit best-on-PATH selector — never
-// as the implicit default for a session-routed command.
+// NewCLIProviderWithBinaries returns a CLIProvider using explicit binaries when available.
 func NewCLIProviderWithBinaries(claudeBinary, opencodeBinary, codexBinary, gooseBinary string) *CLIProvider {
 	if claudeBinary != "" {
 		if _, err := exec.LookPath(claudeBinary); err == nil {
@@ -77,10 +61,10 @@ func NewCLIProviderWithBinaries(claudeBinary, opencodeBinary, codexBinary, goose
 	return &CLIProvider{backend: nil, name: "none"}
 }
 
-// Name reports which backend was selected ("cli", "opencode", "codex", "goose", or "none").
+// Name reports which backend was selected.
 func (p *CLIProvider) Name() string { return p.name }
 
-// Available reports whether any subprocess LLM backend is on PATH.
+// Available reports whether a backend is available.
 func (p *CLIProvider) Available() bool { return p.backend != nil }
 
 func (p *CLIProvider) Reflect(ctx context.Context, prompt string) (string, TokenUsage, error) {
