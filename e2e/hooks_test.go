@@ -293,65 +293,27 @@ func transcriptFor(t *testing.T, host string, withGhostSave bool) (path, format 
 	return path, format
 }
 
-// TestHookStop drives the Stop event: the save-nudge, and the lifecycle spawn
-// behind its lock and its min_interval cooldown.
+// TestHookStop drives the Stop event: it prints nothing, and it spawns the
+// lifecycle behind its lock and its min_interval cooldown.
 func TestHookStop(t *testing.T) {
 	for _, host := range hookHosts {
-		t.Run("nudge/host/"+host, func(t *testing.T) {
+		t.Run("silent/host/"+host, func(t *testing.T) {
 			s := newSandbox(t)
 			call(t, s.mcpSession(t), "ghost_memory_save", map[string]any{
 				"project_id": e2eProject,
 				"content":    "a memory so the project exists for the stop hook",
 			})
 			s.mustRun("project", "bind", e2eProject, s.work)
-
-			// A session that used a tool but saved nothing to Ghost: exactly the
-			// case the reminder exists for.
-			//
-			// The transcript is written in the format THIS host's adapter
-			// declares, not one format for all four. The scanner is selected by
-			// the envelope's transcript_format, and each host has its own native
-			// format — so a fixture in the wrong format would scan clean, count
-			// zero tool calls, and the nudge would correctly not fire. Asserting
-			// the nudge for a host fed another host's transcript would be
-			// asserting that a scanner reads a format it was not written for.
+			// A session that used a tool and saved nothing to Ghost, in this
+			// host's own transcript format: the stop hook prints nothing.
 			transcript, format := transcriptFor(t, host, false)
 			r := s.mustRunStdin(stopPayload(host, s.work, transcript, format),
 				"hook", "stop", "--source", host)
-			mustContain(t, "stop nudge (host "+host+")", r.stdout, "ghost_memory_save")
-			// It is delivered through the documented non-blocking channel
-			// (hookSpecificOutput.additionalContext), not as a block: a host that
-			// rendered it as a Stop failure would make every turn look broken.
-			// The decision is JSON, so it is parsed rather than pattern-matched.
-			var decision struct {
-				HookSpecificOutput struct {
-					AdditionalContext string `json:"additionalContext"`
-				} `json:"hookSpecificOutput"`
-			}
-			line := strings.TrimSpace(strings.SplitN(strings.TrimSpace(r.stdout), "\n", 2)[0])
-			if err := jsonUnmarshal([]byte(line), &decision); err != nil {
-				t.Fatalf("the stop reminder is not JSON: %v\n%s", err, line)
-			}
-			if !strings.Contains(decision.HookSpecificOutput.AdditionalContext, "ghost_memory_save") {
-				t.Fatalf("the reminder does not name the tool to use: %q", decision.HookSpecificOutput.AdditionalContext)
+			if strings.TrimSpace(r.stdout) != "" {
+				t.Fatalf("the stop hook printed output for host %s:\n%s", host, r.stdout)
 			}
 		})
 	}
-
-	t.Run("a session that saved is not nudged", func(t *testing.T) {
-		s := newSandbox(t)
-		call(t, s.mcpSession(t), "ghost_memory_save", map[string]any{
-			"project_id": e2eProject,
-			"content":    "a memory the transcript records a save of",
-		})
-		s.mustRun("project", "bind", e2eProject, s.work)
-		transcript, format := transcriptFor(t, "claude-code", true)
-		r := s.mustRunStdin(stopPayload("claude-code", s.work, transcript, format),
-			"hook", "stop", "--source", "claude-code")
-		if strings.Contains(r.stdout, "ghost_memory_save") {
-			t.Fatalf("a session that saved to Ghost was still nudged:\n%s", r.stdout)
-		}
-	})
 
 	t.Run("a re-stop after the reminder is silent", func(t *testing.T) {
 		// stop_hook_active means the host is re-stopping immediately after our
@@ -646,7 +608,6 @@ func TestHookFailOpen(t *testing.T) {
 		if strings.TrimSpace(r.stdout) != "" {
 			t.Fatalf("a missing transcript produced stdout:\n%s", r.stdout)
 		}
-		mustMatch(t, "the missing-transcript line", r.stderr, "(?i)fail-open|transcript")
 	})
 }
 

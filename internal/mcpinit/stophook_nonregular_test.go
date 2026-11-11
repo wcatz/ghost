@@ -1,8 +1,6 @@
 package mcpinit
 
 import (
-	"bytes"
-	"strings"
 	"testing"
 	"time"
 )
@@ -26,27 +24,5 @@ func runWithDeadline(t *testing.T, f func()) {
 	case <-done:
 	case <-time.After(nonRegularDeadline):
 		t.Fatal("the hook did not return: it opened a transcript path that is not a regular file")
-	}
-}
-
-// TestRunStopRefusesADirectoryTranscript: the payload names the transcript path,
-// so it can be a directory as readily as a file. A directory is refused with the
-// same fail-open line a missing file gets and is never read, so the hook returns
-// rather than handing the scanner something it cannot parse.
-func TestRunStopRefusesADirectoryTranscript(t *testing.T) {
-	isolatedHome(t)
-	dir := t.TempDir() // an empty directory sitting where the transcript belongs
-	input := stopInput(t, dir, false)
-	var out, errOut bytes.Buffer
-
-	runWithDeadline(t, func() {
-		RunHostEvent("stop", "claude-code", strings.NewReader(input), &out, &errOut)
-	})
-
-	if out.Len() != 0 {
-		t.Errorf("expected silence for a directory transcript path, got %q", out.String())
-	}
-	if !strings.Contains(errOut.String(), "open transcript") {
-		t.Errorf("the refusal is not attributed to the open; stderr was %q", errOut.String())
 	}
 }

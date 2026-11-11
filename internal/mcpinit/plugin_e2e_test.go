@@ -381,22 +381,6 @@ func TestPluginE2E(t *testing.T) {
 		}
 	})
 
-	t.Run("stop nudges an unsaved session", func(t *testing.T) {
-		transcript := filepath.Join(t.TempDir(), "transcript.jsonl")
-		body := lineUser + "\n" + lineToolBash + "\n" + lineText + "\n"
-		if err := os.WriteFile(transcript, []byte(body), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		payload := fmt.Sprintf(`{"hook_event_name":"Stop","session_id":"e2e","transcript_path":%q,"cwd":%q,"stop_hook_active":false}`, transcript, cwd)
-		out, errOut := runE2EHook(t, installed, wiring["Stop"], t.TempDir(), home, payload)
-		if !strings.Contains(out, "ghost_memory_save") {
-			t.Errorf("expected save nudge on stdout, got %q", out)
-		}
-		if errOut != "" {
-			t.Errorf("stop hook should be silent on stderr, got %q", errOut)
-		}
-	})
-
 	t.Run("mcp stdio handshake", func(t *testing.T) {
 		cmd := exec.Command(entryPoint(t, installed), "mcp")
 		// Neutralize the plugin env so the MCP path is exercised exactly like
