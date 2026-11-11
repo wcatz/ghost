@@ -3,14 +3,13 @@ package hostevent
 import (
 	"bufio"
 	"bytes"
-	"encoding/json"
 	"errors"
 	"io"
 	"strings"
 )
 
-// Transcript formats known to the contract. The scanner registry is keyed by
-// these values; ghost selects a scanner by format, never by source.
+// Transcript formats known to the contract. The audit scanner registry is
+// keyed by these values; ghost selects a scanner by format, never by source.
 const (
 	FormatNone               = "none"
 	FormatClaudeJSONL        = "claude-jsonl"
@@ -19,57 +18,7 @@ const (
 	FormatCodexRollout       = "codex-rollout"
 )
 
-// ScanResult counts assistant tool_use blocks seen in a transcript and how
-// many of them were Ghost save tools — the save-nudge's evidence.
-type ScanResult struct {
-	ToolCalls  int
-	GhostSaves int
-}
-
-// ScanFunc streams a transcript and returns the counts observed. A non-nil
-// error means the transcript was only partially read (I/O failure, scanner
-// limit exceeded) — callers must not act on partial counts: a save recorded
-// after the cut would be missed and a stop could be wrongly blocked.
-type ScanFunc func(io.Reader) (ScanResult, error)
-
-// scanners is the format-keyed registry. Entries land before their adapter
-// does (spec §4): an adapter that invokes the contract successfully but hits
-// an unregistered format would silently disable reflection/resolve/supersede
-// for that host's users.
-var scanners = map[string]ScanFunc{
-	FormatClaudeJSONL:        ScanClaudeJSONL,
-	FormatOpencodeMessages:   ScanOpencodeMessages,
-	FormatOpencodeV2Messages: ScanOpencodeV2Messages,
-	FormatCodexRollout:       ScanCodexRollout,
-}
-
-// Scan runs the scanner registered for format. ok is false when no scanner is
-// registered — callers must treat that as a fail-open outcome, never an error
-// surfaced to the host. err != nil means the scan stopped early; treat the
-// counts as incomplete and fail open.
-func Scan(format string, r io.Reader) (ScanResult, bool, error) {
-	fn, ok := scanners[format]
-	if !ok {
-		return ScanResult{}, false, nil
-	}
-	res, err := fn(r)
-	return res, true, err
-}
-
-// claudeJSONLLine is the minimal shape needed to spot tool_use entries in a
-// Claude Code transcript JSONL line. Everything else in the line is ignored.
-type claudeJSONLLine struct {
-	Type    string `json:"type"`
-	Message struct {
-		Content []struct {
-			Type string `json:"type"`
-			Name string `json:"name"`
-		} `json:"content"`
-	} `json:"message"`
-}
-
 // ghostSaveToolNames are Ghost's save tools as the MCP server names them.
-// Their presence in a transcript proves the session saved knowledge to Ghost.
 var ghostSaveToolNames = map[string]bool{
 	"ghost_memory_save": true,
 	"ghost_save_global": true,
@@ -87,36 +36,15 @@ var ghostServerQualifiers = []string{"mcp__ghost__", "ghost_", "ghost.", "mcp__g
 // isGhostSaveTool reports whether a transcript's tool name is one of Ghost's
 // save tools, however the host spells it: bare, or qualified with the ghost
 // server under any host's convention. Matching is harness-agnostic (#505) but
-// server-aware — the same tool name under another server never counts, or a
-// stop would skip the nudge when nothing was saved to Ghost.
+// server-aware — the same tool name under another server never counts.
 func isGhostSaveTool(name string) bool { return isGhostTool(name, ghostSaveToolNames) }
-
-// ghostDecisionToolNames are the tools that record a decision between
-// alternatives. They are NOT in ghostSaveToolNames: the audit routes a save's
-// arguments into the restatement bucket, and a decision record's arguments are
-// not a restatement of a memory. They do count as a save for the stop nudge,
-// so the reminder's ghost_decision_record parenthetical does not leave the
-// agent re-nudged after following it. Kept as a separate, nudge-only set so
-// the audit's meaning is unchanged.
-var ghostDecisionToolNames = map[string]bool{
-	"ghost_decision_record": true,
-}
-
-// isGhostNudgeSaveTool reports whether a tool counts as a save for the
-// save-less-stop nudge. It is the union of the real save tools and the
-// decision tools, and is used only by the scanners' GhostSaves count — never
-// by the audit, which keys off isGhostSaveTool alone.
-func isGhostNudgeSaveTool(name string) bool {
-	return isGhostSaveTool(name) || isGhostTool(name, ghostDecisionToolNames)
-}
 
 // ghostUpdateToolNames are the tools that rewrite a memory already stored, whose
 // arguments are the memory's own id and new text. They are kept apart from
-// ghostSaveToolNames because the save-nudge reads that set to ask whether the session
-// saved NEW knowledge, and an edit of an old row is not that. The tools that act on a
-// memory by id without carrying its text (pin, promote, flag, delete, resolve_mark)
-// are deliberately not here: naming a memory to act on it is a deliberate reference,
-// which is what a citation is.
+// ghostSaveToolNames because an edit of an existing row is not a new save. The
+// tools that act on a memory by id without carrying its text (pin, promote,
+// flag, delete, resolve_mark) are deliberately not here: naming a memory to act
+// on it is a deliberate reference, which is what a citation is.
 var ghostUpdateToolNames = map[string]bool{
 	"ghost_memory_update": true,
 }
@@ -202,171 +130,4 @@ func streamJSONL(r io.Reader, visit func(line []byte)) error {
 		line = bytes.TrimSuffix(line, []byte("\n"))
 		visit(bytes.TrimSuffix(line, []byte("\r")))
 	}
-}
-
-// ScanClaudeJSONL streams a Claude Code transcript and counts assistant
-// tool_use blocks, plus how many were Ghost save tools. Unparseable lines are
-// skipped; a read error or over-long line aborts the scan and is returned —
-// the counts are partial and the caller must fail open rather than nudge.
-func ScanClaudeJSONL(r io.Reader) (ScanResult, error) {
-	var res ScanResult
-	err := streamJSONL(r, func(line []byte) {
-		var l claudeJSONLLine
-		if err := json.Unmarshal(line, &l); err != nil {
-			return
-		}
-		if l.Type != "assistant" {
-			return
-		}
-		for _, c := range l.Message.Content {
-			if c.Type == "tool_use" {
-				res.ToolCalls++
-				if isGhostNudgeSaveTool(c.Name) {
-					res.GhostSaves++
-				}
-			}
-		}
-	})
-	return res, err
-}
-
-// codexRolloutLine is the minimal shape of one codex rollout JSONL record
-// (openai/codex, codex-rs/rollout): a timestamped envelope whose type selects
-// the payload — only "response_item" lines carry model traffic; everything
-// else (session_meta, event_msg, turn_context, …) is skipped.
-type codexRolloutLine struct {
-	Type    string `json:"type"`
-	Payload struct {
-		Type      string  `json:"type"`
-		Name      string  `json:"name"`
-		Namespace *string `json:"namespace"`
-	} `json:"payload"`
-}
-
-// ScanCodexRollout streams a codex rollout transcript and counts tool calls
-// (function_call items plus local_shell_call items — codex's shell is not a
-// function call), plus how many were Ghost save tools per
-// isGhostSaveTool (namespace and name are concatenated, as codex flattens them). Unparseable lines are skipped; errors mid-file are
-// returned with partial counts, same fail-open posture as the other scanners.
-func ScanCodexRollout(r io.Reader) (ScanResult, error) {
-	var res ScanResult
-	err := streamJSONL(r, func(line []byte) {
-		var l codexRolloutLine
-		if err := json.Unmarshal(line, &l); err != nil {
-			return
-		}
-		if l.Type != "response_item" {
-			return
-		}
-		switch l.Payload.Type {
-		case "function_call":
-			res.ToolCalls++
-			flat := ""
-			if l.Payload.Namespace != nil {
-				flat = *l.Payload.Namespace
-			}
-			flat += l.Payload.Name
-			if isGhostNudgeSaveTool(flat) {
-				res.GhostSaves++
-			}
-		case "local_shell_call":
-			res.ToolCalls++
-		}
-	})
-	return res, err
-}
-
-// opencodeMessagesLine is the minimal shape needed to spot tool-call parts in
-// one opencode-messages JSONL line: a serialized `{info, parts}` pair exactly
-// as returned by opencode's session.messages API, so the adapter materializes
-// its temp JSONL by writing SDK objects verbatim (spec §2.1).
-type opencodeMessagesLine struct {
-	Info struct {
-		Role string `json:"role"`
-	} `json:"info"`
-	Parts []struct {
-		Type string `json:"type"`
-		Tool string `json:"tool"`
-	} `json:"parts"`
-}
-
-// ScanOpencodeMessages streams an opencode-messages transcript and counts
-// assistant tool-call parts, plus how many were Ghost save tools. Only parts
-// typed "tool" count — prose mentions never do — and only assistant messages
-// are visited. Unparseable lines are skipped; a read error or over-long line
-// aborts the scan and is returned, same fail-open posture as Claude.
-func ScanOpencodeMessages(r io.Reader) (ScanResult, error) {
-	var res ScanResult
-	err := streamJSONL(r, func(line []byte) {
-		var l opencodeMessagesLine
-		if err := json.Unmarshal(line, &l); err != nil {
-			return
-		}
-		if l.Info.Role != "assistant" {
-			return
-		}
-		for _, p := range l.Parts {
-			if p.Type == "tool" {
-				res.ToolCalls++
-				if isGhostNudgeSaveTool(p.Tool) {
-					res.GhostSaves++
-				}
-			}
-		}
-	})
-	return res, err
-}
-
-// opencodeV2MessageLine is the minimal shape needed to spot tool calls in one
-// opencode-v2-messages JSONL line: a V2 session.context message serialized
-// verbatim by the adapter. Assistant messages carry their tool calls as
-// content entries typed "tool".
-type opencodeV2MessageLine struct {
-	Type    string `json:"type"`
-	Content []struct {
-		Type  string `json:"type"`
-		Name  string `json:"name"`
-		State struct {
-			Metadata struct {
-				ToolCalls []struct {
-					Tool string `json:"tool"`
-				} `json:"toolCalls"`
-			} `json:"metadata"`
-		} `json:"state"`
-	} `json:"content"`
-}
-
-// ScanOpencodeV2Messages streams an opencode-v2-messages transcript and counts
-// assistant tool entries, plus how many were Ghost saves. A Code Mode
-// `execute` entry counts once as a tool call; its saves come only from the
-// recorded inner calls (metadata.toolCalls), never from the code text, so
-// code or prose that merely names the tool does not count. Unparseable lines
-// are skipped; read errors abort the scan and are returned.
-func ScanOpencodeV2Messages(r io.Reader) (ScanResult, error) {
-	var res ScanResult
-	err := streamJSONL(r, func(line []byte) {
-		var l opencodeV2MessageLine
-		if err := json.Unmarshal(line, &l); err != nil {
-			return
-		}
-		if l.Type != "assistant" {
-			return
-		}
-		for _, c := range l.Content {
-			if c.Type != "tool" {
-				continue
-			}
-			res.ToolCalls++
-			if isGhostNudgeSaveTool(c.Name) {
-				res.GhostSaves++
-				continue
-			}
-			for _, inner := range c.State.Metadata.ToolCalls {
-				if isGhostNudgeSaveTool(inner.Tool) {
-					res.GhostSaves++
-				}
-			}
-		}
-	})
-	return res, err
 }
