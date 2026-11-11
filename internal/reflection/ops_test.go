@@ -413,17 +413,61 @@ func TestParseOpResponseRejectsUnparseableLine(t *testing.T) {
 // let a hallucinated line delete or rewrite a real memory, so it fails the run.
 func TestParseOpResponseRejectsUnknownID(t *testing.T) {
 	for name, reply := range map[string]string{
-		"keep":             `{"ops":["keep 00000000000000000000000000000000"]}`,
+		"rewrite source":   `{"ops":["rewrite 00000000000000000000000000000000 -> x"]}`,
 		"merge source":     `{"ops":["merge 00000000000000000000000000000000,` + opID2 + ` -> x"]}`,
 		"rewrite target":   `{"ops":["rewrite ` + opID1 + ` -> x","drop 00000000000000000000000000000000 reason: obsolete"]}`,
 		"drop target":      `{"ops":["drop ` + opID1 + ` reason: superseded by 00000000000000000000000000000000","keep ` + opID2 + `"]}`,
-		"truncated prefix": `{"ops":["keep ` + opID1[:8] + `"]}`,
+		"truncated prefix": `{"ops":["rewrite ` + opID1[:8] + ` -> x"]}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			if err := opErr(t, opInput(), reply); err == nil {
 				t.Fatalf("reply %q was accepted", reply)
 			}
 		})
+	}
+}
+
+// TestKeepOfAnUnknownIDIsSkippedNotFatal: a keep changes nothing — every id the
+// response does not name is carried through verbatim anyway — so a keep that
+// names an id this run was not given is a reference to nothing that would also
+// have done nothing. Failing the whole response over it threw away every valid
+// merge, rewrite and drop beside it, and a model that hallucinates one keep id
+// tends to do it again on the re-read, which stalled a project's consolidation
+// on every run. It is skipped and logged at WARN, with the id through the same
+// clipOpText value gate the complaints use. A merge, rewrite or drop naming an
+// unknown id still fails the response (TestParseOpResponseRejectsUnknownID).
+func TestKeepOfAnUnknownIDIsSkippedNotFatal(t *testing.T) {
+	const secretValue = "ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
+	in := opInput()
+	resp, err := parseOpResponse(`{"learned_context":"ctx","ops":["keep 00000000000000000000000000000000","keep ` + secretValue + `","keep ` + opID1 + `"]}`)
+	if err != nil {
+		t.Fatalf("parseOpResponse: %v", err)
+	}
+	var buf bytes.Buffer
+	result, err := executeOps(resp, in, slog.New(slog.NewTextHandler(&buf, nil)))
+	if err != nil {
+		t.Fatalf("a keep of an unknown id failed the response: %v", err)
+	}
+	if len(result.Kept) != 1 || result.Kept[0] != opID1 {
+		t.Errorf("Kept = %v, want only the real id %s", result.Kept, opID1)
+	}
+	if len(result.Memories) != 2 {
+		t.Errorf("result has %d memories, want the 2 inputs (one kept, one passed through): %+v", len(result.Memories), result.Memories)
+	}
+	for _, m := range in.ExistingMemories {
+		if _, ok := findMemory(result, m.Content); !ok {
+			t.Errorf("input %s is missing from the result", m.ID)
+		}
+	}
+	logged := buf.String()
+	if strings.Count(logged, "level=WARN") != 2 {
+		t.Errorf("want one WARN per skipped keep, got:\n%s", logged)
+	}
+	if !strings.Contains(logged, "00000000000000000000000000000000") {
+		t.Errorf("the WARN does not name the skipped id:\n%s", logged)
+	}
+	if strings.Contains(strings.ToUpper(logged), strings.ToUpper(secretValue)) {
+		t.Errorf("the WARN carries a hallucinated id that is a credential verbatim:\n%s", logged)
 	}
 }
 
@@ -493,7 +537,7 @@ func TestReaderComplaintsAreBounded(t *testing.T) {
 	})
 
 	t.Run("hallucinated id", func(t *testing.T) {
-		err := opErr(t, opInput(), `{"ops":["keep `+noise+opID2+`"]}`)
+		err := opErr(t, opInput(), `{"ops":["rewrite `+noise+opID2+` -> x"]}`)
 		if err == nil {
 			t.Fatal("a hallucinated id was accepted")
 		}
@@ -513,7 +557,7 @@ func TestReaderComplaintsAreBounded(t *testing.T) {
 // complaint, because an unrecognised renderer is exactly the case where a log
 // line must not guess.
 func TestReaderComplaintForLogWithholdsTheLine(t *testing.T) {
-	err := opErr(t, opInput(), `{"ops":["keep 00000000000000000000000000000000"]}`)
+	err := opErr(t, opInput(), `{"ops":["rewrite 00000000000000000000000000000000 -> x"]}`)
 	if err == nil {
 		t.Fatal("an unknown id was accepted")
 	}
@@ -527,7 +571,7 @@ func TestReaderComplaintForLogWithholdsTheLine(t *testing.T) {
 	if !strings.Contains(safe, "withheld") {
 		t.Errorf("safe rendering does not say the operation line was withheld:\n%s", safe)
 	}
-	if strings.Contains(safe, `"keep 00000000000000000000000000000000"`) {
+	if strings.Contains(safe, `"rewrite 00000000000000000000000000000000 -> x"`) {
 		t.Errorf("safe rendering quotes the operation line back:\n%s", safe)
 	}
 
@@ -823,7 +867,7 @@ func TestReaderComplaintWithholdsAValueFromTheReasonToo(t *testing.T) {
 	// model invents an id that IS the value, and the reader refuses it for not
 	// being one of the input.
 	t.Run("hallucinated id that is a value", func(t *testing.T) {
-		err := opErr(t, opInput(), `{"ops":["keep `+secretValue+`"]}`)
+		err := opErr(t, opInput(), `{"ops":["rewrite `+secretValue+` -> x"]}`)
 		if err == nil {
 			t.Fatal("a hallucinated id was accepted")
 		}

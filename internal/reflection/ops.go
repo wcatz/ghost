@@ -37,11 +37,17 @@ import (
 // it did not explicitly rewrite.
 //
 // Everything here is strict. An operation Ghost cannot read, an id Ghost did not
-// feed the model, an id claimed twice, a supersession whose target the same
-// response throws away: each fails the whole response rather than being applied
+// feed the model in a merge, rewrite or drop, an id claimed twice, a
+// supersession whose target the same response throws away: each fails the
+// whole response rather than being applied
 // on a best guess. A partially-understood operation list is a corpus rewritten as
 // if the model had said something else, and the tiered consolidator falls through
 // to the deterministic tier instead.
+//
+// The one exception is a keep of an unknown id, which is skipped with a WARN:
+// a keep changes nothing, since every unnamed input is carried through
+// verbatim anyway, so failing the response over it only discards the valid
+// operations beside it.
 
 // opResponse is the JSON envelope. Ops is a pointer so an absent "ops" key is
 // distinguishable from an empty list: the first is a harness answering in the
@@ -482,6 +488,18 @@ func executeOps(resp opResponse, input ReflectionInput, logger *slog.Logger) (Re
 		op, err := parseOpLine(i+1, line)
 		if err != nil {
 			return ReflectionResult{}, err
+		}
+		// A keep of an id this run was not given refers to nothing and would
+		// change nothing: an unnamed input is carried through verbatim below
+		// regardless. Skipping it costs no memory, whereas failing the response
+		// discards every valid operation beside it. Only keep gets this — a
+		// merge, rewrite or drop of an unknown id still fails the response.
+		if op.kind == opKeep {
+			if _, ok := resolve(op.ids[0]); !ok {
+				logger.Warn("reflection keep names an id this run was not given; skipping it",
+					"op", i+1, "id", clipOpText(op.ids[0]))
+				continue
+			}
 		}
 		for _, id := range op.ids {
 			if _, ok := resolve(id); !ok {
