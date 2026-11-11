@@ -29,10 +29,10 @@ const (
 type memOp struct {
 	kind     opKind
 	ids      []string
-	target   string // drop: the id said to supersede this one
-	obsolete bool   // drop: no target named
-	text     string // merge/rewrite: the replacement content
-	line     int    // 1-based position in the ops array, for diagnostics
+	target   string
+	obsolete bool
+	text     string
+	line     int
 }
 
 type opRefusal struct {

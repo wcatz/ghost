@@ -8,8 +8,7 @@ import (
 	"github.com/wcatz/ghost/internal/memory"
 )
 
-// LLMProvider abstracts LLM interactions for reflection. (A streaming chat
-// method lived here until the assistant-era streaming client was removed;
+// LLMProvider abstracts LLM interactions for reflection.
 type LLMProvider interface {
 	Reflect(ctx context.Context, prompt string) (string, ai.TokenUsage, error)
 }

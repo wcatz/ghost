@@ -10,7 +10,6 @@ import (
 )
 
 // SQLiteConsolidator performs mechanical deduplication using Jaccard similarity.
-// Lowest tier: always available, zero external dependencies, but only merges
 type SQLiteConsolidator struct{}
 
 // NewSQLiteConsolidator creates a consolidator that deduplicates via token overlap.

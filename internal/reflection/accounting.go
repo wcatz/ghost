@@ -6,8 +6,7 @@ import (
 	"github.com/wcatz/ghost/internal/memory"
 )
 
-// AccountMerge is one merge line: the ids it folded in, the text it produced,
-// whether that text is one of the result's memories, and how many of its sources
+// AccountMerge describes one merge operation in reflection accounting.
 type AccountMerge struct {
 	IDs         []string
 	Text        string
@@ -16,15 +15,13 @@ type AccountMerge struct {
 	Guarded     int
 }
 
-// AccountScopeRefusal is one merge the apply will refuse because its sources'
-// scopes disagree: the ids it named, and each one's stored scope in the same
+// AccountScopeRefusal describes one merge refused because source scopes disagree.
 type AccountScopeRefusal struct {
 	IDs    []string
 	Scopes []map[string]string
 }
 
-// AccountLinkOverflow is one merge the apply will refuse because the decision
-// links its sources carry, joined, do not fit in one source_ref: the ids it
+// AccountLinkOverflow describes one merge refused because its folded links do not fit.
 type AccountLinkOverflow struct {
 	IDs      []string
 	Carriers []string
@@ -41,8 +38,7 @@ type AccountRewrite struct {
 	Guarded bool
 }
 
-// AccountDrop is one drop line: the id the response disposed of, the reason it
-// gave, the id it named as the replacement, and whether the drop guard found
+// AccountDrop describes one drop operation in reflection accounting.
 type AccountDrop struct {
 	ID        string
 	Reason    string
@@ -61,8 +57,7 @@ type AccountDeleted struct {
 	Reason string
 }
 
-// InputAccounting is every input id of one consolidation, in the buckets the
-// report prints. The fields that name ids and the two counts partition the
+// InputAccounting partitions each input memory of one consolidation run.
 type InputAccounting struct {
 	Inputs        int
 	Merges        []AccountMerge
@@ -123,8 +118,7 @@ func claimedRows(input []memory.Memory, emitted []emission) map[string]bool {
 	return claimed
 }
 
-// AccountInputs partitions the result's input ids into the buckets a report
-// prints. It is pure: the same input and result always account the same way, and
+// AccountInputs partitions consolidation inputs into accounting buckets.
 func AccountInputs(input ReflectionInput, result ReflectionResult, guarded []DroppedGuarded) InputAccounting {
 	present := make(map[string]bool, len(result.Memories))
 	for _, m := range result.Memories {

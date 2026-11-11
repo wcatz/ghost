@@ -7,14 +7,12 @@ import (
 	"syscall"
 )
 
-// SetGroup starts cmd in its own process group. Windows has no portable
-// positive group signal, so this does not let TerminateGroup or KillGroup reach
+// SetGroup starts cmd in its own process group on Windows.
 func SetGroup(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP}
 }
 
-// TerminateGroup kills the direct child. Windows has no portable group signal,
-// so this is the same as the default CommandContext cancellation and
+// TerminateGroup kills the direct child on Windows.
 func TerminateGroup(cmd *exec.Cmd) error {
 	if cmd.Process == nil {
 		return nil
@@ -31,6 +29,5 @@ func KillGroup(cmd *exec.Cmd) {
 	_ = cmd.Process.Kill()
 }
 
-// GroupInhabited is always false on Windows. There is no process group to join
-// or signal, and the deadline's TerminateGroup has already killed the direct
+// GroupInhabited reports false on Windows because process-group membership is not tracked.
 func GroupInhabited(_ *exec.Cmd) bool { return false }

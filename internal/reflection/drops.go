@@ -4,8 +4,8 @@ import (
 	"strings"
 )
 
-// DroppedGuarded is an input memory, in any category, that has no close
-// survivor in the consolidation output. Importance and Tags are carried so the
+// DroppedGuarded is an input memory with no close survivor in the consolidation output.
+// Importance and tags are carried so it can be reinserted verbatim.
 type DroppedGuarded struct {
 	ID         string
 	Category   string
@@ -16,8 +16,7 @@ type DroppedGuarded struct {
 
 const dropContainmentThreshold = 0.45
 
-// AuditGuardedDrops returns every input memory that has no token-overlap
-// survivor among the result memories, whatever its category. Every category is
+// AuditGuardedDrops returns every input memory with no token-overlap survivor in the result.
 func AuditGuardedDrops(input ReflectionInput, result ReflectionResult) []DroppedGuarded {
 	outTokens := make([]map[string]bool, 0, len(result.Memories))
 	present := make(map[string]bool, len(result.Memories))
@@ -92,8 +91,7 @@ func memIDKey(id string) string {
 	return strings.ToUpper(strings.TrimSpace(id))
 }
 
-// RetainGuardedDrops turns every flagged drop back into a result memory so it
-// can be carried forward verbatim. Refusing to apply (the pre-#458
+// RetainGuardedDrops turns every flagged drop back into a result memory so it can be carried forward verbatim.
 func RetainGuardedDrops(drops []DroppedGuarded) []ReflectMemory {
 	retained := make([]ReflectMemory, 0, len(drops))
 	for _, d := range drops {

@@ -6,8 +6,7 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// IsAlive reports whether pid names a running process. Unlike POSIX, Windows
-// aggressively recycles PIDs, so a PID that opens successfully but has already
+// IsAlive reports whether pid names a running process and still matches wantToken when provided.
 func IsAlive(pid int, wantToken string, haveToken bool) bool {
 	if pid <= 0 || int64(pid) > 0xFFFFFFFF {
 		return false
@@ -18,7 +17,7 @@ func IsAlive(pid int, wantToken string, haveToken bool) bool {
 	}
 	defer windows.CloseHandle(h) //nolint:errcheck
 
-	const stillActive = 259 // STILL_ACTIVE, per the Win32 GetExitCodeProcess docs
+	const stillActive = 259
 
 	var exitCode uint32
 	if err := windows.GetExitCodeProcess(h, &exitCode); err != nil {

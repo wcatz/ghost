@@ -36,8 +36,7 @@ var languageMarkers = []struct {
 	{[]string{"CMakeLists.txt"}, "C/C++"},
 }
 
-// CollectGitContext returns recent commit subjects ("<short-sha> <subject>")
-// and a coarse language hint for dir. It is used to populate
+// CollectGitContext returns recent commit subjects and a coarse language hint for dir.
 func CollectGitContext(dir string) (commits []string, language string) {
 	language = detectLanguage(dir)
 	if dir == "" {

@@ -8,8 +8,7 @@ import (
 	"sync/atomic"
 )
 
-// Consolidator performs memory consolidation. Each tier implements this
-// differently: LLM uses a CLI harness for intelligent consolidation,
+// Consolidator performs memory consolidation.
 type Consolidator interface {
 	Name() string
 	Available(ctx context.Context) bool
@@ -40,8 +39,7 @@ func NewTieredConsolidator(tiers []Consolidator, logger *slog.Logger) *TieredCon
 	}
 }
 
-// Name reports the active tier, prefixed with "tiered:" to mark that this came
-// from the tiered constructor the `auto` path uses. The prefix is a marker of
+// Name reports the active tier name.
 func (t *TieredConsolidator) Name() string {
 	idx := int(t.active.Load())
 	prefix := "tiered:"
@@ -78,8 +76,7 @@ func gateMinOutput(inputCount int) int {
 	return gateStrictInputMinOutput + int(math.Round(frac*float64(gateBacklogMinOutput-gateStrictInputMinOutput)))
 }
 
-// NewGatedConsolidator wraps ONE explicitly-selected tier in the tiered
-// consolidator, so the quality gate applies to a selection that named its
+// NewGatedConsolidator wraps one selected tier with the consolidation quality gate.
 func NewGatedConsolidator(c Consolidator, logger *slog.Logger) *TieredConsolidator {
 	t := NewTieredConsolidator([]Consolidator{c}, logger)
 	t.gated = true

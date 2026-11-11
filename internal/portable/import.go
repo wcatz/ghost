@@ -17,8 +17,7 @@ import (
 	"github.com/wcatz/ghost/internal/secret"
 )
 
-// ImportOptions is one import run's settings. It is an alias rather than a
-// second struct because the store owns these semantics — it is the store that
+// ImportOptions configures one import run.
 type ImportOptions = memory.ImportOptions
 
 // Action is what an import did, or would do, with one record.
@@ -30,8 +29,7 @@ const (
 	ActionReject Action = "reject"
 )
 
-// RecordResult is the outcome for one record of an import, reported to the
-// caller's onRecord so the CLI can print it. Line is the artifact line number
+// RecordResult reports the outcome of importing one artifact record.
 type RecordResult struct {
 	Type       string
 	ID         string
@@ -45,8 +43,7 @@ type RecordResult struct {
 	Error      error
 }
 
-// DropReason is why an import dropped a task's blocked_by or a decision's
-// superseded_by. Each is a pointer that could not be honoured without refusing
+// DropReason explains why an import dropped a record reference.
 type DropReason int
 
 const (
@@ -71,15 +68,13 @@ func (r *ImportReport) count(m map[string]int, kind string) {
 	m[kind]++
 }
 
-// Artifact is one parsed artifact: the records an import will apply and the
-// lines it collected as per-record refusals. Parse returns it, and its Import
+// Artifact holds the parsed contents of a portable import artifact.
 type Artifact struct {
 	recs       []parsedRecord
 	unreadable []unreadable
 }
 
-// Parse reads an artifact and refuses one this build cannot read as a whole,
-// without a store. It is the file-level half of Import — the header, every
+// Parse reads and validates a portable artifact without applying it.
 func Parse(r io.Reader) (*Artifact, error) {
 	recs, unreadable, err := readRecords(r)
 	if err != nil {
@@ -125,8 +120,7 @@ func newImportReport(opts ImportOptions) ImportReport {
 	}
 }
 
-// Import applies an artifact Parse has already read and judged. It is the run
-// half of Import, split out so a caller that had to refuse the file before
+// Import applies this parsed artifact to the store.
 func (a *Artifact) Import(ctx context.Context, s *memory.Store, opts ImportOptions, onRecord func(RecordResult)) (ImportReport, error) {
 	report := newImportReport(opts)
 

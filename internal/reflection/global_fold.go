@@ -188,8 +188,7 @@ func olderRow(a, b memory.Memory) bool {
 	return a.ID < b.ID
 }
 
-// PlanGlobalFold finds the near-duplicate clusters among the _global rows a
-// consolidation may touch. It is pure: no store, no model, the same rows always
+// PlanGlobalFold finds near-duplicate clusters among global rows eligible for folding.
 func PlanGlobalFold(mems []memory.Memory) []GlobalFoldCluster {
 	var clusters []GlobalFoldCluster
 	for _, idx := range duplicateClustersWhere(mems, samePolarity) {

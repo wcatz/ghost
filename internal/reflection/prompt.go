@@ -11,9 +11,9 @@ const maxNearDuplicateHintPairs = 20
 
 // ReflectionInput holds all data fed into the reflection prompt.
 type ReflectionInput struct {
-	ExistingMemories   []memory.Memory // all memories (up to 200)
-	CurrentContext     string          // learned_context from ghost_state
-	LastCommits        []string        // recent commit messages
+	ExistingMemories   []memory.Memory
+	CurrentContext     string
+	LastCommits        []string
 	ProjectLanguage    string
 	ProjectName        string
 	OtherProjectNames  []string
@@ -34,22 +34,19 @@ type ReflectionResult struct {
 	RepairTurns    int             `json:"repair_turns,omitempty"`
 }
 
-// Merge is one merge operation and what it produced. Text and not just the ids so
-// the drop guard can check each source against the text its merge actually
+// Merge records one merge operation and its output text.
 type Merge struct {
 	IDs  []string
 	Text string
 }
 
-// Replacement records that a response disposed of an input id, and the text it
-// says took its place — a rewrite's own new text, or the emitted text of the
+// Replacement records an input id disposed of by a response and the text that replaced it.
 type Replacement struct {
 	ID   string
 	Text string
 }
 
-// Drop is one explicit `drop` operation: the input id it names, the reason the
-// response gave, and — for a supersession, and only then — the input id it named
+// Drop records an explicit drop operation requested by a reflection response.
 type Drop struct {
 	ID        string
 	Reason    string
@@ -70,33 +67,13 @@ type ReflectMemory struct {
 	Content    string   `json:"content"`
 	Importance float32  `json:"importance"`
 	Tags       []string `json:"tags"`
-	Scope      string   `json:"scope,omitempty"` // "project" (default) or "global"
+	Scope      string   `json:"scope,omitempty"`
 	RestatesID string   `json:"-"`
 }
 
 // BuildReflectionPrompt assembles the reflection prompt from project history.
-// Any change to the fields rendered below for ExistingMemories must be mirrored
-// in InputSignature, which fingerprints them for the --skip-unchanged gate, with
-// two recorded exceptions.
-//
-// The access count (used:N) is deliberately NOT mirrored: ordinary reads increment
-// it, so including it would break the gate on sessions that saved nothing.
-//
-// The retrieval audit's negative evidence (Usefulness, #648) is likewise NOT
-// mirrored, and for a related but distinct reason. Fingerprinting it would make
-// every project that records verdicts re-consolidate on every stop hook: verdicts
-// arrive from retrieval, not from a session saving something, so the gate would
-// see a changed input on a session that saved nothing — the same defect the access
-// count has, reached by a different column. Both halves of that argument are
-// about FINGERPRINTING the field, and neither is an argument that omitting it
-// makes the gate less conservative: InputSignature hashes only the corpus rows, so
-// leaving the evidence out cannot move it in either direction. It cannot make the
-// gate SKIP a change the corpus itself made, because every field the gate does
-// fingerprint is still fingerprinted. Recorded here rather than only at the call
-// site, because the rule and this exception live in the function that renders the
-// field — a reader who found the rule here without this sentence would "fix" the
-// asymmetry by mirroring Usefulness and silently break the gate for every audited
-// project.
+// Any change to fields rendered for ExistingMemories must be mirrored in InputSignature for the --skip-unchanged gate.
+// The access count is NOT mirrored; Usefulness is also NOT mirrored.
 func BuildReflectionPrompt(input ReflectionInput) string {
 	var sb strings.Builder
 

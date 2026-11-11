@@ -7,14 +7,13 @@ import (
 	"syscall"
 )
 
-// SetGroup puts cmd in its own process group, so TerminateGroup and KillGroup
-// can reach every helper the child spawns rather than only the direct child.
+// SetGroup puts cmd in its own process group so group termination reaches the whole child process tree.
 func SetGroup(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 }
 
-// TerminateGroup asks cmd's whole process group to shut down gracefully. The
-// negative PID targets the group SetGroup created. A group that is already
+// TerminateGroup asks cmd's process group to shut down gracefully.
+// It falls back to signalling the direct child if the group is already gone.
 func TerminateGroup(cmd *exec.Cmd) error {
 	if cmd.Process == nil {
 		return nil
@@ -25,8 +24,7 @@ func TerminateGroup(cmd *exec.Cmd) error {
 	return nil
 }
 
-// KillGroup force-kills cmd's whole process group. Callers use this after a
-// grace period for a group that ignored TerminateGroup, because os/exec's own
+// KillGroup force-kills cmd's process group, falling back to the direct child if needed.
 func KillGroup(cmd *exec.Cmd) {
 	if cmd.Process == nil {
 		return
@@ -36,8 +34,7 @@ func KillGroup(cmd *exec.Cmd) {
 	}
 }
 
-// GroupInhabited reports whether anything is still in cmd's process group.
-// Signal 0 asks the question without delivering anything, and ESRCH is the one
+// GroupInhabited reports whether cmd's process group still has members.
 func GroupInhabited(cmd *exec.Cmd) bool {
 	if cmd.Process == nil {
 		return false

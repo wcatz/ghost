@@ -13,16 +13,14 @@ type reflector interface {
 	Reflect(ctx context.Context, prompt string) (string, ai.TokenUsage, error)
 }
 
-// LlmConsolidator uses an LLM (a configured CLI harness — claude, opencode,
-// codex, or goose — or a source-matched provider) for consolidation. Highest
+// LlmConsolidator uses an LLM harness for memory consolidation.
 type LlmConsolidator struct {
 	client reflector
 	name   string
 	logger *slog.Logger
 }
 
-// SetLogger lets the tiered consolidator route this tier's diagnostics through
-// the configured sink (GHOST_LOG_FILE / level filtering) instead of the
+// SetLogger sets the logger used for this consolidator's diagnostics.
 func (h *LlmConsolidator) SetLogger(l *slog.Logger) { h.logger = l }
 
 func (h *LlmConsolidator) log() *slog.Logger {

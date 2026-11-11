@@ -8,8 +8,7 @@ import (
 	"strings"
 )
 
-// StartTime returns an opaque token identifying pid's process creation
-// instant, or ("", false) if it can't be determined (process gone, unreadable
+// StartTime returns an opaque process-creation token for pid, or reports that it cannot be determined.
 func StartTime(pid int) (string, bool) {
 	data, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
 	if err != nil {

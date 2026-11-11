@@ -2,8 +2,7 @@
 
 package procstat
 
-// StartTime has no known implementation on this OS. Returning ("", false)
-// degrades callers to legacy PID-only liveness checking, identical to the
+// StartTime reports that no process-creation token is available on this platform.
 func StartTime(pid int) (string, bool) {
 	return "", false
 }
