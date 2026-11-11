@@ -173,7 +173,7 @@ The block is a push for the moment of work: the session-start block is chosen wi
 ```text
 host Stop
   → ghost hook stop --source <host>
-  → save reminder / bounded host behavior
+  → bounded host behavior (prints nothing)
   → cooldown check (lifecycle.min_interval vs lifecycle-<project>.last mtime)
   → optional detached ghost lifecycle <project>
        → writes lifecycle-<project>.last
