@@ -569,3 +569,110 @@ func TestACueInOneArgumentNeverBindsAnIDInAnother(t *testing.T) {
 		t.Errorf("a save citing a memory in source_ref judged %s, want used", v.Outcome)
 	}
 }
+
+// TestScanAuditRefusesOversizedAndMalformedLines pins the two outcomes the audit
+// depends on: a line past the memory ceiling aborts the scan with an error — and
+// the signals read before it are kept and marked degraded, so a caller never
+// reads a cut-short scan as a clean one — while an unparseable line is skipped
+// rather than aborting, so one damaged line does not cost the whole transcript.
+func TestScanAuditRefusesOversizedAndMalformedLines(t *testing.T) {
+	old := maxTranscriptLine
+	maxTranscriptLine = 1 << 10
+	t.Cleanup(func() { maxTranscriptLine = old })
+
+	good := `{"type":"assistant","timestamp":"` + auditStampRFC3339 + `","message":{"content":[{"type":"text","text":"` + agentText + `"}]}}` + "\n"
+	named := `{"type":"assistant","timestamp":"` + auditStampRFC3339 + `","message":{"content":[{"type":"text","text":"applying what ` + auditMemoryID + ` records"}]}}` + "\n"
+	oversized := `{"type":"assistant","message":{"content":[{"type":"text","text":"` + strings.Repeat("A", 4<<10) + `"}]}}` + "\n"
+	if len(good) >= maxTranscriptLine || len(named) >= maxTranscriptLine {
+		t.Fatalf("the fixture lines must fit under the lowered ceiling (%d, %d vs %d)", len(good), len(named), maxTranscriptLine)
+	}
+
+	sig, ok, err := ScanAudit(FormatClaudeJSONL, strings.NewReader(good+oversized+named), auditTestHasher(t))
+	if !ok {
+		t.Fatal("no audit scanner registered for claude-jsonl")
+	}
+	if err == nil {
+		t.Fatal("a line past maxTranscriptLine did not abort the scan")
+	}
+	if !errors.Is(err, errTranscriptLineTooLong) {
+		t.Errorf("err = %v, want errTranscriptLineTooLong", err)
+	}
+	if sig == nil || !usedBySignals(t, sig) {
+		t.Error("the lines read before the oversized one were lost; a partial scan must keep what it read")
+	}
+	if sig.HasID(auditMemoryID) {
+		t.Error("a line after the oversized one was read; the scan must stop at the ceiling")
+	}
+	if _, degraded := sig.Degraded(); !degraded {
+		t.Error("an aborted scan was not marked degraded; the report would claim the agent used nothing")
+	}
+
+	sig, ok, err = ScanAudit(FormatClaudeJSONL, strings.NewReader(good+"not json at all\n"+named), auditTestHasher(t))
+	if !ok || err != nil {
+		t.Fatalf("an unparseable line aborted the scan instead of being skipped: ok=%v err=%v", ok, err)
+	}
+	if !usedBySignals(t, sig) || !sig.HasID(auditMemoryID) {
+		t.Error("an unparseable line cost the rest of the transcript")
+	}
+}
+
+// TestScanAuditOpencodeV2HugeLine: an agentic assistant message carries every
+// tool call and output of the turn on one line, so real transcripts pass the old
+// 4 MiB line cap (#632). The agent's words in such a line must still be read.
+func TestScanAuditOpencodeV2HugeLine(t *testing.T) {
+	line := `{"type":"assistant","time":{"created":` + auditStampMS + `},"content":[{"type":"text","text":"` + agentText + `"}]}`
+	huge := padLine(line, 5<<20)
+	if len(huge) <= 4<<20 {
+		t.Fatalf("the fixture line is %d bytes, not past the old 4 MiB cap", len(huge))
+	}
+	sig, ok, err := ScanAudit(FormatOpencodeV2Messages, strings.NewReader(huge+"\n"), auditTestHasher(t))
+	if !ok || err != nil {
+		t.Fatalf("ScanAudit on a 5 MiB line: ok=%v err=%v", ok, err)
+	}
+	if !usedBySignals(t, sig) {
+		t.Error("the agent's words in a 5 MiB line were not read")
+	}
+}
+
+// TestScanAuditGoldenFixtures drives every non-Claude format's scanner over a
+// realistic full-fidelity transcript kept in testdata: non-JSON noise, host
+// bookkeeping lines, and tool results that must not be read as the agent's
+// words. Each case pins what the scan read (a save's text judged against a
+// memory restating it) or what it must not have read (an id that only a tool
+// result carries).
+func TestScanAuditGoldenFixtures(t *testing.T) {
+	for _, tc := range []struct {
+		format, dir string
+		// saved is text the agent saved, when it is long enough to be judged.
+		saved string
+		// resultOnlyID appears only in a tool result in the fixture.
+		resultOnlyID string
+	}{
+		{FormatCodexRollout, "codex-rollout", "config loader lives in internal/config", ""},
+		{FormatOpencodeMessages, "opencode-messages", "config loader lives in internal/config", ""},
+		{FormatOpencodeV2Messages, "opencode-v2-messages", "", "D2911B065A7ECEA2A13BDB6FB2C790F7"},
+	} {
+		t.Run(tc.dir, func(t *testing.T) {
+			b, err := os.ReadFile(filepath.Join("testdata", tc.dir, "session.jsonl"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			sig := scanAudit(t, tc.format, string(b))
+			if sig.Empty() {
+				t.Fatal("the fixture produced no signals at all")
+			}
+			if tc.saved != "" {
+				v, ok := audit.CompareAgainst(sig, audit.Judged{MemoryID: auditUnnamedID, Content: tc.saved})
+				if !ok {
+					t.Fatal("the fixture memory could not be judged")
+				}
+				if v.Outcome != audit.OutcomeSuperseded {
+					t.Errorf("outcome = %+v, want %q: the agent saved this text", v, audit.OutcomeSuperseded)
+				}
+			}
+			if tc.resultOnlyID != "" && sig.HasID(tc.resultOnlyID) {
+				t.Errorf("an id that only a tool result carries was read as the agent's own")
+			}
+		})
+	}
+}

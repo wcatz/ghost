@@ -275,8 +275,7 @@ type claudeAuditLine struct {
 // Assistant lines only. A "user" line is where the injected block and every tool
 // result arrive, so visiting them would make the audit report "used" for every
 // retrieval — see the file comment. Unparseable lines are skipped rather than
-// fatal, exactly as the save-nudge's scanner skips them: one bad line must not
-// cost a whole session's audit.
+// fatal: one bad line must not cost a whole session's audit.
 func AuditScanClaudeJSONL(r io.Reader, h audit.Hasher) (*audit.Signals, error) {
 	sig := audit.NewWithHasher(h)
 	err := streamJSONL(r, func(line []byte) {
