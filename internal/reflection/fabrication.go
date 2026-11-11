@@ -9,26 +9,8 @@ import (
 	"github.com/wcatz/ghost/internal/secret"
 )
 
-// shaLikeRe matches candidate git-SHA-shaped tokens: 7-40 hex chars,
-// word-bounded. The 7-char floor is git's short-SHA default; 40 is a full
-// SHA-1. shaLikeToken() then requires at least one digit, because pure-letter
-// hex tokens ("defaced", "deadbeef") are English words, not SHAs — recorded
-// fabrication failures have been mixed digit/letter tokens ("fdf4583",
-// "0a1f004").
 var shaLikeRe = regexp.MustCompile(`(?i)\b[0-9a-f]{7,40}\b`)
 
-// shaLikeToken reports whether tok is a SHA-shaped token worth guarding:
-// 7-40 hex chars containing at least one digit AND at least one a-f letter.
-// The digit requirement excludes pure-letter English words ("defaced",
-// "deadbeef"); the letter requirement excludes pure-digit numbers (network
-// magics, ports) that are facts, not hashes.
-// shaLikeToken reports whether tok is a SHA-looking token the fabrication
-// guard can reason about. It requires both a digit and a letter, so hex-shaped
-// non-SHAs — numbers (764824073, 20260116) and words (defaced, deadbeef) — are
-// never mistaken for SHAs and dropped. The cost is a false negative when a
-// real abbreviation is made of a single character class (all digits, e.g.
-// 6457253, or all letters): drops are destructive, so the guard errs toward
-// missing a fabrication rather than discarding a real memory.
 func shaLikeToken(tok string) bool {
 	if len(tok) < 7 || len(tok) > 40 {
 		return false
@@ -48,17 +30,6 @@ func shaLikeToken(tok string) bool {
 	return hasDigit && hasLetter
 }
 
-// dropFabricatedMemories removes emitted memories whose content contains a
-// SHA-shaped token that appears nowhere in the input corpus. A consolidation
-// run cannot legitimately learn a new commit SHA — the model has no git
-// access and LastCommits/ExistingMemories are the only sources — so any
-// emitted SHA that isn't traceable to the input is a hallucinated specific
-// (this repo has recorded bogus-SHA fabrications, e.g. "fdf4583" for a
-// change actually made in 0a1f004). The memory is dropped rather than the
-// whole run failing: one contaminated memory must not nuke an otherwise
-// healthy consolidation pass. Each drop is logged, because a silently
-// discarded memory is indistinguishable from the model never emitting it —
-// the operator cannot tell a clean run from a truncated one.
 func dropFabricatedMemories(result *ReflectionResult, input ReflectionInput, logger *slog.Logger) {
 	if logger == nil {
 		logger = slog.Default()
@@ -79,10 +50,6 @@ func dropFabricatedMemories(result *ReflectionResult, input ReflectionInput, log
 	result.Memories = kept
 }
 
-// knownSHAs is the set of SHA-shaped tokens a run can legitimately cite: the
-// ones its input memories and recent commits carry, lowercased. The stored
-// learned_context is not in it. It is the harness's own earlier output, so a
-// SHA only it holds was never traceable to anything.
 func knownSHAs(input ReflectionInput) map[string]bool {
 	known := make(map[string]bool)
 	for _, m := range input.ExistingMemories {
@@ -102,9 +69,6 @@ func knownSHAs(input ReflectionInput) map[string]bool {
 	return known
 }
 
-// unknownSHAs returns the SHA-shaped tokens in text that known does not hold,
-// as written. It is the one rule both a proposed memory and a proposed
-// learned_context are checked against.
 func unknownSHAs(text string, known map[string]bool) []string {
 	var unknown []string
 	for _, tok := range shaLikeRe.FindAllString(text, -1) {
@@ -115,21 +79,6 @@ func unknownSHAs(text string, known map[string]bool) []string {
 	return unknown
 }
 
-// previewContent renders content as a single-line, length-bounded preview for
-// log output, so a dropped memory can be identified without dumping the whole
-// body into the log. Truncation is by rune, not byte, so the cut never lands
-// mid-rune and emits invalid UTF-8 (memory content is arbitrary text).
-// A preview is a log line, and in the autonomous path the log is an append-only
-// file the process writes and nothing ever prunes. So a 160-rune prefix is a
-// copy of the content into storage that outlives the run, and the three callers
-// (fabrication, contamination, grounding) all run INSIDE the tier — before
-// cmd/ghost sees anything, and therefore before the credential drop at the write
-// boundary. A proposal that trips one of those guards would have its value
-// written to the log verbatim and never reach the boundary at all.
-//
-// The check is here, in the one function all three share, rather than at the
-// call sites: a guard that has to be remembered at three places is a guard that
-// is one refactor away from not existing.
 func previewContent(content string) string {
 	if finding, ok := secret.Detect(content); ok {
 		return fmt.Sprintf("<withheld: %s, bytes=%d>", finding.Label, len(content))
