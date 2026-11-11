@@ -43,10 +43,10 @@ func TestSessionStartSameSecondRowsKeepNewestFirst(t *testing.T) {
 	now := time.Date(2026, 1, 2, 12, 0, 0, 0, time.UTC)
 	_, _, _, _, _, tasks, decisions, _, _ :=
 		loadSessionContextFrom(dbPath, canonical, mustHookConfig(t), func() time.Time { return now }, "")
-	if len(tasks) != 10 || tasks[0][0] != "l" || tasks[9][0] != "c" {
-		t.Errorf("tasks window = %v; want newest l first, oldest kept c last", tasks)
+	if len(tasks) != 5 || tasks[0][0] != "l" || tasks[4][0] != "h" {
+		t.Errorf("tasks window = %v; want newest l first, oldest kept h last", tasks)
 	}
-	if len(decisions) != 5 || decisions[0][0] != "l" || decisions[4][0] != "h" {
-		t.Errorf("decisions window = %v; want l first, h last", decisions)
+	if len(decisions) != 3 || decisions[0][0] != "l" || decisions[2][0] != "j" {
+		t.Errorf("decisions window = %v; want l first, j last", decisions)
 	}
 }

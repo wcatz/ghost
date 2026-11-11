@@ -1986,8 +1986,8 @@ func seedSessionDecisions(t *testing.T, decisions []struct{ id, title, decision,
 // block. The revisit row is stamped the NEWEST decision in the project, so
 // without the active-first order it is the row that takes the last slot.
 func TestHandleSessionStartHook_RevisitDecisionDoesNotDisplaceAnActiveOne(t *testing.T) {
-	rows := make([]struct{ id, title, decision, rationale, status, createdMod string }, 0, 6)
-	for i := 0; i < 5; i++ {
+	rows := make([]struct{ id, title, decision, rationale, status, createdMod string }, 0, 4)
+	for i := 0; i < 3; i++ {
 		id := "a" + string(rune('0'+i))
 		rows = append(rows, struct{ id, title, decision, rationale, status, createdMod string }{
 			id, "active decision " + id, "body " + id, "why", "active", "-1 day",
@@ -2005,7 +2005,7 @@ func TestHandleSessionStartHook_RevisitDecisionDoesNotDisplaceAnActiveOne(t *tes
 	runSessionStartHook(t, string(input), &out)
 	result := out.String()
 
-	for i := 0; i < 5; i++ {
+	for i := 0; i < 3; i++ {
 		id := "a" + string(rune('0'+i))
 		if !strings.Contains(result, "active decision "+id) {
 			t.Errorf("active decision %s was pushed out by a revisit row:\n%s", id, result)
