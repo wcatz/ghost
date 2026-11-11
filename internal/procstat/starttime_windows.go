@@ -10,8 +10,6 @@ import (
 
 // StartTime returns an opaque token identifying pid's process creation
 // instant, or ("", false) if it can't be determined. The creation Filetime is
-// wall-clock (100ns intervals since 1601-01-01), so it is already reboot-safe
-// with no extra prefixing needed.
 func StartTime(pid int) (string, bool) {
 	if pid <= 0 || int64(pid) > 0xFFFFFFFF {
 		return "", false
