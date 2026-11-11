@@ -8,10 +8,7 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// StartTime returns an opaque token identifying pid's process creation
-// instant, or ("", false) if it can't be determined. The creation Filetime is
-// wall-clock (100ns intervals since 1601-01-01), so it is already reboot-safe
-// with no extra prefixing needed.
+// StartTime returns an opaque process-creation token for pid, or reports that it cannot be determined.
 func StartTime(pid int) (string, bool) {
 	if pid <= 0 || int64(pid) > 0xFFFFFFFF {
 		return "", false

@@ -6,23 +6,10 @@ import (
 	"strings"
 )
 
-// foreignNameRe matches a known foreign project name as a whole token.
-// Built per call with regexp.QuoteMeta so project names containing regex
-// metacharacters cannot alter the pattern. Case-insensitive: project names
-// are identifiers in prose, not case-sensitive keys.
 func foreignNameRe(name string) *regexp.Regexp {
 	return regexp.MustCompile(`(?i)\b` + regexp.QuoteMeta(name) + `\b`)
 }
 
-// dropForeignProjectMemories removes emitted memories that name a known other
-// project which never appears in the input corpus. A consolidation run only
-// sees one project's memories, context, and commits — it cannot legitimately
-// learn a new fact about a different project. Names that already appear in
-// the input are allowed (cross-references the corpus itself makes, e.g. a
-// ghost memory that mentions dingo, stay). Modeled on dropFabricatedMemories:
-// one contaminated memory must not nuke the run, and every drop is logged so
-// a clean pass is distinguishable from a silent loss. No-op when
-// input.OtherProjectNames is empty (guard not wired).
 func dropForeignProjectMemories(result *ReflectionResult, input ReflectionInput, logger *slog.Logger) {
 	if logger == nil {
 		logger = slog.Default()
@@ -49,9 +36,6 @@ func dropForeignProjectMemories(result *ReflectionResult, input ReflectionInput,
 	result.Memories = kept
 }
 
-// forbiddenProjectNames returns the known other project names that the input
-// corpus never mentions: the names a run cannot legitimately write about.
-// Names traceable to the corpus are not foreign for this run.
 func forbiddenProjectNames(input ReflectionInput) []string {
 	corpus := inputCorpus(input)
 	forbidden := make([]string, 0, len(input.OtherProjectNames))
@@ -67,8 +51,6 @@ func forbiddenProjectNames(input ReflectionInput) []string {
 	return forbidden
 }
 
-// foreignNamesIn returns the forbidden names text mentions. It is the one rule
-// both a proposed memory and a proposed learned_context are checked against.
 func foreignNamesIn(text string, forbidden []string) []string {
 	var hit []string
 	for _, name := range forbidden {
@@ -79,15 +61,6 @@ func foreignNamesIn(text string, forbidden []string) []string {
 	return hit
 }
 
-// inputCorpus concatenates the input fields a foreign project name can be
-// traced to: the project's name, its recent commits and its memories. Built
-// once per drop pass so each name is searched against a single string rather
-// than re-scanning per memory.
-//
-// The stored learned_context is deliberately not part of it. It is the
-// harness's own earlier output, not evidence, and counting it let one answer
-// license itself: a name written there was allowed in every later round, in
-// memories and in the next learned_context alike.
 func inputCorpus(input ReflectionInput) string {
 	var sb strings.Builder
 	sb.WriteString(input.ProjectName)

@@ -8,11 +8,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// StartTime returns an opaque token identifying pid's process creation
-// instant, or ("", false) if it can't be determined. KinfoProc's P_starttime
-// is a wall-clock Timeval (seconds+microseconds since epoch), so — unlike
-// Linux's boot-relative ticks — it is already reboot-safe with no extra
-// prefixing needed.
+// StartTime returns an opaque process-creation token for pid, or reports that it cannot be determined.
 func StartTime(pid int) (string, bool) {
 	kp, err := unix.SysctlKinfoProc("kern.proc.pid", pid)
 	if err != nil {

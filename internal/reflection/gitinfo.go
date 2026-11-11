@@ -14,22 +14,12 @@ import (
 	"github.com/wcatz/ghost/internal/repo"
 )
 
-// gitContextTimeout bounds the git invocation so a hung repository or a slow
-// filesystem can never stall a reflection run — git context is best-effort
-// grounding for the prompt, not a requirement.
 const gitContextTimeout = 5 * time.Second
 
-// maxGitCommits caps how many recent commit subjects reach the prompt.
 const maxGitCommits = 20
 
-// maxCommitSubjectLen bounds a single commit line, in runes. Very long
-// subjects (merge bots, generated messages) would otherwise dominate the
-// prompt.
 const maxCommitSubjectLen = 300
 
-// languageMarkers maps build/manifest files to a coarse language name. Order
-// matters: the first match wins, so put the more specific marker first when a
-// repository could carry several.
 var languageMarkers = []struct {
 	files []string
 	name  string
@@ -46,15 +36,7 @@ var languageMarkers = []struct {
 	{[]string{"CMakeLists.txt"}, "C/C++"},
 }
 
-// CollectGitContext returns recent commit subjects ("<short-sha> <subject>")
-// and a coarse language hint for dir. It is used to populate
-// ReflectionInput.LastCommits and ProjectLanguage.
-//
-// Every failure path is non-fatal and returns whatever was determined:
-// reflection must still run for a directory that is not a git repository, is
-// unreadable, or where git is not installed. LastCommits is also the SHA
-// whitelist dropFabricatedMemories consults, so returning an empty list keeps
-// the guard strict rather than failing the run.
+// CollectGitContext returns recent commit subjects and a coarse language hint for dir.
 func CollectGitContext(dir string) (commits []string, language string) {
 	language = detectLanguage(dir)
 	if dir == "" {
@@ -73,7 +55,6 @@ func CollectGitContext(dir string) (commits []string, language string) {
 	cmd.Stdout = &out
 	cmd.Stderr = io.Discard
 	if err := cmd.Run(); err != nil {
-		// Not a repository, no commits yet, or git missing — all normal.
 		return nil, language
 	}
 
@@ -90,9 +71,6 @@ func CollectGitContext(dir string) (commits []string, language string) {
 	return commits, language
 }
 
-// detectLanguage reports a coarse language name from the repository's build or
-// manifest files. It is deliberately shallow — a prompt hint, not a classifier
-// — and returns "" when nothing recognizable is present.
 func detectLanguage(dir string) string {
 	if dir == "" {
 		return ""
@@ -113,33 +91,8 @@ func detectLanguage(dir string) string {
 	return ""
 }
 
-// commitLineBreak is what a line break inside a commit line is rendered as. It
-// is the glyph assemble.LineBreakEscape uses for the same fold, copied rather
-// than imported because assemble imports memory and this package cannot reach
-// it without a cycle; one spelling of a folded break across Ghost's surfaces is
-// what lets a reader recognise it.
 const commitLineBreak = "⏎"
 
-// commitLine renders one LastCommits entry for the reflection input as data.
-//
-// A commit subject is text from outside the store: anyone who can push to a
-// branch the user pulls writes it. So it is framed the way a memory's content
-// is, through quoteData (« » delimited, any literal « » inside rewritten), and
-// additionally folded to ONE physical line, which quoteData deliberately does
-// not do for memories. The fold is safe here and not there because the model is
-// never asked to rewrite a commit subject, so a visible escape cannot be copied
-// back into stored text as a rewrite of it.
-//
-// Folded: every rune a reader ends a line at (LF, VT, FF, CR, FS, GS, RS, NEL,
-// LS, PS — the set assemble's fold uses, with a CRLF pair as one break) becomes
-// commitLineBreak, and every other C0 or C1 control becomes a space. With the
-// line opened by the builder's own "- «", no subject can start a line with a
-// heading or a memory-shaped "- id:".
-//
-// It is applied at render time rather than in CollectGitContext because
-// LastCommits is also the SHA source for the fabrication and contamination
-// guards and is set directly by callers that never run git; the builder is the
-// one place every entry passes through.
 func commitLine(c string) string {
 	return quoteData(foldCommitControls(c))
 }

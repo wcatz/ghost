@@ -7,14 +7,7 @@ import (
 	"syscall"
 )
 
-// IsAlive reports whether pid names a running process, by sending it signal
-// 0 — this checks existence and permission without actually signaling the
-// process. If haveToken is true, a live PID is additionally required to still
-// carry wantToken as its creation-time token — a mismatch means the OS
-// recycled pid to an unrelated process after the original one exited, which
-// plain signal-0 can't distinguish from the original still running. A
-// transient failure to read the fresh token fails open to "alive" rather than
-// flapping a live process to "dead".
+// IsAlive reports whether pid names a running process and still matches wantToken when provided.
 func IsAlive(pid int, wantToken string, haveToken bool) bool {
 	proc, err := os.FindProcess(pid)
 	if err != nil {

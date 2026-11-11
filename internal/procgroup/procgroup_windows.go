@@ -7,24 +7,12 @@ import (
 	"syscall"
 )
 
-// SetGroup starts cmd in its own process group. Windows has no portable
-// positive group signal, so this does not let TerminateGroup or KillGroup reach
-// a grandchild the way the unix Setpgid does; what it does buy is that a
-// Ctrl-C and its console events are not delivered to the child with the
-// parent, which CREATE_NEW_PROCESS_GROUP is the closest analogue of. THIS IS
-// FOR THE HARNESS SPAWN ONLY. The lifecycle phase spawn in cmd/ghost does not
-// call it on Windows: a phase is ghost itself and must keep receiving the
-// console Ctrl-C that maintenanceContext relies on, so cmd/ghost's
-// setPhaseProcessGroup is a no-op there. That asymmetry is deliberate, and the
-// two must not be "reconciled".
+// SetGroup starts cmd in its own process group on Windows.
 func SetGroup(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP}
 }
 
-// TerminateGroup kills the direct child. Windows has no portable group signal,
-// so this is the same as the default CommandContext cancellation and
-// KillGroup; the caller's WaitDelay is what bounds a helper that keeps the
-// child's stdout open.
+// TerminateGroup kills the direct child on Windows.
 func TerminateGroup(cmd *exec.Cmd) error {
 	if cmd.Process == nil {
 		return nil
@@ -41,7 +29,5 @@ func KillGroup(cmd *exec.Cmd) {
 	_ = cmd.Process.Kill()
 }
 
-// GroupInhabited is always false on Windows. There is no process group to join
-// or signal, and the deadline's TerminateGroup has already killed the direct
-// child outright — there is nothing left to escalate against.
+// GroupInhabited reports false on Windows because process-group membership is not tracked.
 func GroupInhabited(_ *exec.Cmd) bool { return false }
