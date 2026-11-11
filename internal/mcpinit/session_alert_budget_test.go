@@ -86,13 +86,13 @@ func seedAlertBudgetStore(t *testing.T, xdgHome string) (projectPath string) {
 			VALUES (?, ?, ?, ?, 'manual', 0.5, 0, ?, ?)`, id, project, category, content, ts, ts)
 	}
 	for i := range 15 {
-		insert(fmt.Sprintf("pmem%02d", i), alertBudgetProjectID, "fact", fmt.Sprintf("row %02d", i))
+		insert(fmt.Sprintf("pmem%02d", i), alertBudgetProjectID, "fact", fmt.Sprintf("row %02d ", i)+strings.Repeat("filler words ", 30))
 	}
 	for i := range 8 {
 		insert(fmt.Sprintf("gmem%02d", i), "_global", "fact", fmt.Sprintf("g %02d", i))
 	}
-	// The tasks and the decisions carry the rest of the framing: the block's
-	// own fields, each at its own cap.
+	// The tasks and the decisions carry part of the framing, each at its own
+	// cap; the project rows' length carries the block the rest of the way.
 	for i := range 10 {
 		exec(`INSERT INTO tasks (id, project_id, title, description, status, priority) VALUES (?, ?, ?, ?, 'pending', 1)`,
 			fmt.Sprintf("task%02d", i), alertBudgetProjectID, strings.Repeat("Task title words ", 10), strings.Repeat("Task description. ", 14))

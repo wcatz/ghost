@@ -1271,36 +1271,37 @@ func loadSessionContextFrom(dbPath, cwd string, cfg *config.Config, clock func()
 	// the whole block the host receives and the assembler measures it against the
 	// render of this framing plus the rows kept so far.
 
-	// Get open tasks
+	// Open tasks: titles only, and few of them. Tasks and decisions are framing
+	// the byte cap never cuts, so their size comes out of the memory rows' room.
 	taskRows, err := db.Query(`
-		SELECT id, status, priority, title, COALESCE(description, '')
+		SELECT id, status, priority, title
 		FROM tasks
 		WHERE project_id = ? AND status IN ('pending', 'active', 'blocked')
 		ORDER BY priority ASC, created_at DESC, rowid DESC
-		LIMIT 10
+		LIMIT 5
 	`, projectID)
 	if err == nil {
 		defer taskRows.Close() //nolint:errcheck
 		for taskRows.Next() {
-			var id, status, title, desc string
+			var id, status, title string
 			var priority int
-			if err := taskRows.Scan(&id, &status, &priority, &title, &desc); err != nil {
+			if err := taskRows.Scan(&id, &status, &priority, &title); err != nil {
 				continue
 			}
 			label := fmt.Sprintf("P%d %s", priority, truncateUTF8(title, sessionTitleBytes))
-			tasks = append(tasks, [4]string{id, status, label, truncateUTF8(desc, 200)})
+			tasks = append(tasks, [4]string{id, status, label, ""})
 		}
 	}
 
 	// Get live decisions — active or revisit, superseded excluded — active
 	// first. A decision flagged for reconsideration is context a session should
 	// see, and the renderer labels it; the active-first order is what keeps it
-	// from pushing an active decision out of the five-row window.
+	// from pushing an active decision out of the three-row window.
 	decRows, err := db.Query(`
 		SELECT id, title, decision, status FROM decisions
 		WHERE project_id = ? AND status != 'superseded'
 		ORDER BY (status = 'revisit'), created_at DESC, rowid DESC
-		LIMIT 5
+		LIMIT 3
 	`, projectID)
 	if err == nil {
 		defer decRows.Close() //nolint:errcheck

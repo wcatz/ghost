@@ -510,10 +510,7 @@ func execOnStore(t *testing.T, dbPath string, stmts ...string) {
 func TestSessionStartCutsUnpinnedRowsBeforeAPinnedOneRankedBelowThem(t *testing.T) {
 	dbPath, projectPath, pinned := seedByteCapStore(t)
 	execOnStore(t, dbPath, `UPDATE memories SET pinned = 1 WHERE id = 'gmem00'`)
-	long := strings.Repeat("Task title words ", 10)
-	for i := 0; i < 6; i++ {
-		execOnStore(t, dbPath, fmt.Sprintf(`INSERT INTO tasks (id, project_id, title, description, status, priority) VALUES ('xtask%02d', 'pbig', '%s', '%s', 'pending', 1)`, i, long, strings.Repeat("More task text. ", 13)))
-	}
+	addSessionFramingPressure(t, dbPath)
 
 	block := SessionBlockAt(dbPath, projectPath, mustHookConfig(t), time.Date(2026, 1, 2, 12, 0, 0, 0, time.UTC))
 
@@ -546,10 +543,7 @@ func TestSessionStartKeepsTheMemoriesHeadingWhenEveryProjectRowIsCut(t *testing.
 		`UPDATE memories SET content = content || content WHERE project_id = '_global'`,
 	)
 	// Enough framing that the pinned globals plus a single project row do not fit.
-	long := strings.Repeat("Task title words ", 10)
-	for i := 0; i < 6; i++ {
-		execOnStore(t, dbPath, fmt.Sprintf(`INSERT INTO tasks (id, project_id, title, description, status, priority) VALUES ('xtask%02d', 'pbig', '%s', '%s', 'pending', 1)`, i, long, strings.Repeat("More task text. ", 13)))
-	}
+	addSessionFramingPressure(t, dbPath)
 
 	block := SessionBlockAt(dbPath, projectPath, mustHookConfig(t), time.Date(2026, 1, 2, 12, 0, 0, 0, time.UTC))
 
@@ -590,3 +584,20 @@ func TestSessionStartBoundsTheFraming(t *testing.T) {
 		t.Errorf("every row was cut for framing that is now bounded:\n%s", block)
 	}
 }
+
+// addSessionFramingPressure raises the byte-cap fixture's framing: the learned
+// summary past its 1,000-byte cap, a fifth open task with a title past its cap,
+// and a long project name (printed twice, and the one framing field nothing
+// bounds), so rows have to be cut to fit.
+func addSessionFramingPressure(t *testing.T, dbPath string) {
+	t.Helper()
+	execOnStore(t, dbPath,
+		fmt.Sprintf(`UPDATE ghost_state SET learned_context = '%s' WHERE project_id = 'pbig'`, strings.Repeat("Learned summary sentence. ", 60)),
+		fmt.Sprintf(`INSERT INTO tasks (id, project_id, title, status, priority) VALUES ('xtask00', 'pbig', '%s', 'pending', 1)`, strings.Repeat("Task title words ", 10)),
+		fmt.Sprintf(`UPDATE projects SET name = 'bigproj%s' WHERE id = 'pbig'`, strings.Repeat("n", sessionPressureNameBytes)),
+	)
+}
+
+// sessionPressureNameBytes is how far addSessionFramingPressure lengthens the
+// project name.
+const sessionPressureNameBytes = 1000
