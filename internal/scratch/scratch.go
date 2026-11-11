@@ -178,6 +178,14 @@ func ownerMarkerText(pid int, token, start string, haveStart bool) string {
 var removeTree = os.RemoveAll
 var removeFile = os.Remove
 
+// SetRemoveTreeForTest replaces the tree removal for another package's test
+// and returns the function that restores it. Production code never calls it.
+func SetRemoveTreeForTest(f func(string) error) (restore func()) {
+	prev := removeTree
+	removeTree = f
+	return func() { removeTree = prev }
+}
+
 // Path returns the directory's absolute path.
 func (d *Dir) Path() string { return d.path }
 

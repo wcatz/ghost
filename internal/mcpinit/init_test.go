@@ -10,6 +10,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/wcatz/ghost/internal/scratch"
 )
 
 // absProjectPath returns an absolute project path for this OS. Claude project
@@ -1963,51 +1965,31 @@ func TestWriteRedirects_IdempotentOnSecondRun(t *testing.T) {
 // removal finds it non-empty; the test retries the whole setup until the
 // reporting line appears (a single attempt can win the race).
 func TestEnsureScratchSpace_ReportsUnremovableStaleDirs(t *testing.T) {
-	attempts := 10
-	for attempt := 0; attempt < attempts; attempt++ {
-		root := t.TempDir()
-		t.Setenv("GHOST_SCRATCH_DIR", root)
-
-		entry := filepath.Join(root, "999-0123456789abcdef")
-		if err := os.Mkdir(entry, 0o700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(entry, ".owner"), []byte("pid=1073741824\ntoken=aa\nstart=gone\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-
-		stop := make(chan struct{})
-		done := make(chan struct{})
-		go func() {
-			defer close(done)
-			for i := 0; ; i++ {
-				select {
-				case <-stop:
-					return
-				default:
-				}
-				_ = os.WriteFile(filepath.Join(entry, "c"+fmt.Sprint(i)), []byte("x"), 0o600)
-				if i > 50000 {
-					return
-				}
-			}
-		}()
-
-		var buf bytes.Buffer
-		ensureScratchSpace(&buf, false)
-		close(stop)
-		<-done
-
-		out := buf.String()
-		if strings.Contains(out, "1 could not be removed") {
-			if !strings.Contains(out, root) {
-				t.Errorf("init output missing the root:\n%s", out)
-			}
-			if _, err := os.Lstat(entry); err != nil {
-				t.Errorf("entry vanished although it could not be removed: %v", err)
-			}
-			return
-		}
+	root := t.TempDir()
+	t.Setenv("GHOST_SCRATCH_DIR", root)
+	entry := filepath.Join(root, "999-0123456789abcdef")
+	if err := os.Mkdir(entry, 0o700); err != nil {
+		t.Fatal(err)
 	}
-	t.Fatal("init never reported an unremovable stale dir in 10 attempts")
+	if err := os.WriteFile(filepath.Join(entry, ".owner"), []byte("pid=1073741824\ntoken=aa\nstart=gone\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// The removal is forced to fail rather than raced: a writer goroutine
+	// racing RemoveAll only sometimes wins, so the old version of this test
+	// failed on fast runners.
+	defer scratch.SetRemoveTreeForTest(func(string) error { return os.ErrPermission })()
+
+	var buf bytes.Buffer
+	ensureScratchSpace(&buf, false)
+
+	out := buf.String()
+	if !strings.Contains(out, "1 could not be removed") {
+		t.Fatalf("init output does not report the unremovable stale dir:\n%s", out)
+	}
+	if !strings.Contains(out, root) {
+		t.Errorf("init output missing the root:\n%s", out)
+	}
+	if _, err := os.Lstat(entry); err != nil {
+		t.Errorf("entry vanished although it could not be removed: %v", err)
+	}
 }
