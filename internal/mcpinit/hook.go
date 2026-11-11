@@ -973,10 +973,11 @@ func renderHistoricalSessionContext(cwd string, asOf time.Time) string {
 	// none, and a framing already over the host's own limit keeps its rows
 	// rather than being cut for nothing.
 	items, _ = assemble.FitItems(items, assemble.Budget{
-		MaxBytes:         sessionStartByteCap,
-		KeepPinned:       true,
-		FramingCeiling:   sessionHostLimit,
-		ReserveByProject: sessionGlobalReserve(),
+		MaxBytes:               sessionStartByteCap,
+		KeepPinned:             true,
+		FramingCeiling:         sessionHostLimit,
+		ReserveByProject:       sessionGlobalReserve(),
+		ReservePinnedByProject: sessionGlobalPinnedReserve(),
 	}, func(rows []assemble.Item) int { return len(render(rows, tally)) }, allCutFraming, cut, nil, false)
 	block := render(items, tally)
 	if readErr != "" {

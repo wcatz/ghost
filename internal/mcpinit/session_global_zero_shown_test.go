@@ -43,6 +43,42 @@ func TestSessionCountsLinePinnedCutWithZeroShown(t *testing.T) {
 // the response-fit pass must not empty the global bucket to zero, including
 // pinned rows, when project content consumes the byte budget.
 func TestSessionStartKeepsGlobalBucketWhenFitCutsRows(t *testing.T) {
+	dbPath, projectPath := seedSessionPressure(t, 2, true)
+	cfg := mustHookConfig(t)
+	block := SessionBlockAt(dbPath, projectPath, cfg, time.Date(2026, 1, 2, 12, 0, 0, 0, time.UTC))
+	if !strings.Contains(block, "**Global (applies to all projects):**") {
+		t.Fatalf("global section missing entirely:\n%s", block)
+	}
+	if !strings.Contains(block, "Global row") {
+		t.Fatalf("global bucket was emptied to zero rows:\n%s", block)
+	}
+	if strings.Contains(block, "the ones shown are the best-ranked of them") {
+		t.Fatalf("contradictory pinned note present:\n%s", block)
+	}
+}
+
+// TestSessionStartKeepsEveryPinnedGlobalUnderPressure: a user's pinned global
+// rows are their cross-project non-negotiables, and a project with enough pinned
+// rows of its own used to push all but one of them out of the block (the global
+// reserve was one row). Every pinned global up to the globals cap is now kept
+// while project rows can be cut instead.
+func TestSessionStartKeepsEveryPinnedGlobalUnderPressure(t *testing.T) {
+	dbPath, projectPath := seedSessionPressure(t, 3, false)
+	block := SessionBlockAt(dbPath, projectPath, mustHookConfig(t), time.Date(2026, 1, 2, 12, 0, 0, 0, time.UTC))
+	for i := 0; i < 3; i++ {
+		if want := fmt.Sprintf("Global row %02d", i); !strings.Contains(block, want) {
+			t.Errorf("pinned global %q was cut from the block:\n%s", want, block)
+		}
+	}
+}
+
+// seedSessionPressure writes a store whose project framing and pinned project
+// rows overflow the session-start byte cap, with eight globals of which the
+// first pinnedGlobals are pinned. With heavyFraming the summary, tasks and
+// decisions alone nearly fill the cap; without it the pinned project rows are
+// what overflow it. It returns the database and project paths.
+func seedSessionPressure(t *testing.T, pinnedGlobals int, heavyFraming bool) (string, string) {
+	t.Helper()
 	ghostDir := filepath.Join(t.TempDir(), "ghost")
 	if err := os.MkdirAll(ghostDir, 0o700); err != nil {
 		t.Fatalf("mkdir: %v", err)
@@ -62,27 +98,34 @@ func TestSessionStartKeepsGlobalBucketWhenFitCutsRows(t *testing.T) {
 			t.Fatalf("exec %q: %v", q, err)
 		}
 	}
-	exec(`INSERT INTO projects (id, path, name) VALUES ('_global', '_global', 'global')`)
-	longName := strings.Repeat("projectname ", 60)
-	exec(`INSERT INTO projects (id, path, name) VALUES ('p1', ?, ?)`, projectPath, longName)
-	exec(`INSERT INTO ghost_state (project_id, learned_context) VALUES ('p1', ?)`, strings.Repeat("Learned context sentence with detail for pressure. ", 140))
 	ts := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC).Format("2006-01-02 15:04:05")
+	exec(`INSERT INTO projects (id, path, name) VALUES ('_global', '_global', 'global')`)
+	if heavyFraming {
+		longName := strings.Repeat("projectname ", 60)
+		exec(`INSERT INTO projects (id, path, name) VALUES ('p1', ?, ?)`, projectPath, longName)
+		exec(`INSERT INTO ghost_state (project_id, learned_context) VALUES ('p1', ?)`, strings.Repeat("Learned context sentence with detail for pressure. ", 140))
+	} else {
+		exec(`INSERT INTO projects (id, path, name) VALUES ('p1', ?, 'proj')`, projectPath)
+		exec(`INSERT INTO ghost_state (project_id, learned_context) VALUES ('p1', ?)`, strings.Repeat("Learned context sentence with detail for pressure. ", 140))
+	}
 	for i := 0; i < 15; i++ {
 		exec(`INSERT INTO memories (id, project_id, category, content, source, importance, pinned, created_at, updated_at)
 			VALUES (?, 'p1', 'architecture', ?, 'manual', ?, 1, ?, ?)`,
 			fmt.Sprintf("pmem%02d", i), strings.Repeat(fmt.Sprintf("Project row %02d architecture detail for session start pressure and fit behavior. ", i), 50), 0.95-float64(i)*0.01, ts, ts)
 	}
-	for i := 0; i < 8; i++ {
-		exec(`INSERT INTO tasks (id, project_id, title, description, status, priority) VALUES (?, 'p1', ?, ?, 'pending', 1)`,
-			fmt.Sprintf("task%02d", i), strings.Repeat("Task title words for session-start pressure ", 16), strings.Repeat("Task description text for session-start framing and budget. ", 24))
-	}
-	for i := 0; i < 6; i++ {
-		exec(`INSERT INTO decisions (id, project_id, title, decision, rationale, status) VALUES (?, 'p1', ?, ?, 'why', 'active')`,
-			fmt.Sprintf("dec%02d", i), strings.Repeat("Decision title words for session-start pressure ", 14), strings.Repeat("Decision body text for session-start framing and budget. ", 24))
+	{
+		for i := 0; i < 8; i++ {
+			exec(`INSERT INTO tasks (id, project_id, title, description, status, priority) VALUES (?, 'p1', ?, ?, 'pending', 1)`,
+				fmt.Sprintf("task%02d", i), strings.Repeat("Task title words for session-start pressure ", 16), strings.Repeat("Task description text for session-start framing and budget. ", 24))
+		}
+		for i := 0; i < 6; i++ {
+			exec(`INSERT INTO decisions (id, project_id, title, decision, rationale, status) VALUES (?, 'p1', ?, ?, 'why', 'active')`,
+				fmt.Sprintf("dec%02d", i), strings.Repeat("Decision title words for session-start pressure ", 14), strings.Repeat("Decision body text for session-start framing and budget. ", 24))
+		}
 	}
 	for i := 0; i < 8; i++ {
 		pinned := 0
-		if i < 2 {
+		if i < pinnedGlobals {
 			pinned = 1
 		}
 		exec(`INSERT INTO memories (id, project_id, category, content, source, importance, pinned, created_at, updated_at)
@@ -92,16 +135,5 @@ func TestSessionStartKeepsGlobalBucketWhenFitCutsRows(t *testing.T) {
 	if err := db.Close(); err != nil {
 		t.Fatalf("close: %v", err)
 	}
-
-	cfg := mustHookConfig(t)
-	block := SessionBlockAt(dbPath, projectPath, cfg, time.Date(2026, 1, 2, 12, 0, 0, 0, time.UTC))
-	if !strings.Contains(block, "**Global (applies to all projects):**") {
-		t.Fatalf("global section missing entirely:\n%s", block)
-	}
-	if !strings.Contains(block, "Global row") {
-		t.Fatalf("global bucket was emptied to zero rows:\n%s", block)
-	}
-	if strings.Contains(block, "the ones shown are the best-ranked of them") {
-		t.Fatalf("contradictory pinned note present:\n%s", block)
-	}
+	return dbPath, projectPath
 }

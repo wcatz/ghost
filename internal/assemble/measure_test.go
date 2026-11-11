@@ -290,6 +290,38 @@ func TestReserveByProjectKeepsGlobalBucketFromZero(t *testing.T) {
 	}
 }
 
+// TestReservePinnedByProjectKeepsPinnedGlobalsOverProjectPins: the fit pass
+// keeps up to the reserved number of PINNED rows of a bucket while rows of any
+// other kind can be cut instead — including pinned rows of another bucket, which
+// otherwise rank above every global and survive while the global pins (a user's
+// cross-project non-negotiables) are cut. An unpinned row of the reserved bucket
+// is not protected by it.
+func TestReservePinnedByProjectKeepsPinnedGlobalsOverProjectPins(t *testing.T) {
+	var cands []memory.Candidate
+	for i, id := range []string{"P1", "P2", "P3", "P4"} {
+		c := ranked(id, i, strings.Repeat("x", 100))
+		c.ProjectID = "proj"
+		c.Pinned = true
+		cands = append(cands, c)
+	}
+	for i, id := range []string{"GP1", "GP2", "GP3", "GU"} {
+		c := ranked(id, 10+i, strings.Repeat("x", 100))
+		c.ProjectID = memory.GlobalProjectID
+		c.Pinned = id != "GU"
+		cands = append(cands, c)
+	}
+	req := baseRequest()
+	req.Budget.MaxItems = 10
+	req.Budget.KeepPinned = true
+	req.Budget.MaxBytes = 300
+	req.Budget.ReservePinnedByProject = map[string]int{memory.GlobalProjectID: 8}
+	req.Budget.Measure = func(items []Item, _ *Trace) int { return 100 * len(items) }
+	res := run(t, &fakeRetriever{set: ftsOnlySet(cands...)}, req)
+	if got := strings.Join(itemIDs(res.Items), ","); got != "GP1,GP2,GP3" {
+		t.Errorf("kept %q, want GP1,GP2,GP3: pinned globals are reserved over project pins, the unpinned global is not", got)
+	}
+}
+
 // TestReserveGivesWayWhenASingleGlobalRowCannotStay: a reserved bucket row is
 // cut last, but it is still cut when keeping it would leave the block over the
 // byte cap.

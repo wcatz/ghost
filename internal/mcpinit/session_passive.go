@@ -78,6 +78,14 @@ func sessionGlobalReserve() map[string]int {
 	return map[string]int{memory.GlobalProjectID: 1}
 }
 
+// sessionGlobalPinnedReserve keeps every pinned global row, up to the globals
+// cap, while project rows can be cut instead. Pinned globals are a user's
+// cross-project non-negotiables; a project with pinned rows of its own used to
+// outrank all but the one row sessionGlobalReserve holds.
+func sessionGlobalPinnedReserve() map[string]int {
+	return map[string]int{memory.GlobalProjectID: globalsCap}
+}
+
 // sessionPassiveBudget is the ONE statement of what the session-start block
 // selects, and it is the only place the two bucket policies are written down.
 //
@@ -146,8 +154,9 @@ func sessionPassiveBudget(cfg *config.Config, projectID string) assemble.Budget 
 		DropDemotedLosers: true,
 	})
 	return assemble.Budget{
-		Slices:           slices,
-		ReserveByProject: sessionGlobalReserve(),
+		Slices:                 slices,
+		ReserveByProject:       sessionGlobalReserve(),
+		ReservePinnedByProject: sessionGlobalPinnedReserve(),
 	}
 }
 
@@ -339,6 +348,7 @@ func loadSessionPassive(ctx context.Context, store *memory.Store, cfg *config.Co
 	// empty it when project rows consume the byte cap. Pinned rows are preferred
 	// because KeepPinned cuts unpinned rows first.
 	budget.ReserveByProject = sessionGlobalReserve()
+	budget.ReservePinnedByProject = sessionGlobalPinnedReserve()
 	// The host's own limit: a framing that reaches it even with every row cut
 	// cannot be helped by cutting rows, so those rows are kept instead of cut for
 	// nothing. Decided once by the fit pass, against the all-cut framing.
