@@ -100,30 +100,56 @@ func FitItems(items []Item, budget Budget, measure func([]Item) int, allCutFrami
 // is possible. If no reserve-respecting cut exists, the reserve gives way so the
 // byte cap can still be met. It returns -1 when no row can be cut.
 func fitCutIndex(items []Item, budget Budget) int {
-	counts := reserveCounts(items, budget.ReserveByProject)
+	r := reserves{
+		all: budget.ReserveByProject, allCounts: reserveCounts(items, budget.ReserveByProject, false),
+		pinned: budget.ReservePinnedByProject, pinnedCounts: reserveCounts(items, budget.ReservePinnedByProject, true),
+	}
 	for _, respect := range []bool{true, false} {
-		c, r := counts, budget.ReserveByProject
+		rr := r
 		if !respect {
-			c, r = nil, nil
+			rr = reserves{}
 		}
 		if budget.KeepPinned {
-			if at := findCutCandidate(items, c, r, false); at >= 0 {
+			if at := findCutCandidate(items, rr, false); at >= 0 {
 				return at
 			}
 		}
-		if at := findCutCandidate(items, c, r, true); at >= 0 {
+		if at := findCutCandidate(items, rr, true); at >= 0 {
 			return at
 		}
 	}
 	return -1
 }
 
-func reserveCounts(items []Item, reserve map[string]int) map[string]int {
+// reserves is the two bucket minimums a cut must respect: one over every row
+// of a bucket, one over its pinned rows only.
+type reserves struct {
+	all, allCounts       map[string]int
+	pinned, pinnedCounts map[string]int
+}
+
+// protects reports whether cutting it would take a bucket below a minimum.
+func (r reserves) protects(it Item) bool {
+	if min, ok := r.all[it.ProjectID]; ok && r.allCounts[it.ProjectID] <= min {
+		return true
+	}
+	if it.Pinned {
+		if min, ok := r.pinned[it.ProjectID]; ok && r.pinnedCounts[it.ProjectID] <= min {
+			return true
+		}
+	}
+	return false
+}
+
+func reserveCounts(items []Item, reserve map[string]int, pinnedOnly bool) map[string]int {
 	if len(reserve) == 0 {
 		return nil
 	}
 	counts := make(map[string]int, len(reserve))
 	for _, it := range items {
+		if pinnedOnly && !it.Pinned {
+			continue
+		}
 		if _, ok := reserve[it.ProjectID]; ok {
 			counts[it.ProjectID]++
 		}
@@ -131,12 +157,12 @@ func reserveCounts(items []Item, reserve map[string]int) map[string]int {
 	return counts
 }
 
-func findCutCandidate(items []Item, counts, reserve map[string]int, allowPinned bool) int {
+func findCutCandidate(items []Item, r reserves, allowPinned bool) int {
 	for i := len(items) - 1; i >= 0; i-- {
 		if !allowPinned && items[i].Pinned {
 			continue
 		}
-		if min, ok := reserve[items[i].ProjectID]; ok && counts[items[i].ProjectID] <= min {
+		if r.protects(items[i]) {
 			continue
 		}
 		return i

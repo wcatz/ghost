@@ -188,6 +188,12 @@ type Budget struct {
 	// prefers cutting unpinned rows before pinned rows when selecting among
 	// candidates that do not violate a reserve.
 	ReserveByProject map[string]int
+	// ReservePinnedByProject is the same guarantee for PINNED rows only: up to
+	// the stated number of a bucket's pinned items are kept while any other row
+	// — another bucket's pinned rows included — can be cut instead. A bucket's
+	// unpinned rows are not protected by it. It gives way, like
+	// ReserveByProject, when nothing else is left to cut.
+	ReservePinnedByProject map[string]int
 }
 
 // Condition is the retrieval condition. It is an alias so a request and the
