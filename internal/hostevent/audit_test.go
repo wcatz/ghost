@@ -2,6 +2,7 @@ package hostevent
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -316,14 +317,28 @@ func TestScanAuditCodexIgnoresFunctionCallOutput(t *testing.T) {
 	}
 }
 
-// TestScanAuditSkipsUnparseableLines keeps the same posture the save-nudge's
-// scanner has: a line Ghost cannot read is skipped, never fatal, because a
-// whole session's audit must not be lost to one bad line.
+// TestScanAuditSkipsUnparseableLines: a line Ghost cannot read is skipped,
+// never fatal, because a whole session's audit must not be lost to one bad
+// line.
 func TestScanAuditSkipsUnparseableLines(t *testing.T) {
 	transcript := "garbage not json\n" + `{"type":"assistant","timestamp":"` + auditStampRFC3339 + `","message":{"content":[{"type":"text","text":"` + agentText + `"}]}}` + "\n{{{{\n"
 	if !usedBySignals(t, scanAudit(t, FormatClaudeJSONL, transcript)) {
 		t.Error("a transcript with unparseable lines lost the agent's own text")
 	}
+}
+
+type auditErrReader struct {
+	data []byte
+	pos  int
+}
+
+func (e *auditErrReader) Read(p []byte) (int, error) {
+	if e.pos >= len(e.data) {
+		return 0, errors.New("read failure mid-transcript")
+	}
+	n := copy(p, e.data[e.pos:])
+	e.pos += n
+	return n, nil
 }
 
 // TestScanAuditMarksAPartialReadDegraded: a truncated transcript would otherwise
@@ -332,7 +347,7 @@ func TestScanAuditMarksAPartialReadDegraded(t *testing.T) {
 	full := `{"type":"assistant","message":{"content":[{"type":"text","text":"` + agentText + `"}]}}`
 	// One whole line, then a partial one with no terminator, then a read error.
 	data := full + "\n" + `{"type":"assistant","mess`
-	r := &errReader{data: []byte(data)}
+	r := &auditErrReader{data: []byte(data)}
 	sig, ok, err := ScanAudit(FormatClaudeJSONL, r, auditTestHasher(t))
 	if !ok {
 		t.Fatal("no audit scanner registered for claude-jsonl")
@@ -346,17 +361,10 @@ func TestScanAuditMarksAPartialReadDegraded(t *testing.T) {
 }
 
 func TestScanAuditRegistryCoversEveryScanFormat(t *testing.T) {
-	// The save-nudge's registry and the audit's are separate, so a format added
-	// to one and not the other would silently disable the audit for that host's
-	// users — the failure the scanner registry comment is about, one level up.
-	for format := range scanners {
+	// Every supported transcript format must have an audit scanner.
+	for _, format := range []string{FormatClaudeJSONL, FormatOpencodeMessages, FormatOpencodeV2Messages, FormatCodexRollout} {
 		if _, ok := auditScanners[format]; !ok {
-			t.Errorf("format %q has a save-nudge scanner but no audit scanner", format)
-		}
-	}
-	for format := range auditScanners {
-		if _, ok := scanners[format]; !ok {
-			t.Errorf("format %q has an audit scanner but no save-nudge scanner", format)
+			t.Errorf("format %q has no audit scanner", format)
 		}
 	}
 }

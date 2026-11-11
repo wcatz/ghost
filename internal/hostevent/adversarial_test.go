@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/wcatz/ghost/internal/adversarial"
+	"github.com/wcatz/ghost/internal/audit"
 )
 
 // Adversarial fixtures for the host-event parsers (issue #585).
@@ -311,106 +312,15 @@ func TestNULBytesNeverReachTheFilesystem(t *testing.T) {
 		t.Fatalf("the truncated prefix should not have been disturbed: %v", err)
 	}
 
-	// And the scanner, which is what the path is handed to, takes a reader
+	// And the audit scanner, which is what the path is handed to, takes a reader
 	// rather than a path, so a NUL in the value cannot become a filename there
 	// at all.
-	if _, _, err := Scan(FormatClaudeJSONL, strings.NewReader("{}\n")); err != nil {
-		t.Errorf("Scan over an in-memory reader: %v", err)
-	}
-}
-
-// TestScannerCountsStructureNotProse defends the save-nudge's evidence.
-//
-// GhostSaves is the proof a session saved something, and a stop is nudged off
-// it. A transcript line that merely MENTIONS a save tool — inside a text part,
-// inside a shell command, inside the code an opencode Code Mode entry ran — is
-// prose, and counting it would forge the evidence out of a string. The fixture
-// plants both shapes for every registered format: the prose must count zero, and
-// the real structural shape must count one, so the prose case cannot pass
-// because the scanner stopped counting at all.
-func TestScannerCountsStructureNotProse(t *testing.T) {
-	const (
-		claudeTool = "mcp__ghost__ghost_memory_save"
-		v2Tool     = "ghost.ghost_memory_save"
-	)
-
-	for _, tc := range []struct {
-		format, prose, real, named string
-	}{
-		{
-			format: FormatClaudeJSONL, named: claudeTool,
-			prose: `{"type":"assistant","message":{"content":[{"type":"text","text":"call ` + claudeTool + ` to save this"}]}}` + "\n",
-			real:  `{"type":"assistant","message":{"content":[{"type":"tool_use","name":"` + claudeTool + `"}]}}` + "\n",
-		},
-		{
-			format: FormatCodexRollout, named: claudeTool,
-			prose: `{"type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"` + claudeTool + `"}}` + "\n",
-			real:  `{"type":"response_item","payload":{"type":"function_call","name":"` + claudeTool + `"}}` + "\n",
-		},
-		{
-			format: FormatOpencodeMessages, named: claudeTool,
-			prose: `{"info":{"role":"assistant"},"parts":[{"type":"text","text":"` + claudeTool + `"}]}` + "\n",
-			real:  `{"info":{"role":"assistant"},"parts":[{"type":"tool","tool":"` + claudeTool + `"}]}` + "\n",
-		},
-		{
-			// The code text is the shape the scanner's own comment says must not
-			// count: saves come from the recorded inner calls, never from code.
-			format: FormatOpencodeV2Messages, named: v2Tool,
-			prose: `{"type":"assistant","content":[{"type":"tool","name":"execute","state":{"metadata":{"code":"await ghost.` + v2Tool + `({})"}}}]}` + "\n",
-			real:  `{"type":"assistant","content":[{"type":"tool","name":"execute","state":{"metadata":{"toolCalls":[{"tool":"` + v2Tool + `"}]}}}]}` + "\n",
-		},
-	} {
-		t.Run(tc.format, func(t *testing.T) {
-			// The name really is in the line, so a zero count below is the
-			// scanner refusing to read prose and not a fixture that planted
-			// nothing.
-			adversarial.AssertVerbatim(t, "fixture line", tc.prose, tc.named)
-
-			res, ok, err := Scan(tc.format, strings.NewReader(tc.prose))
-			if err != nil || !ok {
-				t.Fatalf("scan prose: ok=%v err=%v", ok, err)
-			}
-			if res.GhostSaves != 0 {
-				t.Errorf("a save tool named in prose counted as %d saves", res.GhostSaves)
-			}
-
-			res, ok, err = Scan(tc.format, strings.NewReader(tc.real))
-			if err != nil || !ok {
-				t.Fatalf("scan real: ok=%v err=%v", ok, err)
-			}
-			if res.GhostSaves != 1 {
-				t.Errorf("the structural save counted as %d, want 1 — the prose case above would then pass for the wrong reason", res.GhostSaves)
-			}
-		})
-	}
-}
-
-// TestScannerRefusesOversizedAndMalformedLines pins the two fail-open outcomes
-// the save-nudge depends on: a line past the memory ceiling aborts the scan with
-// an error so the caller decides nothing, and an unparseable line is skipped
-// rather than aborting — one damaged line must not cost the whole transcript.
-func TestScannerRefusesOversizedAndMalformedLines(t *testing.T) {
-	old := maxTranscriptLine
-	maxTranscriptLine = 1 << 10
-	t.Cleanup(func() { maxTranscriptLine = old })
-
-	good := `{"type":"assistant","message":{"content":[{"type":"tool_use","name":"mcp__ghost__ghost_memory_save"}]}}` + "\n"
-	oversized := `{"type":"assistant","message":{"content":[{"type":"text","text":"` + strings.Repeat("A", 4<<10) + `"}]}}` + "\n"
-
-	res, err := ScanClaudeJSONL(strings.NewReader(good + oversized + good))
-	if err == nil {
-		t.Fatalf("a line past maxTranscriptLine did not abort the scan: %+v", res)
-	}
-	if res.GhostSaves == 0 {
-		t.Error("the partial counts were zero, so a caller that only checked the count would have skipped the nudge instead of failing open")
-	}
-
-	res, err = ScanClaudeJSONL(strings.NewReader(good + "not json at all\n" + good))
+	h, err := audit.NewHasher([]byte("adversarial-test-key"))
 	if err != nil {
-		t.Fatalf("an unparseable line aborted the scan instead of being skipped: %v", err)
+		t.Fatalf("NewHasher: %v", err)
 	}
-	if res.GhostSaves != 2 {
-		t.Errorf("GhostSaves = %d, want 2 — an unparseable line must not cost the rest of the transcript", res.GhostSaves)
+	if _, _, err := ScanAudit(FormatClaudeJSONL, strings.NewReader("{}\n"), h); err != nil {
+		t.Errorf("ScanAudit over an in-memory reader: %v", err)
 	}
 }
 

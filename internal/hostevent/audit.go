@@ -54,20 +54,7 @@ import (
 // stops before it gets here.
 type AuditScanFunc func(io.Reader, audit.Hasher) (*audit.Signals, error)
 
-// auditScanners is the audit's format-keyed registry, and it is a SEPARATE map
-// from scanners rather than a second field on one entry.
-//
-// The two scanners want different things from the same transcript, and only one
-// of them can be right for a given host: the save-nudge must not read a tool's
-// arguments, or prose naming a save tool would block a stop, and this one must
-// not skip a tool's output, or every use would be invisible. Bundling them into
-// one struct would make every host's shape a compromise of both.
-//
-// TestScanAuditRegistryCoversEveryScanFormat is what keeps the two in step, and
-// it is the reason this map is allowed to exist separately at all: a format
-// added to one and not the other would silently disable the audit — or the
-// nudge — for that host's users, which is the failure the scanners registry's
-// own comment is about one level up.
+// auditScanners is the audit's format-keyed registry.
 var auditScanners = map[string]AuditScanFunc{
 	FormatClaudeJSONL:        AuditScanClaudeJSONL,
 	FormatOpencodeMessages:   AuditScanOpencodeMessages,
@@ -77,11 +64,11 @@ var auditScanners = map[string]AuditScanFunc{
 
 // ScanAudit runs the audit scanner registered for format.
 //
-// The shape is Scan's, deliberately: ok is false when nothing is registered, and
-// a caller must treat that as fail-open rather than as an error to surface to the
-// host. An unregistered format means the audit is off for that host — never that
-// the host misbehaved — so returning a signals value there would invite a caller
-// to persist a verdict derived from nothing.
+// ok is false when nothing is registered, and a caller must treat that as
+// fail-open rather than as an error to surface to the host. An unregistered
+// format means the audit is off for that host — never that the host misbehaved
+// — so returning a signals value there would invite a caller to persist a
+// verdict derived from nothing.
 func ScanAudit(format string, r io.Reader, h audit.Hasher) (*audit.Signals, bool, error) {
 	fn, ok := auditScanners[format]
 	if !ok {
