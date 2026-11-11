@@ -15,38 +15,22 @@ type SourceProvider struct {
 	name    string
 }
 
-// NewSourceProviderForSource returns a provider for the given source token, or
-// an unavailable one ("none") for an empty or unknown source. There is no
-// cascade: silently classifying through a different harness than the caller's
-// would use the wrong configured billing path and betray the user's routing choice.
-// Callers resolve the source (--source, or ai.DetectSource) and fail with an
-// actionable error when it is empty.
+// NewSourceProviderForSource returns a provider for the given source token.
 func NewSourceProviderForSource(source string, cfgBinaries ...string) *SourceProvider {
 	return newSourceProvider(source, "", cfgBinaries...)
 }
 
-// NewSourceProviderForSourceWithModel is NewSourceProviderForSource plus a
-// constructor-level model pin threaded to the opencode backend only (the other
-// harnesses have no model flag). Used by the long-lived MCP server, where the
-// configured cli.model_resolve must apply without mutating process env.
+// NewSourceProviderForSourceWithModel returns a provider for the given source token with an opencode model pin.
 func NewSourceProviderForSourceWithModel(source, model string, cfgBinaries ...string) *SourceProvider {
 	return newSourceProvider(source, model, cfgBinaries...)
 }
 
-// knownSources is every source token newSourceProvider resolves, in the order
-// a refusal names them. It is the switch below written down once so a caller
-// can ask whether a token is one this build knows before it builds a provider:
-// an unknown token and a known one whose binary is missing both come back as
-// the unavailable "none" provider, and only the first is a typo.
-// TestKnownSourcesMatchTheProviderSwitch holds the two together.
 var knownSources = []string{"claude-code", "opencode", "codex", "goose"}
 
-// KnownSources returns the source tokens NewSourceProviderForSource resolves,
-// as a fresh slice the caller may keep.
+// KnownSources returns the source tokens NewSourceProviderForSource resolves.
 func KnownSources() []string { return slices.Clone(knownSources) }
 
-// IsKnownSource reports whether source is one of KnownSources. It says nothing
-// about whether that harness's binary is installed.
+// IsKnownSource reports whether source is a known source token.
 func IsKnownSource(source string) bool { return slices.Contains(knownSources, source) }
 
 func newSourceProvider(source, model string, cfgBinaries ...string) *SourceProvider {
@@ -77,11 +61,6 @@ func newSourceProvider(source, model string, cfgBinaries ...string) *SourceProvi
 	}
 }
 
-// resolveCLI resolves a specific CLI backend for the given source. It does NOT
-// cascade to other binaries — if the source-specific binary isn't found, the
-// provider is unavailable. This is intentional: when the user's session used
-// claude, we should use claude, not silently switch to opencode. model is
-// threaded to the opencode backend only; the other harnesses ignore it.
 func resolveCLI(configured, defaultName, providerName, model string) *SourceProvider {
 	bin := configured
 	if bin == "" {
@@ -120,11 +99,6 @@ func (p *SourceProvider) Classify(ctx context.Context, systemPrompt, userContent
 	return p.backend.Classify(ctx, systemPrompt, userContent)
 }
 
-// clientSourceNames maps an MCP client's self-reported name
-// (InitializeParams.ClientInfo.Name) to the source token
-// NewSourceProviderForSource understands. Matching is case-insensitive
-// substring-based so minor naming variance ("Claude Desktop", "claude-code")
-// still resolves. Adding a new client is one table row here.
 var clientSourceNames = []struct{ name, source string }{
 	{"opencode", "opencode"},
 	{"claude", "claude-code"},
@@ -132,10 +106,7 @@ var clientSourceNames = []struct{ name, source string }{
 	{"goose", "goose"},
 }
 
-// SourceForClientName maps an MCP client's reported name to a source token,
-// or "" for unknown names. Unknown does not cascade to a default harness:
-// callers then detect the calling harness (ai.DetectSource) or fail with an
-// actionable error.
+// SourceForClientName maps an MCP client name to a source token.
 func SourceForClientName(clientName string) string {
 	lower := strings.ToLower(clientName)
 	for _, c := range clientSourceNames {
