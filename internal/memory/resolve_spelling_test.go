@@ -9,10 +9,6 @@ import (
 	"time"
 )
 
-// spellingFixture builds <root>/real/proj and a symlink <root>/link -> real,
-// with root itself resolved so the only difference between the two spellings
-// is the symlink. The project name is deliberately not the basename of the
-// directory, so only the path steps can find it.
 func spellingFixture(t *testing.T) (real, viaLink string) {
 	t.Helper()
 	root, err := filepath.EvalSymlinks(t.TempDir())
@@ -48,11 +44,8 @@ func TestResolveProjectFindsRecordedPathUnderAnotherSpelling(t *testing.T) {
 				t.Fatalf("EnsureProject: %v", err)
 			}
 			id, _, err := s.ResolveProject(ctx, tc.input(real, link))
-			if err != nil {
-				t.Fatalf("ResolveProject: %v", err)
-			}
-			if id != "proj-id" {
-				t.Fatalf("resolved %q, want proj-id: the recorded path names the same directory", id)
+			if err != nil || id != "proj-id" {
+				t.Fatalf("resolved (%q, %v), want proj-id", id, err)
 			}
 		})
 	}
@@ -70,23 +63,13 @@ func TestResolveProjectDoesNotMatchDifferentDirectoriesAcrossSpellings(t *testin
 		t.Fatalf("EnsureProject: %v", err)
 	}
 	id, _, err := s.ResolveProject(ctx, other)
-	if err != nil {
-		t.Fatalf("ResolveProject: %v", err)
-	}
-	if id != "" {
-		t.Fatalf("a different directory resolved %q", id)
+	if err != nil || id != "" {
+		t.Fatalf("resolved (%q, %v), want empty", id, err)
 	}
 }
 
-// A child recorded through a symlink spelling and a parent recorded at the
-// resolved spelling are both survivors for a caller standing in the child; the
-// deeper one, measured in the resolved form, must win whichever spelling the
-// caller reports.
 func TestResolveProjectDeepestWinsAcrossSpellings(t *testing.T) {
 	ctx := context.Background()
-	// The second layout makes the child's recorded TEXT shorter than the
-	// parent's (a short link name against a long real one), so ranking by
-	// recorded text would pick the parent even where the first layout does not.
 	for _, tc := range []struct{ name, realDir, linkDir string }{
 		{"equal-length spellings", "real", "link"},
 		{"child text shorter than parent text", "a-very-long-real-directory-name", "l"},
@@ -112,20 +95,14 @@ func TestResolveProjectDeepestWinsAcrossSpellings(t *testing.T) {
 			}
 			for _, input := range []string{child, filepath.Join(root, tc.linkDir, "parent-dir", "child-proj")} {
 				id, _, err := s.ResolveProject(ctx, input)
-				if err != nil {
-					t.Fatalf("ResolveProject(%q): %v", input, err)
-				}
-				if id != "child-id" {
-					t.Fatalf("ResolveProject(%q) = %q, want child-id: the child is the deeper directory in either spelling", input, id)
+				if err != nil || id != "child-id" {
+					t.Fatalf("ResolveProject(%q) = (%q, %v), want child-id", input, id, err)
 				}
 			}
 		})
 	}
 }
 
-// Two projects recorded under two spellings of ONE directory, with recorded
-// texts of different lengths, are a tie: the ranking is by resolved length, so
-// the longer text must not win by accident.
 func TestResolveProjectTiesTwoSpellingsOfOneDirectory(t *testing.T) {
 	ctx := context.Background()
 	s := testStore(t)
@@ -148,16 +125,12 @@ func TestResolveProjectTiesTwoSpellingsOfOneDirectory(t *testing.T) {
 		t.Fatalf("EnsureProject: %v", err)
 	}
 	for _, input := range []string{real, long} {
-		id, _, err := s.ResolveProject(ctx, input)
-		if !errors.Is(err, ErrAmbiguousProject) {
+		if id, _, err := s.ResolveProject(ctx, input); !errors.Is(err, ErrAmbiguousProject) {
 			t.Fatalf("ResolveProject(%q) = (%q, %v), want ErrAmbiguousProject", input, id, err)
 		}
 	}
 }
 
-// The memo holds a stored path's resolved form between resolves. A project
-// write refreshes it, so a stored path that is a symlink retargeted on disk
-// never keeps resolving callers into the directory it used to name.
 func TestResolveProjectMemoIsRefreshedByAProjectWrite(t *testing.T) {
 	ctx := context.Background()
 	s := testStore(t)
@@ -181,7 +154,7 @@ func TestResolveProjectMemoIsRefreshedByAProjectWrite(t *testing.T) {
 		t.Fatalf("EnsureProject: %v", err)
 	}
 	if id, _, err := s.ResolveProject(ctx, dirA); err != nil || id != "proj-id" {
-		t.Fatalf("before retarget: ResolveProject(dirA) = (%q, %v), want proj-id", id, err)
+		t.Fatalf("before retarget: (%q, %v)", id, err)
 	}
 	if err := os.Remove(link); err != nil {
 		t.Fatal(err)
@@ -189,8 +162,6 @@ func TestResolveProjectMemoIsRefreshedByAProjectWrite(t *testing.T) {
 	if err := os.Symlink(dirB, link); err != nil {
 		t.Fatal(err)
 	}
-	// A project write that removes a project refreshes the memo; this one is
-	// unrelated to proj-id.
 	if err := s.EnsureProject(ctx, "other-id", other, "other-name"); err != nil {
 		t.Fatalf("EnsureProject other: %v", err)
 	}
@@ -198,17 +169,13 @@ func TestResolveProjectMemoIsRefreshedByAProjectWrite(t *testing.T) {
 		t.Fatalf("DeleteProject other: %v", err)
 	}
 	if id, _, err := s.ResolveProject(ctx, dirA); err != nil || id != "" {
-		t.Fatalf("after retarget: ResolveProject(dirA) = (%q, %v), want no project", id, err)
+		t.Fatalf("after retarget A: (%q, %v)", id, err)
 	}
 	if id, _, err := s.ResolveProject(ctx, dirB); err != nil || id != "proj-id" {
-		t.Fatalf("after retarget: ResolveProject(dirB) = (%q, %v), want proj-id", id, err)
+		t.Fatalf("after retarget B: (%q, %v)", id, err)
 	}
 }
 
-// A resolved entry is never allowed to route a caller on its own authority: a
-// survivor is re-resolved before it is returned, so a retargeted symlink cannot
-// send a caller into the directory it used to name even with no write and no
-// expiry.
 func TestResolveProjectNeverRoutesOnAStaleMemoEntry(t *testing.T) {
 	ctx := context.Background()
 	s := testStore(t)
@@ -238,12 +205,10 @@ func TestResolveProjectNeverRoutesOnAStaleMemoEntry(t *testing.T) {
 		t.Fatal(err)
 	}
 	if id, _, err := s.ResolveProject(ctx, dirA); err != nil || id != "" {
-		t.Fatalf("stale memo routed a caller: ResolveProject(dirA) = (%q, %v)", id, err)
+		t.Fatalf("stale memo routed: (%q, %v)", id, err)
 	}
 }
 
-// Entries expire on their own, and a stored path that did not exist is retried
-// after canonMemoRetry rather than remembered as missing.
 func TestResolveProjectMemoExpiresAndRetriesUnresolvable(t *testing.T) {
 	ctx := context.Background()
 	s := testStore(t)
@@ -258,23 +223,23 @@ func TestResolveProjectMemoExpiresAndRetriesUnresolvable(t *testing.T) {
 		t.Fatalf("EnsureProject: %v", err)
 	}
 	if _, ok := s.canon.lookup(later); ok {
-		t.Fatal("a directory that does not exist resolved")
+		t.Fatal("unresolved path should not be cached")
 	}
 	if err := os.MkdirAll(later, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := s.canon.lookup(later); ok {
-		t.Fatal("unresolvable entry was retried before canonMemoRetry")
+		t.Fatal("retried before canonMemoRetry")
 	}
 	now = now.Add(canonMemoRetry + time.Second)
 	if id, _, err := s.ResolveProject(ctx, later); err != nil || id != "proj-id" {
-		t.Fatalf("after the retry interval ResolveProject = (%q, %v), want proj-id", id, err)
+		t.Fatalf("after retry: (%q, %v)", id, err)
 	}
 	if err := os.RemoveAll(later); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := s.canon.lookup(later); !ok {
-		t.Fatal("resolved entry expired before canonMemoTTL")
+		t.Fatal("resolved entry expired too early")
 	}
 	now = now.Add(canonMemoTTL + time.Second)
 	if _, ok := s.canon.lookup(later); ok {
@@ -282,9 +247,6 @@ func TestResolveProjectMemoExpiresAndRetriesUnresolvable(t *testing.T) {
 	}
 }
 
-// Pins the bounded staleness: a child recorded as a symlink that is retargeted
-// into the caller's directory with no ghost write is excluded by the warm memo,
-// so the caller is routed to the shallower parent until the entry expires.
 func TestResolveProjectStaleMemoCanHideADeeperProjectUntilItExpires(t *testing.T) {
 	ctx := context.Background()
 	s := testStore(t)
@@ -313,23 +275,21 @@ func TestResolveProjectStaleMemoCanHideADeeperProjectUntilItExpires(t *testing.T
 		t.Fatal(err)
 	}
 	if id, _, _ := s.ResolveProject(ctx, child); id != "parent-id" {
-		t.Fatalf("warm-up: %q, want parent-id", id)
+		t.Fatalf("warm-up: %q", id)
 	}
 	_ = os.Remove(link)
 	if err := os.Symlink(child, link); err != nil {
 		t.Fatal(err)
 	}
 	if id, _, _ := s.ResolveProject(ctx, child); id != "parent-id" {
-		t.Fatalf("within the TTL the stale entry hides the child: %q, want parent-id", id)
+		t.Fatalf("within TTL: %q", id)
 	}
 	now = now.Add(canonMemoTTL + time.Second)
 	if id, _, _ := s.ResolveProject(ctx, child); id != "child-id" {
-		t.Fatalf("after the TTL: %q, want child-id", id)
+		t.Fatalf("after TTL: %q", id)
 	}
 }
 
-// A memo warm from resolving the parent must not hide a child created
-// afterwards: the memo is keyed by path string, so a new row has no entry.
 func TestResolveProjectNewDeeperProjectIsFoundWithWarmMemo(t *testing.T) {
 	ctx := context.Background()
 	s := testStore(t)
@@ -346,12 +306,12 @@ func TestResolveProjectNewDeeperProjectIsFoundWithWarmMemo(t *testing.T) {
 		t.Fatal(err)
 	}
 	if id, _, _ := s.ResolveProject(ctx, child); id != "parent-id" {
-		t.Fatalf("warm-up: %q, want parent-id", id)
+		t.Fatalf("warm-up: %q", id)
 	}
 	if err := s.EnsureProject(ctx, "child-id", child, "child-name"); err != nil {
 		t.Fatal(err)
 	}
 	if id, _, _ := s.ResolveProject(ctx, child); id != "child-id" {
-		t.Fatalf("after adding the child: %q, want child-id", id)
+		t.Fatalf("after adding child: %q", id)
 	}
 }

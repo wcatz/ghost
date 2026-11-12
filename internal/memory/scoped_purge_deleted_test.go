@@ -6,11 +6,6 @@ import (
 	"testing"
 )
 
-// TestPurgeDeletedMemoryHistoryInProjectDecidesInsideThePurge: the scoped purge
-// of an already-deleted memory refuses, inside its own transaction, an id that
-// has a live row (whatever project holds it) and a tombstone filed under another
-// project, and erases nothing when it does. The id it does purge is one that is
-// still deleted and was the caller's project's.
 func TestPurgeDeletedMemoryHistoryInProjectDecidesInsideThePurge(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -30,11 +25,9 @@ func TestPurgeDeletedMemoryHistoryInProjectDecidesInsideThePurge(t *testing.T) {
 		}
 		return id
 	}
-
 	if _, err := s.PurgeDeletedMemoryHistoryInProject(ctx, "", "x"); err == nil {
-		t.Error("an empty project id was not refused")
+		t.Error("empty project not refused")
 	}
-
 	live := create("the vqzt relay is on port nine")
 	global := create("the vqzt relay is on port ten")
 	if err := s.PromoteToGlobal(ctx, testProject, global); err != nil {
@@ -44,36 +37,33 @@ func TestPurgeDeletedMemoryHistoryInProjectDecidesInsideThePurge(t *testing.T) {
 	if err := s.Delete(ctx, deleted); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
-
-	refusals := []struct {
+	for _, r := range []struct {
 		name, project, id, want string
 	}{
-		{"live row in the project", testProject, live, "live again"},
-		{"live row promoted to _global", testProject, global, "not found in project"},
-		{"tombstone in another project", "other-project", deleted, "not found in project"},
-		{"no history at all", testProject, "no-such-memory", "not found"},
-	}
-	for _, r := range refusals {
+		{"live in project", testProject, live, "live again"},
+		{"live promoted", testProject, global, "not found in project"},
+		{"other project tombstone", "other-project", deleted, "not found in project"},
+		{"no history", testProject, "no-such-memory", "not found"},
+	} {
 		before := hist(r.id)
 		_, err := s.PurgeDeletedMemoryHistoryInProject(ctx, r.project, r.id)
 		if err == nil || !strings.Contains(err.Error(), r.want) {
-			t.Errorf("%s: err = %v, want a refusal containing %q", r.name, err, r.want)
+			t.Errorf("%s: err = %v", r.name, err)
 		}
 		if after := hist(r.id); after != before {
-			t.Errorf("%s: history rows %d -> %d after a refused purge", r.name, before, after)
+			t.Errorf("%s: history %d -> %d", r.name, before, after)
 		}
 	}
 	for _, id := range []string{live, global} {
 		if mems, err := s.GetByIDs(ctx, []string{id}); err != nil || len(mems) != 1 {
-			t.Errorf("live row %s gone after a refused purge: %v", id, err)
+			t.Errorf("live row %s gone: %v", id, err)
 		}
 	}
-
 	out, err := s.PurgeDeletedMemoryHistoryInProject(ctx, testProject, deleted)
 	if err != nil {
-		t.Fatalf("purge of the project's own deleted memory: %v", err)
+		t.Fatalf("purge: %v", err)
 	}
 	if out.Rows == 0 || hist(deleted) != 0 {
-		t.Errorf("purge removed %d rows and left %d", out.Rows, hist(deleted))
+		t.Errorf("purge removed %d left %d", out.Rows, hist(deleted))
 	}
 }
