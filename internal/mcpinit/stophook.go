@@ -60,7 +60,7 @@ func RunHostEvent(eventArg, sourceArg string, stdin io.Reader, stdout io.Writer,
 		if RunningAsPlugin() {
 			finalizePlugin(stderr)
 		}
-		runSessionStart(payload.Raw, stdout)
+		runSessionStart(payload.Raw, payload.HostSource(), stdout)
 	case hostevent.EventMessageSubmit, hostevent.EventEdit:
 		// Capability-scoped like session start: a host that does not add
 		// additionalContext beside a message or a tool result gets a silent no-op.

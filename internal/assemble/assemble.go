@@ -270,6 +270,12 @@ type Request struct {
 	// is off (the embedding model is not the one the default was measured on). It
 	// is recorded in the trace only and never changes a block.
 	NoAnswerBarNote string
+	// Covered reports a candidate the caller's host already has from another
+	// source (session start: the instruction files the host loaded itself). A
+	// covered row is withheld at the predicates stage, before the window closes,
+	// with ReasonHostInstructions, so the slot goes to the next row and the
+	// header counts it as withheld. nil withholds nothing.
+	Covered func(memory.Candidate) bool
 	// Explain asks Run to project the trace of THIS run into Result.Explain, the
 	// ghost_memory_search explain payload. It is a request for a second reading
 	// of the same run and never for a second run: the candidate request, the

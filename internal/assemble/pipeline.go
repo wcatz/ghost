@@ -288,6 +288,13 @@ func runPredicates(p *pipeline) {
 			p.droppedBy[dropScope]++
 			p.trace.decide(c.ID, c.ProjectID, stagePredicates, "scope_contradiction", c.Score)
 			continue
+		case p.req.Covered != nil && p.req.Covered(c):
+			dropped = append(dropped, c.ID)
+			p.dropped[c.ID] = ReasonHostInstructions
+			p.droppedBy[stagePredicates]++
+			p.droppedBy[dropHostInstructions]++
+			p.trace.decide(c.ID, c.ProjectID, stagePredicates, ReasonHostInstructions, c.Score)
+			continue
 		}
 		kept = append(kept, c)
 		items = append(items, it)
@@ -310,7 +317,13 @@ const (
 	dropCategory  = "predicate:category"
 	dropRetention = "predicate:retention"
 	dropScope     = "predicate:scope"
+
+	dropHostInstructions = "predicate:host_instructions"
 )
+
+// ReasonHostInstructions is the drop reason for a row Request.Covered reported:
+// the host already loaded the same rule from its own instruction files.
+const ReasonHostInstructions = "in_host_instructions"
 
 const provenanceWeight = "1.0"
 

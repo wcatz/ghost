@@ -69,7 +69,7 @@ const nudgePrompt = (reason: string): string =>
 // and ghost context diagnostics must never reach the terminal (issue #363).
 const renderStartContext = (cwd: string): Promise<string> =>
 	new Promise((resolve) => {
-		const child = spawn(process.env.GHOST_BIN ?? GHOST_BIN_DEFAULT, ["context", "--cwd", cwd], {
+		const child = spawn(process.env.GHOST_BIN ?? GHOST_BIN_DEFAULT, ["context", "--cwd", cwd, "--source", "opencode"], {
 			stdio: ["ignore", "pipe", "ignore"],
 		})
 		let out = ""

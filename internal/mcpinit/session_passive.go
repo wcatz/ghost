@@ -67,6 +67,9 @@ type sessionFrame struct {
 	tasks            [][4]string
 	decisions        [][4]string
 	interactionCount int
+	// covered withholds rows the host already loaded from its instruction
+	// files (see hostInstructionCover); nil withholds nothing.
+	covered func(memory.Candidate) bool
 }
 
 // sessionGlobalReserve is the session-start minimum for the global bucket: the
@@ -375,7 +378,8 @@ func loadSessionPassive(ctx context.Context, store *memory.Store, cfg *config.Co
 		//
 		// nil on the branch with no project to attribute the call to (see
 		// loadSessionContext), and the assembler treats nil as "record nothing".
-		Record: record,
+		Record:  record,
+		Covered: frame.covered,
 		// SessionID is the hook payload's own session id, "" for a caller with no
 		// payload (`ghost context`, opencode's plugin). It is what lets the audit match
 		// this block's record to the stop hook's scan of the same session; a record
