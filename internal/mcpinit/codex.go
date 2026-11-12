@@ -16,80 +16,22 @@ import (
 	"github.com/wcatz/ghost/internal/memory"
 )
 
-// Codex integration (spec §4 Phase 2). Ghost installs two artifacts, both
-// additive merges that never rewrite content they don't own:
-//
-//   - `[mcp_servers.ghost]` is merged TEXTUALLY into ~/.codex/config.toml.
-//     The user's config may contain comments and hand-tuned tables, so the
-//     file is never parsed and re-marshaled: the ghost table block is located
-//     line-wise, spliced in at the end (or repaired in place on drift), and
-//     every other byte of the file is preserved exactly. A repair rewrites
-//     only the table's own `command` and `args` keys, so sub-tables such as
-//     [mcp_servers.ghost.env] and any key ghost does not own survive. An entry
-//     written as a dotted or inline key (`mcp_servers.ghost = {…}`) is left
-//     untouched with a warning: it cannot be merged textually, and appending a
-//     table beside it would be a duplicate definition.
-//
-//   - Lifecycle hooks are merged JSON-wise into ~/.codex/hooks.json, wiring
-//     SessionStart/Stop/SessionEnd onto `ghost hook <event> --source codex`.
-//     The merge owns ghost's own ACTION, never the rule around it: an action
-//     ghost rendered is rewritten in place, so a rule the user wrote that runs
-//     ghost beside their own command keeps that command and its matcher.
-//
-// Verified against primary sources (2026-08-24, developers.openai.com/codex/hooks):
-//
-//   - Codex discovers hooks at ~/.codex/hooks.json (user scope) or inline
-//     [hooks] tables in config.toml; mixing both forms in one layer warns at
-//     startup, so a dedicated hooks.json is the clean seam. Event names match
-//     the Claude dialect (SessionStart, Stop, SessionEnd, …) and stdin
-//     payloads share the dialect fields verbatim (session_id,
-//     transcript_path, cwd, hook_event_name, plus host extras that
-//     hostevent.Parse tolerates), so no shim sits between codex and ghost.
-//   - Non-managed hooks are SKIPPED until the user reviews and trusts the
-//     exact definition via /hooks in the CLI (trust is keyed to the hook's
-//     hash). Install must tell the user to run /hooks — until then codex
-//     silently drops our events.
-//   - SessionEnd defaults to a 1s timeout capped at 3s; ghost's handlers only
-//     spawn detached workers, but the maximum is configured explicitly so a
-//     slow spawn burst can't truncate the session-end pass.
-//
-// CODEX_HOME relocates the whole directory (config, credentials, hooks), so
-// both paths resolve through codexHomeDir.
-
-// codexSessionEndTimeoutSec is the documented maximum SessionEnd budget.
-// Codex defaults SessionEnd to 1s; ghost's spawn-and-return handler fits
-// easily but deserves the full headroom on a loaded machine.
 const codexSessionEndTimeoutSec = 3
 
-// codexMCPServerKey is the config.toml table ghost owns. Inside it only the
-// `command` and `args` keys are ghost's to rewrite; sub-tables
-// ([mcp_servers.ghost.env]) and every other key belong to the user, and so does
-// everything outside the table. None of it is ever touched.
 const codexMCPServerKey = "mcp_servers.ghost"
 
-// codexHooksDescription is written into freshly-created hooks.json files.
-// An existing description is preserved untouched — the field is optional
-// metadata and not worth a rewrite war.
 const codexHooksDescription = "Ghost persistent memory lifecycle hooks (managed by `ghost mcp init --client codex`)"
 
-// codexHookAction is one command handler in hooks.json. Only type "command"
-// handlers run today. Timeout is seconds; omitted means codex's default.
 type codexHookAction struct {
 	Type    string `json:"type"`
 	Command string `json:"command"`
 	Timeout int    `json:"timeout,omitempty"`
 }
 
-// codexHookRule omits matcher deliberately: lifecycle events have no useful
-// matcher target (SessionStart matcher filters start source, SessionEnd
-// filters end reason — omitting matches every fire, which is what the
-// contract wants).
 type codexHookRule struct {
 	Hooks []codexHookAction `json:"hooks"`
 }
 
-// codexLifecycleEvents pairs each hooks.json event key with its contract-v1
-// argv token. Codex shares the Claude event names verbatim.
 var codexLifecycleEvents = []struct {
 	Key        string
 	EventToken string
@@ -99,8 +41,6 @@ var codexLifecycleEvents = []struct {
 	{"SessionEnd", string(hostevent.EventSessionEnd)},
 }
 
-// codexHomeDir resolves the directory codex reads configuration from:
-// $CODEX_HOME when set, else ~/.codex.
 func codexHomeDir() (string, error) {
 	if dir := os.Getenv("CODEX_HOME"); dir != "" {
 		return dir, nil
@@ -128,10 +68,6 @@ func codexHooksPath() (string, error) {
 	return filepath.Join(dir, "hooks.json"), nil
 }
 
-// codexTOMLString renders s as a TOML string value. Literal strings (single
-// quotes) are preferred — no escape processing, so Windows backslash paths
-// stay readable — falling back to an escaped basic string when the path
-// itself contains a single quote or a line break.
 func codexTOMLString(s string) string {
 	if !strings.ContainsAny(s, "'\n\r") {
 		return "'" + s + "'"
@@ -140,9 +76,6 @@ func codexTOMLString(s string) string {
 	return `"` + esc.Replace(s) + `"`
 }
 
-// decodeCodexTOMLString reverses codexTOMLString for the simple forms init
-// itself writes (and hand edits typically produce). Unquoted values are
-// returned as-is; the caller treats an unresolvable value as drift.
 func decodeCodexTOMLString(val string) string {
 	val = strings.TrimSpace(val)
 	if len(val) >= 2 && val[0] == '\'' && val[len(val)-1] == '\'' {
@@ -173,9 +106,6 @@ func decodeCodexTOMLString(val string) string {
 	return val
 }
 
-// parseCodexTOMLStringArray decodes a flat TOML array of strings such as
-// ["mcp"]. Multi-line or bare-token arrays return nil, which callers treat
-// as drift rather than trying to emulate a full TOML parser.
 func parseCodexTOMLStringArray(val string) []string {
 	val = strings.TrimSpace(val)
 	if !strings.HasPrefix(val, "[") || !strings.HasSuffix(val, "]") {
@@ -217,48 +147,11 @@ func parseCodexTOMLStringArray(val string) []string {
 	return out
 }
 
-// codexValueComplete reports whether a value's brackets and braces balance. A
-// value split over several lines (args = [ ... ]) has continuation lines that
-// belong to the key above them, so a value that does not balance on its own line
-// is the signal to look further down. Three things that look like structure are
-// not: a "#" opens a comment running to the end of the line, a backslash escapes
-// the next byte inside a basic "..." string, and a literal '...' string has no
-// escapes at all. Misreading any of them makes a finished value look unfinished,
-// and a repair that believes it is still running deletes the user's keys below.
-//
-// A comment ends the value only at depth 0, where the value is finished anyway.
-// Deeper in a bracket the comment is skipped and the scan carries on, because
-// the closing bracket usually sits on a later line.
-//
-// It is codexScanValue's first answer read on its own; the two come from one walk
-// because a multi-line string makes the second answer load-bearing, and two walks
-// of the same value could disagree about where it ended.
 func codexValueComplete(value string) bool {
 	complete, _ := codexScanValue(value)
 	return complete
 }
 
-// codexMultilineStillOpen reports whether value ends inside a TOML multi-line
-// string — one opened by three single quotes or three double quotes — that
-// lines[i:] can still CLOSE.
-//
-// The closing clause is the whole content, and it is not optional. A header
-// line is allowed to end an open value only when that value is malformed,
-// because treating it as yet another line of the value hides every table below
-// the typo from all three scanners: the ghost table itself can become invisible,
-// so init appends a second copy of a table already in the file, or a
-// neighbouring server's keys get swept into the ghost span and dropped. A
-// multi-line string is NOT malformed — it runs to a later line by design — so a
-// bracketed line inside it is content and must not close it, or the repair
-// writes ghost's own `args` beside the user's and codex rejects the file.
-//
-// An opener with no closer anywhere in rest is the case that reconciles the
-// two, and it is decided the other way. codexScanValue cannot tell "a string
-// that will close" from "a typo that never will" at the point the rule is being
-// applied, so the question is put to the rest of the file instead: if the
-// delimiter it is waiting for is not on this line or any later one, the string
-// never closes, the value is malformed after all, and the next header ends it —
-// which is the pre-existing rule, restored for the only shape that earns it.
 func codexMultilineStillOpen(value string, rest []string) bool {
 	delim := codexOpenMultilineDelimiter(value)
 	if delim == "" {
@@ -272,30 +165,21 @@ func codexMultilineStillOpen(value string, rest []string) bool {
 	return false
 }
 
-// codexOpenMultilineDelimiter returns the triple-quote delimiter value is
-// waiting to close, or "" when value is not inside one. It is the second answer
-// of codexScanValue, read on its own because the delimiter is what the rest of
-// the file has to be searched for.
 func codexOpenMultilineDelimiter(value string) string {
 	_, delim := codexScanValue(value)
 	return delim
 }
 
-// codexScanValue walks value once for brackets, strings and comments and reports
-// whether the value is finished and which triple-quote delimiter it is waiting
-// for, if any. A value that ends inside one is unfinished AND well formed, which
-// is the distinction codexMultilineStillOpen exists to draw; every other
-// unfinished value is malformed.
 func codexScanValue(value string) (complete bool, openDelim string) {
 	depth := 0
 	for i := 0; i < len(value); i++ {
 		switch c := value[i]; c {
 		case '#':
 			if depth == 0 {
-				return true, "" // the rest of the line is a comment, not a value
+				return true, ""
 			}
 			for i < len(value) && value[i] != '\n' {
-				i++ // skip the comment, keeping any bracket depth
+				i++
 			}
 		case '\'', '"':
 			end, open, delim := codexStringEndOpen(value, i)
@@ -308,43 +192,18 @@ func codexScanValue(value string) (complete bool, openDelim string) {
 		case ']', '}':
 			depth--
 			if depth < 0 {
-				return true, "" // malformed; treat as self-contained
+				return true, ""
 			}
 		}
 	}
 	return depth == 0, ""
 }
 
-// codexStringEnd returns the index of the quote closing the string that opens at
-// i, or the last index of value when the string is unterminated. Inside a basic
-// "..." string a backslash escapes the next byte, so an escaped quote does not
-// close it; inside a literal '...' string nothing is escaped.
-//
-// It reports only where the closing quote is. A value still inside a multi-line
-// string is a question codexStripComment and the key-name readers do not ask, so
-// they get the last index and carry on; codexScanValue is the one caller that
-// needs the other answer and asks for it through codexStringEndOpen.
 func codexStringEnd(value string, i int) int {
 	end, _, _ := codexStringEndOpen(value, i)
 	return end
 }
 
-// codexStringEndOpen returns the index of the quote closing the string that opens
-// at i, whether the string is still open where value ends, and the triple-quote
-// delimiter it is waiting for when it is.
-//
-// A triple-quote delimiter (three single quotes, or three double quotes) is a
-// multi-line string in its own right: it runs until its own three quotes, across
-// as many lines as the author wrote, so a value carrying only its opener is
-// UNFINISHED rather than malformed — which is the whole reason this function
-// exists. A single-line quoted string cannot span lines at all, so an
-// unterminated one is not reported as open: the two are different TOML, and
-// reading a multi-line opener as an empty one-line string is what let a header
-// inside the string end the ghost table's span.
-//
-// The delimiter is returned so the caller can ask whether the string can still
-// close; being still-open is not by itself a licence to ignore a table header,
-// and see codexMultilineStillOpen.
 func codexStringEndOpen(value string, i int) (end int, open bool, delim string) {
 	quote := value[i]
 	if i+3 <= len(value) && value[i+1] == quote && value[i+2] == quote {
@@ -354,7 +213,7 @@ func codexStringEndOpen(value string, i int) (end int, open bool, delim string) 
 				continue
 			}
 			if quote == '"' && j > i+2 && value[j-1] == '\\' {
-				continue // a backslash escapes the next byte inside """
+				continue
 			}
 			if value[j] == quote && value[j+1] == quote && value[j+2] == quote {
 				return j + 2, false, ""
@@ -368,15 +227,13 @@ func codexStringEndOpen(value string, i int) (end int, open bool, delim string) 
 			return i, false, ""
 		case '\\':
 			if quote == '"' {
-				i++ // the escaped byte cannot close the string
+				i++
 			}
 		}
 	}
 	return len(value) - 1, false, ""
 }
 
-// codexStripComment returns line with any "#" comment removed. A "#" inside a
-// quoted run belongs to the value, not to a comment.
 func codexStripComment(line string) string {
 	for i := 0; i < len(line); i++ {
 		switch line[i] {
@@ -389,13 +246,6 @@ func codexStripComment(line string) string {
 	return line
 }
 
-// normaliseCodexTableName returns the dotted key path a table header declares,
-// with each part trimmed of surrounding space and of one layer of quotes, and
-// ok=false when the header cannot be read with confidence. A trailing comment
-// is stripped first, so "[mcp_servers.ghost] # mine" names the same table as the
-// bare spelling, and ["mcp_servers"."ghost"] and [ mcp_servers . ghost ]
-// normalise to it as well. An array-of-tables header ([[name]]) is not a table
-// ghost manages, so it reports false.
 func normaliseCodexTableName(line string) (name string, ok bool) {
 	t := strings.TrimSpace(line)
 	if !strings.HasPrefix(t, "[") || strings.HasPrefix(t, "[[") {
@@ -413,8 +263,7 @@ func normaliseCodexTableName(line string) (name string, ok bool) {
 	names := make([]string, 0, len(parts))
 	for _, part := range parts {
 		if isCodexQuotedToken(part) {
-			// ["mcp_servers.ghost"] declares one literal key holding a dot,
-			// which is a different table from the mcp_servers.ghost path.
+
 			if strings.ContainsRune(part[1:len(part)-1], '.') {
 				return "", false
 			}
@@ -428,10 +277,6 @@ func normaliseCodexTableName(line string) (name string, ok bool) {
 	return strings.Join(names, "."), true
 }
 
-// codexIsTableHeader reports whether line opens a TOML table. The '=' guard
-// keeps an array element like ["a","b"] inside a multi-line value from being
-// mistaken for a header; real headers never carry an assignment. A trailing
-// comment does not disqualify a header.
 func codexIsTableHeader(line string) bool {
 	trimmed := codexStripComment(strings.TrimSpace(line))
 	if !strings.HasPrefix(trimmed, "[") || !strings.HasSuffix(trimmed, "]") {
@@ -440,9 +285,6 @@ func codexIsTableHeader(line string) bool {
 	return !strings.Contains(trimmed, "=")
 }
 
-// codexTableName extracts the raw table name from a header line, handling both
-// [table] and [[array-of-tables]] forms. Prefer normaliseCodexTableName when
-// the name is compared against a key path.
 func codexTableName(line string) string {
 	t := codexStripComment(strings.TrimSpace(line))
 	t = strings.TrimPrefix(t, "[[")
@@ -453,35 +295,6 @@ func codexTableName(line string) string {
 	return strings.TrimSpace(t)
 }
 
-// codexValueContinuationLines returns the indexes of lines that continue an
-// unterminated value begun on an earlier line. A nested array element such as
-// ["a","b"] inside a multi-line array is bracketed exactly like a header, so a
-// scanner that ignores continuations can end the ghost table's span early and
-// then insert owned keys that already exist further down the table.
-//
-// A table header ends an open value even when that value is malformed, because
-// treating it as yet another line of the value hides every table below the typo
-// from all three scanners: the ghost table itself can become invisible (so init
-// appends a second copy of a table already in the file), or a neighbouring
-// server's keys get swept into the ghost span and dropped. codexHeaderClosesValue
-// draws the line between that and a nested array element, which is bracketed
-// exactly like a header.
-//
-// One open value is NOT malformed, and the header rule must not reach it. A
-// value inside a multi-line string is unfinished because the string runs to a
-// later line by design, so a bracketed line there is string content; letting it
-// close the value ends the ghost table's span in the middle of the user's own
-// text, and the repair then inserts a second `args` beside the first, which is
-// invalid TOML.
-//
-// codexMultilineStillOpen is the test, and it carries the "that can still
-// close" clause on purpose. An opener with no closer anywhere in the file would
-// otherwise hold the value open for every remaining line, so the malformation
-// rule could never fire again and every table below the typo would be
-// invisible — the exact failure the rule exists to prevent, reached through the
-// fix for it. So the bypass is available only while the delimiter is still
-// somewhere ahead; once it is not, this is a malformed value and the next
-// header ends it, as it always did.
 func codexValueContinuationLines(lines []string) map[int]bool {
 	continuation := make(map[int]bool)
 	value, open := "", false
@@ -505,52 +318,27 @@ func codexValueContinuationLines(lines []string) map[int]bool {
 	return continuation
 }
 
-// codexHeaderClosesValue reports whether a line is a table header that must end a
-// value still open above it, which decides whether a malformed value can hide
-// every table below it. The test is content-based, not punctuation-based,
-// because a nested array element is bracketed exactly like a header; see
-// codexBracketedKind.
 func codexHeaderClosesValue(line string) bool {
 	return codexBracketedKind(line) == codexTableKey
 }
 
-// codexBracketed says how a bracketed line should be read while recovering from
-// a malformed value.
 type codexBracketed int
 
 const (
-	// codexNotAKey is not a key path at all: an array element such as [1, 2]
-	// or ["a", "b"], which belongs to the value above it.
 	codexNotAKey codexBracketed = iota
-	// codexArrayElement could be either, and a value is the more likely
-	// reading: a single quoted token like ["b"], or a single bare token that
-	// is a TOML value like [true] or [1].
+
 	codexArrayElement
-	// codexTableKey only reads as a table: a multi-part key path, a bare token
-	// that is not a value like [b], or a quoted name holding a dot, which is a
-	// literal table name such as ["mcp_servers.other"].
+
 	codexTableKey
 )
 
-// codexBracketedKind classifies a bracketed line that could be a table header.
-// A nested array element inside a multi-line value is bracketed exactly like a
-// header, so the distinction comes from the content: every dot-separated part
-// must look like a key (a bare key or one quoted string) before the line is
-// treated as a header at all, and a single part only counts when nothing else
-// fits. One reading stays ambiguous: a single-element array of a bare value,
-// [true] or [1], which is resolved toward value content because that is the
-// reading that cannot lose a neighbouring table's keys, at the cost of a table
-// codex declared with exactly that name being swept up by the repair. A
-// [[...]] line is resolved the other way, as a table.
 func codexBracketedKind(line string) codexBracketed {
 	if !codexIsTableHeader(line) {
 		return codexNotAKey
 	}
 	t := codexStripComment(strings.TrimSpace(line))
 	if strings.HasPrefix(t, "[[") {
-		// Read as a table. It usually is one, and the alternative reading (a
-		// nested array of a nested array, which TOML allows) is the rarer of the
-		// two; guessing wrong only ends an already-malformed value early.
+
 		return codexTableKey
 	}
 	inner := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(t, "["), "]"))
@@ -562,7 +350,7 @@ func codexBracketedKind(line string) codexBracketed {
 		case isCodexQuotedToken(part):
 			quoted++
 			if strings.ContainsRune(part[1:len(part)-1], '.') {
-				return codexTableKey // a literal name like "mcp_servers.other"
+				return codexTableKey
 			}
 		default:
 			return codexNotAKey
@@ -572,17 +360,14 @@ func codexBracketedKind(line string) codexBracketed {
 	case len(parts) > 1:
 		return codexTableKey
 	case quoted > 0:
-		return codexArrayElement // ["b"] reads as an element before a table
+		return codexArrayElement
 	case isCodexBareValue(parts[0]):
-		return codexArrayElement // [true], [1], [1.5]
+		return codexArrayElement
 	default:
-		return codexTableKey // [b]: a bare word is not a TOML value
+		return codexTableKey
 	}
 }
 
-// codexDottedParts splits text on the dots that separate key parts, trimming the
-// space around each one. A dot inside a quoted token belongs to the key's name,
-// so it does not split.
 func codexDottedParts(text string) []string {
 	var parts []string
 	start := 0
@@ -598,7 +383,6 @@ func codexDottedParts(text string) []string {
 	return append(parts, strings.TrimSpace(text[start:]))
 }
 
-// isCodexBareKey reports whether s is a bare TOML key.
 func isCodexBareKey(s string) bool {
 	if s == "" {
 		return false
@@ -611,10 +395,6 @@ func isCodexBareKey(s string) bool {
 	return true
 }
 
-// isCodexQuotedToken reports whether s is exactly one quoted string, quotes
-// included. The closing quote has to be the last byte, which is what separates a
-// key part such as "b.c" from an array element holding several values, ["a",
-// "b.c"], whose first quote closes early.
 func isCodexQuotedToken(s string) bool {
 	if len(s) < 2 || (s[0] != '\'' && s[0] != '"') {
 		return false
@@ -622,8 +402,6 @@ func isCodexQuotedToken(s string) bool {
 	return codexStringEnd(s, 0) == len(s)-1
 }
 
-// isCodexBareValue reports whether a bare token is a TOML value, which is what
-// makes a single-token bracket read as an array element rather than a table.
 func isCodexBareValue(s string) bool {
 	switch s {
 	case "true", "false":
@@ -632,9 +410,7 @@ func isCodexBareValue(s string) bool {
 	if s == "" {
 		return false
 	}
-	// A number, allowing a sign, decimal point and exponent. A date-time holds
-	// colons and dashes and lands here too, which is the right answer for the
-	// bracket test either way.
+
 	digits := false
 	for i := 0; i < len(s); i++ {
 		switch c := s[i]; {
@@ -649,14 +425,6 @@ func isCodexBareValue(s string) bool {
 	return digits
 }
 
-// codexAssignmentKeyPath returns the key path a `key = value` assignment
-// declares, and whether it is a path at all. One quoted part is that part's
-// content, so "ghost" under [mcp_servers] reaches the server the same way a bare
-// ghost does. The exception is a quoted name holding a dot: "mcp_servers.ghost"
-// is one literal key, not the mcp_servers.ghost path, so it must not be read as
-// it. Any dotted spelling is a path, including one with a literal part, since
-// "mcp_servers".ghost, mcp_servers . ghost and ghost."a.b" all reach the server
-// and the guard that stops init appending a duplicate table has to see them.
 func codexAssignmentKeyPath(assigned string) (path string, isPath bool) {
 	parts := codexDottedParts(assigned)
 	if len(parts) == 1 && isCodexQuotedToken(parts[0]) {
@@ -678,20 +446,8 @@ func codexAssignmentKeyPath(assigned string) (path string, isPath bool) {
 	return strings.Join(names, "."), true
 }
 
-// codexBOM is the UTF-8 byte-order mark a Windows editor or PowerShell writer
-// may leave at the very start of a config file.
 const codexBOM = "\ufeff"
 
-// splitCodexLines splits a config file's body into lines with one leading
-// byte-order mark removed, returning the mark it stripped so the caller can
-// write it back and keep the user's encoding. A TOML parser strips one before
-// it lexes the document, so a BOM-prefixed file is valid codex config; U+FEFF is
-// not whitespace, so a scanner that only trims space cannot normalise a
-// BOM-prefixed header and reads the ghost table as absent — which is how init
-// appended a second table and status called the broken install healthy. Only the
-// LEADING mark is removed: a U+FEFF anywhere else is content, not an encoding
-// mark, and the caller joins its BOM-free lines and re-prepends the mark, so the
-// repaired file keeps the mark at the start where the parser expects it.
 func splitCodexLines(body string) (lines []string, bom string) {
 	if strings.HasPrefix(body, codexBOM) {
 		bom = codexBOM
@@ -700,15 +456,6 @@ func splitCodexLines(body string) (lines []string, bom string) {
 	return strings.Split(body, "\n"), bom
 }
 
-// findCodexTOMLTable locates the [key] table header in lines and returns the
-// half-open span [start, end) of the table's OWN key lines: everything up to
-// the next table header of any name, minus trailing blank/comment lines so the
-// spacing and lead-in comments of the next section survive a replacement.
-// Sub-tables ([key.env]) start at their own header, so they fall outside the
-// span and can never be rewritten by a caller that replaces it. The name is
-// compared in normalised form, so any spelling of the key path matches, and
-// lines continuing a multi-line value are skipped so a nested array element
-// cannot be mistaken for the header that ends the span.
 func findCodexTOMLTable(lines []string, key string) (start, end int, ok bool) {
 	continuation := codexValueContinuationLines(lines)
 	for i, line := range lines {
@@ -734,15 +481,6 @@ func findCodexTOMLTable(lines []string, key string) (start, end int, ok bool) {
 	return 0, 0, false
 }
 
-// findCodexAmbiguousGhostHeader reports a bracketed line that names the ghost
-// server but cannot be matched with confidence: a key path that does not parse (a
-// stray or empty key part, an unterminated header) yet still carries a "ghost"
-// part, or the array-of-tables form [[mcp_servers.ghost]], which is a different
-// structure from the table ghost manages. init must refuse such a file rather
-// than append, because reading it as an absent table emits a second definition of
-// the server, and repairing inside a table whose shape we do not understand risks
-// eating the user's keys. A line that parses to a different key path is left
-// alone, and a line continuing a multi-line value is not a header at all.
 func findCodexAmbiguousGhostHeader(lines []string, key string) (at int, text string, ok bool) {
 	leaf := key
 	if i := strings.LastIndex(key, "."); i >= 0 {
@@ -754,15 +492,9 @@ func findCodexAmbiguousGhostHeader(lines []string, key string) (at int, text str
 			continue
 		}
 		if _, named := normaliseCodexTableName(line); named {
-			continue // a parseable header: the repair path matches or ignores it
+			continue
 		}
-		// A line a malformed value swallowed is not skipped outright, or a
-		// broken header hidden behind the typo would be appended to. It has to
-		// look like the start of a header first, which keeps an array element
-		// written with a trailing comma, ["ghost"], as value content. An element
-		// written without one still refuses, because it ends in ] and is then
-		// indistinguishable from a table quoting a literal name; the file is left
-		// untouched, so that costs a warning rather than a key.
+
 		if !codexIsTableHeader(line) && !codexHeaderCandidate(line) {
 			continue
 		}
@@ -773,13 +505,6 @@ func findCodexAmbiguousGhostHeader(lines []string, key string) (at int, text str
 	return 0, "", false
 }
 
-// codexHeaderCandidate reports whether a bracketed line that does not parse as a
-// header is at least shaped like the start of one, which is how a header broken
-// by a typo is told apart from an array element that happens to hold the same
-// word: [mcp_servers.ghost.] and ["mcp_servers".ghost are candidates, while
-// ["ghost"], is an element. A truncated array-of-tables header, [[name, is one
-// too, and the leading brackets are stripped rather than trimmed as a pair so it
-// is not mistaken for a line that is not a header at all.
 func codexHeaderCandidate(line string) bool {
 	t := codexStripComment(strings.TrimSpace(line))
 	if !strings.HasPrefix(t, "[") {
@@ -792,10 +517,6 @@ func codexHeaderCandidate(line string) bool {
 	return isCodexBareKey(first[0]) || isCodexQuotedToken(first[0])
 }
 
-// codexHeaderNamesPart reports whether an unparseable table header still names
-// the given key part, comparing with quotes and spaces removed so [a . "ghost"]
-// reads the same as [a.ghost]. The check only runs on headers that failed to
-// parse, and a false positive merely makes init warn instead of writing.
 func codexHeaderNamesPart(line, part string) bool {
 	t := strings.Map(func(r rune) rune {
 		if r == '\'' || r == '"' || r == ' ' || r == '\t' {
@@ -808,7 +529,7 @@ func codexHeaderNamesPart(line, part string) bool {
 			continue
 		}
 		if i > 0 && isCodexIdentByte(t[i-1]) {
-			continue // part of a longer key, e.g. ghost_profile
+			continue
 		}
 		if i+len(part) < len(t) && isCodexIdentByte(t[i+len(part)]) {
 			continue
@@ -818,12 +539,6 @@ func codexHeaderNamesPart(line, part string) bool {
 	return false
 }
 
-// splitCodexAssignment splits a `key = value` line into its two halves. ok is
-// false for a line that carries no assignment (a blank, a comment, an orphaned
-// fragment of a multi-line value). The first `=` separates them, which is safe
-// because a TOML key can never contain one. The key comes back as written: what a
-// quoted key means differs by caller, so codexOwnedKeyName unquotes it for the
-// owned keys while codexAssignmentKeyPath reads it as a path.
 func splitCodexAssignment(line string) (key, value string, ok bool) {
 	trimmed := strings.TrimSpace(line)
 	if trimmed == "" || strings.HasPrefix(trimmed, "#") {
@@ -836,11 +551,6 @@ func splitCodexAssignment(line string) (key, value string, ok bool) {
 	return strings.TrimSpace(trimmed[:eq]), strings.TrimSpace(trimmed[eq+1:]), true
 }
 
-// codexOwnedKeyName maps a key to the name ghost owns, so a quoted spelling of an
-// owned key is recognized as ours instead of being left in the file to collide
-// with the bare one we write. Only a key that is one quoted token is unquoted:
-// "command" is the command key, while "mcp_servers".ghost is a path and never
-// collides with an owned name.
 func codexOwnedKeyName(key string) string {
 	if len(key) > 0 && (key[0] == 0x27 || key[0] == 0x22) && codexStringEnd(key, 0) == len(key)-1 {
 		return key[1 : len(key)-1]
@@ -848,10 +558,6 @@ func codexOwnedKeyName(key string) string {
 	return key
 }
 
-// codexValueLastLine returns the index of the line completing an unterminated
-// value that starts on line i, or end-1 when the span runs out. Rewriting a
-// multi-line owned key in place has to drop those continuation lines, or the
-// orphaned fragments would corrupt the table.
 func codexValueLastLine(value string, lines []string, i, end int) int {
 	acc := value
 	for i+1 < end {
@@ -864,14 +570,6 @@ func codexValueLastLine(value string, lines []string, i, end int) int {
 	return i
 }
 
-// findCodexDottedGhost reports a non-table definition of the ghost MCP server:
-// `mcp_servers.ghost = {…}` (or `mcp_servers.ghost.command = …`) at top level,
-// `ghost = {…}` / `ghost.command = …` inside [mcp_servers], or an inline
-// `mcp_servers = { ghost = {…} }`. The line-wise merge cannot read or rewrite
-// any of them, so init must refuse rather than append a second definition
-// beside it. It returns the 1-based line number and the offending text.
-// Definitions made inside the ghost table itself are the long form this
-// installer writes and are not reported.
 func findCodexDottedGhost(lines []string, key string) (at int, text string, ok bool) {
 	continuation := codexValueContinuationLines(lines)
 	table := ""
@@ -883,7 +581,7 @@ func findCodexDottedGhost(lines []string, key string) (at int, text string, ok b
 			if name, named := normaliseCodexTableName(line); named {
 				table = name
 			} else {
-				table = codexTableName(line) // best effort for an odd header
+				table = codexTableName(line)
 			}
 			continue
 		}
@@ -893,7 +591,7 @@ func findCodexDottedGhost(lines []string, key string) (at int, text string, ok b
 		}
 		assignedPath, isPath := codexAssignmentKeyPath(assigned)
 		if !isPath {
-			continue // a single literal key, not a path
+			continue
 		}
 		full := assignedPath
 		if table != "" {
@@ -902,8 +600,7 @@ func findCodexDottedGhost(lines []string, key string) (at int, text string, ok b
 		if (full == key || strings.HasPrefix(full, key+".")) && !codexTableWithin(table, key) {
 			return i + 1, strings.TrimSpace(line), true
 		}
-		// The entry can also hide as a key of an inline mcp_servers table,
-		// written either on one line or spread over several.
+
 		if full == "mcp_servers" && codexInlineNamesKey(codexValueText(value, lines, i), "ghost") {
 			return i + 1, strings.TrimSpace(line), true
 		}
@@ -911,10 +608,6 @@ func findCodexDottedGhost(lines []string, key string) (at int, text string, ok b
 	return 0, "", false
 }
 
-// codexValueText returns a key's value with its continuation lines folded in, so
-// a multi-line inline table (mcp_servers = { … }) is scanned whole: a `ghost`
-// key on a later line would otherwise read as a top-level key of its own and
-// slip past the guard. An unterminated value runs to the end of the file.
 func codexValueText(value string, lines []string, i int) string {
 	if codexValueComplete(value) {
 		return value
@@ -922,15 +615,10 @@ func codexValueText(value string, lines []string, i int) string {
 	return strings.Join(lines[i:codexValueLastLine(value, lines, i, len(lines))+1], " ")
 }
 
-// codexTableWithin reports whether table is key or a sub-table of it.
 func codexTableWithin(table, key string) bool {
 	return table == key || strings.HasPrefix(table, key+".")
 }
 
-// codexInlineNamesKey reports whether an inline-table value mentions name as a
-// key (name = or name. inside the braces). The scan deliberately over-matches:
-// a nested mention only causes init to warn and leave the file alone, which is
-// the safe direction, while a missed one would append a duplicate table.
 func codexInlineNamesKey(value, name string) bool {
 	for i := 0; i < len(value); i++ {
 		if q := value[i]; q == '\'' || q == '"' {
@@ -949,25 +637,16 @@ func codexInlineNamesKey(value, name string) bool {
 	return false
 }
 
-// isCodexIdentByte reports whether c can appear in a TOML bare key, so
-// `myghost` never matches a search for `ghost`.
 func isCodexIdentByte(c byte) bool {
 	return c == '_' || c == '-' ||
 		(c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
 }
 
-// codexMCPServerValues holds the parts of a [mcp_servers.ghost] table that
-// decide whether it is current: the resolved command and its args.
 type codexMCPServerValues struct {
 	Command string
 	Args    []string
 }
 
-// parseCodexMCPServerBlock extracts command/args from a ghost table's lines.
-// Comments, blank lines, and anything that is not a `key = value` line are
-// skipped, and a quoted key spelling counts as its bare form, so a hand-tuned
-// table (including one carrying an env sub-table outside this span) never
-// makes a working registration read as drifted.
 func parseCodexMCPServerBlock(lines []string) codexMCPServerValues {
 	var vals codexMCPServerValues
 	for _, line := range lines[1:] {
@@ -985,26 +664,10 @@ func parseCodexMCPServerBlock(lines []string) codexMCPServerValues {
 	return vals
 }
 
-// codexMCPCurrent reports whether the parsed ghost table registers the given
-// binary with the contract's stdio invocation.
 func codexMCPCurrent(vals codexMCPServerValues, ghostBin string) bool {
 	return vals.Command == ghostBin && len(vals.Args) == 1 && vals.Args[0] == "mcp"
 }
 
-// codexConfigHoldsOnlyGhostOutput reports whether a config.toml holds nothing
-// but the block ghost manages: the managed comment, the [mcp_servers.ghost]
-// table, and its own command/args keys, with every other line blank. A file
-// the user added anything to — another table, a sub-table such as
-// [mcp_servers.ghost.env], another key in the ghost table — is not this and
-// must be backed up.
-//
-// The command is recognised as ghost's own by basename, not by this run's
-// resolved path, and the args must be the canonical ["mcp"]: a fresh install
-// writes exactly this block, so after an upgrade moved the binary the
-// stale-path repair finds a file that is still only ghost's output and must
-// not capture it. Drifted ghost output is deliberately NOT this shape — an
-// earlier ghost table with different args carries a value ghost never wrote —
-// and keeps its .bak.
 func codexConfigHoldsOnlyGhostOutput(lines []string) bool {
 	start, end, found := findCodexTOMLTable(lines, codexMCPServerKey)
 	if !found {
@@ -1040,21 +703,13 @@ func codexConfigHoldsOnlyGhostOutput(lines []string) bool {
 	return isGhostBinaryName(vals.Command) && len(vals.Args) == 1 && vals.Args[0] == "mcp"
 }
 
-// codexMCPServerComment marks the block ghost owns inside a config.toml the
-// user also edits by hand. It is written once, above the table.
 const codexMCPServerComment = "# Ghost persistent memory (managed by `ghost mcp init --client codex`)"
 
-// codexOwnedKey is one config.toml key inside the ghost table that ghost owns
-// and is therefore allowed to rewrite. Anything else in the table (comments,
-// blank lines, and keys codex supports but ghost does not manage, such as
-// startup_timeout_sec or cwd) belongs to the user.
 type codexOwnedKey struct {
 	key  string
 	line string
 }
 
-// codexMCPServerKeys returns the owned keys in the order ghost writes them, so
-// a fresh install and a repair cannot drift apart.
 func codexMCPServerKeys(ghostBin string) []codexOwnedKey {
 	return []codexOwnedKey{
 		{"command", "command = " + codexTOMLString(ghostBin) + "\n"},
@@ -1062,8 +717,6 @@ func codexMCPServerKeys(ghostBin string) []codexOwnedKey {
 	}
 }
 
-// codexMCPServerBlockLines returns the complete managed block: the comment, the
-// table header, and the owned keys.
 func codexMCPServerBlockLines(ghostBin string) []string {
 	lines := []string{codexMCPServerComment, "[" + codexMCPServerKey + "]"}
 	for _, k := range codexMCPServerKeys(ghostBin) {
@@ -1072,18 +725,10 @@ func codexMCPServerBlockLines(ghostBin string) []string {
 	return lines
 }
 
-// renderCodexMCPServerBlock returns the exact config.toml lines ghost manages.
 func renderCodexMCPServerBlock(ghostBin string) string {
 	return strings.Join(codexMCPServerBlockLines(ghostBin), "\n") + "\n"
 }
 
-// repairCodexMCPServerTable returns the replacement lines for a drifted ghost
-// table: the canonical `command` and `args` key lines, each rewritten in place,
-// with every other line of the span (comments, blank lines, the user's own
-// keys) preserved verbatim and in order. A missing owned key is inserted ahead
-// of the span's first real line, so a table that defines only an env sub-table
-// still gets a working registration. Nothing outside the span is consulted, so
-// sub-tables and the rest of the file cannot be lost.
 func repairCodexMCPServerTable(lines []string, start, end int, ghostBin string) []string {
 	owned := codexMCPServerKeys(ghostBin)
 	ownedLine := func(key string) string {
@@ -1095,8 +740,6 @@ func repairCodexMCPServerTable(lines []string, start, end int, ghostBin string) 
 		return ""
 	}
 
-	// What the table already defines, and where its first non-preamble line
-	// is — the spot any owned key the table is missing gets inserted at.
 	defined := make(map[string]bool, len(owned))
 	insertAt := -1
 	for i := start + 1; i < end; i++ {
@@ -1112,7 +755,7 @@ func repairCodexMCPServerTable(lines []string, start, end int, ghostBin string) 
 		}
 	}
 	if insertAt < 0 {
-		insertAt = end // a table of nothing but comments: append after them
+		insertAt = end
 	}
 	var missing []string
 	for _, k := range owned {
@@ -1123,9 +766,9 @@ func repairCodexMCPServerTable(lines []string, start, end int, ghostBin string) 
 
 	out := make([]string, 0, end-start+len(missing)+1)
 	if start == 0 || strings.TrimSpace(lines[start-1]) != codexMCPServerComment {
-		out = append(out, codexMCPServerComment) // mark the block we own
+		out = append(out, codexMCPServerComment)
 	}
-	out = append(out, lines[start]) // the [mcp_servers.ghost] header, verbatim
+	out = append(out, lines[start])
 	written := make(map[string]bool, len(owned))
 	inserted := false
 	for i := start + 1; i < end; i++ {
@@ -1141,7 +784,7 @@ func repairCodexMCPServerTable(lines []string, start, end int, ghostBin string) 
 			continue
 		}
 		if written[key] {
-			// A repeated key is invalid TOML; keep the first, our canonical one.
+
 			if !codexValueComplete(value) {
 				i = codexValueLastLine(value, lines, i, end)
 			}
@@ -1159,13 +802,6 @@ func repairCodexMCPServerTable(lines []string, start, end int, ghostBin string) 
 	return out
 }
 
-// installCodexMCP merges [mcp_servers.ghost] into ~/.codex/config.toml
-// without parsing the file: the ghost table block is located line-wise and
-// either left alone (current), spliced in at the end (absent), or repaired in
-// place (stale command/args — e.g. after an upgrade moved the binary). A repair
-// rewrites only the ghost table's own command/args key lines; sub-tables such
-// as [mcp_servers.ghost.env], the user's other keys, and every byte outside the
-// ghost table are preserved exactly, comments included.
 func installCodexMCP(w io.Writer, ghostBin string, dryRun bool) (bool, error) {
 	path, err := codexConfigTomlPath()
 	if err != nil {
@@ -1191,35 +827,6 @@ func installCodexMCP(w io.Writer, ghostBin string, dryRun bool) (bool, error) {
 		return false, fmt.Errorf("read %s: %w", path, err)
 	}
 
-	// The file's own line ending decides the join below, and the split strips
-	// the "\r" that goes with it. A repair that split on "\n" and joined on
-	// "\n" left every line ghost does not own with its CR and every line it
-	// does without one: still valid TOML, and a document whose real shape no
-	// editor will show. Stripping at the split rather than at the join is what
-	// lets the file be put back together with one ending.
-	//
-	// What the strip does NOT do is make the "already current" check
-	// CR-tolerant, because that check already was: findCodexTOMLTable reads the
-	// header after a TrimSpace, and splitCodexAssignment and the two value
-	// decoders TrimSpace as well, so a CRLF config compared as current and was
-	// never rewritten. That is why the defect here is the mixed-endings one and
-	// not a repeated repair of a CRLF file, and why the test repairs a stale
-	// command rather than asserting anything about the current check.
-	//
-	// ANY CRLF anywhere in the file makes the WHOLE file CRLF, and a file that
-	// already carries both endings is NORMALISED rather than preserved. The test
-	// is presence, deliberately, and not a count of the two: a config.toml
-	// carrying a single CRLF was written by something on Windows, and a Windows
-	// editor is what will read it back, so CRLF is the ending that file wants
-	// even when one stray line out of five hundred says otherwise. A majority
-	// rule would pick the other way there, and would then have to answer what to
-	// do on a tie.
-	//
-	// Whatever the rule, a mixed file cannot be preserved: the join below can
-	// only be one ending, so the lines ghost owns have to be given one. Ending
-	// up with a file that is not mixed is strictly better than the one it
-	// replaced, and better than a repair that keeps adding to the mix. A file
-	// with no CRLF at all is left entirely alone, as before.
 	eol := "\n"
 	crlf := bytes.Contains(existing, []byte("\r\n"))
 	if crlf {
@@ -1232,9 +839,6 @@ func installCodexMCP(w io.Writer, ghostBin string, dryRun bool) (bool, error) {
 		}
 	}
 
-	// A ghost entry written as a dotted or inline key is invisible to the
-	// line-wise merge: appending a table next to it would give codex a
-	// duplicate definition. Leave the file alone and say why.
 	if at, text, dotted := findCodexDottedGhost(lines, codexMCPServerKey); dotted {
 		_, _ = fmt.Fprintf(w, "  ! %s defines the ghost MCP server with a dotted or inline key (line %d: %s)\n", path, at, memory.RefusalArg("config line", text))
 		_, _ = fmt.Fprintln(w, "    ghost manages the [mcp_servers.ghost] table only, so the file was left unchanged.")
@@ -1242,9 +846,6 @@ func installCodexMCP(w io.Writer, ghostBin string, dryRun bool) (bool, error) {
 		return false, nil
 	}
 
-	// A header that names the ghost server but cannot be read with confidence is
-	// not the table we manage. Appending a second one would be a duplicate-key
-	// document, so leave the file alone and say why.
 	if at, text, ambiguous := findCodexAmbiguousGhostHeader(lines, codexMCPServerKey); ambiguous {
 		_, _ = fmt.Fprintf(w, "  ! %s has a table header ghost cannot parse (line %d: %s)\n", path, at, memory.RefusalArg("config line", text))
 		_, _ = fmt.Fprintln(w, "    ghost manages a plain [mcp_servers.ghost] table only, so the file was left unchanged.")
@@ -1254,7 +855,7 @@ func installCodexMCP(w io.Writer, ghostBin string, dryRun bool) (bool, error) {
 
 	start, end, found := findCodexTOMLTable(lines, codexMCPServerKey)
 	if !found {
-		// Absent table: degrade to append-at-end.
+
 		start, end = len(lines), len(lines)
 	} else if codexMCPCurrent(parseCodexMCPServerBlock(lines[start:end]), ghostBin) {
 		_, _ = fmt.Fprintf(w, "  ✓ ghost MCP server already registered in config.toml\n")
@@ -1272,14 +873,12 @@ func installCodexMCP(w io.Writer, ghostBin string, dryRun bool) (bool, error) {
 
 	var out []string
 	if found {
-		// In place: every line outside the ghost table's own key span stays,
-		// and only that span is swapped for the repaired one.
+
 		out = append(out, lines[:start]...)
 		out = append(out, repairCodexMCPServerTable(lines, start, end, ghostBin)...)
 		out = append(out, lines[end:]...)
 	} else {
-		// Append at the end, separated by one blank line. Only newlines are
-		// added here; existing ones are content and stay put.
+
 		out = append(out, lines[:start]...)
 		for len(out) > 0 && strings.TrimSpace(out[len(out)-1]) == "" {
 			out = out[:len(out)-1]
@@ -1288,52 +887,15 @@ func installCodexMCP(w io.Writer, ghostBin string, dryRun bool) (bool, error) {
 			out = append(out, "")
 		}
 		out = append(out, codexMCPServerBlockLines(ghostBin)...)
-		out = append(out, "") // the registered file ends with a newline
+		out = append(out, "")
 	}
 
-	// The user's pre-ghost file, kept once, on BOTH paths. That the append path
-	// is the one that matters is the whole point: this is the first init, so
-	// `existing` is the config.toml the user had before Ghost ever touched it,
-	// and that is the only copy worth having. Backing up only the repair path
-	// would mean the .bak never held a pre-ghost file at all — the bytes there
-	// would already contain a ghost table, because a repair can only find one —
-	// so the commonest damage, a first merge that went wrong, would have nothing
-	// to restore.
-	//
-	// O_EXCL and never rolled forward, for the reason writeBackupOnce gives: a
-	// later run would otherwise overwrite the only pristine copy with Ghost's own
-	// output. Which is why a 0-byte file is skipped rather than copied: a
-	// 0-byte config.toml is the one case where a .bak has nothing worth keeping,
-	// and since the backup is never rolled forward, that empty one would stand
-	// forever and suppress the real copy a later repair of a file the user has
-	// since filled in would otherwise take — a "way back" that wipes their keys.
-	//
-	// 0-BYTE, deliberately, and not "defines no keys". A file holding only
-	// comments or whitespace is also a file with no keys to lose, but its bytes
-	// are still the user's, and skipping those would need a scan of every file on
-	// every init to work out. Restoring a comments-only .bak costs the user
-	// comments, not data, which is a different trade from the one above. A file
-	// that did not exist before this run returned earlier and never gets here.
-	//
-	// The second skip is a file that holds nothing but the block ghost manages.
-	// On the FRESH INSTALL that file is ghost's own output — a config.toml the
-	// earlier run appended its table to from nothing — and the slot is the
-	// user's pre-ghost file, so capturing ghost's bytes there would, because the
-	// backup is never rolled forward, fill it for good and leave the user's own
-	// file with nowhere to be kept. The case that reaches here is the
-	// stale-path repair after an upgrade moved the binary: the block is ghost's,
-	// at the old path, and codexConfigHoldsOnlyGhostOutput recognises it by the
-	// ghost basename rather than by this run's resolved path. A file the user
-	// added anything to — another table, a sub-table, another key in the ghost
-	// table — is not that and is backed up.
 	if len(existing) > 0 && !codexConfigHoldsOnlyGhostOutput(lines) {
 		if err := writeBackupOnce(path+".bak", existing); err != nil {
 			return false, err
 		}
 	}
 
-	// The BOM stripped for scanning goes back at the very start, the position a
-	// TOML parser expects it, so the user's file keeps its encoding.
 	if err := writeFileAtomic(path, []byte(bom+strings.Join(out, eol)), 0644); err != nil {
 		return false, fmt.Errorf("write config.toml: %w", err)
 	}
@@ -1345,8 +907,6 @@ func installCodexMCP(w io.Writer, ghostBin string, dryRun bool) (bool, error) {
 	return true, nil
 }
 
-// renderCodexHooksConfig returns a complete hooks.json document for machines
-// without one, rendered with the resolved absolute ghost binary path.
 func renderCodexHooksConfig(ghostBin string) string {
 	events := make(map[string][]codexHookRule, len(codexLifecycleEvents))
 	for _, ev := range codexLifecycleEvents {
@@ -1359,9 +919,6 @@ func renderCodexHooksConfig(ghostBin string) string {
 	return marshalCodexJSON(doc)
 }
 
-// renderCodexHookAction renders one handler for a contract event token. Only
-// SessionEnd carries an explicit timeout (its codex default of 1s is tighter
-// than the others' 600s).
 func renderCodexHookAction(eventToken, ghostBin string) codexHookAction {
 	action := codexHookAction{
 		Type:    "command",
@@ -1373,9 +930,6 @@ func renderCodexHookAction(eventToken, ghostBin string) codexHookAction {
 	return action
 }
 
-// marshalCodexJSON renders a config document deterministically: two-space
-// indent, sorted map keys, trailing newline. Byte-stable rendering is what
-// makes install idempotency and status's byte-compare work.
 func marshalCodexJSON(v any) string {
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
@@ -1387,37 +941,11 @@ func marshalCodexJSON(v any) string {
 	return buf.String()
 }
 
-// codexIsGhostHookAction reports whether cmd runs ghost's hook for this event:
-// the same ownership rule the Claude installer applies (ghostHookTail) — a
-// ghost-binary token in COMMAND position, the one this run bakes under whatever
-// name it carries or a "ghost" basename under any path and any quoting,
-// immediately followed by that event's `hook <eventToken>` tail. Every token is
-// read with the quoting splitHookCommand applies to the leading one, and a
-// quoted argument is read inside only behind the command-list gate, so a
-// hand-edited WRAPPER counts as ghost's own: `env X=1 '<bin>' hook
-// session-start`, `cd d && '<bin>' hook stop`, `sh -c "'<bin>' hook …"` all
-// invoke ghost, and a second rule beside them would fire the hook twice per
-// session. A ghost binary that is only an ARGUMENT of another command — inside a
-// quoted argument, or bare in argument position like `echo /opt/bin/ghost hook
-// stop …`, which runs echo — is not ghost's. Only such an action is ghost's to
-// count and to prune; whether it is also ghost's to REWRITE in place is
-// codexLeadingGhostHookAction's narrower question. A command that runs some
-// other binary or some other ghost subcommand belongs to the user and is left
-// alone.
 func codexIsGhostHookAction(cmd, eventToken, ghostBin string) bool {
 	_, ok := ghostHookTail(cmd, eventToken, ghostBin)
 	return ok
 }
 
-// codexLeadingGhostHookAction reports whether cmd is the unwrapped action
-// ghost renders for this event: the binary it bakes — any name, any path, any
-// quoting — in the LEADING position with the `hook <eventToken>` tail right
-// after it. The basename rule also recognises a binary named "ghost" (or its
-// native .exe / .bat/.cmd launcher forms) under any path, so an install made by
-// a differently named binary still repairs an older ghost-named action in
-// place. Only such an action is ghost's to rewrite; a wrapped invocation is
-// recognised and counted by codexIsGhostHookAction but keeps its prefix, the
-// way the Claude side's isStaleGhostHookCommand bound keeps its wrapper.
 func codexLeadingGhostHookAction(cmd, eventToken, ghostBin string) bool {
 	bin, rest, ok := splitHookCommand(cmd)
 	if !ok || (!isGhostBinaryName(bin) && !isBakedGhostBinary(bin, ghostBin)) {
@@ -1427,12 +955,6 @@ func codexLeadingGhostHookAction(cmd, eventToken, ghostBin string) bool {
 	return len(fields) >= 2 && fields[0] == "hook" && fields[1] == eventToken
 }
 
-// isBakedGhostBinary reports whether bin is the path this merge renders for
-// ghost, so the rule ghost itself just wrote is recognised as its own (#1249).
-// Without it a binary baked under any other name — /g, a renamed .exe, a
-// .bat/.cmd shim — was invisible to the merge, which appended it again on
-// every pass and never reached a fixed point. The compare is case-insensitive
-// on Windows, where a path's spelling carries no meaning.
 func isBakedGhostBinary(bin, ghostBin string) bool {
 	if ghostBin == "" {
 		return false
@@ -1443,10 +965,6 @@ func isBakedGhostBinary(bin, ghostBin string) bool {
 	return bin == ghostBin
 }
 
-// codexObject is one JSON object decoded in document order. A Go map decodes
-// the same object and re-encodes it alphabetically, which would reshuffle a
-// user's keys over a change that touched none of them — so a rewrite keeps the
-// order the file had.
 type codexObject struct {
 	fields []codexField
 }
@@ -1456,8 +974,6 @@ type codexField struct {
 	value json.RawMessage
 }
 
-// decodeCodexObject reads one JSON object in document order. ok is false for
-// anything that is not an object, which nothing may rewrite.
 func decodeCodexObject(raw json.RawMessage) (codexObject, bool) {
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	tok, err := dec.Token()
@@ -1489,9 +1005,6 @@ func decodeCodexObject(raw json.RawMessage) (codexObject, bool) {
 	return obj, true
 }
 
-// get returns the raw value of key, or nil when the object holds no such key
-// or holds it twice — a repeated key is a malformed object, and nothing
-// rewrites one.
 func (o codexObject) get(key string) json.RawMessage {
 	var found json.RawMessage
 	for _, f := range o.fields {
@@ -1506,7 +1019,6 @@ func (o codexObject) get(key string) json.RawMessage {
 	return found
 }
 
-// set replaces the value of key where it sits, or appends the pair.
 func (o *codexObject) set(key string, value json.RawMessage) {
 	for i := range o.fields {
 		if o.fields[i].key == key {
@@ -1517,9 +1029,6 @@ func (o *codexObject) set(key string, value json.RawMessage) {
 	o.fields = append(o.fields, codexField{key: key, value: value})
 }
 
-// remove deletes key and the value it carried, keeping the order of the rest.
-// Nothing is written in its place: rendering no timeout is what distinguishes
-// an event that has none from one whose budget is zero.
 func (o *codexObject) remove(key string) {
 	kept := make([]codexField, 0, len(o.fields))
 	for _, f := range o.fields {
@@ -1530,7 +1039,6 @@ func (o *codexObject) remove(key string) {
 	o.fields = kept
 }
 
-// marshal renders the object back out in the order it was decoded in.
 func (o codexObject) marshal() (json.RawMessage, error) {
 	var buf bytes.Buffer
 	buf.WriteByte('{')
@@ -1554,10 +1062,6 @@ func (o codexObject) marshal() (json.RawMessage, error) {
 	return out.Bytes(), nil
 }
 
-// codexRuleRendered renders our canonical rule for an event as raw JSON.
-// HTML escaping is off, so the bytes are the ones a fresh install writes: a
-// binary path holding &, < or > must come back the same on every render, or
-// the second run rewrites the file the first one wrote.
 func codexRuleRendered(eventToken, ghostBin string) json.RawMessage {
 	data, err := marshalNoEscape(codexHookRule{Hooks: []codexHookAction{renderCodexHookAction(eventToken, ghostBin)}})
 	if err != nil {
@@ -1566,8 +1070,6 @@ func codexRuleRendered(eventToken, ghostBin string) json.RawMessage {
 	return data
 }
 
-// codexActionCommand reads one action's command. ok is false for an action
-// with no command or an unreadable one — neither is ghost's to rewrite.
 func codexActionCommand(obj codexObject) (string, bool) {
 	raw := obj.get("command")
 	if raw == nil {
@@ -1580,14 +1082,6 @@ func codexActionCommand(obj codexObject) (string, bool) {
 	return cmd, cmd != ""
 }
 
-// decodeCodexHooksConfig parses the parts of a hooks.json that both the merge
-// and the pre-flight validation must agree on: the document is a JSON object
-// (an explicit null is refused), a "hooks" member is an object (an explicit
-// null is refused), and each managed event's value is an array (an explicit
-// null is refused the same way, one level down). Sharing this decode is what
-// keeps the pre-flight honest — a document it accepts is a document the merge
-// can act on — and keeps both callers refusing the same shapes with the same
-// parse errors.
 func decodeCodexHooksConfig(existing []byte) (top, events map[string]json.RawMessage, err error) {
 	if err := leadingBOMError(existing, "hooks.json"); err != nil {
 		return nil, nil, err
@@ -1595,24 +1089,14 @@ func decodeCodexHooksConfig(existing []byte) (top, events map[string]json.RawMes
 	if err := json.Unmarshal(existing, &top); err != nil {
 		return nil, nil, fmt.Errorf("parse hooks.json: %w", err)
 	}
-	// A document that is the JSON literal null decodes into a nil map with no
-	// error — an empty object decodes into an empty map, so a nil map means
-	// null and nothing else. The document is not a JSON object, so it is
-	// refused by name rather than read as an empty document to fill in: the
-	// "hooks" member would read as absent and the merge would write ghost's
-	// canonical document over the user's file. The Claude settings path
-	// refuses a null document the same way.
+
 	if top == nil {
 		return nil, nil, fmt.Errorf("hooks.json is null")
 	}
 
 	events = map[string]json.RawMessage{}
 	if raw, ok := top["hooks"]; ok {
-		// An explicit null is structurally-invalid-but-present data, not
-		// "absent": json.Unmarshal decodes null into a nil map with no error,
-		// and the assignment in the merge would then panic on it. Refuse it the
-		// way the Claude settings path does, naming the file rather than
-		// treating the user's declaration as an empty object to fill in.
+
 		if isJSONNull(raw) {
 			return nil, nil, fmt.Errorf("hooks.json: hooks is null")
 		}
@@ -1623,13 +1107,7 @@ func decodeCodexHooksConfig(existing []byte) (top, events map[string]json.RawMes
 
 	for _, ev := range codexLifecycleEvents {
 		if raw, ok := events[ev.Key]; ok {
-			// An explicit null on a managed event is the same
-			// structurally-invalid-but-present data as a null "hooks" above, one
-			// level down: json.Unmarshal decodes it into a nil []json.RawMessage
-			// with no error, and the merge would then append ghost's canonical
-			// rule as if the event were empty, silently replacing the user's
-			// declaration. Refuse it the same way, naming the file and the event
-			// the way the Claude settings path renders `hooks[%q] is null`.
+
 			if isJSONNull(raw) {
 				return nil, nil, fmt.Errorf("hooks.json: hooks[%q] is null", ev.Key)
 			}
@@ -1642,31 +1120,12 @@ func decodeCodexHooksConfig(existing []byte) (top, events map[string]json.RawMes
 	return top, events, nil
 }
 
-// mergeCodexHooksConfig overlays ghost's lifecycle rules onto an existing
-// hooks.json: unknown top-level keys, the user's description, foreign events,
-// and every rule that is not ghost's own are preserved verbatim.
-//
-// A rule that carries ghost's own hook action is repaired IN PLACE, one action
-// at a time: ghost's own action is rewritten to what ghost renders for that
-// event, and every other key of that action, the user's other actions and the
-// rule's matcher are the user's and are left where they are. An action is
-// ghost's own when it runs the binary this call bakes — whatever that binary
-// is named — or one named "ghost" under the launcher extensions, so the rule
-// ghost itself wrote is recognised as its own even under a renamed or shimmed
-// path (#1249). Ghost owns exactly one action per event, so a second copy of
-// it is pruned rather than left to fire twice, and a rule whose every action
-// was such a copy disappears with them. Ghost's canonical rule is appended
-// only when no rule holds its action at all. The result is deterministically
-// rendered, so feeding the output back through this function is a byte-level
-// no-op for every accepted input and every path.
 func mergeCodexHooksConfig(existing []byte, ghostBin string) (string, error) {
 	top, events, err := decodeCodexHooksConfig(existing)
 	if err != nil {
 		return "", err
 	}
 
-	// Preserve the document's own key order for both the top level and the
-	// "hooks" object, so a merge never reorders entries the user wrote.
 	topOrder := topLevelKeyOrder(existing)
 	eventOrder := []string{}
 	if hooksRaw, ok := top["hooks"]; ok {
@@ -1718,25 +1177,9 @@ func mergeCodexHooksConfig(existing []byte, ghostBin string) (string, error) {
 	return string(pretty) + "\n", nil
 }
 
-// mergeCodexEventRules rewrites ghost's own hook action where it already sits
-// in an event's rule list and appends ghost's canonical rule when it sits
-// nowhere. What ghost renders for that action is the whole of it — command,
-// type and timeout — so a stale path, a hand-edited type or a budget from
-// another build are all repaired. An action is ghost's own when it runs a
-// ghost binary before that event's hook tail, a wrapped invocation included
-// (codexIsGhostHookAction, the rule the Claude side shares), but only a
-// leading-token action is rewritten — a wrapper keeps its prefix and its
-// path byte for byte. Every other rule is carried across byte for byte, every
-// other key of a repaired action stays where it sits, and a rule that is
-// repaired is re-encoded in the key order it was read in.
 func mergeCodexEventRules(rules []json.RawMessage, eventToken, ghostBin string) ([]json.RawMessage, error) {
 	desired := renderCodexHookAction(eventToken, ghostBin)
-	// No +1: capacity arithmetic over an unbounded rule count reads as a
-	// possible size overflow to static analysis, and the append below runs
-	// for at most one event per merge.
-	// Any wrapped ghost action present is never pruned, and its presence
-	// decides the survivor (see below). Pre-scan so the decision does not
-	// depend on rule order.
+
 	hasSourceCodexWrapper := false
 	for _, r := range rules {
 		ro, ok := decodeCodexObject(r)
@@ -1757,9 +1200,7 @@ func mergeCodexEventRules(rules []json.RawMessage, eventToken, ghostBin string) 
 				continue
 			}
 			if !codexLeadingGhostHookAction(c, eventToken, ghostBin) {
-				// Only a wrapper carrying --source matching the codex dialect is
-				// a privileged survivor; a wrapper running another host's source,
-				// or none at all, leaves canonical actions untouched.
+
 				if codexWrappedActionCarriesSource(c, eventToken, ghostBin) {
 					hasSourceCodexWrapper = true
 				}
@@ -1797,13 +1238,7 @@ func mergeCodexEventRules(rules []json.RawMessage, eventToken, ghostBin string) 
 				continue
 			}
 			if !codexLeadingGhostHookAction(cmd, eventToken, ghostBin) {
-				// A wrapped action runs ghost but is never pruned and never
-				// rewritten. It is the user's form, optionally carrying other
-				// commands in the same shell expression, and its prefix and
-				// path stay exactly as written. When it runs with the codex
-				// dialect it becomes the preferred survivor (see
-				// hasSourceCodexWrapper); otherwise it is treated as the
-				// user's and only the chained commands it already ran matter.
+
 				kept = append(kept, action)
 				if codexWrappedActionCarriesSource(cmd, eventToken, ghostBin) {
 					hasSourceCodexWrapper = true
@@ -1812,11 +1247,7 @@ func mergeCodexEventRules(rules []json.RawMessage, eventToken, ghostBin string) 
 				continue
 			}
 			if hasSourceCodexWrapper {
-				// The event carries a wrapper running the codex dialect, which
-				// is the preferred survivor: prune canonical leading-token
-				// actions (and drop a rule that becomes empty) regardless of
-				// their position, so ghost fires once per event from the user's
-				// form.
+
 				dropped++
 				hasGhost = true
 				continue
@@ -1830,9 +1261,7 @@ func mergeCodexEventRules(rules []json.RawMessage, eventToken, ghostBin string) 
 				return nil, fmt.Errorf("render %s rule: %w", eventToken, err)
 			}
 			actionObj.set("command", fresh)
-			// The WHOLE of ghost's action is what ghost rendered, so a stale
-			// or hand-edited type and timeout are repaired beside the command.
-			// Every other key is the user's and stays where it sits.
+
 			typed, err := marshalNoEscape(desired.Type)
 			if err != nil {
 				return nil, fmt.Errorf("render %s rule: %w", eventToken, err)
@@ -1845,8 +1274,7 @@ func mergeCodexEventRules(rules []json.RawMessage, eventToken, ghostBin string) 
 				}
 				actionObj.set("timeout", budget)
 			} else {
-				// An event with no timeout of its own must not inherit a stale
-				// one, so the key goes rather than being rewritten to 0.
+
 				actionObj.remove("timeout")
 			}
 			rewritten, err := actionObj.marshal()
@@ -1879,15 +1307,6 @@ func mergeCodexEventRules(rules []json.RawMessage, eventToken, ghostBin string) 
 	return out, nil
 }
 
-// installCodexHooks wires SessionStart/Stop/SessionEnd onto the contract
-// entrypoint in ~/.codex/hooks.json. An existing file is MERGED, never
-// replaced: the user's own hooks (any event ghost doesn't manage) and unknown
-// fields survive byte-semantically, and a rule that runs ghost beside the
-// user's own actions keeps those actions while ghost's is repaired in place.
-// Idempotent via byte-compare against the deterministically rendered desired
-// document. Both writes go through writeFileAtomic, so the merge lands by
-// rename and a codex process reading hooks.json during the repair sees a
-// whole document, not a truncated one.
 func installCodexHooks(w io.Writer, ghostBin string, dryRun bool) (bool, error) {
 	path, err := codexHooksPath()
 	if err != nil {
@@ -1898,10 +1317,7 @@ func installCodexHooks(w io.Writer, ghostBin string, dryRun bool) (bool, error) 
 	if err != nil && !os.IsNotExist(err) {
 		return false, fmt.Errorf("read %s: %w", path, err)
 	}
-	// A blank file — 0 bytes, or only whitespace — carries nothing to merge, so
-	// it is written as if it were absent, the way installCodexMCP appends to a
-	// 0-byte config.toml (#1296). The read of a missing file yields nil, so
-	// that case and this one share the install path below.
+
 	if len(bytes.TrimSpace(existing)) == 0 {
 		existing = nil
 	}
@@ -1939,13 +1355,6 @@ func installCodexHooks(w io.Writer, ghostBin string, dryRun bool) (bool, error) 
 	return true, nil
 }
 
-// loadCodexHooksRules parses the installed hooks.json into per-event rule
-// lists for status. Missing or malformed files surface as errors so status
-// can report them as actionable failures.
-//
-// The read goes through readHostConfigFile, so a path that is not a regular
-// file is refused by name instead of blocking the open until a writer
-// appears.
 func loadCodexHooksRules() (map[string][]json.RawMessage, error) {
 	path, err := codexHooksPath()
 	if err != nil {
@@ -1964,9 +1373,7 @@ func loadCodexHooksRules() (map[string][]json.RawMessage, error) {
 	if err := json.Unmarshal(data, &top); err != nil {
 		return nil, fmt.Errorf("parse hooks.json: %w", err)
 	}
-	// A document that is null leaves top nil. Init refuses that file, so status
-	// names it rather than reporting the hooks as missing and pointing at an
-	// init that would refuse.
+
 	if top == nil {
 		return nil, fmt.Errorf("hooks.json is null")
 	}
@@ -1986,12 +1393,6 @@ func loadCodexHooksRules() (map[string][]json.RawMessage, error) {
 	return out, nil
 }
 
-// codexWrappedActionCarriesSource reports whether a wrapped (non-leading) ghost
-// action's tail names --source codex. The merge treats such a wrapper as the
-// wired survivor and prunes canonical actions; one whose source names another
-// host, or omits the flag, is the user's own and is left beside the canonical
-// codex rule, matching codexContractHookWired's exact --source read — so
-// `ghost mcp init` and `ghost mcp status` agree on the same file.
 func codexWrappedActionCarriesSource(cmd, eventToken, ghostBin string) bool {
 	tail, ok := ghostHookTail(cmd, eventToken, ghostBin)
 	if !ok {
@@ -2000,14 +1401,6 @@ func codexWrappedActionCarriesSource(cmd, eventToken, ghostBin string) bool {
 	return codexTailNamesSource(tail, "codex")
 }
 
-// codexTailNamesSource reports whether the arguments ghost itself receives —
-// tail, the tokens after its `hook <event>` invocation — carry an exact --source
-// token equal to wantSource, in either accepted spelling. The scan stops at the
-// first token that ends a command list, because a `--source` behind `&&`, `||`,
-// `;`, `|` or `&` belongs to a command chained after ghost's, not to ghost: a
-// wrapper whose own invocation names no source must not be read as wired on the
-// strength of the next command's flag. A connective glued to a token (`&&tool`,
-// `stop;`) ends the list there too.
 func codexTailNamesSource(tail []string, wantSource string) bool {
 	for i := 0; i < len(tail); i++ {
 		if codexTokenEndsCommand(tail[i]) {
@@ -2023,12 +1416,6 @@ func codexTailNamesSource(tail []string, wantSource string) bool {
 	return false
 }
 
-// codexTokenEndsCommand reports whether tok ends the shell command list it
-// belongs to, as a standalone connective or one glued to a word (`&&tool`,
-// `stop;`, `build|tee`). A token carrying any of `;&|` is treated as a
-// boundary, which is the safe direction: at worst a real flag written without
-// separating space goes unread and ghost's canonical rule is appended, where
-// crediting a chained command's flag would leave ghost silently unwired.
 func codexTokenEndsCommand(tok string) bool {
 	if shellConnectives[tok] {
 		return true
@@ -2036,17 +1423,6 @@ func codexTokenEndsCommand(tok string) bool {
 	return strings.ContainsAny(tok, ";&|")
 }
 
-// codexContractHookWired is the codex analog of contractHookWired: it walks
-// codex's OWN hooks.json rules (not Claude's settings.json) and reports
-// whether any command RUNS GHOST and invokes `hook <eventToken>` with an
-// exact --source codex token, accepting both "--source X" and "--source=X"
-// flag forms. Token-based, not substring-based — a lookalike like "--source
-// codex-extra" would fail hostevent.Parse at runtime, so it must never read as
-// wired. Ownership is the same rule the merge applies (ghostHookTail), so the
-// diagnostic and the merge answer the same question about the same file: a
-// hand-edited wrapper that does run ghost reads as wired, and a command that
-// merely ends in the ghost tail — another tool's hook, or a ghost name inside
-// its quoted argument — never does.
 func codexContractHookWired(rules []json.RawMessage, eventToken, wantSource, ghostBin string) bool {
 	for _, rule := range rules {
 		var parsed struct {
@@ -2070,17 +1446,6 @@ func codexContractHookWired(rules []json.RawMessage, eventToken, wantSource, gho
 	return false
 }
 
-// validateCodexHooksFile loads ~/.codex/hooks.json and validates every part of
-// it `ghost mcp init --client codex` parses, BEFORE step 3 registers the MCP
-// server in config.toml. An absent or blank file is valid: init writes the
-// canonical document into it, as it does for an absent or 0-byte config.toml.
-// A refusal names the file and carries the edit that clears it — repair it or
-// delete it — rather than the generic re-run hint, which a re-run cannot
-// satisfy: the file stays invalid until the user acts on it.
-//
-// A path that is not a regular file is refused the same way, and with the
-// edit that clears it: the file has to be replaced or deleted, which no
-// re-run does.
 func validateCodexHooksFile() error {
 	path, err := codexHooksPath()
 	if err != nil {
@@ -2096,9 +1461,7 @@ func validateCodexHooksFile() error {
 		}
 		return fmt.Errorf("read %s: %w", path, err)
 	}
-	// A blank file — 0 bytes, or only whitespace — carries nothing to merge and
-	// installCodexHooks writes the canonical document over it, the way the
-	// config.toml merge appends to a 0-byte file. It is not a refusal.
+
 	if len(bytes.TrimSpace(data)) == 0 {
 		return nil
 	}
@@ -2110,56 +1473,39 @@ func validateCodexHooksFile() error {
 
 // RunCodex installs Ghost's codex integration: the [mcp_servers.ghost] stdio
 // entry merged textually into ~/.codex/config.toml and SessionStart/Stop/
-// SessionEnd hooks merged into ~/.codex/hooks.json, both carrying the
-// resolved absolute ghost binary path (desktop launchers may run codex with a
-// narrower PATH than the shell that ran init). Payloads pass through
-// verbatim, so no adapter artifact beyond these two config entries exists.
+
 func RunCodex(w io.Writer, dryRun bool) error {
 	if dryRun {
 		_, _ = fmt.Fprintf(w, "\nDry run — showing what would change:\n\n")
 	}
 
-	// Validate hooks.json before step 3 registers the server, the way Run
-	// validates Claude's settings.json before it registers anything: a file
-	// step 4 cannot wire would otherwise be discovered only after step 3 had
-	// registered the MCP server, leaving codex with a ghost server and no
-	// hooks. Refusing here registers nothing and leaves the file exactly as the
-	// user wrote it. No retryHint: the file stays invalid until it is repaired
-	// or deleted, so a re-run cannot fix it and the hint would misdirect.
 	if err := validateCodexHooksFile(); err != nil {
 		return err
 	}
 
-	// Step 1: Prerequisites — only the ghost binary is required; its resolved
-	// path is baked into both artifacts.
 	_, _ = fmt.Fprintln(w, "[1/4] Checking prerequisites...")
 	ghostBin, _, err := checkPrereqs(w, "codex")
 	if err != nil {
 		return retryHint(err)
 	}
 
-	// Step 2: Ghost's own user config (not codex's).
 	_, _ = fmt.Fprintln(w, "\n[2/4] Ensuring ghost config file...")
 	if err := ensureConfigBootstrap(w, dryRun); err != nil {
 		return retryHint(err)
 	}
 
-	// Step 3: The MCP server entry — textual TOML merge, comments preserved.
 	_, _ = fmt.Fprintln(w, "\n[3/4] Merging ghost MCP server into config.toml...")
 	mcpChanged, err := installCodexMCP(w, ghostBin, dryRun)
 	if err != nil {
 		return stepError(err)
 	}
 
-	// Step 4: Lifecycle hooks — JSON merge into hooks.json.
 	_, _ = fmt.Fprintln(w, "\n[4/4] Installing lifecycle hooks...")
 	hooksChanged, err := installCodexHooks(w, ghostBin, dryRun)
 	if err != nil {
 		return stepError(err)
 	}
 
-	// Codex skips non-managed hooks until the user trusts the exact
-	// definitions via /hooks — a silent no-op integration if we don't say so.
 	if !dryRun {
 		_, _ = fmt.Fprintln(w, "\nRequired one-time step: run /hooks inside codex and approve (trust) the ghost entries — codex silently skips them until trusted.")
 		if mcpChanged || hooksChanged {
@@ -2167,7 +1513,6 @@ func RunCodex(w io.Writer, dryRun bool) error {
 		}
 	}
 
-	// Ollama embedding model.
 	cfg, err := config.Load()
 	if err != nil {
 		_, _ = fmt.Fprintf(w, "  ! load config: %v\n", err)
@@ -2187,13 +1532,6 @@ func RunCodex(w io.Writer, dryRun bool) error {
 	return nil
 }
 
-// codexMCPEntryStatus validates the [mcp_servers.ghost] table against the
-// resolved ghost binary. The returned message explains the failure for the
-// status check line.
-//
-// A config.toml that is not there is reported as missing. One that is there
-// and cannot be read — a FIFO at the path, say — is reported as that, with
-// the file named: it is not a missing table, and the repair is not an init.
 func codexMCPEntryStatus(ghostBin string) (bool, string) {
 	path, err := codexConfigTomlPath()
 	if err != nil {
@@ -2206,9 +1544,7 @@ func codexMCPEntryStatus(ghostBin string) (bool, string) {
 		}
 		return false, fmt.Sprintf("cannot read %s: %v", path, err)
 	}
-	// Read the file the way the merge scans it: one leading byte-order mark is
-	// stripped, so a BOM-prefixed ghost header is seen instead of being read as
-	// an absent table on an install that is actually healthy.
+
 	lines, _ := splitCodexLines(string(data))
 	if at, text, dotted := findCodexDottedGhost(lines, codexMCPServerKey); dotted {
 		return false, fmt.Sprintf("ghost MCP server defined by a dotted or inline key in config.toml (line %d: %s), a form ghost cannot manage", at, memory.RefusalArg("config line", text))
@@ -2228,9 +1564,7 @@ func codexMCPEntryStatus(ghostBin string) (bool, string) {
 
 // StatusCodex checks the health of the Ghost ↔ codex integration. It reports
 // only codex-relevant checks — the ghost binary, the config.toml MCP entry,
-// the hooks.json lifecycle wiring (token-validated), and the client-agnostic
-// embedding/link stats tail shared with Status/StatusOpencode/StatusGoose.
-// Claude-only checks (permissions, autoMemory, redirects) are never reported.
+
 func StatusCodex(w io.Writer) (bool, error) {
 	_, _ = fmt.Fprintf(w, "\nGhost ↔ codex integration status:\n\n")
 
@@ -2244,7 +1578,6 @@ func StatusCodex(w io.Writer) (bool, error) {
 		}
 	}
 
-	// 1. Ghost binary.
 	ghostBin := findGhostBinary()
 	check(ghostBin != "",
 		fmt.Sprintf("ghost binary: %s", ghostBin),
@@ -2252,13 +1585,9 @@ func StatusCodex(w io.Writer) (bool, error) {
 
 	reportConfigFile(w)
 
-	// 2. MCP server entry — validated against the resolved binary path, so a
-	// stale baked command (binary moved on upgrade) reports unhealthy and
-	// `ghost mcp init --client codex` repairs it in place.
 	mcpOK, mcpFail := codexMCPEntryStatus(ghostBin)
 	check(mcpOK, "ghost MCP server registered in config.toml", mcpFail)
 
-	// 3. Lifecycle hooks — token-validated over codex's own hooks.json.
 	events, herr := loadCodexHooksRules()
 	if herr != nil {
 		check(false, "", fmt.Sprintf("cannot read hooks: %v", herr))
@@ -2276,8 +1605,6 @@ func StatusCodex(w io.Writer) (bool, error) {
 		}
 	}
 
-	// 4. Embedding & linking health — silent embed failures leave vector
-	// search and memory linking inactive.
 	store := checkStoreHealth(w, check)
 	if store != nil {
 		defer store.Close() //nolint:errcheck
