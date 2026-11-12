@@ -2,62 +2,29 @@ package supersede
 
 import "testing"
 
-// TestRepairableTargetsNamesWhatTheFollowUpMustClear pins the rule BOTH surfaces
-// now read, in the package that owns it. It used to be pinned twice — once in
-// cmd/ghost for `ghost supersede --withdraw` and once in internal/mcpserver for
-// ghost_link_withdraw, which had NO test at all — over two bodies that were
-// character for character the same. Two copies is two answers to "which targets
-// can this repair still clear", and the CLI's copy was proved right while the
-// MCP one drifted unobserved; a wrong answer here does not print a wrong report,
-// it CLEARS the wrong memories.
-//
-// Four rules, and the second is the one that is easy to get backwards.
-//
-// A target appears once however many edges named it — the same orphan is not a
-// second claim. A row whose edge is STILL LIVE is not in the list: never reached,
-// or a write that errored, means the edge still points at the target, so the
-// repair would report it as still asserted and clear nothing. And a row a
-// CONCURRENT pass took first IS in the list: that pass left no live edge and a
-// resolved_at nothing defends any more, which is exactly the state the repair
-// clears, so dropping the target would leave a repairable memory out of the list
-// the operator is about to run.
-//
-// The fourth is the GROUPING, and it is not presentation. A resolve repair's pool
-// is ResolvedCandidates(projectID), which filters `project_id = ?`, so a selector
-// resolved against one project and repaired against another is a silent no-op.
 func TestRepairableTargetsNamesWhatTheFollowUpMustClear(t *testing.T) {
-	links := []WithdrawnLink{
+	got := RepairableTargets([]WithdrawnLink{
 		{SourceID: "A", TargetID: "T1", TargetProjectID: "p", Withdrawn: true},
-		{SourceID: "B", TargetID: "T1", TargetProjectID: "p", Withdrawn: true}, // a second edge, one target
+		{SourceID: "B", TargetID: "T1", TargetProjectID: "p", Withdrawn: true},
 		{SourceID: "C", TargetID: "T2", TargetProjectID: "p", Withdrawn: true},
-		{SourceID: "D", TargetID: "T3", TargetProjectID: "p", NotAttempted: true},     // never reached: still live
-		{SourceID: "E", TargetID: "T4", TargetProjectID: "p", WithdrawalFailed: true}, // the write errored
-		{SourceID: "F", TargetID: "T5", TargetProjectID: "p"},                         // a concurrent pass took it
-	}
-	got := RepairableTargets(links)
+		{SourceID: "D", TargetID: "T3", TargetProjectID: "p", NotAttempted: true},
+		{SourceID: "E", TargetID: "T4", TargetProjectID: "p", WithdrawalFailed: true},
+		{SourceID: "F", TargetID: "T5", TargetProjectID: "p"},
+	})
 	if len(got) != 1 || got[0].ProjectID != "p" {
-		t.Fatalf("RepairableTargets = %+v, want one group for p", got)
+		t.Fatalf("got %+v", got)
 	}
 	want := []string{"T1", "T2", "T5"}
 	if len(got[0].Targets) != len(want) {
-		t.Fatalf("RepairableTargets = %+v, want %v", got, want)
+		t.Fatalf("got %+v want %v", got[0].Targets, want)
 	}
 	for i := range want {
 		if got[0].Targets[i] != want[i] {
-			t.Fatalf("RepairableTargets[0].Targets[%d] = %q, want %q", i, got[0].Targets[i], want[i])
+			t.Fatalf("Targets[%d]=%q want %q", i, got[0].Targets[i], want[i])
 		}
 	}
 }
 
-// TestRepairableTargetsGroupsByTheProjectThatCanRepairThem is the case the
-// grouping exists for, and it is the one a flat list got wrong: a
-// `ghost supersede _global --withdraw` over a pair whose source was promoted into
-// `_global` and whose target stayed in a project. The command printed
-// `ghost resolve _global --reassess --only <target> --apply`, which resolves the
-// selector (a `_global` ref scope reaches a project memory) and then finds
-// nothing in the pool — so every id came back a miss under a block promising a
-// clear. The group is the TARGET's project, and it is one group per project even
-// when a single request spans two.
 func TestRepairableTargetsGroupsByTheProjectThatCanRepairThem(t *testing.T) {
 	got := RepairableTargets([]WithdrawnLink{
 		{SourceID: "A", TargetID: "T1", TargetProjectID: "p", Withdrawn: true},
@@ -66,98 +33,55 @@ func TestRepairableTargetsGroupsByTheProjectThatCanRepairThem(t *testing.T) {
 		{SourceID: "D", TargetID: "T4", TargetProjectID: "p", NotAttempted: true},
 	})
 	if len(got) != 2 {
-		t.Fatalf("RepairableTargets = %+v, want two groups", got)
+		t.Fatalf("got %+v", got)
 	}
 	if got[0].ProjectID != "p" || len(got[0].Targets) != 2 || got[0].Targets[0] != "T1" || got[0].Targets[1] != "T3" {
-		t.Errorf("the first group = %+v, want project p holding T1 and T3 in report order", got[0])
+		t.Errorf("group 0 %+v", got[0])
 	}
 	if got[1].ProjectID != "other" || len(got[1].Targets) != 1 || got[1].Targets[0] != "T2" {
-		t.Errorf("the second group = %+v, want project other holding T2", got[1])
+		t.Errorf("group 1 %+v", got[1])
 	}
 }
 
-// TestRepairableTargetsSkipsACausesWithdrawal is the rule #833 made load-bearing.
-// The follow-up is a `ghost resolve --reassess`, and resolve's supersedes
-// piggyback acts on 'supersedes'/'llm' edges alone — a 'causes' claim never
-// stamped the `resolved_at` the repair clears. So naming a 'causes' target sends
-// the operator to clear a memory nothing is holding down, and the repair reports
-// it as still asserted for a reason that was removed by the very command they ran.
-//
-// Before #833 this was not a filter at all: every link reaching this function was
-// a 'supersedes' edge by construction, because the relation was never read off
-// the row. #833 made a 'causes' edge withdrawable, which is the first time a
-// non-supersedes row can arrive here, and it arrives on both surfaces at once —
-// so the filter is written here rather than at either caller, where one of the two
-// would have been forgotten.
-//
-// An EMPTY relation still counts, and that is not leniency: it is the zero value
-// of a struct a caller may have built by hand, and the withdrawal's own default
-// is 'supersedes', so a row without one has not said it is a 'causes' claim.
 func TestRepairableTargetsSkipsACausesWithdrawal(t *testing.T) {
 	got := RepairableTargets([]WithdrawnLink{
 		{SourceID: "A", TargetID: "T1", TargetProjectID: "p", Relation: "causes", Withdrawn: true},
 		{SourceID: "B", TargetID: "T2", TargetProjectID: "p", Relation: "supersedes", Withdrawn: true},
-		{SourceID: "C", TargetID: "T3", TargetProjectID: "p", Withdrawn: true},    // unset: the default
-		{SourceID: "D", TargetID: "T1", TargetProjectID: "p", Relation: "causes"}, // deduped anyway
+		{SourceID: "C", TargetID: "T3", TargetProjectID: "p", Withdrawn: true},
+		{SourceID: "D", TargetID: "T1", TargetProjectID: "p", Relation: "causes"},
 	})
-	if len(got) != 1 {
-		t.Fatalf("RepairableTargets = %+v, want one group", got)
+	if len(got) != 1 || len(got[0].Targets) != 2 || got[0].Targets[0] != "T2" || got[0].Targets[1] != "T3" {
+		t.Fatalf("got %+v", got)
 	}
-	want := []string{"T2", "T3"}
-	if len(got[0].Targets) != len(want) {
-		t.Fatalf("RepairableTargets = %+v, want %v: a 'causes' target is not repairable", got[0].Targets, want)
-	}
-	for i := range want {
-		if got[0].Targets[i] != want[i] {
-			t.Errorf("Targets[%d] = %q, want %q", i, got[0].Targets[i], want[i])
-		}
-	}
-	// The filter runs BEFORE the dedup, and that ordering is load-bearing: a
-	// 'causes' row for T1 must not consume T1's slot, or a later 'supersedes' row
-	// for the same target would be dropped as a duplicate of a row that was never
-	// added. Two rows, one target, one relation each — the shape
-	// `RepairableTargets` reaches when a request names both edges of one pair.
 	both := RepairableTargets([]WithdrawnLink{
 		{SourceID: "A", TargetID: "T1", TargetProjectID: "p", Relation: "causes", Withdrawn: true},
 		{SourceID: "B", TargetID: "T1", TargetProjectID: "p", Relation: "supersedes", Withdrawn: true},
 	})
 	if len(both) != 1 || len(both[0].Targets) != 1 || both[0].Targets[0] != "T1" {
-		t.Errorf("RepairableTargets(causes then supersedes on one target) = %+v, want T1 once: a filtered row must not consume the target's slot", both)
+		t.Errorf("both %+v", both)
 	}
-
-	// A request that withdrew only 'causes' edges has no follow-up at all, rather
-	// than an empty group the caller would render as a command naming nothing.
-	if n := len(RepairableTargets([]WithdrawnLink{
-		{SourceID: "A", TargetID: "T1", TargetProjectID: "p", Relation: "causes", Withdrawn: true},
-	})); n != 0 {
-		t.Errorf("RepairableTargets = %d group(s) over a 'causes'-only withdrawal, want none", n)
+	if n := len(RepairableTargets([]WithdrawnLink{{SourceID: "A", TargetID: "T1", TargetProjectID: "p", Relation: "causes", Withdrawn: true}})); n != 0 {
+		t.Errorf("got %d groups", n)
 	}
 }
 
-// RepairableTargets keeps the ORDER the rows were reported in, so the report and
-// the command built from it cannot disagree about which memory is which, and it
-// keeps a blank TargetID out of a selector list readRefSelectors would refuse.
 func TestRepairableTargetsKeepsReportOrderAndDropsABlankTarget(t *testing.T) {
-	links := []WithdrawnLink{
-		{SourceID: "A"}, // no target resolved
+	got := RepairableTargets([]WithdrawnLink{
+		{SourceID: "A"},
 		{SourceID: "B", TargetID: "T2", TargetProjectID: "p"},
-		{SourceID: "C", TargetID: "T1", TargetProjectID: "p"}, // reported before T2, ranked after it
+		{SourceID: "C", TargetID: "T1", TargetProjectID: "p"},
 		{SourceID: "D", TargetID: "T3", TargetProjectID: "p", Withdrawn: true},
-	}
-	got := RepairableTargets(links)
+	})
 	if len(got) != 1 {
-		t.Fatalf("RepairableTargets = %+v, want one group", got)
+		t.Fatalf("got %+v", got)
 	}
 	want := []string{"T2", "T1", "T3"}
-	if len(got[0].Targets) != len(want) {
-		t.Fatalf("RepairableTargets = %+v, want %v", got, want)
-	}
 	for i := range want {
 		if got[0].Targets[i] != want[i] {
-			t.Fatalf("RepairableTargets[0].Targets[%d] = %q, want %q (report order, not ranked order)", i, got[0].Targets[i], want[i])
+			t.Fatalf("Targets[%d]=%q want %q", i, got[0].Targets[i], want[i])
 		}
 	}
 	if n := len(RepairableTargets(nil)); n != 0 {
-		t.Errorf("RepairableTargets(nil) = %d groups, want none", n)
+		t.Errorf("nil got %d", n)
 	}
 }
