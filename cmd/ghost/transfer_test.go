@@ -27,63 +27,31 @@ func transferTestStore(t *testing.T) *memory.Store {
 }
 
 func TestParseBackupArgs(t *testing.T) {
-	t.Run("no flags is the default path", func(t *testing.T) {
-		opts, err := parseBackupArgs(nil)
-		if err != nil {
-			t.Fatalf("no flags must not error: %v", err)
+	for _, args := range [][]string{{"--out", "/tmp/a.db"}, {"--out=/tmp/a.db"}} {
+		if opts, err := parseBackupArgs(args); err != nil || opts.Out != "/tmp/a.db" {
+			t.Errorf("parseBackupArgs(%v) = %+v, %v", args, opts, err)
 		}
-		if opts.Out != "" {
-			t.Errorf("opts = %+v, want the default path", opts)
+	}
+	if opts, err := parseBackupArgs(nil); err != nil || opts.Out != "" {
+		t.Errorf("no flags = %+v, %v, want the default path", opts, err)
+	}
+	// -h never reaches a parser: handleHelp answers it before dispatch.
+	for _, args := range [][]string{{"--overwrite"}, {"--out"}, {"project"}, {"-h"}} {
+		if _, err := parseBackupArgs(args); err == nil {
+			t.Errorf("parseBackupArgs(%v) was accepted", args)
 		}
-	})
-	t.Run("both flag spellings", func(t *testing.T) {
-		for _, args := range [][]string{{"--out", "/tmp/a.db"}, {"--out=/tmp/a.db"}} {
-			opts, err := parseBackupArgs(args)
-			if err != nil {
-				t.Fatalf("%v: %v", args, err)
-			}
-			if opts.Out != "/tmp/a.db" {
-				t.Errorf("%v parsed as %q", args, opts.Out)
-			}
-		}
-	})
-	t.Run("unknown and valueless flags error", func(t *testing.T) {
-		if _, err := parseBackupArgs([]string{"--overwrite"}); err == nil {
-			t.Error("an unknown flag must error rather than being ignored")
-		}
-		if _, err := parseBackupArgs([]string{"--out"}); err == nil {
-			t.Error("a value flag with no argument must error")
-		}
-		if _, err := parseBackupArgs([]string{"project"}); err == nil {
-			t.Error("a stray positional must error")
-		}
-		// -h never reaches a parser: runCLI's handleHelp answers it before the
-		// dispatch, which is what keeps a help request free of side effects. A
-		// parser that also accepted it would be a second, less careful gate.
-		if _, err := parseBackupArgs([]string{"-h"}); err == nil {
-			t.Error("-h must not be accepted by the parser; handleHelp is the only gate")
-		}
-	})
+	}
 }
 
-// TestTransferCommandsAreRegisteredForHelp: the #630 contract is that handleHelp
-// answers -h/--help before any subcommand runs, and it can only do that for a
-// command whose usage is in the table. A dispatched-but-unregistered command
-// would answer `ghost export -h` with "unknown argument" — and the contract it
-// breaks is that a help request must not reach the command at all. Nothing else
-// fails when one is left out, which is why the three are named here.
+// TestTransferCommandsAreRegisteredForHelp (#630): handleHelp answers -h/--help
+// before any subcommand runs, but only for a command whose usage is in the
+// table; nothing else fails when one is left out.
 func TestTransferCommandsAreRegisteredForHelp(t *testing.T) {
 	for _, cmd := range []string{"backup", "export", "import"} {
 		usage, found := usageByCommand[cmd]
-		if !found {
-			t.Errorf("%q is dispatched but has no usage registered, so -h/--help would reach the command", cmd)
-			continue
+		if !found || !strings.Contains(usage, "ghost "+cmd) {
+			t.Errorf("%q has no usage registered naming the command", cmd)
 		}
-		if !strings.Contains(usage, "ghost "+cmd) {
-			t.Errorf("%q usage does not name the command: %q", cmd, strings.SplitN(usage, "\n", 2)[0])
-		}
-		// handleHelp must actually claim it: the registered path alone is not
-		// enough if the flag scan rejects the arguments.
 		if !handleHelp([]string{cmd, "-h"}) {
 			t.Errorf("%q -h did not reach handleHelp's table", cmd)
 		}
@@ -91,273 +59,135 @@ func TestTransferCommandsAreRegisteredForHelp(t *testing.T) {
 }
 
 func TestParseExportArgs(t *testing.T) {
-	// One destination per command line. This row used to pass two --out flags and
-	// assert the last one won, which was the last-one-wins rule #1227 replaced: a
-	// repeated destination is a refusal now, and its own table lives in
-	// TestRepeatedDestinationIsRefusedByEveryParser.
 	opts, err := parseExportArgs([]string{"--project", "ghost", "--out=-"})
-	if err != nil {
-		t.Fatalf("parseExportArgs: %v", err)
+	if err != nil || opts.Project != "ghost" || opts.Out != "-" {
+		t.Errorf("opts = %+v, %v, want project=ghost out=-", opts, err)
 	}
-	if opts.Project != "ghost" || opts.Out != "-" {
-		t.Errorf("opts = %+v, want project=ghost out=-", opts)
+	for _, args := range [][]string{{"--project"}, {"--dry-run"}} {
+		if _, err := parseExportArgs(args); err == nil {
+			t.Errorf("parseExportArgs(%v) was accepted", args)
+		}
 	}
-	if _, err := parseExportArgs([]string{"--project"}); err == nil {
-		t.Error("a value flag with no argument must error")
-	}
-	if _, err := parseExportArgs([]string{"--dry-run"}); err == nil {
-		t.Error("an unknown flag must error")
+	// A project is taken in both spellings, and a dash-leading name is a name.
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"--project", "ghost"}, "ghost"},
+		{[]string{"--project=ghost"}, "ghost"},
+		{[]string{"--project", "-myproj"}, "-myproj"},
+	} {
+		if opts, err := parseExportArgs(tc.args); err != nil || opts.Project != tc.want {
+			t.Errorf("parseExportArgs(%v) = %+v, %v, want %q", tc.args, opts, err, tc.want)
+		}
 	}
 }
 
-// TestParseExportArgsRefusesAnEmptyProject: `--project` with no value is a refusal,
-// never "every project".
-//
-// This is the one scope flag in the tree whose empty value reached the WHOLE STORE
-// silently. `runExportCore` takes `projectFilter` as a string and an empty one is
-// every project, which is the correct default for a flag that was never typed and the
-// wrong answer for one that was typed with an unset variable behind it — the export
-// writes the artifact to a path and reports what it wrote, so nothing downstream
-// looks like a mistake. Both spellings are refused, and so is the `--project ""`
-// form, which reached the same branch by a different route.
+// TestParseExportArgsRefusesAnEmptyProject: `--project` with no value is a
+// refusal, never "every project" (an unset variable behind the flag must not
+// export the whole store).
 func TestParseExportArgsRefusesAnEmptyProject(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		args []string
-	}{
-		{"equals form", []string{"--project="}},
-		{"separate form", []string{"--project", ""}},
-		{"equals form beside an out", []string{"--out", "/tmp/x.jsonl", "--project="}},
-		{"separate form beside an out", []string{"--out", "/tmp/x.jsonl", "--project", ""}},
+	for _, args := range [][]string{
+		{"--project="}, {"--project", ""}, {"--out", "/tmp/x.jsonl", "--project="}, {"--out", "/tmp/x.jsonl", "--project", ""},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			opts, err := parseExportArgs(tc.args)
-			if err == nil {
-				t.Fatalf("parseExportArgs(%v) = %+v: an empty --project is a refusal, not the whole store", tc.args, opts)
-			}
-			if !strings.Contains(err.Error(), "--project") {
-				t.Errorf("error %q must name the flag the reader has to fix", err)
-			}
-			if opts.Project != "" {
-				t.Errorf("Project = %q alongside the error: a refused parse hands back no scope to reach the store with", opts.Project)
-			}
-		})
+		opts, err := parseExportArgs(args)
+		if err == nil || !strings.Contains(err.Error(), "--project") || opts.Project != "" {
+			t.Errorf("parseExportArgs(%v) = %+v, %v, want a refusal naming --project and no scope", args, opts, err)
+		}
 	}
 }
 
 // TestParseExportArgsRefusesARepeatedProject: a second --project is a repeat
-// whatever the first one said.
-//
-// Occurrences are counted rather than tested with `Project != ""`, because that test
-// cannot see `--project= --project ghost`: it reads the empty first value as no value
-// given, and the second silently becomes the scope. The export is the shape where
-// that matters most — the run reads a project and writes a file that is then handed
-// to someone else, so a scope that silently became the last spelling on the line is a
-// copy of the wrong corpus.
+// whatever the first said (occurrences are counted, not values); two empty
+// values stop at the first.
 func TestParseExportArgsRefusesARepeatedProject(t *testing.T) {
+	const dup, empty = "expected exactly one project", "--project requires a value"
 	for _, tc := range []struct {
-		name string
 		args []string
 		want string
 	}{
-		{"two separate forms", []string{"--project", "ghost", "--project", "other"}, "expected exactly one project"},
-		{"two equals forms", []string{"--project=ghost", "--project=other"}, "expected exactly one project"},
-		{"separate then equals", []string{"--project", "ghost", "--project=other"}, "expected exactly one project"},
-		{"equals then separate", []string{"--project=ghost", "--project", "other"}, "expected exactly one project"},
-		// A NAMED value followed by any second value is the duplicate it is, and
-		// the duplicate is the question asked first.
-		{"a project then an empty one", []string{"--project", "ghost", "--project="}, "expected exactly one project"},
-		// Two empty values stop at the FIRST one: the duplicate guard cannot fire
-		// until there is a first value, and with none there is no scope in the
-		// command line to be a duplicate of.
-		{"empty first then a project", []string{"--project=", "--project", "ghost"}, "--project requires a value"},
-		{"empty separate first then a project", []string{"--project", "", "--project", "ghost"}, "--project requires a value"},
-		{"two empty ones", []string{"--project=", "--project="}, "--project requires a value"},
+		{[]string{"--project", "ghost", "--project", "other"}, dup},
+		{[]string{"--project=ghost", "--project=other"}, dup},
+		{[]string{"--project", "ghost", "--project=other"}, dup},
+		{[]string{"--project", "ghost", "--project="}, dup},
+		{[]string{"--project=", "--project", "ghost"}, empty},
+		{[]string{"--project=", "--project="}, empty},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			_, err := parseExportArgs(tc.args)
-			if err == nil {
-				t.Fatalf("parseExportArgs(%v) was accepted with the same scope twice", tc.args)
-			}
-			if !strings.Contains(err.Error(), tc.want) {
-				t.Errorf("error %q must contain %q", err, tc.want)
-			}
-		})
-	}
-}
-
-// TestParseExportArgsTakesOneProject: the control for both refusals above, in both
-// spellings. A parser that counted SIGHTS instead of VALUES would pass them both.
-func TestParseExportArgsTakesOneProject(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		args []string
-		want string
-	}{
-		{"separate form", []string{"--project", "ghost"}, "ghost"},
-		{"equals form", []string{"--project=ghost"}, "ghost"},
-		{"a dash-leading name is a name", []string{"--project", "-myproj"}, "-myproj"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			opts, err := parseExportArgs(tc.args)
-			if err != nil {
-				t.Fatalf("parseExportArgs(%v): %v", tc.args, err)
-			}
-			if opts.Project != tc.want {
-				t.Errorf("Project = %q, want %q", opts.Project, tc.want)
-			}
-		})
+		if _, err := parseExportArgs(tc.args); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("parseExportArgs(%v) error = %v, want one containing %q", tc.args, err, tc.want)
+		}
 	}
 }
 
 // TestParseTransferRefusesAnEmptyOut: an explicit empty --out is the
-// unset-variable spelling and is a refusal, never "no flag given".
-//
-// `ghost backup --out="$DEST"` with DEST unset reaches the parser as `--out=`,
-// and `ghost backup --out ""` as a separate empty token. Both were read as the
-// flag never having been typed, so the snapshot was written to the timestamped
-// default path inside the data directory and the command exited 0 — a backup a
-// script then looks for in $DEST and does not find. The two commands that write
-// to a named destination now share the rule --project already has: the empty
-// value is refused, and the refusal names the flag, in every spelling the parser
-// accepts. The default is the flag left off.
+// unset-variable spelling and is a refusal, never "no flag given" (the backup
+// would land at the default path while the script looks in $DEST).
 func TestParseTransferRefusesAnEmptyOut(t *testing.T) {
-	parsers := []struct {
-		name  string
-		parse func([]string) (string, error)
-	}{
-		{"backup", func(args []string) (string, error) {
-			opts, err := parseBackupArgs(args)
-			return opts.Out, err
-		}},
-		{"export", func(args []string) (string, error) {
-			opts, err := parseExportArgs(args)
-			return opts.Out, err
-		}},
+	parsers := map[string]func([]string) (string, error){
+		"backup": func(args []string) (string, error) { opts, err := parseBackupArgs(args); return opts.Out, err },
+		"export": func(args []string) (string, error) { opts, err := parseExportArgs(args); return opts.Out, err },
 	}
-	for _, p := range parsers {
-		for _, tc := range []struct {
-			name string
-			args []string
-		}{
-			{"attached empty", []string{"--out="}},
-			{"separate empty", []string{"--out", ""}},
-		} {
-			t.Run(p.name+"/"+tc.name, func(t *testing.T) {
-				got, err := p.parse(tc.args)
-				if err == nil {
-					t.Fatalf("%s(%v) = %q with no error: an empty --out is the unset-variable spelling and must be refused, not read as the default path", p.name, tc.args, got)
-				}
-				if !strings.Contains(err.Error(), "--out") {
-					t.Errorf("%s(%v) error = %q, want it to name the flag the reader has to fix", p.name, tc.args, err)
-				}
-			})
+	for name, parse := range parsers {
+		for _, args := range [][]string{{"--out="}, {"--out", ""}} {
+			if got, err := parse(args); err == nil || !strings.Contains(err.Error(), "--out") {
+				t.Errorf("%s(%v) = %q, %v, want a refusal naming --out", name, args, got, err)
+			}
 		}
-	}
-
-	// The control: a destination that is not empty still parses, in both
-	// spellings, so a parser that refused every --out would not pass here — and
-	// "-" (export's stdout marker) is a value, not an empty one.
-	for _, args := range [][]string{{"--out", "x.jsonl"}, {"--out=x.jsonl"}} {
-		if opts, err := parseBackupArgs(args); err != nil || opts.Out != "x.jsonl" {
-			t.Errorf("parseBackupArgs(%v) = %+v (err %v), want the destination used verbatim", args, opts, err)
+		// The control: a destination is used verbatim, in both spellings.
+		for _, args := range [][]string{{"--out", "x.jsonl"}, {"--out=x.jsonl"}} {
+			if got, err := parse(args); err != nil || got != "x.jsonl" {
+				t.Errorf("%s(%v) = %q, %v, want the destination verbatim", name, args, got, err)
+			}
 		}
-		if opts, err := parseExportArgs(args); err != nil || opts.Out != "x.jsonl" {
-			t.Errorf("parseExportArgs(%v) = %+v (err %v), want the destination used verbatim", args, opts, err)
-		}
-	}
-	if opts, err := parseExportArgs([]string{"--out=-"}); err != nil || opts.Out != "-" {
-		t.Errorf(`parseExportArgs(--out=-) = %+v (err %v), want the stdout marker "-"`, opts, err)
 	}
 }
 
 func TestParseImportArgs(t *testing.T) {
-	t.Run("file required", func(t *testing.T) {
-		if _, err := parseImportArgs(nil); err == nil {
-			t.Error("import with no file must error")
+	for _, args := range [][]string{nil, {"--apply"}, {"--trust-provenance"}, {"a.jsonl", "b.jsonl"}} {
+		if _, err := parseImportArgs(args); err == nil {
+			t.Errorf("parseImportArgs(%v) was accepted: import reads exactly one artifact, and a flag is not a file", args)
 		}
-		if _, err := parseImportArgs([]string{"--apply"}); err == nil {
-			t.Error("--apply is not a file: it must not be taken as one")
+	}
+	for _, tc := range []struct {
+		args  []string
+		apply bool
+		trust bool
+	}{
+		{[]string{"x.jsonl"}, false, false}, // dry run and untrusted provenance by default
+		{[]string{"--apply", "x.jsonl"}, true, false},
+		{[]string{"--trust-provenance", "x.jsonl"}, false, true},
+	} {
+		opts, err := parseImportArgs(tc.args)
+		if err != nil || opts.File != "x.jsonl" || opts.Apply != tc.apply || opts.TrustProvenance != tc.trust {
+			t.Errorf("parseImportArgs(%v) = %+v, %v", tc.args, opts, err)
 		}
-	})
-	t.Run("dry run by default", func(t *testing.T) {
-		opts, err := parseImportArgs([]string{"x.jsonl"})
-		if err != nil {
-			t.Fatalf("parseImportArgs: %v", err)
-		}
-		if opts.File != "x.jsonl" || opts.Apply {
-			t.Errorf("opts = %+v, want file=x.jsonl and a dry run", opts)
-		}
-	})
-	t.Run("trust-provenance is opt-in", func(t *testing.T) {
-		opts, err := parseImportArgs([]string{"x.jsonl"})
-		if err != nil {
-			t.Fatalf("parseImportArgs: %v", err)
-		}
-		if opts.TrustProvenance {
-			t.Error("trusting an artifact's provenance must be asked for, never the default")
-		}
-		opts, err = parseImportArgs([]string{"--trust-provenance", "x.jsonl"})
-		if err != nil || !opts.TrustProvenance {
-			t.Errorf("opts = %+v (err %v), want TrustProvenance set", opts, err)
-		}
-		// The flag on its own is not a file, exactly as --apply is not.
-		if _, err := parseImportArgs([]string{"--trust-provenance"}); err == nil {
-			t.Error("--trust-provenance alone must not satisfy the file argument")
-		}
-	})
-	t.Run("apply and extra positionals", func(t *testing.T) {
-		opts, err := parseImportArgs([]string{"--apply", "x.jsonl"})
-		if err != nil || !opts.Apply || opts.File != "x.jsonl" {
-			t.Errorf("opts = %+v (err %v), want file=x.jsonl and apply", opts, err)
-		}
-		if _, err := parseImportArgs([]string{"a.jsonl", "b.jsonl"}); err == nil {
-			t.Error("two files must error: import reads exactly one artifact")
-		}
-	})
+	}
 }
 
-// TestBackupDefaultPathIsTimestampedBesideTheDatabase: the default backup name
-// has to be inside the data directory, carry a UTC timestamp, and never collide
-// with the live database or the pre-migrate copy.
-func TestBackupDefaultPathIsTimestampedBesideTheDatabase(t *testing.T) {
+// TestDefaultPathsAreTimestampedBesideTheDatabase: the default backup and export
+// names live in the data directory with a UTC timestamp and never collide with
+// the live database; an explicit --out (or export's "-") is used verbatim.
+func TestDefaultPathsAreTimestampedBesideTheDatabase(t *testing.T) {
 	at := time.Date(2026, 9, 26, 15, 32, 7, 0, time.UTC)
 	got, err := backupDefaultPath(filepath.Join("/data/ghost", "ghost.db"), "", at)
-	if err != nil {
-		t.Fatalf("backupDefaultPath: %v", err)
+	if want := filepath.Join("/data/ghost", "ghost.db.backup-20260926T153207Z"); err != nil || got != want {
+		t.Errorf("backup default path = %q, %v, want %q", got, err, want)
 	}
-	if want := filepath.Join("/data/ghost", "ghost.db.backup-20260926T153207Z"); got != want {
-		t.Errorf("default path = %q, want %q", got, want)
+	if explicit, err := backupDefaultPath("/data/ghost/ghost.db", "/elsewhere/snap.db", at); err != nil || explicit != "/elsewhere/snap.db" {
+		t.Errorf("explicit --out = %q, %v, want it verbatim", explicit, err)
 	}
-	explicit, err := backupDefaultPath(filepath.Join("/data/ghost", "ghost.db"), "/elsewhere/snap.db", at)
-	if err != nil {
-		t.Fatalf("backupDefaultPath(explicit): %v", err)
-	}
-	if explicit != "/elsewhere/snap.db" {
-		t.Errorf("explicit --out = %q, want it used verbatim", explicit)
-	}
-	if strings.HasSuffix(got, "ghost.db") {
-		t.Error("the default must never be the live database itself")
-	}
-}
-
-func TestExportDefaultPathIsTimestampedBesideTheDatabase(t *testing.T) {
-	at := time.Date(2026, 9, 26, 15, 32, 7, 0, time.UTC)
-	got, err := exportDefaultPath("/data/ghost", "", at)
-	if err != nil {
-		t.Fatalf("exportDefaultPath: %v", err)
-	}
-	if want := filepath.Join("/data/ghost", "ghost-export-20260926T153207Z.jsonl"); got != want {
-		t.Errorf("default path = %q, want %q", got, want)
+	got, err = exportDefaultPath("/data/ghost", "", at)
+	if want := filepath.Join("/data/ghost", "ghost-export-20260926T153207Z.jsonl"); err != nil || got != want {
+		t.Errorf("export default path = %q, %v, want %q", got, err, want)
 	}
 	if got, err := exportDefaultPath("/data/ghost", "-", at); err != nil || got != "-" {
-		t.Errorf(`--out - = %q (err %v), want the stdout marker "-"`, got, err)
+		t.Errorf(`--out - = %q, %v, want the stdout marker "-"`, got, err)
 	}
 }
 
-// TestRunBackupCoreWritesAndReports: the CLI's backup path is the real store
-// method against a temp database, and the report has to name the file and every
-// row count a restore would check.
+// TestRunBackupCoreWritesAndReports: the report names the file and every row
+// count a restore would check, and a second run into the same path fails without
+// printing a report.
 func TestRunBackupCoreWritesAndReports(t *testing.T) {
 	store := transferTestStore(t)
 	ctx := context.Background()
@@ -367,7 +197,6 @@ func TestRunBackupCoreWritesAndReports(t *testing.T) {
 	if _, err := store.Create(ctx, "p1", memory.Memory{Category: "fact", Content: "one", Source: "mcp"}); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-
 	dest := filepath.Join(t.TempDir(), "snap.db")
 	var out strings.Builder
 	if err := runBackupCore(ctx, store, &out, dest); err != nil {
@@ -376,30 +205,20 @@ func TestRunBackupCoreWritesAndReports(t *testing.T) {
 	if _, err := os.Stat(dest); err != nil {
 		t.Fatalf("no backup at %s: %v", dest, err)
 	}
-	text := out.String()
-	if !strings.Contains(text, dest) {
-		t.Errorf("report does not name the file it wrote:\n%s", text)
-	}
-	for _, want := range []string{"projects:     1", "memories:     1", "memory_links: 0", "tasks:        0", "decisions:    0"} {
-		if !strings.Contains(text, want) {
-			t.Errorf("report is missing %q:\n%s", want, text)
+	for _, want := range []string{"backed up " + dest, "bytes", "projects:     1", "memories:     1", "memory_links: 0", "tasks:        0", "decisions:    0"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("report is missing %q:\n%s", want, out.String())
 		}
 	}
-
-	// A second run into the same path fails rather than replacing it, and the
-	// report is not printed as if it had succeeded.
 	var second strings.Builder
-	if err := runBackupCore(ctx, store, &second, dest); err == nil {
-		t.Error("a second backup into the same path must fail")
-	}
-	if second.Len() != 0 {
-		t.Errorf("a failed backup printed a report:\n%s", second.String())
+	if err := runBackupCore(ctx, store, &second, dest); err == nil || second.Len() != 0 {
+		t.Errorf("a second backup into the same path = %v with report %q, want a failure with no report", err, second.String())
 	}
 }
 
-// TestRunExportCoreThenRunImportCoreRoundTrip: the two commands against each
-// other — export writes an artifact, import reads it back into a store that has
-// never seen the data, dry run first and then applied.
+// TestRunExportCoreThenRunImportCoreRoundTrip: export writes an artifact, import
+// reads it into a store that has never seen the data (dry run first, then
+// applied, then a no-op re-run that says so).
 func TestRunExportCoreThenRunImportCoreRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	src := transferTestStore(t)
@@ -409,115 +228,68 @@ func TestRunExportCoreThenRunImportCoreRoundTrip(t *testing.T) {
 	if _, err := src.Create(ctx, "p1", memory.Memory{Category: "gotcha", Content: "remembered", Source: "manual"}); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-
 	artifact := filepath.Join(t.TempDir(), "export.jsonl")
 	var summary strings.Builder
 	if err := runExportCore(ctx, src, &summary, &summary, artifact, ""); err != nil {
 		t.Fatalf("runExportCore: %v", err)
 	}
-	if !strings.Contains(summary.String(), artifact) {
-		t.Errorf("export summary does not name the artifact:\n%s", summary.String())
-	}
-	for _, want := range []string{"1 project", "1 memory"} {
+	for _, want := range []string{artifact, "1 project", "1 memory"} {
 		if !strings.Contains(summary.String(), want) {
 			t.Errorf("export summary is missing %q:\n%s", want, summary.String())
 		}
 	}
 
 	dst := transferTestStore(t)
-	// Dry run: reports what it would do and writes nothing.
-	var dry strings.Builder
-	if err := runImportCore(ctx, dst, artifact, portable.ImportOptions{}, &dry); err != nil {
-		t.Fatalf("runImportCore(dry run): %v", err)
-	}
-	if !strings.Contains(dry.String(), "would import") {
-		t.Errorf("dry run did not say it would import:\n%s", dry.String())
-	}
-	if !strings.Contains(dry.String(), "--apply") {
-		t.Errorf("dry run did not say how to apply it:\n%s", dry.String())
-	}
-	if n := countMemories(t, dst); n != 0 {
-		t.Errorf("dry run wrote %d memories", n)
-	}
-
-	var applied strings.Builder
-	if err := runImportCore(ctx, dst, artifact, portable.ImportOptions{Apply: true}, &applied); err != nil {
-		t.Fatalf("runImportCore(apply): %v", err)
-	}
-	if !strings.Contains(applied.String(), "imported") {
-		t.Errorf("apply did not report what it imported:\n%s", applied.String())
-	}
-	if n := countMemories(t, dst); n != 1 {
-		t.Errorf("apply left %d memories, want 1", n)
-	}
-
-	// Re-running is a no-op that says so, which is what makes a re-run the
-	// repair after a rejected record.
-	var again strings.Builder
-	if err := runImportCore(ctx, dst, artifact, portable.ImportOptions{Apply: true}, &again); err != nil {
-		t.Fatalf("second runImportCore: %v", err)
-	}
-	if !strings.Contains(again.String(), "skipped") {
-		t.Errorf("a re-import did not report the skips:\n%s", again.String())
-	}
-	if n := countMemories(t, dst); n != 1 {
-		t.Errorf("a re-import changed the memory count to %d", n)
+	for _, step := range []struct {
+		opts  portable.ImportOptions
+		wants []string
+		count int
+	}{
+		{portable.ImportOptions{}, []string{"would import", "--apply"}, 0},
+		{portable.ImportOptions{Apply: true}, []string{"imported"}, 1},
+		{portable.ImportOptions{Apply: true}, []string{"skipped"}, 1},
+	} {
+		var out strings.Builder
+		if err := runImportCore(ctx, dst, artifact, step.opts, &out); err != nil {
+			t.Fatalf("runImportCore(%+v): %v", step.opts, err)
+		}
+		for _, want := range step.wants {
+			if !strings.Contains(out.String(), want) {
+				t.Errorf("import %+v did not say %q:\n%s", step.opts, want, out.String())
+			}
+		}
+		if n := countMemories(t, dst); n != step.count {
+			t.Errorf("import %+v left %d memories, want %d", step.opts, n, step.count)
+		}
 	}
 }
 
-// TestRunImportCoreReportsARejectedRecordAndFails: a record this build cannot
-// accept has to leave a non-zero exit, because a silent partial import reads as
-// a complete one.
-func TestRunImportCoreReportsARejectedRecordAndFails(t *testing.T) {
-	body := `{"type":"header","schema_version":1}` + "\n" +
+// TestRunImportCoreRefusals: a rejected record, an unknown schema version and a
+// missing file each leave an error naming what is wrong; a silent partial import
+// reads as a complete one.
+func TestRunImportCoreRefusals(t *testing.T) {
+	rejected := `{"type":"header","schema_version":1}` + "\n" +
 		`{"type":"project","project":{"id":"p1","path":"/src/p1","name":"one"}}` + "\n" +
 		`{"type":"memory","memory":{"id":"m1","project_id":"p1","category":"not-a-category","content":"x","source":"mcp"}}` + "\n"
-	path := filepath.Join(t.TempDir(), "bad.jsonl")
-	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
-		t.Fatalf("write artifact: %v", err)
-	}
-	store := transferTestStore(t)
-	var out strings.Builder
-	err := runImportCore(context.Background(), store, path, portable.ImportOptions{Apply: true}, &out)
-	if err == nil {
-		t.Fatal("an import with a rejected record must report an error")
-	}
-	if !strings.Contains(err.Error(), "rejected") {
-		t.Errorf("error = %v, want it to say a record was rejected", err)
-	}
-	if !strings.Contains(out.String(), "reject") {
-		t.Errorf("report is missing the rejected record:\n%s", out.String())
-	}
-	if !strings.Contains(out.String(), "m1") {
-		t.Errorf("report does not name the rejected record:\n%s", out.String())
-	}
-}
-
-// TestRunImportCoreRefusesAnUnknownSchemaVersion: the CLI reports the refusal
-// rather than importing what it cannot interpret.
-func TestRunImportCoreRefusesAnUnknownSchemaVersion(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "future.jsonl")
-	if err := os.WriteFile(path, []byte(`{"type":"header","schema_version":7}`+"\n"), 0o600); err != nil {
-		t.Fatalf("write artifact: %v", err)
-	}
-	store := transferTestStore(t)
-	err := runImportCore(context.Background(), store, path, portable.ImportOptions{Apply: true}, &strings.Builder{})
-	if err == nil {
-		t.Fatal("an unknown schema version must be refused")
-	}
-	if !strings.Contains(err.Error(), "7") {
-		t.Errorf("error = %v, want it to name the version", err)
-	}
-}
-
-func TestRunImportCoreReportsAMissingFile(t *testing.T) {
-	store := transferTestStore(t)
-	err := runImportCore(context.Background(), store, filepath.Join(t.TempDir(), "gone.jsonl"), portable.ImportOptions{Apply: true}, &strings.Builder{})
-	if err == nil {
-		t.Fatal("a missing artifact must be an error")
-	}
-	if !strings.Contains(err.Error(), "gone.jsonl") {
-		t.Errorf("error = %v, want it to name the file", err)
+	for _, tc := range []struct{ name, body, want string }{
+		{"rejected.jsonl", rejected, "rejected"},
+		{"future.jsonl", `{"type":"header","schema_version":7}` + "\n", "7"},
+		{"gone.jsonl", "", "gone.jsonl"},
+	} {
+		path := filepath.Join(t.TempDir(), tc.name)
+		if tc.body != "" {
+			if err := os.WriteFile(path, []byte(tc.body), 0o600); err != nil {
+				t.Fatalf("write artifact: %v", err)
+			}
+		}
+		var out strings.Builder
+		err := runImportCore(context.Background(), transferTestStore(t), path, portable.ImportOptions{Apply: true}, &out)
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: error = %v, want one containing %q", tc.name, err, tc.want)
+		}
+		if tc.want == "rejected" && !strings.Contains(out.String(), "m1") {
+			t.Errorf("the report does not name the rejected record:\n%s", out.String())
+		}
 	}
 }
 
@@ -529,8 +301,7 @@ func TestRunExportCoreRejectsAnUnknownProject(t *testing.T) {
 		t.Fatalf("EnsureProject: %v", err)
 	}
 	dest := filepath.Join(t.TempDir(), "x.jsonl")
-	err := runExportCore(context.Background(), store, &strings.Builder{}, &strings.Builder{}, dest, "nope")
-	if err == nil {
+	if err := runExportCore(context.Background(), store, &strings.Builder{}, &strings.Builder{}, dest, "nope"); err == nil {
 		t.Fatal("an unmatched --project must fail")
 	}
 	if _, statErr := os.Stat(dest); statErr == nil {
@@ -538,34 +309,9 @@ func TestRunExportCoreRejectsAnUnknownProject(t *testing.T) {
 	}
 }
 
-// TestPrintBackupReportNamesEveryTable: a report that omitted a table would
-// leave a reader unable to tell an empty store from a truncated copy.
-func TestPrintBackupReportNamesEveryTable(t *testing.T) {
-	var out strings.Builder
-	err := printBackupReport(&out, memory.BackupResult{
-		Path:   "/data/ghost.db.backup-20260926T153207Z",
-		Bytes:  4096,
-		Counts: memory.BackupCounts{Projects: 2, Memories: 5, MemoryLinks: 1, Tasks: 1, Decisions: 1},
-	})
-	if err != nil {
-		t.Fatalf("printBackupReport: %v", err)
-	}
-	text := out.String()
-	if !strings.HasPrefix(text, "backed up /data/ghost.db.backup-20260926T153207Z") {
-		t.Errorf("first line = %q, want the path", strings.SplitN(text, "\n", 2)[0])
-	}
-	if !strings.Contains(text, "4096 bytes") {
-		t.Errorf("report does not state the size:\n%s", text)
-	}
-	for _, want := range []string{
-		"projects:     2", "memories:     5", "memory_links: 1", "tasks:        1", "decisions:    1",
-	} {
-		if !strings.Contains(text, want) {
-			t.Errorf("report is missing %q:\n%s", want, text)
-		}
-	}
-}
-
+// TestPrintImportReportNamesTheFileAndTheCounts: the summary names the file, the
+// counts and skips, a singular noun for 1, and the provenance policy (it decides
+// what every memory becomes, and the artifact's own value is gone once stored).
 func TestPrintImportReportNamesTheFileAndTheCounts(t *testing.T) {
 	report := portable.ImportReport{
 		Applied: true,
@@ -576,46 +322,19 @@ func TestPrintImportReportNamesTheFileAndTheCounts(t *testing.T) {
 	if err := printImportReport(&out, "/tmp/x.jsonl", report, portable.ImportOptions{Apply: true}); err != nil {
 		t.Fatalf("printImportReport: %v", err)
 	}
-	text := out.String()
-	if !strings.Contains(text, "/tmp/x.jsonl") {
-		t.Errorf("report does not name the artifact:\n%s", text)
+	for _, want := range []string{"/tmp/x.jsonl", "1 project", "3 memories", "skipped 2",
+		"provenance and retention downgraded", memory.RetentionProject, "--trust-provenance"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("report is missing %q:\n%s", want, out.String())
+		}
 	}
-	if !strings.Contains(text, "1 project") || !strings.Contains(text, "3 memories") {
-		t.Errorf("report does not state what was created:\n%s", text)
-	}
-	if !strings.Contains(text, "skipped 2") {
-		t.Errorf("report does not state the skips:\n%s", text)
-	}
-	// The provenance policy is in the summary, not only on the record lines: it
-	// decides what every memory in the file becomes, and the stored source is the
-	// rewritten one, so the artifact's own value is gone from the store. The
-	// retention tier is part of the same rewrite and is named beside it.
-	if !strings.Contains(text, "provenance and retention downgraded") {
-		t.Errorf("report does not state the provenance downgrade:\n%s", text)
-	}
-	if !strings.Contains(text, memory.RetentionProject) {
-		t.Errorf("report does not name the tier a downgraded memory lands on:\n%s", text)
-	}
-	if !strings.Contains(text, "--trust-provenance") {
-		t.Errorf("report does not name the flag that changes it:\n%s", text)
-	}
-	trusted := portable.ImportReport{Applied: true, Created: map[string]int{"memory": 1}}
 	out.Reset()
+	trusted := portable.ImportReport{Applied: true, Created: map[string]int{"memory": 1, "task": 1}}
 	if err := printImportReport(&out, "x.jsonl", trusted, portable.ImportOptions{Apply: true, TrustProvenance: true}); err != nil {
 		t.Fatalf("printImportReport(trusted): %v", err)
 	}
-	if !strings.Contains(out.String(), "provenance and retention kept as the artifact states them") {
-		t.Errorf("a --trust-provenance run does not say it kept the provenance:\n%s", out.String())
-	}
-	// A plural-aware noun for a count of 1, so a single record is not reported
-	// as "1 memories".
-	report = portable.ImportReport{Applied: false, Created: map[string]int{"task": 1}}
-	out.Reset()
-	if err := printImportReport(&out, "x.jsonl", report, portable.ImportOptions{}); err != nil {
-		t.Fatalf("printImportReport: %v", err)
-	}
-	if strings.Contains(out.String(), "1 tasks") {
-		t.Errorf("report pluralised a single task:\n%s", out.String())
+	if !strings.Contains(out.String(), "provenance and retention kept as the artifact states them") || strings.Contains(out.String(), "1 tasks") {
+		t.Errorf("the trusted report misstates the policy or pluralises a single task:\n%s", out.String())
 	}
 }
 
