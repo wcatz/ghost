@@ -27,6 +27,9 @@ import (
 )
 
 // GlobalProjectID is the reserved project id Ghost stores its own shipped
+// rules under. It is a persisted value, not an in-memory convention: it is the
+// projects.id row the global seeds are written into, the memories.project_id
+// every global row carries, and the value cross-project queries filter on.
 const GlobalProjectID = "_global"
 
 // Memory represents a single discrete memory.
@@ -72,6 +75,11 @@ type Project struct {
 }
 
 // Queryer is the read surface shared by *sql.DB and *sql.Tx. Search
+// explanations and candidate retrieval use it to keep their production result
+// and diagnostic reads on one SQLite snapshot: a method that takes a *sql.DB
+// cannot be redirected onto a transaction, and a transaction that issued its
+// reads through the pool would wait for a second connection the single-
+// connection store does not have.
 type Queryer interface {
 	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
 	QueryRowContext(context.Context, string, ...any) *sql.Row
@@ -117,6 +125,8 @@ func (s *Store) SetOnSave(fn func(projectID string)) {
 }
 
 // SetDemotionThreshold overrides the near-duplicate demotion cutoff
+// GetTopMemories uses. Call after NewStore once config is loaded; until
+// called, GetTopMemories uses DefaultDemotionThreshold.
 func (s *Store) SetDemotionThreshold(threshold float64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -124,6 +134,8 @@ func (s *Store) SetDemotionThreshold(threshold float64) {
 }
 
 // SetVectorMinSimilarity overrides the vector-leg cosine floor hybrid search
+// applies before fusion. Call after NewStore once config is loaded; until
+// called, the floor is 0 (only non-positive cosines dropped).
 func (s *Store) SetVectorMinSimilarity(floor float32) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -137,6 +149,9 @@ func (s *Store) vectorMinSimilarityFloor() float32 {
 }
 
 // SetEmbeddingIdentity declares which vector space this process embeds into —
+// the model, its dimensions and its task-prefix setting, as produced by
+// embedding.VectorIdentity. Call after NewStore once config is loaded, with
+// the same string the embedding client stamps into memory_embeddings.model.
 func (s *Store) SetEmbeddingIdentity(identity string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -224,6 +239,9 @@ func shippedSeedContents() []string {
 }
 
 // SeedGlobalMemories ensures the _global project exists and inserts any
+// missing seed memories. Seeds are pinned and source='builtin' so they
+// survive consolidation without being presented as user-authored. Idempotent —
+// skips memories whose content already exists.
 func (s *Store) SeedGlobalMemories(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -315,6 +333,9 @@ func (s *Store) ListProjects(ctx context.Context) ([]Project, error) {
 }
 
 // GetProjectPath returns the filesystem path recorded for a project. Callers
+// use it to inspect the working tree (e.g. reflection's git context); a
+// missing project is an error, but callers that treat the path as optional
+// can ignore it.
 func (s *Store) GetProjectPath(ctx context.Context, id string) (string, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -336,11 +357,15 @@ func (s *Store) EnsureProject(ctx context.Context, id, path, name string) error 
 }
 
 // EnsureProjectWithRepo is EnsureProject plus the normalized remote URL of the
+// repository at path.
 func (s *Store) EnsureProjectWithRepo(ctx context.Context, id, path, name, repoRemote string) error {
 	return s.ensureProjectLocked(ctx, id, path, name, repoRemote)
 }
 
 // BindNewProjectToCheckout opens project id at the checkout dir, recording the
+// physical path and, when repoRemote is not empty, the repository, and reports
+// whether it did. It is the write side of a save that creates a project from a
+// name (#957).
 func (s *Store) BindNewProjectToCheckout(ctx context.Context, id, dir, name, repoRemote string) (bool, error) {
 	repoRemote = NormalizeRepoRemote(repoRemote)
 	if id == "" || id == "_global" || dir == id || !storedPathIsUsable(dir) {
@@ -404,6 +429,7 @@ func (s *Store) BindNewProjectToCheckout(ctx context.Context, id, dir, name, rep
 }
 
 // BindingRefusalKind names the rule that stopped a repository from claiming
+// the project its name matched.
 type BindingRefusalKind string
 
 const (
@@ -413,6 +439,7 @@ const (
 )
 
 // BindingRefusal reports that a repository was not allowed to claim the
+// project its name matched, and names the project the save went to instead.
 type BindingRefusal struct {
 	Kind           BindingRefusalKind
 	Name           string
@@ -424,6 +451,9 @@ type BindingRefusal struct {
 }
 
 // Notice renders the refusal for whoever asked for the save: what kept the
+// name, where the memory went, and what — if anything — the reader can run to
+// make the split go away. Empty for no refusal, so a caller can append it to
+// every save result without a nil check.
 func (r *BindingRefusal) Notice() string {
 	if r == nil {
 		return ""
@@ -471,6 +501,9 @@ func namedCandidates(ids []string, matched int) string {
 }
 
 // ResolveOrCreateRepoProject resolves a repository-aware save to one project
+// and creates that project when no identity match exists. The complete
+// resolve-or-create sequence runs in one immediate SQLite transaction, so
+// separate Ghost processes cannot both create the first project for a remote.
 func (s *Store) ResolveOrCreateRepoProject(ctx context.Context, projectRef, repoName, id, path, name, repoRemote string) (string, *BindingRefusal, error) {
 	repoRemote = NormalizeRepoRemote(repoRemote)
 	if repoRemote == "" {
@@ -1065,6 +1098,11 @@ func (s *Store) ensureProjectLocked(ctx context.Context, id, path, name, repoRem
 }
 
 // MergeProject reassigns all child records from oldID to newID, then deletes
+// the old project row. Use this to unify duplicate project entries.
+// Refuses _global on either side, mirroring DeleteProject: merging away from
+// _global would delete its project row and silently stop global injection
+// everywhere; merging into it would dump an arbitrary bucket into every
+// session's context.
 func (s *Store) MergeProject(ctx context.Context, oldID, newID string) error {
 	if oldID == "_global" || newID == "_global" {
 		return fmt.Errorf("refusing to merge the _global project (old=%s new=%s)", RefusalArg(ProjectIdentifierLabel, oldID), RefusalArg(ProjectIdentifierLabel, newID))
@@ -1271,6 +1309,7 @@ func (s *Store) mergeProjectTx(ctx context.Context, tx *sql.Tx, oldID, newID str
 }
 
 // DeleteProjectSummary reports what DeleteProject found (dry-run) or removed
+// (apply) for one project, across every table that references it.
 type DeleteProjectSummary struct {
 	ProjectID        string
 	ProjectName      string
@@ -1437,6 +1476,7 @@ func deleteProjectRowTx(ctx context.Context, tx *sql.Tx, id string) error {
 var detectRemoteForPath = func(string) string { return "" }
 
 // SetDetectRemote wires the repository detector used when resolving a project
+// by filesystem path. Passing nil restores the default no-op.
 func SetDetectRemote(fn func(dir string) string) {
 	if fn == nil {
 		detectRemoteForPath = func(string) string { return "" }
@@ -1446,9 +1486,21 @@ func SetDetectRemote(fn func(dir string) string) {
 }
 
 // ErrAmbiguousProject means an identifier matched more than one project and
+// choosing one would silently send a caller's data to an arbitrary project.
+// Callers that create projects must propagate this error instead of treating
+// it as a miss.
 var ErrAmbiguousProject = errors.New("project identifier is ambiguous")
 
 // ResolveProject resolves an exact ID/name, a canonical path prefix, an exact
+// repository remote, or one evidence-backed basename candidate. A genuine miss
+// returns ("", "", nil); multiple surviving candidates return ErrAmbiguousProject.
+// ResolveExactProjectID reports whether input is literally a project's id. It
+// is deliberately narrower than ResolveProject: that function also accepts a
+// path prefix, a repository remote and a basename fallback, and the write side
+// must not use those — reclassifying a save that named an existing project by
+// the repository the session happens to be standing in would move the memory to
+// a different project than the caller addressed. Only the id is a claim the
+// caller can make without evidence.
 func (s *Store) ResolveExactProjectID(ctx context.Context, id string) (string, bool, error) {
 	var name string
 	err := s.db.QueryRowContext(ctx, `SELECT id, name FROM projects WHERE id = ? LIMIT 1`, id).Scan(&id, &name)
@@ -1749,6 +1801,8 @@ func isASCIILetter(c byte) bool {
 }
 
 // IsPathShaped reports whether s looks like a filesystem path rather than a
+// project name or a repository remote: it contains a path separator, or it
+// begins with a drive-relative Windows prefix such as C:repo.
 func IsPathShaped(s string) bool {
 	if strings.ContainsAny(s, `/\`) {
 		return true
@@ -1796,6 +1850,8 @@ func samePath(a, b string) bool {
 }
 
 // ListProjectNames returns all known project names, ordered the same way as
+// ListProjects (name ASC) — used to format an actionable CLI error listing
+// known projects on a resolution miss.
 func (s *Store) ListProjectNames(ctx context.Context) ([]string, error) {
 	projects, err := s.ListProjects(ctx)
 	if err != nil {
@@ -1809,6 +1865,7 @@ func (s *Store) ListProjectNames(ctx context.Context) ([]string, error) {
 }
 
 // CreateFromCorpus inserts a memory from a third-party benchmark dataset,
+// without the credential guard Create applies.
 func (s *Store) CreateFromCorpus(ctx context.Context, projectID string, m Memory) (string, error) {
 	return s.insertMemory(ctx, projectID, m, insertOptions{})
 }
@@ -1835,6 +1892,8 @@ func secretSourceRefField(sourceRef string) []secretField {
 }
 
 // Create inserts a new memory and returns its ID. The insert and the history
+// row that records it share one transaction, so a memory cannot exist without
+// its own first entry in its history.
 func (s *Store) Create(ctx context.Context, projectID string, m Memory) (string, error) {
 	if err := checkMemoryWrite(m); err != nil {
 		return "", err
@@ -1873,6 +1932,9 @@ func (s *Store) CreateWithID(ctx context.Context, projectID, id string, m Memory
 }
 
 // CreateWithIDFromCorpus is CreateWithID with the corpus opt-out: the caller's id,
+// the credential guard and the whole write are CreateWithID's, and the one bit that
+// differs is recordVerification — so a verified_at the DATASET states is stored
+// verbatim as the column's value and no `verified` record is appended for it.
 func (s *Store) CreateWithIDFromCorpus(ctx context.Context, projectID, id string, m Memory) (string, error) {
 	if id == "" {
 		return "", errors.New("create memory: no id given; CreateWithIDFromCorpus stores the row under the id it is given, and an empty one would be a row the caller cannot find again")
@@ -1948,21 +2010,33 @@ func (s *Store) insertMemory(ctx context.Context, projectID string, m Memory, op
 // Upsert checks for an existing similar memory, probing in two stages:
 
 // MaxSourceRefLen is the byte cap on a write-time source reference, at the store
+// rather than at the tool boundary.
 const MaxSourceRefLen = 512
 
 // MaxAgentLen is the byte cap on a write-time agent, for the same reason and by
+// the same route as MaxSourceRefLen: the shared item line prints `agent=` beside
+// `source_ref=` on every listing, so a value with no bound is a value echoed into
+// every answer that touches the row.
 const MaxAgentLen = 128
 
 // StoredStampLayout is the layout a writer stores a validity stamp in: SQLite's
+// own datetime() shape, in UTC.
 const StoredStampLayout = "2006-01-02 15:04:05"
 
 // DateStampLayout is the whole-day form, the other shape SQLite's date() produces.
 const DateStampLayout = "2006-01-02"
 
 // StampLayouts is every layout a reader of a validity column accepts, in the order
+// to try them: what Ghost's own writers store first, then the whole-day form a
+// portable artifact, a hand edit or a date() call can leave behind.
 var StampLayouts = []string{StoredStampLayout, DateStampLayout}
 
 // ParseStamp reads a stored validity stamp over every layout StampLayouts names,
+// reporting whether it was readable. The store owns it because a writer judging a
+// value it did not store and a reader interpreting one have to reach the same
+// answer: a check that understood only the shape Ghost writes would wave through
+// a contradiction on every imported, restored or hand-edited row, and a reader
+// that understood only its own would read a real claim as no claim at all.
 func ParseStamp(s string) (time.Time, bool) {
 	for _, layout := range StampLayouts {
 		if at, err := time.Parse(layout, s); err == nil {
@@ -1973,6 +2047,10 @@ func ParseStamp(s string) (time.Time, bool) {
 }
 
 // AcceptedStampForms are the forms a caller may write a validity stamp in, in
+// the order NormalizeStampArg's refusal lists them: RFC 3339, or a whole day.
+// The whole-day form is DateStampLayout because it is the same string the
+// store's readers accept. The stored layout is not among them; a caller writes
+// an instant or a day, and the stored layout is what both become.
 var AcceptedStampForms = []string{time.RFC3339, DateStampLayout}
 
 // NormalizeStampArg normalizes one caller-supplied stamp into the stored layout.
@@ -1994,6 +2072,16 @@ func NormalizeStampArg(field, s string, endOfDay bool) (*string, error) {
 }
 
 // NormalizeImportedStamp is NormalizeStampArg for a stamp read from a portable
+// artifact. It accepts one form more, the stored layout, because that is what
+// `ghost export` writes for every row a writer tool stored. A value the stored
+// layout reads is returned as a copy of the raw text, never re-formatted:
+// time.Parse accepts a fractional second the layout does not name, and
+// formatting would truncate it, so a window ParseStamp, CheckWindowOrder and
+// readableStampSQL all order (00:00:00.2 to 00:00:00.8) would be refused over
+// values the row does not hold. Every other value is read exactly as the save
+// tool reads it, end-of-day rule included — so a bare-date valid_until an older
+// import stored, which export writes verbatim, comes back as 23:59:59 of that
+// day rather than the midnight today's readers give it.
 func NormalizeImportedStamp(field string, raw *string, endOfDay bool) (*string, error) {
 	if raw == nil {
 		return nil, nil
@@ -2006,6 +2094,11 @@ func NormalizeImportedStamp(field string, raw *string, endOfDay bool) (*string, 
 }
 
 // CheckConfidence refuses a trust rating outside [0,1], the rule the writer tools
+// and `ghost import` share. The range is checked rather than clamped: a value
+// outside it is not a low belief but a broken scale, and clamping it would
+// invent a rating nobody gave. NaN and ±Inf are refused first, because a NaN
+// passes every `f < 0 || f > 1` comparison and would be stored and then rendered
+// as "confidence NaN".
 func CheckConfidence(f float64) error {
 	if math.IsNaN(f) || math.IsInf(f, 0) {
 		return fmt.Errorf("confidence must be a finite number between 0 and 1, got %v", f)
@@ -2017,6 +2110,8 @@ func CheckConfidence(f float64) error {
 }
 
 // CheckWindowOrder refuses a window that does not end after it starts, judging the
+// effective pair: the boundaries the caller supplied, with a missing half taken
+// from what the row already holds.
 func CheckWindowOrder(v, stored Validity) error {
 	from, until := v.ValidFrom, v.ValidUntil
 	if from == nil {
@@ -2040,6 +2135,7 @@ func CheckWindowOrder(v, stored Validity) error {
 }
 
 // Validity is the optional temporal claim attached to one write: when the
+// memory became true, when it stops being true, and when someone last checked.
 type Validity struct {
 	ValidFrom  *string
 	ValidUntil *string
@@ -2047,6 +2143,10 @@ type Validity struct {
 }
 
 // IsZero reports whether the claim is entirely absent, so a write can leave the
+// three columns alone without the caller having to know which of them exist. It
+// is the one place that question is answered, because the callers that need it —
+// a tool deciding whether a request stated anything at all — must not each hold
+// their own copy of it and disagree about what "stated nothing" means.
 func (v Validity) IsZero() bool {
 	return v.ValidFrom == nil && v.ValidUntil == nil && v.VerifiedAt == nil
 }
@@ -2290,6 +2390,13 @@ func applyViewFromContext(ctx context.Context) (*applyView, bool) {
 }
 
 // CheckUpsertArguments is every refusal UpsertWithOptions makes from its
+// arguments alone, before it takes the lock or opens a transaction. It is the
+// SAME predicate the upsert asks first, exported so a caller that has to open a
+// project before the write — the MCP save tools — can ask it before opening
+// that project: a refused save must leave no empty project, and no checkout
+// binding, behind it. What the upsert can still refuse after this answer is nil
+// needs a row the store already holds in that project (the fold-time window
+// check), so it cannot fire on a project the caller has just opened.
 func CheckUpsertArguments(content string, tags []string, opts UpsertOptions) error {
 	if err := rejectSecretFields(secretContentAndTags(content, tags)...); err != nil {
 		return err
@@ -2641,9 +2748,38 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 }
 
 // DecayRankingSQL is the composite-score ranking expression shared by
+// GetTopMemories below and the session-start hook's own read-only query
+// (internal/mcpinit/hook.go's loadSessionContext) — a single source of truth
+// for the category-aware time-decay + pinned-exemption formula so the two
+// callers can never drift apart. It is a fragment, not a full query: callers
+// interpolate it into their own "ORDER BY (...) DESC" clause.
+// The 0.15 and 0.3 floors create a dead zone at the low end of each decaying
+// category: a brand-new memory saved at importance 0.15 (or 0.3) scores
+// identically to a maximally-important, fully-decayed one of the same
+// category (1.0 * 0.15 == 0.15 * 1.0). Accepted — importance that low is rare
+// in practice (defaults are 0.5+) — but if ranking ever looks off for a
+// low-importance category member, this tie is why.
+// Pinned is a full decay exemption (factor 1.0), not a multiplier on top of
+// the decayed/floored score — a pinned memory always scores at its raw
+// importance regardless of age or category. preference and convention never
+// decay; a fact never decays unless its content carries a calendar date, in
+// which case it decays on the pattern/architecture curve. The tier factor is the
+// one that has to multiply rather than stand in, because a session row decays by
+// its category AND by how long it is wanted.
 var DecayRankingSQL = decayRankingSQL(true)
 
 // DecayRankingSQLWithTier is the same expression with or without the tier half,
+// for a reader that may not be able to name memories.retention. The
+// session-start loaders hold a read-only handle that runs no migration
+// (memory.OpenReadDB), so on a store from before schema v19 the column is not
+// there and naming it fails the whole query with SQLite's "no such column" —
+// which a passive read takes as no rows, so a user whose first session after the
+// upgrade starts the hook would get a digest with no memories and nothing saying
+// why. That is the same window memories.scope has always had, and the remedy is
+// the same shape: the expression a reader cannot afford to fail on drops the half
+// it cannot spell. passiveColumnsFor picks which half, and it is the only place
+// that does — a second version floor in a caller is a second answer to "which
+// columns does this store have".
 func DecayRankingSQLWithTier(hasTier bool) string {
 	return decayRankingSQL(hasTier)
 }
@@ -2669,6 +2805,7 @@ func decayRankingSQL(hasTier bool) string {
 }
 
 // GetTopMemories returns the top N memories ranked by composite score
+// with category-aware time decay and pinned exemption.
 func (s *Store) GetTopMemories(ctx context.Context, projectID string, limit int) ([]Memory, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -2728,6 +2865,10 @@ func (s *Store) GetTopMemories(ctx context.Context, projectID string, limit int)
 }
 
 // SearchFTS searches memories using full-text search. It returns every match in
+// the window, an expired row included: the browse surfaces show a row outside
+// its window MARKED, not withheld, so this reader must not filter. The query
+// path calls searchFTSValidating directly, which applies the window predicate
+// before the LIMIT (#1053); the two share one statement so they cannot drift.
 func (s *Store) SearchFTS(ctx context.Context, projectID, query string, limit int) ([]Memory, error) {
 	memories, err := s.searchFTSValidating(ctx, projectID, query, limit, time.Time{}, false)
 	if err != nil {
@@ -2806,6 +2947,8 @@ func (s *Store) GetAll(ctx context.Context, projectID string, limit int) ([]Memo
 }
 
 // ListMemories returns a project's memories for browsing, narrowed by the two
+// row-level filters a caller can state and left open for everything else. An
+// empty category or retention is no filter on that axis.
 func (s *Store) ListMemories(ctx context.Context, projectID, category, retention string, limit int) ([]Memory, error) {
 	if category != "" && !IsValidCategory(category) {
 		return nil, fmt.Errorf("invalid category %s — must be one of %s", RefusalArg("category", category), categoryList())
@@ -2876,6 +3019,11 @@ func (s *Store) Touch(ctx context.Context, ids []string) error {
 }
 
 // ResolveCandidates returns the project's memories that are eligible for
+// resolution classification: not yet resolved, not pinned, and not in a
+// standing-preference category (convention/preference are never evictable —
+// see the guardrail in the resolution-classifier spec §4). Globals are
+// excluded by the project_id filter. Newest first, so a batch reviews the most
+// recent work first.
 func (s *Store) ResolveCandidates(ctx context.Context, projectID string) ([]Memory, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -2898,6 +3046,13 @@ func (s *Store) ResolveCandidates(ctx context.Context, projectID string) ([]Memo
 }
 
 // ResolvedCandidates returns the project's memories resolve has ALREADY
+// stamped resolved_at, in ResolveCandidates' eligibility shape with the
+// resolved_at predicate inverted: not pinned, and not in a standing-preference
+// category. Those two exclusions are load-bearing for the repair path
+// (internal/resolve.Reassess, issue #640) — a pin is an explicit user override
+// and an exempt category is never resolve's to change — and Newest first, so
+// the report reads like the ordinary pass. Globals are excluded by the
+// project_id filter.
 func (s *Store) ResolvedCandidates(ctx context.Context, projectID string) ([]Memory, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -2920,6 +3075,13 @@ func (s *Store) ResolvedCandidates(ctx context.Context, projectID string) ([]Mem
 }
 
 // ClearResolved clears resolved_at on the given memory IDs, returning them to
+// ranked injection and browse while leaving them searchable — the inverse of
+// SetResolved, used by `ghost resolve --reassess` to repair a resolution that
+// should not have been made (issue #640). The WHERE clause re-checks the same
+// guard as SetResolved (already resolved, unpinned) and binds project_id, so a
+// stale or wrong-project caller cannot resurrect another project's rows.
+// Returns the count actually cleared, which callers should report instead of
+// len(ids). A no-op on an empty slice.
 func (s *Store) ClearResolved(ctx context.Context, projectID string, ids []string) (int, error) {
 	if len(ids) == 0 {
 		return 0, nil
@@ -3018,6 +3180,14 @@ type judgedRow struct {
 }
 
 // ResolveJustification is the deterministic signal a resolve pass read, before
+// its classify call, as the reason to demote one row without asking the
+// classifier (#1389). The stamp is only as good as that signal, and the signal
+// can be withdrawn in the window: a supersedes edge invalidated, a correction
+// memory deleted or rewritten. A row is stamped only while AT LEAST ONE of its
+// signals still holds at write time, checked inside the stamping transaction.
+// The zero value justifies nothing and means "no signal to re-check", which is
+// how a classifier verdict is written: that verdict's own freshness is the
+// content and project CAS.
 type ResolveJustification struct {
 	EdgeSources []string
 	Corrections []Memory
@@ -3177,6 +3347,12 @@ func (s *Store) setResolvedStampTx(ctx context.Context, ids []string, projectID 
 }
 
 // SetResolved stamps resolved_at = now on the given memory IDs, dropping them
+// from the ranked injection/browse surface while leaving them searchable. The
+// WHERE clause re-checks the same eligibility guard as ResolveCandidates
+// (unresolved, unpinned, non-exempt category) at write time, not just at read
+// time — a candidate pinned or recategorized during the classify loop is
+// excluded rather than stamped anyway. Returns the count actually stamped,
+// which callers should report instead of len(ids). A no-op on an empty slice.
 func (s *Store) SetResolved(ctx context.Context, ids []string) (int, error) {
 	if len(ids) == 0 {
 		return 0, nil
@@ -3186,11 +3362,22 @@ func (s *Store) SetResolved(ctx context.Context, ids []string) (int, error) {
 }
 
 // SetResolvedJudged stamps resolved_at on the memories a classifier confirmed
+// resolved, but only those that still hold the EXACT identity the verdict was
+// judged against (#1052). It returns the ids it stamped and the ids it found
+// stale — eligible rows whose content changed while they were being classified,
+// or that were promoted to another project in that window — each in
+// first-appearance order and each disjoint.
 func (s *Store) SetResolvedJudged(ctx context.Context, judged []Memory) (stamped, stale []string, err error) {
 	return s.SetResolvedJustified(ctx, judged, nil)
 }
 
 // SetResolvedJustified is SetResolvedJudged for a pass that demoted some rows on
+// a deterministic signal rather than a verdict (#1389). why maps a row id to the
+// signal it was demoted on; a row with an entry is stamped only while one of its
+// signals still holds, read inside the stamping transaction, and is reported
+// stale otherwise — the same outcome as a row rewritten mid-pass. A row with no
+// entry is written exactly as SetResolvedJudged writes it. A nil or empty why is
+// SetResolvedJudged.
 func (s *Store) SetResolvedJustified(ctx context.Context, judged []Memory, why map[string]ResolveJustification) (stamped, stale []string, err error) {
 	if len(judged) == 0 {
 		return nil, nil, nil
@@ -3208,6 +3395,9 @@ func (s *Store) SetResolvedJustified(ctx context.Context, judged []Memory, why m
 }
 
 // MarkResolved stamps resolved_at on the named ids IN projectID and returns the
+// ids it actually stamped, in the order it stamped them. It is SetResolved for a
+// caller that names its rows — `ghost resolve --mark` (#714) — and the two
+// differences are the point of the separate method rather than a wrapper:
 func (s *Store) MarkResolved(ctx context.Context, projectID string, ids []string, prov Provenance) ([]string, error) {
 	if len(ids) == 0 {
 		return nil, nil
@@ -3223,6 +3413,9 @@ func (s *Store) MarkResolved(ctx context.Context, projectID string, ids []string
 }
 
 // ResolveKeptHashes returns the key resolve recorded when it last judged each
+// memory KEEP, keyed by memory ID — the content hash, or that hash combined
+// with the flag count the verdict was judged with (#880), which
+// is resolve.KeepStamp's two shapes. Only rows with a recorded key appear.
 func (s *Store) ResolveKeptHashes(ctx context.Context, projectID string) (map[string]string, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -3249,6 +3442,12 @@ func (s *Store) ResolveKeptHashes(ctx context.Context, projectID string) (map[st
 }
 
 // MarkResolveKept records KEEP verdicts (id -> resolve's keep stamp: the
+// content hash, plus the flag count the verdict was judged with
+// when there was any — see resolve.KeepStamp, #880) for memories resolve
+// classified as not-resolved. It deliberately does not touch
+// updated_at: the content did not change, and bumping freshness would perturb
+// the reflect signature and decay ranking. The update is project-scoped, so a
+// stale caller cannot write another project's rows. A no-op on an empty map.
 func (s *Store) MarkResolveKept(ctx context.Context, projectID string, hashes map[string]string) error {
 	if len(hashes) == 0 {
 		return nil
@@ -3274,12 +3473,15 @@ func (s *Store) MarkResolveKept(ctx context.Context, projectID string, hashes ma
 }
 
 // SupersedeCheck is a cached NEITHER verdict for an ordered pair: the content
+// hashes it was judged on. A pair is only skipped while both hashes still
+// match.
 type SupersedeCheck struct {
 	NewerHash string
 	OlderHash string
 }
 
 // SupersedeChecked returns the cached NEITHER verdicts for a project, keyed by
+// {newerID, olderID}. Pairs never judged NEITHER are absent from the map.
 func (s *Store) SupersedeChecked(ctx context.Context, projectID string) (map[[2]string]SupersedeCheck, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -3307,6 +3509,9 @@ func (s *Store) SupersedeChecked(ctx context.Context, projectID string) (map[[2]
 }
 
 // MarkSupersedeNeither records (or refreshes) NEITHER verdicts for a project,
+// keyed by {newerID, olderID}. A re-mark updates the stored hashes in place so
+// a stale row cannot accumulate beside a refreshed one. A no-op on an empty
+// map.
 func (s *Store) MarkSupersedeNeither(ctx context.Context, projectID string, checks map[[2]string]SupersedeCheck) error {
 	if len(checks) == 0 {
 		return nil
@@ -3342,22 +3547,32 @@ type DeleteOptions struct {
 }
 
 // Delete removes a specific memory and KEEPS its history. The row's last state is
+// recorded first, in the same transaction: memory_history.memory_id
+// deliberately has no foreign key, so a delete leaves behind a tombstone carrying
+// the text the memory held — the only remaining record of it, and the reason a
+// cascading history table would be empty exactly when the audit is asked.
 func (s *Store) Delete(ctx context.Context, id string) error {
 	return s.DeleteWithOptions(ctx, id, DeleteOptions{})
 }
 
 // DeleteWithOptions is Delete with the caller's choice about the history: kept (a
+// tombstone) or purged (nothing). Both happen inside the one transaction that
+// removes the row, so a memory and its history can never come apart.
 func (s *Store) DeleteWithOptions(ctx context.Context, id string, opts DeleteOptions) error {
 	_, err := s.deleteWithOptionsLocked(ctx, id, opts)
 	return err
 }
 
 // DeletePurge deletes a memory and erases every recorded copy of its text,
+// reporting what the purge reached. It is DeleteWithOptions(PurgeHistory: true)
+// with the checkpoint's result; that call delegates here and drops the detail.
 func (s *Store) DeletePurge(ctx context.Context, id string) (PurgeOutcome, error) {
 	return s.deleteWithOptionsLocked(ctx, id, DeleteOptions{PurgeHistory: true})
 }
 
 // DeletePurgeInProject is DeletePurge scoped to the memory's owning project, the
+// way DeleteOptions.ProjectID scopes a delete: a row outside projectID is refused
+// inside the write and nothing is purged.
 func (s *Store) DeletePurgeInProject(ctx context.Context, projectID, id string) (PurgeOutcome, error) {
 	if projectID == "" {
 		return PurgeOutcome{}, fmt.Errorf("delete purge: project_id is required")
@@ -3426,6 +3641,9 @@ func (s *Store) deleteWithOptionsLocked(ctx context.Context, id string, opts Del
 }
 
 // UpdateOptions is the optional set of facts an edit may change. Every field is
+// optional and its zero value means "not part of this edit", which is what makes
+// the edit partial: a caller correcting a port number must not silently drop the
+// validity window and the source reference the row already carries.
 type UpdateOptions struct {
 	Content    *string
 	Category   *string
@@ -3436,6 +3654,11 @@ type UpdateOptions struct {
 }
 
 // UpdateMemory applies a partial update to a memory. Nil content/category/
+// importance preserve current values; a non-nil tags slice replaces the tag
+// list (pass an empty slice to clear). Source and pinned are never touched.
+// When the content changes, the embedding and link-scan rows are deleted in
+// the same transaction so the background workers re-embed and re-link the
+// memory; FTS needs nothing — the memories_au trigger re-syncs it.
 func (s *Store) UpdateMemory(ctx context.Context, projectID, id string, content, category *string, importance *float32, tags []string) error {
 	return s.UpdateMemoryWithOptions(ctx, projectID, id, UpdateOptions{
 		Content: content, Category: category, Importance: importance, Tags: tags,
@@ -3443,6 +3666,7 @@ func (s *Store) UpdateMemory(ctx context.Context, projectID, id string, content,
 }
 
 // UpdateMemoryWithOptions is UpdateMemory over the full partial-edit set, adding
+// the validity triple and the write-time provenance an MCP edit may carry.
 func (s *Store) UpdateMemoryWithOptions(ctx context.Context, projectID, id string, opts UpdateOptions) error {
 	if opts.Content != nil {
 		if err := rejectSecret("content", *opts.Content); err != nil {
@@ -3580,6 +3804,10 @@ func (s *Store) UpdateMemoryWithOptions(ctx context.Context, projectID, id strin
 }
 
 // PromoteToGlobal moves a memory into the shared _global project. The memory
+// keeps its ID, so its embedding and graph links survive; pinned state and
+// importance are preserved. The _global project row is ensured inline (the
+// FK on memories.project_id requires it) — EnsureProject can't be called
+// here because s.mu is already held.
 func (s *Store) PromoteToGlobal(ctx context.Context, projectID, id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -3638,6 +3866,9 @@ func (s *Store) TogglePin(ctx context.Context, id string, pinned bool) error {
 }
 
 // TogglePinInProject is TogglePin scoped the way PromoteToGlobal is: the UPDATE
+// matches (id, project_id), so a row that is not in projectID — including one
+// another handle promoted to _global after the caller's own ownership read
+// (#1154) — is refused as "not found in project" and left as it was.
 func (s *Store) TogglePinInProject(ctx context.Context, projectID, id string, pinned bool) error {
 	if projectID == "" {
 		return fmt.Errorf("toggle pin: project_id is required")
@@ -3674,6 +3905,9 @@ func (s *Store) togglePin(ctx context.Context, projectID, id string, pinned bool
 }
 
 // CurrentTimestamp returns the database's own notion of "now", formatted
+// exactly like the created_at columns (UTC, via SQLite's datetime('now')).
+// Callers can later filter rows by created_at against this value with a plain
+// string comparison, with no clock-skew risk between the Go process and SQLite.
 func (s *Store) CurrentTimestamp(ctx context.Context) (string, error) {
 	var ts string
 	if err := s.db.QueryRowContext(ctx, `SELECT datetime('now')`).Scan(&ts); err != nil {
@@ -3693,6 +3927,11 @@ type replaceCandidate struct {
 }
 
 // CorpusRow is one row as a reflection pass READ it: the identity and the state
+// the write transaction re-checks before a claim on it is honoured. A row is
+// only replaceable while the store still holds that content, at that write
+// clock, carrying the same metadata the harness was shown; anything else is a
+// concurrent edit, the row is kept as it is, and any emission claiming it is
+// dropped rather than written beside it.
 type CorpusRow struct {
 	ID         string
 	Content    string
@@ -3804,6 +4043,11 @@ func emissionClaimIDs(candidates []replaceCandidate, m Memory) []string {
 }
 
 // EmissionClaimsRow reports whether an emission whose sources are named and
+// whose text is content claims the stored row (rowID, rowContent): the row is
+// one of its named sources, or it already carries the emission's text. It is
+// keepEmissionClaims' predicate, exported so the reflect accounting lists the
+// rows an overflowing merge keeps — its text twins included — by the same rule
+// the replace keeps them, rather than by a copy of it.
 func EmissionClaimsRow(named map[string]bool, content, rowID, rowContent string) bool {
 	return named[rowID] || rowContent == content
 }
@@ -4104,6 +4348,11 @@ type SourceScope struct {
 }
 
 // FoldSourceScopes is inheritedScope's agreement rule over rows the caller
+// already holds: the scope a successor of these sources inherits, or an error
+// (IsScopeConflict) when their scopes disagree or mix scoped with unscoped rows
+// — the refusal ReplaceNonManual and ApplyReflection make at the write. The
+// reflect accounting calls it so a dry run lists such a merge as refused instead
+// of as a merge the apply will not write.
 func FoldSourceScopes(sources []SourceScope) (map[string]string, error) {
 	var fold scopeFold
 	for _, src := range sources {
@@ -4115,6 +4364,7 @@ func FoldSourceScopes(sources []SourceScope) (map[string]string, error) {
 }
 
 // IsScopeConflict reports whether err is the scope refusal FoldSourceScopes
+// and the replace make.
 func IsScopeConflict(err error) bool { return errors.Is(err, errScopeConflict) }
 
 func sourceRetentionTx(ctx context.Context, tx *sql.Tx, projectID string, ids []string) (tier string, found bool, err error) {
@@ -4350,6 +4600,33 @@ func (s *Store) fedGuardFor(ctx context.Context, tx *sql.Tx, projectID, consolid
 }
 
 // consolidatedSince should be a timestamp (see CurrentTimestamp) captured
+// before the caller fetched the memories it fed to the consolidator. ghost
+// reflect runs as a separate process from the long-lived MCP server, so a
+// ghost_memory_save landing on the live server during the multi-minute
+// consolidation round trip would otherwise be silently deleted here — it was
+// durably written but never part of what the consolidator saw. Any non-manual
+// memory created at/after that timestamp is preserved through the replace
+// instead. Pass "" to skip the check (tests that don't exercise the race).
+// The two preserved []string / dropped int returns answer the caller's two
+// "did anything change" questions separately. preserved is the ids of rows kept
+// untouched: the ones edited or saved during the round trip, and the ones a
+// refused emission named as its sources — those did not change, but they were
+// spared from the delete set and nothing consumed them, so they need the next
+// run as much as an edited row does. dropped is how many EMISSIONS the corpus
+// guard refused because the row they claimed changed or is gone. A dropped
+// emission is invisible to preserved in the delete case — the row it claimed no
+// longer exists, so there is nothing to preserve — but the caller must still know
+// the round wrote nothing, or it will print "Applied" and record a skip
+// fingerprint over a project the consolidator's answer never landed in. Either
+// value non-zero means the next run has to revisit the corpus. dropped counts
+// the refused emissions BY REASON (EmissionDrops): the corpus guard's, whose
+// claimed row is still live and still needs consolidating, and the overflowing
+// merges, whose decision links do not fit in a source_ref and which no later run
+// can write either, and the merges whose sources' scopes disagree, which every
+// later run refuses again for the same reason. The distinction is the caller's,
+// not decoration: the first has to suppress the skip fingerprint so the next run
+// re-merges the survivor, and the other two must not, because they would
+// re-propose the same merge on every run forever (#1228, #1492).
 func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories []Memory, consolidatedSince string, fed []CorpusRow) (preserved []string, dropped EmissionDrops, deleted int, appliedByCategory map[string]int, err error) {
 	if len(memories) == 0 {
 		return nil, EmissionDrops{}, 0, nil, fmt.Errorf("refusing to replace memories with empty set — reflection likely malformed")
@@ -4844,6 +5121,14 @@ type RestoreResult struct {
 }
 
 // RestoreSnapshot restores memories from the most recent snapshot for a project,
+// putting back the content, the scope and the retention tier the snapshot
+// recorded. The expiry is re-derived through sessionExpiry exactly as a save
+// does (#1341) — except that a session row whose tier never moved (already
+// session, carrying an expiry) keeps the expiry it holds, so a restore never
+// extends an untouched row's life and a second run leaves the corpus alone.
+// The result carries both the number of memories restored and the number of
+// covered snapshot rows that predate the retention column, so a caller can
+// report an undo that could not be complete.
 func (s *Store) RestoreSnapshot(ctx context.Context, projectID string) (RestoreResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -5151,6 +5436,10 @@ func (s *Store) CountMemories(ctx context.Context, projectID string) (int, error
 }
 
 // ConsolidatableCounts reports how many consolidatable memories each project
+// holds. A memory is consolidatable when reflection may rewrite it: not pinned,
+// not manual or builtin, not persistent, and not resolved. _global is never
+// counted, because no lifecycle pass runs for it. One GROUP BY, so the cost
+// does not grow with the project count the caller is about to iterate over.
 func (s *Store) ConsolidatableCounts(ctx context.Context) (map[string]int, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -5183,6 +5472,9 @@ func (s *Store) ConsolidatableCounts(ctx context.Context) (map[string]int, error
 }
 
 // CountActiveMemories counts the project's memories that pass the one predicate
+// every retrieval window binds regardless of caller: `resolved_at IS NULL`. It is
+// not CountMemories with a filter applied for tidiness — the two answer different
+// questions, and the difference is the whole of what each is for.
 func (s *Store) CountActiveMemories(ctx context.Context, projectID string) (int, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -5275,6 +5567,8 @@ func (s *Store) UpdateLearnedContext(ctx context.Context, projectID, learnedCont
 }
 
 // GetReflectInputSignature returns the fingerprint of the memory set that
+// produced the last applied consolidation for projectID, or "" when none was
+// recorded.
 func (s *Store) GetReflectInputSignature(ctx context.Context, projectID string) (string, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -5292,6 +5586,7 @@ func (s *Store) GetReflectInputSignature(ctx context.Context, projectID string) 
 }
 
 // SetReflectInputSignature records the fingerprint of the memory set that just
+// produced an applied consolidation.
 func (s *Store) SetReflectInputSignature(ctx context.Context, projectID, sig string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
