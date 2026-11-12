@@ -2,12 +2,9 @@ package memory
 
 import (
 	"context"
-	"database/sql"
 	"testing"
 )
 
-// TestCountConsolidatableMemoriesAgreesWithIsConsolidatable pins that the SQL
-// count uses the same consolidatable predicate as the Go-side IsConsolidatable.
 func TestCountConsolidatableMemoriesAgreesWithIsConsolidatable(t *testing.T) {
 	dbPath := t.TempDir() + "/ghost.db"
 	db, err := OpenDB(dbPath)
@@ -21,15 +18,14 @@ func TestCountConsolidatableMemoriesAgreesWithIsConsolidatable(t *testing.T) {
 		t.Fatalf("EnsureProject: %v", err)
 	}
 
-	cases := []Memory{
+	for _, m := range []Memory{
 		{Category: "fact", Content: "consolidatable project", Source: "mcp", Importance: 0.5, Retention: "project"},
 		{Category: "fact", Content: "consolidatable session", Source: "mcp", Importance: 0.5, Retention: "session"},
 		{Category: "fact", Content: "pinned", Source: "mcp", Importance: 0.5, Pinned: true},
 		{Category: "fact", Content: "manual", Source: "manual", Importance: 0.5},
 		{Category: "fact", Content: "builtin", Source: "builtin", Importance: 0.5},
 		{Category: "fact", Content: "persistent", Source: "mcp", Importance: 0.5, Retention: "persistent"},
-	}
-	for _, m := range cases {
+	} {
 		if _, err := store.Create(ctx, "p1", m); err != nil {
 			t.Fatalf("Create: %v", err)
 		}
@@ -54,7 +50,6 @@ func TestCountConsolidatableMemoriesAgreesWithIsConsolidatable(t *testing.T) {
 		}
 	}
 	if got != want {
-		t.Fatalf("CountConsolidatableMemories = %d, want %d (IsConsolidatable count)", got, want)
+		t.Fatalf("CountConsolidatableMemories = %d, want %d", got, want)
 	}
-	_ = sql.Open
 }

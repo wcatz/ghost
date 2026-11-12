@@ -19,10 +19,6 @@ import (
 	"time"
 )
 
-// diagnosticTestStore is a file-backed store with the read handle the
-// production server is built with. An in-memory database cannot have one:
-// ":memory:" is per-connection, so a second handle would open a second,
-// empty database.
 func diagnosticTestStore(t *testing.T) (*Store, *sql.DB) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "ghost.db")
@@ -57,11 +53,6 @@ func diagnosticTestStore(t *testing.T) (*Store, *sql.DB) {
 	return store, db
 }
 
-// TestTheDiagnosticReadAnswersWhileAWriteIsInFlight: the store's own read
-// waits for the write, and the diagnostic read does not. Both halves are
-// observed here: the first is what the diagnostic read exists to avoid, and a
-// test that only saw the second could not tell the difference between a
-// diagnostic read and a store whose writes are fast.
 func TestTheDiagnosticReadAnswersWhileAWriteIsInFlight(t *testing.T) {
 	ctx := context.Background()
 	store, db := diagnosticTestStore(t)
@@ -139,11 +130,6 @@ func TestTheDiagnosticReadAnswersWhileAWriteIsInFlight(t *testing.T) {
 	}
 }
 
-// TestTheDiagnosticReadReportsANewerStore: the store-version line in a health
-// report is the one thing that says the running server is writing a store a
-// newer Ghost owns, so the diagnostic read has to be able to see it. The
-// version is read on the read handle, and the read handle is a different
-// connection to the same file, so it sees what the file carries.
 func TestTheDiagnosticReadReportsANewerStore(t *testing.T) {
 	ctx := context.Background()
 	store, db := diagnosticTestStore(t)
@@ -176,11 +162,6 @@ func TestTheDiagnosticReadReportsANewerStore(t *testing.T) {
 	}
 }
 
-// TestTheDiagnosticVersionReadFailsLoudly: a version read that cannot be
-// answered must say so rather than answer anyway. The report renders the
-// failure ("could not read the store's schema version"), and a version it did
-// not read — a zero, or a guess — would be rendered as a healthy store, which
-// is the one answer that must never be invented.
 func TestTheDiagnosticVersionReadFailsLoudly(t *testing.T) {
 	store, _ := diagnosticTestStore(t)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -204,10 +185,6 @@ func TestTheDiagnosticVersionReadFailsLoudly(t *testing.T) {
 	}
 }
 
-// TestAStoreWithNoReadHandleHasNoDiagnosticRead: an in-memory store, a bench
-// store and a store built without NewStoreWithRead have no second handle to
-// read through. The diagnostic read says so rather than pretending, and the
-// caller falls back to the store's own reads.
 func TestAStoreWithNoReadHandleHasNoDiagnosticRead(t *testing.T) {
 	db, err := OpenDB(":memory:")
 	if err != nil {

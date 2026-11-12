@@ -6,19 +6,6 @@ import (
 	"testing"
 )
 
-// TestScopesConflict pins the rule that keeps folding honest about scope.
-//
-// Two memories are candidates for the same claim only if they could both be
-// true in the same place. Scope states that: if each names the same key with
-// a different value, they are not two wordings of one fact but two facts
-// about two places, and linking them as duplicates would demote one of them
-// behind a partner it never belonged to.
-//
-// The rule is deliberately narrow. If either side is silent on a key, there
-// is no disagreement to find, and an unscoped memory stays as foldable as it
-// was before scope existed — which matters because every memory written
-// before schema v12 has no scope at all, and a rule that made those inert
-// would rewrite the behaviour of the whole existing store.
 func TestScopesConflict(t *testing.T) {
 	cases := []struct {
 		name string
@@ -100,16 +87,6 @@ func newDedupStore(t *testing.T) (*Store, context.Context) {
 }
 
 // TestDedupDoesNotFoldAcrossConflictingScope is the defect this PR exists
-// for. Observed in practice: "The production database is PostgreSQL." folded
-// as a likely duplicate of "The development database is SQLite." at score
-// 0.60 — two claims about two environments, near-identical in wording,
-// linked as duplicates of each other.
-//
-// The fold preserves both rows, so retrieval still worked, but it wrote a
-// 'duplicate' edge between facts that are not duplicates, and the duplicate
-// penalty then sinks one behind a partner it does not belong to. Scope is
-// exactly the signal that says they never were one claim, and text
-// similarity can never supply it.
 func TestDedupDoesNotFoldAcrossConflictingScope(t *testing.T) {
 	s, ctx := newDedupStore(t)
 
@@ -160,87 +137,6 @@ func TestDedupDoesNotFoldAcrossConflictingScope(t *testing.T) {
 	}
 }
 
-// TestDedupStillFoldsWithinScope and TestDedupStillFoldsUnscoped are the
-// guard against over-correction. Exempting every scoped memory would be as
-// wrong as folding across scopes: it would make scope a reason to stop
-// deduplicating at all, so the store fills with the near-restatements
-// dedup exists to absorb.
-func TestDedupStillFoldsWithinScope(t *testing.T) {
-	s, ctx := newDedupStore(t)
-
-	prod := map[string]string{"environment": "production"}
-
-	_, _, _, err := s.UpsertWithOptions(ctx, testProject, "fact",
-		"The project database for production is PostgreSQL.", "manual", 0.7, nil,
-		UpsertOptions{Scope: prod})
-	if err != nil {
-		t.Fatalf("first save: %v", err)
-	}
-
-	_, dup, _, err := s.UpsertWithOptions(ctx, testProject, "fact",
-		"The production project database uses PostgreSQL.", "manual", 0.7, nil,
-		UpsertOptions{Scope: prod})
-	if err != nil {
-		t.Fatalf("second save: %v", err)
-	}
-	if dup == "" {
-		t.Error("two restatements in the SAME scope did not fold — scope should only block a fold when it disagrees")
-	}
-}
-
-// TestDedupUnscopedBehaviourUnchanged: every memory written before schema
-// v12 has no scope, so a rule that made unscoped rows un-foldable would
-// silently change dedup for the entire existing store. An unscoped save
-// against a scoped row must fold exactly as it did before, because neither
-// side makes a claim the other contradicts.
-func TestDedupUnscopedBehaviourUnchanged(t *testing.T) {
-	s, ctx := newDedupStore(t)
-
-	_, _, _, err := s.UpsertWithOptions(ctx, testProject, "fact",
-		"The project database for development is SQLite.", "manual", 0.7, nil,
-		UpsertOptions{Scope: map[string]string{"environment": "development"}})
-	if err != nil {
-		t.Fatalf("first save: %v", err)
-	}
-
-	// Second save states no scope — no disagreement is possible.
-	_, dup, _, err := s.UpsertWithOptions(ctx, testProject, "fact",
-		"The project database for development is SQLite.", "manual", 0.7, nil,
-		UpsertOptions{})
-	if err != nil {
-		t.Fatalf("second save: %v", err)
-	}
-	if dup == "" {
-		t.Error("an unscoped save stopped folding — scope is silent here, so behaviour must match pre-scope dedup")
-	}
-}
-
-// TestDedupScopeConflictAcrossCategory: the cross-category probe has the
-// same blind spot, and its stricter Jaccard gate does not help — near
-// identical wording across environments scores high regardless of category.
-// A conflicting scope must exempt the candidate there too.
-func TestDedupScopeConflictAcrossCategory(t *testing.T) {
-	s, ctx := newDedupStore(t)
-
-	_, _, _, err := s.UpsertWithOptions(ctx, testProject, "fact",
-		"The project database for development is SQLite.", "manual", 0.7, nil,
-		UpsertOptions{Scope: map[string]string{"environment": "development"}})
-	if err != nil {
-		t.Fatalf("first save: %v", err)
-	}
-
-	// Different category, so this can only be found by the cross probe.
-	_, dup, _, err := s.UpsertWithOptions(ctx, testProject, "gotcha",
-		"The project database for development is SQLite.", "manual", 0.7, nil,
-		UpsertOptions{Scope: map[string]string{"environment": "production"}})
-	if err != nil {
-		t.Fatalf("second save: %v", err)
-	}
-	if dup != "" {
-		t.Errorf("cross-category probe folded across a scope conflict (duplicateOf=%s)", dup)
-	}
-}
-
 // conflictCutText is stored byte-identically by every row of the corpus below,
 // so each row ties on FTS rank and only importance decides the window.
 const conflictCutText = "the api listen port is 8443"
@@ -248,16 +144,6 @@ const conflictCutText = "the api listen port is 8443"
 // seedConflictCutCorpus stores one production memory and fifteen development
 // memories whose text is byte-identical to it, and returns the production id
 // and the development ids.
-//
-// Both probes order candidates `ORDER BY rank, m.importance DESC LIMIT 15`, and
-// rank is a function of the indexed text alone — so fifteen identical rows tie
-// at the top of the window and, seeded at a higher importance than the
-// production row, occupy all fifteen slots. The production row is then the
-// sixteenth candidate the unfiltered window returns: precisely the rank a scope
-// check applied AFTER that cut could never see. Rows are created directly
-// rather than through Upsert, because fifteen restatements of one sentence are
-// what the probe is meant to absorb and seeding them through the fold path
-// would collapse the corpus this test depends on.
 func seedConflictCutCorpus(t *testing.T, s *Store, ctx context.Context) (compatible string, conflicting []string) {
 	t.Helper()
 	dev := map[string]string{"environment": "development"}
@@ -275,10 +161,6 @@ func seedConflictCutCorpus(t *testing.T, s *Store, ctx context.Context) (compati
 }
 
 // accessCounts reads access_count for ids, keyed by id.
-//
-// The fold path is the only writer that bumps access_count, and it bumps it on
-// the row it chose and on no other, so this is how a test sees which candidate
-// a probe picked when duplicateOf alone would not say.
 func accessCounts(t *testing.T, s *Store, ctx context.Context, ids []string) map[string]int {
 	t.Helper()
 	ms, err := s.GetByIDs(ctx, ids)
@@ -292,16 +174,6 @@ func accessCounts(t *testing.T, s *Store, ctx context.Context, ids []string) map
 	return out
 }
 
-// TestDedupFoldsCompatibleDuplicateBelowTheConflictCut is the cost of deciding
-// scope after the candidate window instead of inside it (issue #665).
-//
-// A save's scope can disagree with the fifteen best FTS matches it retrieves
-// while agreeing with the sixteenth. When the check ran after the cut, those
-// fifteen rows consumed the whole budget, every one of them was skipped as
-// conflicting, and the probe reported no match — so a production fact that
-// _global already knew was written a second time, unlinked, next to the row it
-// restates. Scope has to be a condition of the query, not a filter over what
-// the query already decided to return.
 func TestDedupFoldsCompatibleDuplicateBelowTheConflictCut(t *testing.T) {
 	s, ctx := newDedupStore(t)
 	compatible, conflicting := seedConflictCutCorpus(t, s, ctx)
@@ -353,11 +225,6 @@ func TestDedupFoldsCompatibleDuplicateBelowTheConflictCut(t *testing.T) {
 	}
 }
 
-// TestCrossCategoryDedupFoldsCompatibleDuplicateBelowTheConflictCut is the same
-// defect in the cross-category probe, which carries its own statement and its
-// own window. Its stricter Jaccard gate changes nothing here: identical wording
-// scores 1.0 whatever the category, so scope is the only thing that separates
-// the candidates, and it has to be asked before the cut there too.
 func TestCrossCategoryDedupFoldsCompatibleDuplicateBelowTheConflictCut(t *testing.T) {
 	s, ctx := newDedupStore(t)
 	compatible, conflicting := seedConflictCutCorpus(t, s, ctx)

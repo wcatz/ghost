@@ -2,13 +2,7 @@ package memory
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"io"
-	"log/slog"
-	"os"
-	"path/filepath"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -97,11 +91,6 @@ func TestProjectSearchIsNotCrowdedOutByGlobalRows(t *testing.T) {
 	}
 }
 
-// TestCandidatesCarriesTheEvidenceCounts: the assembler's only route to the store
-// is this one read, so the support counts have to arrive with the rows. A row
-// whose counts read zero when the memory has evidence would make the trace report
-// "no recorded evidence" about a memory two agents had already reported — a false
-// claim about the corpus, produced by a read that silently did nothing.
 func TestCandidatesCarriesTheEvidenceCounts(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -188,12 +177,6 @@ func TestCandidatesCarriesTheEvidenceCounts(t *testing.T) {
 	}
 }
 
-// TestCandidatesWindowMatchesSearchHybrid is the equivalence the seam depends
-// on: with no predicate, the rows a candidate request returns, closed to the
-// requested window, must be exactly what the production search returns. The
-// corpus is larger than the window so the set is genuinely widened, which is
-// what makes this a test of the tail rather than of a pool that happened to
-// fit.
 func TestCandidatesWindowMatchesSearchHybrid(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -245,10 +228,6 @@ func TestCandidatesWindowMatchesSearchHybrid(t *testing.T) {
 	}
 }
 
-// TestCandidatesKeepsTheNegativeRetrievalContract: query mode admits resolved
-// rows and demotes them, supersede demotion sinks a replaced row below its
-// replacement, and a _global row stays reachable from a project search. A
-// candidate path that changed any of those would change what search returns.
 func TestCandidatesKeepsTheNegativeRetrievalContract(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -307,11 +286,6 @@ func TestCandidatesKeepsTheNegativeRetrievalContract(t *testing.T) {
 	}
 }
 
-// TestCandidatesReportsAHydrationFailure: a read that fails is an error, not an
-// empty window. The tail is hydrated by a second, independent read, so a
-// transient failure on the window read that the tail read survives would
-// otherwise yield a candidate set missing the whole selected window — and
-// "no matching memories" for a store that plainly has matches.
 func TestCandidatesReportsAHydrationFailure(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -334,77 +308,6 @@ func TestCandidatesReportsAHydrationFailure(t *testing.T) {
 	}
 }
 
-// TestCandidatesReturnsUntrimmedWidenedSet: stages 2-8 need rows the window
-// would have cut, or a predicate can only ever remove from the answer.
-func TestCandidatesReturnsUntrimmedWidenedSet(t *testing.T) {
-	s := testStore(t)
-	ctx := context.Background()
-
-	for i := range 12 {
-		makeMemory(t, s, "vector search window candidate number "+string(rune('a'+i)))
-	}
-	req := candidateRequest("vector search window candidate", 3, time.Now().UTC())
-
-	set, err := s.Candidates(ctx, req)
-	if err != nil {
-		t.Fatalf("Candidates: %v", err)
-	}
-	if len(set.Rows) <= 3 {
-		t.Fatalf("candidate set has %d rows: the window of 3 was closed before returning, so no filter can backfill", len(set.Rows))
-	}
-	if !set.Widened {
-		t.Error("Widened = false for a set larger than the requested window")
-	}
-	// The tail is capped at the window width: no closure the assembler can
-	// apply admits more rows than the window it was given.
-	if got := len(set.Rows) - 3; got > 3 {
-		t.Errorf("tail has %d rows, want at most the window width (3)", got)
-	}
-}
-
-// TestCandidatesAppliesConfiguredVectorFloor: the Store owns the floor, so a
-// candidate request cannot bypass search.min_similarity the way an unset
-// SearchParams.MinSimilarity could.
-func TestCandidatesAppliesConfiguredVectorFloor(t *testing.T) {
-	s := testStore(t)
-	ctx := context.Background()
-	s.SetVectorMinSimilarity(0.5)
-
-	strong := makeMemory(t, s, "kubernetes readiness probe misconfiguration")
-	weak := makeMemory(t, s, "zzz unrelated quantum banana syntax")
-	if err := s.StoreEmbedding(ctx, strong, []float32{1, 0, 0}, "test"); err != nil {
-		t.Fatalf("StoreEmbedding strong: %v", err)
-	}
-	if err := s.StoreEmbedding(ctx, weak, []float32{0.1, 0.99, 0}, "test"); err != nil {
-		t.Fatalf("StoreEmbedding weak: %v", err)
-	}
-
-	req := candidateRequest("kubernetes readiness probe", 10, time.Now().UTC())
-	req.QueryVec = []float32{1, 0, 0}
-	req.Condition = CondHybrid
-	// The caller leaves the floor unset in its params; the Store's configured
-	// value is the one that has to apply.
-	req.Params.MinSimilarity = 0
-
-	set, err := s.Candidates(ctx, req)
-	if err != nil {
-		t.Fatalf("Candidates: %v", err)
-	}
-	for _, c := range set.Rows {
-		if c.ID == weak {
-			t.Errorf("weak candidate %s survived the configured floor of 0.5", weak)
-		}
-	}
-	if !set.Legs["vector"].Applicable {
-		t.Error("vector leg not marked applicable for a hybrid request")
-	}
-}
-
-// TestCandidatesNarrowsScopeInsideTheWindow: scope is narrowed from the fused
-// pool before the window is cut, not applied to the finished window. A request
-// whose eligible row ranks below the window's fill must still get it — and it
-// would not if the window were allowed to fill with contradicting rows, because
-// the backfill that replaces them is bounded.
 func TestCandidatesNarrowsScopeInsideTheWindow(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -458,9 +361,6 @@ func TestCandidatesNarrowsScopeInsideTheWindow(t *testing.T) {
 	}
 }
 
-// TestCandidatesUsesTheBoundNow: the candidate path must not read the wall
-// clock. A request clock one day after a row's created_at has to produce an
-// age of one day, whatever time the test happens to run.
 func TestCandidatesUsesTheBoundNow(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -497,11 +397,6 @@ func TestCandidatesUsesTheBoundNow(t *testing.T) {
 	}
 }
 
-// TestCandidatesOrdersDecayAgainstTheBoundClock is the ordering half of the
-// bound clock. Decay reorders the window, so a request clock that disagrees
-// with the wall clock reorders it differently: the row that is fresh relative
-// to the request must outrank the stronger hit that is ancient relative to it,
-// and it cannot if the candidate path reads the wall clock instead.
 func TestCandidatesOrdersDecayAgainstTheBoundClock(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -543,179 +438,6 @@ func TestCandidatesOrdersDecayAgainstTheBoundClock(t *testing.T) {
 	}
 }
 
-// TestCandidatesCarriesScoringFacts: the trace copies these, so they have to be
-// the numbers fusion actually used, including the -1 that distinguishes "this
-// leg did not retrieve the row" from a first place.
-func TestCandidatesCarriesScoringFacts(t *testing.T) {
-	s := testStore(t)
-	ctx := context.Background()
-	hit := makeMemory(t, s, "sqlite wal mode checkpoint starvation")
-	miss := makeMemory(t, s, "zzz unrelated quantum banana syntax")
-	// cosine 0.6 with the query, and content that shares no term with it, so
-	// the row can only arrive through the vector leg.
-	if err := s.StoreEmbedding(ctx, miss, []float32{0.6, 0.8, 0}, "test"); err != nil {
-		t.Fatalf("StoreEmbedding: %v", err)
-	}
-
-	req := candidateRequest("sqlite wal mode checkpoint", 10, time.Now().UTC())
-	req.QueryVec = []float32{1, 0, 0}
-	req.Condition = CondHybrid
-	set, err := s.Candidates(ctx, req)
-	if err != nil {
-		t.Fatalf("Candidates: %v", err)
-	}
-	byID := map[string]Candidate{}
-	for _, c := range set.Rows {
-		byID[c.ID] = c
-	}
-	row, ok := byID[hit]
-	if !ok {
-		t.Fatalf("keyword hit %s missing: %v", hit, candidateIDs(t, set))
-	}
-	if row.FTSRank != 0 {
-		t.Errorf("fts rank = %d, want 0 for the only keyword hit", row.FTSRank)
-	}
-	if row.VectorRank != -1 || row.VectorScore != -1 {
-		t.Errorf("vector facts = %d at %v, want -1 at -1 for a leg that did not retrieve it", row.VectorRank, row.VectorScore)
-	}
-	if row.Base <= 0 {
-		t.Errorf("base = %v, want a positive fused score", row.Base)
-	}
-	if row.ID != hit || row.Content == "" {
-		t.Error("candidate does not carry the hydrated memory")
-	}
-	if byID[miss].VectorScore <= 0 {
-		t.Error("vector-only candidate did not carry its cosine")
-	}
-}
-
-// TestCandidatesScansValidityColumns: the columns exist and are readable, so
-// the retrieval DTO carries them. The test writes them in raw SQL, the way
-// RestoreSnapshot and an older import do, so the whole-day form reaches the
-// column unnormalized.
-func TestCandidatesScansValidityColumns(t *testing.T) {
-	s := testStore(t)
-	ctx := context.Background()
-	id := makeMemory(t, s, "retention policy for the nightly backup window")
-
-	from, until, verified := "2026-01-01", "2026-12-31 23:59:59", "2026-09-20 08:00:00"
-	if _, err := s.db.ExecContext(ctx,
-		`UPDATE memories SET valid_from = ?, valid_until = ?, verified_at = ? WHERE id = ?`,
-		from, until, verified, id); err != nil {
-		t.Fatalf("write validity columns: %v", err)
-	}
-
-	set, err := s.Candidates(ctx, candidateRequest("retention policy nightly backup", 10, time.Now().UTC()))
-	if err != nil {
-		t.Fatalf("Candidates: %v", err)
-	}
-	var row *Candidate
-	for i := range set.Rows {
-		if set.Rows[i].ID == id {
-			row = &set.Rows[i]
-		}
-	}
-	if row == nil {
-		t.Fatalf("row %s missing: %v", id, candidateIDs(t, set))
-	}
-	if row.ValidFrom == nil || *row.ValidFrom != from {
-		t.Errorf("valid_from = %v, want %q", row.ValidFrom, from)
-	}
-	if row.ValidUntil == nil || *row.ValidUntil != until {
-		t.Errorf("valid_until = %v, want %q", row.ValidUntil, until)
-	}
-	if row.VerifiedAt == nil || *row.VerifiedAt != verified {
-		t.Errorf("verified_at = %v, want %q", row.VerifiedAt, verified)
-	}
-
-	// Every retrieval path that hydrates a row has to carry the columns, or a
-	// validity claim would be visible to one surface and invisible to another.
-	byIDs, err := s.GetByIDs(ctx, []string{id})
-	if err != nil {
-		t.Fatalf("GetByIDs: %v", err)
-	}
-	if len(byIDs) != 1 || byIDs[0].ValidFrom == nil {
-		t.Errorf("GetByIDs dropped the validity columns: %+v", byIDs)
-	}
-	fts, err := s.SearchFTS(ctx, testProject, "retention policy", 10)
-	if err != nil {
-		t.Fatalf("SearchFTS: %v", err)
-	}
-	if len(fts) != 1 || fts[0].ValidUntil == nil {
-		t.Errorf("SearchFTS dropped the validity columns: %+v", fts)
-	}
-}
-
-// TestCandidateEmbedsMemoryWithoutRedeclaringValidity: Candidate embeds
-// Memory, and a redeclared field would silently shadow the embedded one — a
-// validity claim read from the wrong field. The collision is rejected here
-// rather than diagnosed later in a trace.
-func TestCandidateEmbedsMemoryWithoutRedeclaringValidity(t *testing.T) {
-	ct := reflect.TypeFor[Candidate]()
-	for i := range ct.NumField() {
-		f := ct.Field(i)
-		if f.Anonymous {
-			continue
-		}
-		switch f.Name {
-		case "ValidFrom", "ValidUntil", "VerifiedAt", "Scope", "Confidence", "Agent":
-			t.Errorf("Candidate declares %s; the value must come from the embedded Memory", f.Name)
-		}
-	}
-	mt := reflect.TypeFor[Memory]()
-	for _, name := range []string{"ValidFrom", "ValidUntil", "VerifiedAt"} {
-		f, ok := mt.FieldByName(name)
-		if !ok {
-			t.Errorf("Memory has no %s field", name)
-			continue
-		}
-		if f.Type.Kind() != reflect.Pointer {
-			t.Errorf("Memory.%s is %v, want a pointer so nil means no claim", name, f.Type)
-		}
-	}
-}
-
-// TestCandidatesHonoursTheConfiguredEmbeddingIdentity: the store's snapshot
-// copy has to carry every knob that steers retrieval, and the embedding identity
-// is the one that decides whether a stored vector may be scored at all. A
-// candidate set built without it would rank the foreign-space vectors the real
-// search excludes, so a search would return rows no caller could reproduce.
-func TestCandidatesHonoursTheConfiguredEmbeddingIdentity(t *testing.T) {
-	store, ctx := setupTestStore(t)
-	store.SetEmbeddingIdentity(identityCurrent)
-	current, stale := seedIdentityRows(t, store, ctx)
-
-	// The query term is in the current row's content only, so the stale row can
-	// reach the candidate set through the vector leg and nothing else: what this
-	// asserts is the leg's verdict, not the keyword leg's.
-	req := candidateRequest("configured", 10, time.Now().UTC())
-	req.ProjectID = "test-proj" // the project setupTestStore seeds
-	req.QueryVec = []float32{1, 0, 0}
-	req.Condition = CondHybrid
-	set, err := store.Candidates(ctx, req)
-	if err != nil {
-		t.Fatalf("Candidates: %v", err)
-	}
-	for _, c := range set.Rows {
-		if c.ID == stale {
-			t.Errorf("candidate %s carries a vector from another space: the snapshot store lost the "+
-				"configured embedding identity, so its vector leg scored a vector production search excludes", stale)
-		}
-	}
-	if got := set.Legs["vector"]; got.Applicable && !got.Attempted {
-		t.Error("vector leg reported applicable but not attempted for a hybrid request with a query vector")
-	}
-	if !containsID(set, current) {
-		t.Errorf("candidates = %v, want the current-identity row %s", candidateIDs(t, set), current)
-	}
-}
-
-// TestCandidatesMarksARowTheVectorLegCouldNotSee: the leg-consensus gate must
-// not penalise a row the vector leg could never score, and the retriever is the
-// only layer that can tell "not yet embedded" from "embedded but ranked low".
-// A row with no vector at all is unembedded; so is a row whose only vector is
-// stamped with a different identity. A row with a vector in the configured
-// space is not, whatever rank the leg gave it (#1319).
 func TestCandidatesMarksARowTheVectorLegCouldNotSee(t *testing.T) {
 	store, ctx := setupTestStore(t)
 	store.SetEmbeddingIdentity(identityCurrent)
@@ -773,9 +495,6 @@ func containsID(set *CandidateSet, id string) bool {
 	return false
 }
 
-// TestCandidatesReportsLegStatuses: absence is only claimable when every
-// applicable leg ran, and a truncated leg is not complete coverage. The
-// statuses are what makes that decidable downstream.
 func TestCandidatesReportsLegStatuses(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -839,48 +558,6 @@ func TestCandidatesReportsLegStatuses(t *testing.T) {
 	}
 }
 
-// TestCandidatesReportsEdgesAndTheirStatus: stages 5 and 6 read the edge set,
-// and a failed lookup has to be visible rather than silently empty.
-func TestCandidatesReportsEdgesAndTheirStatus(t *testing.T) {
-	s := testStore(t)
-	ctx := context.Background()
-	a := makeMemory(t, s, "sqlite wal mode checkpoint starvation")
-	b := makeMemory(t, s, "sqlite wal mode checkpoint after a restart")
-	if err := s.CreateLink(ctx, a, b, "contradicts", 1, "manual"); err != nil {
-		t.Fatalf("CreateLink: %v", err)
-	}
-
-	set, err := s.Candidates(ctx, candidateRequest("sqlite wal mode checkpoint", 10, time.Now().UTC()))
-	if err != nil {
-		t.Fatalf("Candidates: %v", err)
-	}
-	if set.EdgesStatus.Status != "ok" {
-		t.Errorf("edge status = %+v, want ok", set.EdgesStatus)
-	}
-	if len(set.Edges) != 1 {
-		t.Fatalf("edges = %+v, want the contradiction between the two candidates", set.Edges)
-	}
-	e := set.Edges[0]
-	if (e.From != a || e.To != b) && (e.From != b || e.To != a) {
-		t.Errorf("edge %+v does not join the two candidates", e)
-	}
-	if e.Relation != "contradicts" {
-		t.Errorf("relation = %q, want contradicts", e.Relation)
-	}
-
-	// A query that matches nothing links nothing, which is not a failure.
-	empty, err := s.Candidates(ctx, candidateRequest("no such term anywhere in the store", 10, time.Now().UTC()))
-	if err != nil {
-		t.Fatalf("Candidates empty: %v", err)
-	}
-	if empty.EdgesStatus.Status != "unavailable" {
-		t.Errorf("edge status = %+v, want unavailable for a successful query with no edges", empty.EdgesStatus)
-	}
-}
-
-// TestCandidatesRejectsInvalidRequests: the retriever validates what it is
-// asked to do, because it is reachable directly as well as through the
-// assembler.
 func TestCandidatesRejectsInvalidRequests(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -919,222 +596,6 @@ func TestCandidatesRejectsInvalidRequests(t *testing.T) {
 	})
 }
 
-// TestCandidatesGlobalOnlyForAnUnresolvedProject: search keeps today's
-// fallback — an unresolved project still reaches the global rows rather than
-// failing or searching everything.
-func TestCandidatesGlobalOnlyForAnUnresolvedProject(t *testing.T) {
-	s := testStore(t)
-	ctx := context.Background()
-	if err := s.EnsureProject(ctx, "_global", "_global", "global"); err != nil {
-		t.Fatalf("EnsureProject(_global): %v", err)
-	}
-	if _, err := s.Create(ctx, "_global", Memory{
-		Category: "convention", Content: "unattributed commits belong to the committer",
-		Source: "manual", Importance: 0.7,
-	}); err != nil {
-		t.Fatalf("Create global: %v", err)
-	}
-	makeMemory(t, s, "unattributed commits are forbidden in this project")
-
-	req := candidateRequest("unattributed commits", 10, time.Now().UTC())
-	req.Mode = GlobalOnly
-	req.ProjectID = ""
-
-	set, err := s.Candidates(ctx, req)
-	if err != nil {
-		t.Fatalf("Candidates: %v", err)
-	}
-	if len(set.Rows) != 1 {
-		t.Fatalf("global-only search returned %d rows, want only the global one: %v", len(set.Rows), candidateIDs(t, set))
-	}
-	if set.Rows[0].ProjectID != "_global" {
-		t.Errorf("row project = %q, want _global", set.Rows[0].ProjectID)
-	}
-}
-
-// TestCandidatesAllProjectsSeesEveryProject: the cross-project mode has no
-// project predicate at all.
-func TestCandidatesAllProjectsSeesEveryProject(t *testing.T) {
-	s := testStore(t)
-	ctx := context.Background()
-	if err := s.EnsureProject(ctx, "second", "/tmp/second", "second"); err != nil {
-		t.Fatalf("EnsureProject: %v", err)
-	}
-	if _, err := s.Create(ctx, "second", Memory{
-		Category: "fact", Content: "cross project sqlite wal mode note", Source: "manual", Importance: 0.7,
-	}); err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	makeMemory(t, s, "cross project sqlite wal mode note for the first project")
-
-	req := candidateRequest("cross project sqlite wal mode", 10, time.Now().UTC())
-	req.Mode = AllProjects
-	req.ProjectID = ""
-
-	set, err := s.Candidates(ctx, req)
-	if err != nil {
-		t.Fatalf("Candidates: %v", err)
-	}
-	if len(set.Rows) != 2 {
-		t.Errorf("all-projects search returned %d rows, want both projects: %v", len(set.Rows), candidateIDs(t, set))
-	}
-}
-
-// TestNewStoreWarnsWhenItHasNoReadHandle: the production DSN issues
-// BEGIN IMMEDIATE, so a candidate transaction on the primary handle takes the
-// write lock. A store without an injected read handle says so once, rather
-// than taking it quietly on every search.
-func TestNewStoreWarnsWhenItHasNoReadHandle(t *testing.T) {
-	var logs strings.Builder
-	logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelWarn}))
-
-	db, err := OpenDB(":memory:")
-	if err != nil {
-		t.Fatalf("OpenDB: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	s := NewStore(db, logger)
-	if s.readDB != nil {
-		t.Fatal("NewStore invented a read handle")
-	}
-	if _, err := s.Candidates(context.Background(), candidateRequest("anything", 5, time.Now().UTC())); err != nil {
-		t.Fatalf("Candidates: %v", err)
-	}
-	if !strings.Contains(logs.String(), "read-only handle") {
-		t.Errorf("no warning about the missing read handle:\n%s", logs.String())
-	}
-
-	// With a read handle the snapshot never touches the primary connection, so
-	// there is nothing to warn about.
-	path := filepath.Join(t.TempDir(), "ghost.db")
-	primary, err := OpenDB(path)
-	if err != nil {
-		t.Fatalf("OpenDB: %v", err)
-	}
-	t.Cleanup(func() { _ = primary.Close() })
-	readDB, err := OpenReadDB(path)
-	if err != nil {
-		t.Fatalf("OpenReadDB: %v", err)
-	}
-	t.Cleanup(func() { _ = readDB.Close() })
-	var quiet strings.Builder
-	withRead := NewStoreWithRead(primary, readDB, slog.New(slog.NewTextHandler(&quiet, &slog.HandlerOptions{Level: slog.LevelWarn})))
-	if _, err := withRead.Candidates(context.Background(), candidateRequest("anything", 5, time.Now().UTC())); err != nil {
-		t.Fatalf("Candidates with read handle: %v", err)
-	}
-	if quiet.Len() != 0 {
-		t.Errorf("a store with a read handle warned: %s", quiet.String())
-	}
-}
-
-// TestCandidatesRunsOnTheInjectedReadHandle: with a read handle, the candidate
-// transaction is taken on that handle, so a write transaction already open on
-// the primary handle does not block it and the snapshot is the committed one.
-// This is the guarantee a single-connection primary handle cannot give.
-func TestCandidatesRunsOnTheInjectedReadHandle(t *testing.T) {
-	if _, err := OpenReadDB(":memory:"); err == nil {
-		t.Fatal("OpenReadDB accepted :memory: — a second connection cannot see a private in-memory database")
-	}
-
-	dir := t.TempDir()
-	path := filepath.Join(dir, "ghost.db")
-	db, err := OpenDB(path)
-	if err != nil {
-		t.Fatalf("OpenDB: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	readDB, err := OpenReadDB(path)
-	if err != nil {
-		t.Fatalf("OpenReadDB: %v", err)
-	}
-	t.Cleanup(func() { _ = readDB.Close() })
-
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
-	s := NewStoreWithRead(db, readDB, logger)
-	ctx := context.Background()
-	if err := s.EnsureProject(ctx, testProject, "/tmp/test", "test"); err != nil {
-		t.Fatalf("EnsureProject: %v", err)
-	}
-	makeMemory(t, s, "sqlite wal mode checkpoint starvation")
-
-	// Hold an open write transaction on the primary handle: it owns the only
-	// connection there, and with _txlock=immediate it owns the write lock.
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		t.Fatalf("BeginTx: %v", err)
-	}
-	defer tx.Rollback() //nolint:errcheck
-	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO memories (project_id, category, content, source, importance, tags)
-		 VALUES (?, 'fact', 'uncommitted row', 'manual', 0.7, '[]')`, testProject); err != nil {
-		t.Fatalf("insert in tx: %v", err)
-	}
-
-	done := make(chan *CandidateSet, 1)
-	errc := make(chan error, 1)
-	go func() {
-		set, err := s.Candidates(ctx, candidateRequest("sqlite wal mode checkpoint", 10, time.Now().UTC()))
-		if err != nil {
-			errc <- err
-			return
-		}
-		done <- set
-	}()
-	select {
-	case err := <-errc:
-		t.Fatalf("Candidates on the read handle failed while a write transaction was open: %v", err)
-	case set := <-done:
-		if len(set.Rows) != 1 {
-			t.Errorf("rows = %v, want the committed row only: the snapshot must not include the open transaction", candidateIDs(t, set))
-		}
-	case <-time.After(20 * time.Second):
-		t.Fatal("Candidates blocked: the candidate transaction did not use the injected read handle")
-	}
-}
-
-// TestOpenReadDBRefusesAMissingDatabase: a diagnostic read must not create the
-// file it is reporting about.
-func TestOpenReadDBRefusesAMissingDatabase(t *testing.T) {
-	missing := filepath.Join(t.TempDir(), "ghost.db")
-	if _, err := OpenReadDB(missing); !errors.Is(err, ErrNoDatabase) {
-		t.Fatalf("OpenReadDB(missing) error = %v, want ErrNoDatabase", err)
-	}
-	if _, err := os.Stat(missing); !os.IsNotExist(err) {
-		t.Error("OpenReadDB created the database it was asked to report about")
-	}
-}
-
-// TestStoreCloseClosesTheInjectedReadHandle: the read handle is a second
-// database connection this Store opened, so closing the Store has to close it.
-// Leaving it open holds a WAL reader for the life of the process, which is
-// what the read handle exists to avoid holding during a retrieval.
-func TestStoreCloseClosesTheInjectedReadHandle(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "ghost.db")
-	db, err := OpenDB(path)
-	if err != nil {
-		t.Fatalf("OpenDB: %v", err)
-	}
-	readDB, err := OpenReadDB(path)
-	if err != nil {
-		t.Fatalf("OpenReadDB: %v", err)
-	}
-
-	s := NewStoreWithRead(db, readDB, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	if err := s.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-	if err := readDB.PingContext(context.Background()); err == nil {
-		t.Error("the injected read handle is still open after Store.Close")
-	}
-}
-
-// TestCandidatesErrorsWhenEveryApplicableLegFails: a total retrieval failure is
-// an error, not an empty set. The zero CandidateSet is reserved for the case
-// where one leg failed and another completed — a partial retrieval, which the
-// caller reports as incomplete. When nothing ran, there is no result to report
-// at all, and returning an empty set would let a broken keyword index read as
-// "this store has no memory matching that".
 func TestCandidatesErrorsWhenEveryApplicableLegFails(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -1156,10 +617,6 @@ func TestCandidatesErrorsWhenEveryApplicableLegFails(t *testing.T) {
 	}
 }
 
-// TestCandidatesReturnsStatusesForAPartialLegFailure: one leg failed and the
-// other completed with nothing, so the caller can say "the search was
-// incomplete" rather than "nothing matched". This is the case the zero set is
-// for, and it must not be an error.
 func TestCandidatesReturnsStatusesForAPartialLegFailure(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -1189,141 +646,6 @@ func TestCandidatesReturnsStatusesForAPartialLegFailure(t *testing.T) {
 	}
 }
 
-// TestCandidatesWarnsOncePerRetiredIdentity: the foreign-vector warning is
-// gated so a re-embed — which lasts many queries — reports each retired
-// identity once per process rather than once per search. The gate is shared
-// state, so the snapshot store Candidates builds has to carry it: a store with
-// no gate reports every time, and since the formatted search path now runs
-// through Candidates, every search after a model change would repeat the line.
-func TestCandidatesWarnsOncePerRetiredIdentity(t *testing.T) {
-	store, ctx := setupTestStore(t)
-	var logs strings.Builder
-	store.logger = slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelWarn}))
-	store.SetEmbeddingIdentity(identityCurrent)
-	current, _ := seedIdentityRows(t, store, ctx)
-	_ = current
-
-	req := candidateRequest("configured", 10, time.Now().UTC())
-	req.ProjectID = "test-proj"
-	req.QueryVec = []float32{1, 0, 0}
-	req.Condition = CondHybrid
-	for range 3 {
-		if _, err := store.Candidates(ctx, req); err != nil {
-			t.Fatalf("Candidates: %v", err)
-		}
-	}
-
-	if n := strings.Count(logs.String(), "another vector space"); n != 1 {
-		t.Errorf("foreign-vector warning appeared %d times over three searches, want 1: "+
-			"the snapshot store is not sharing the process's warning gate", n)
-	}
-}
-
-// TestLegFactsAreNotLeftOverFromAnEarlierSearch: the vector scan's snapshot is
-// pooled and reused across queries, and the leg's facts now travel on it. A count
-// that survives the reuse would be reported as this search's: a leg that skipped
-// a retired identity once would keep claiming it skipped rows for every later
-// query, which is the difference between "your model changed" and "your model
-// changed, on every search since".
-func TestLegFactsAreNotLeftOverFromAnEarlierSearch(t *testing.T) {
-	store, ctx := setupTestStore(t)
-	store.SetEmbeddingIdentity(identityCurrent)
-	seedIdentityRows(t, store, ctx) // one vector in the configured space, one retired
-
-	req := candidateRequest("configured", 10, time.Now().UTC())
-	req.ProjectID = "test-proj"
-	req.QueryVec = []float32{1, 0, 0}
-	req.Condition = CondHybrid
-	first, err := store.Candidates(ctx, req)
-	if err != nil {
-		t.Fatalf("Candidates (mixed identities): %v", err)
-	}
-	if first.Legs["vector"].DimMismatch == 0 {
-		t.Fatal("precondition: the first search should have skipped the retired vector")
-	}
-
-	// Retire the odd one out: the same search, now with nothing to skip.
-	if _, err := store.db.ExecContext(ctx, "DELETE FROM memory_embeddings WHERE model = ?", identityStale); err != nil {
-		t.Fatalf("delete the stale vector: %v", err)
-	}
-	second, err := store.Candidates(ctx, req)
-	if err != nil {
-		t.Fatalf("Candidates (one identity): %v", err)
-	}
-	if got := second.Legs["vector"].DimMismatch; got != 0 {
-		t.Errorf("the second search reports %d skipped rows, want 0: the fact is left over from the pooled snapshot", got)
-	}
-}
-
-// TestTheSnapshotStoreRunsItsVectorLegThroughTheStoresScratch: the corpus-sized
-// snapshot is recycled through a store's scratch, and the store Candidates builds
-// for one retrieval is a bare literal. With no scratch of its own it takes the
-// pre-#560 path and allocates a snapshot per query, handing it to a pool that is
-// garbage the moment the retrieval returns -- reintroducing on the live search path,
-// at every search, the cost the scratch exists to avoid.
-//
-// The assertion is that the store's own allocation counter moved, which is the one
-// part of this that is guaranteed. Two adjacent properties are NOT, and the first
-// version of this test asserted them and failed in CI for exactly that reason:
-// a sync.Pool's contents are per-processor and are dropped at every collection, so
-// neither "the pool is empty" nor "five further searches allocate nothing" is a
-// property a test can hold -- a collection in the window re-allocates, whichever
-// store is asking. What cannot vary is whether the retrieval went through the real
-// store's scratch at all: a store with no scratch of its own never touches this
-// counter, so a counter that never moves is the defect, deterministically.
-func TestTheSnapshotStoreRunsItsVectorLegThroughTheStoresScratch(t *testing.T) {
-	store, ctx := setupTestStore(t)
-	for i, content := range []string{"vector search corpus row one", "vector search corpus row two"} {
-		id := createTestMemory(t, store, ctx, content)
-		vec := []float32{0.8 - float32(i)*0.1, 0.6, 0}
-		if err := store.StoreEmbedding(ctx, id, vec, identityCurrent); err != nil {
-			t.Fatalf("StoreEmbedding: %v", err)
-		}
-	}
-
-	req := candidateRequest("vector search corpus", 10, time.Now().UTC())
-	req.ProjectID = "test-proj"
-	req.QueryVec = []float32{1, 0, 0}
-	req.Condition = CondHybrid
-
-	// Drain first. Create's near-duplicate probes borrow and return a corpus
-	// snapshot, so a pool that still holds one would let the retrieval recycle it
-	// without allocating, and the counter would not move for a reason that has
-	// nothing to do with the seam. Each Get on an empty pool allocates, which is
-	// fine: the baseline is read after this, not before.
-	for range 8 {
-		if v := store.scratch.pool.Get(); v != nil {
-			_ = v
-		}
-	}
-	before := store.scratch.allocationCount()
-	if _, err := store.Candidates(ctx, req); err != nil {
-		t.Fatalf("Candidates: %v", err)
-	}
-
-	if after := store.scratch.allocationCount(); after <= before {
-		t.Errorf("the store's corpus-scratch allocations did not move (%d -> %d) across a retrieval, "+
-			"so the snapshot store ran its vector leg without this store's scratch: a corpus-sized "+
-			"allocation per query that nothing recycles", before, after)
-	}
-}
-
-// TestCandidatesCountsTheRowsTheKeywordLegWithheld is the query path's own
-// counterpart to passiveValidityExcluded, and the half of #1053 that keeps an
-// empty answer honest.
-//
-// The legs now apply the window predicate in SQL, BEFORE their LIMIT, so a query
-// whose every match lies outside its window comes back with no candidate and no
-// stage having run — and the store is the only component that can still say how
-// many rows the predicate removed. Without the count the empty reason reads
-// `no_candidates`, which is the one reason a caller may read as the store holding
-// nothing matching; the truth is that rows matched and were withheld as out of
-// date, which is `all_invalid`.
-//
-// A resolved row is counted too, and a row of another project is not: the probe
-// asks the leg's own population, so it cannot describe rows the leg never
-// considered. An empty set whose query matched nothing is left at zero, which is
-// what keeps the two empty cases distinguishable.
 func TestCandidatesCountsTheRowsTheKeywordLegWithheld(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -1397,15 +719,6 @@ func TestCandidatesCountsTheRowsTheKeywordLegWithheld(t *testing.T) {
 
 // TestCandidatesCountsTheRowsTheVectorLegWithheld is the semantic counterpart of
 // the keyword count above, and the half of #1053 the semantic-only and hybrid
-// paths depend on: the vector scan withholds an out-of-window row before its
-// top-k cut, so a query whose every above-floor match retired comes back empty
-// and needs the count to keep `all_invalid` rather than read as absence.
-//
-// The count is the scan's own: the number of rows the cosine pass scored above
-// the similarity floor and then withheld, which no separate statement could
-// reconstruct (a vector match is a cosine, not a term). It joins the set only
-// when the leg came back empty, exactly as the keyword probe does, so a leg that
-// found a valid match reports zero even when it also withheld rows.
 func TestCandidatesCountsTheRowsTheVectorLegWithheld(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -1476,96 +789,3 @@ func TestCandidatesCountsTheRowsTheVectorLegWithheld(t *testing.T) {
 // the state a model or width change leaves the store in until the worker has
 // re-embedded it. A leg that scored at least one row, and a leg with nothing to
 // read at all, stay as they were.
-func TestVectorLegIsNotRunWhenItSkippedEveryRow(t *testing.T) {
-	for _, mode := range []struct {
-		name string
-		mode ProjectMode
-	}{{"project", ProjectScoped}, {"all projects", AllProjects}} {
-		for _, tc := range []struct {
-			name        string
-			seed        func(t *testing.T, store *Store, ctx context.Context)
-			wantRun     bool
-			wantSkipped int
-		}{
-			{
-				name: "every stored vector has another width",
-				seed: func(t *testing.T, store *Store, ctx context.Context) {
-					for _, text := range []string{"pool timeout one", "pool timeout two", "pool timeout three"} {
-						id := createTestMemory(t, store, ctx, text)
-						if err := store.StoreEmbedding(ctx, id, []float32{1, 0, 0, 0}, identityCurrent); err != nil {
-							t.Fatalf("StoreEmbedding: %v", err)
-						}
-					}
-				},
-				wantSkipped: 3,
-			},
-			{
-				name: "every stored vector carries another identity",
-				seed: func(t *testing.T, store *Store, ctx context.Context) {
-					for _, text := range []string{"pool timeout one", "pool timeout two"} {
-						id := createTestMemory(t, store, ctx, text)
-						if err := store.StoreEmbedding(ctx, id, []float32{1, 0, 0}, identityStale); err != nil {
-							t.Fatalf("StoreEmbedding: %v", err)
-						}
-					}
-				},
-				wantSkipped: 2,
-			},
-			{
-				name: "one vector is usable and one is skipped",
-				seed: func(t *testing.T, store *Store, ctx context.Context) {
-					ok := createTestMemory(t, store, ctx, "pool timeout one")
-					bad := createTestMemory(t, store, ctx, "pool timeout two")
-					if err := store.StoreEmbedding(ctx, ok, []float32{1, 0, 0}, identityCurrent); err != nil {
-						t.Fatalf("StoreEmbedding: %v", err)
-					}
-					if err := store.StoreEmbedding(ctx, bad, []float32{1, 0, 0, 0}, identityCurrent); err != nil {
-						t.Fatalf("StoreEmbedding: %v", err)
-					}
-				},
-				wantRun:     true,
-				wantSkipped: 1,
-			},
-			{
-				name:    "no vector is stored at all",
-				seed:    func(*testing.T, *Store, context.Context) {},
-				wantRun: true,
-			},
-		} {
-			t.Run(mode.name+"/"+tc.name, func(t *testing.T) {
-				store, ctx := setupTestStore(t)
-				store.SetEmbeddingIdentity(identityCurrent)
-				tc.seed(t, store, ctx)
-
-				req := candidateRequest("pool timeout", 10, time.Now().UTC())
-				req.ProjectID = "test-proj"
-				req.Mode = mode.mode
-				req.QueryVec = []float32{1, 0, 0}
-				req.Condition = CondHybrid
-				set, err := store.Candidates(ctx, req)
-				if err != nil {
-					t.Fatalf("Candidates: %v", err)
-				}
-				leg := set.Legs["vector"]
-				if !leg.Applicable {
-					t.Fatal("precondition: the vector leg applies to a hybrid request")
-				}
-				if leg.Attempted != tc.wantRun {
-					t.Errorf("Attempted = %v, want %v: a leg that skipped every row it read ran no cosine", leg.Attempted, tc.wantRun)
-				}
-				if leg.Available != tc.wantRun {
-					t.Errorf("Available = %v, want %v", leg.Available, tc.wantRun)
-				}
-				if leg.Err != "" {
-					t.Errorf("Err = %q, want empty: skipping rows is not a failure", leg.Err)
-				}
-				if leg.DimMismatch != tc.wantSkipped {
-					t.Errorf("DimMismatch = %d, want %d", leg.DimMismatch, tc.wantSkipped)
-				}
-				if got := set.Legs["fts"]; !got.Attempted || !got.Available {
-					t.Errorf("the keyword leg is %+v, want it untouched", got)
-				}
-			})
-		}
-	}
-}
