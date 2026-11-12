@@ -195,7 +195,9 @@ var systemBinDirs = []string{"/opt/homebrew/bin", "/usr/local/bin"}
 
 // FindClientBinary is the lookup `ghost mcp init` auto-detect uses: PATH, then
 // the home bin dirs. It never reads the fixed system dirs, which a sandbox
-
+// cannot redirect, so a client installed system-wide is not detected on its
+// own; findBinary builds on this same lookup and adds those dirs. It returns
+// "" when the binary is in neither place.
 func FindClientBinary(name string) string {
 	if c := homeBinaryCandidates(name); len(c) > 0 {
 		return c[0]

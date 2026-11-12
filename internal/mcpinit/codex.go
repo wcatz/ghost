@@ -1473,7 +1473,10 @@ func validateCodexHooksFile() error {
 
 // RunCodex installs Ghost's codex integration: the [mcp_servers.ghost] stdio
 // entry merged textually into ~/.codex/config.toml and SessionStart/Stop/
-
+// SessionEnd hooks merged into ~/.codex/hooks.json, both carrying the
+// resolved absolute ghost binary path (desktop launchers may run codex with a
+// narrower PATH than the shell that ran init). Payloads pass through
+// verbatim, so no adapter artifact beyond these two config entries exists.
 func RunCodex(w io.Writer, dryRun bool) error {
 	if dryRun {
 		_, _ = fmt.Fprintf(w, "\nDry run — showing what would change:\n\n")
@@ -1564,7 +1567,9 @@ func codexMCPEntryStatus(ghostBin string) (bool, string) {
 
 // StatusCodex checks the health of the Ghost ↔ codex integration. It reports
 // only codex-relevant checks — the ghost binary, the config.toml MCP entry,
-
+// the hooks.json lifecycle wiring (token-validated), and the client-agnostic
+// embedding/link stats tail shared with Status/StatusOpencode/StatusGoose.
+// Claude-only checks (permissions, autoMemory, redirects) are never reported.
 func StatusCodex(w io.Writer) (bool, error) {
 	_, _ = fmt.Fprintf(w, "\nGhost ↔ codex integration status:\n\n")
 

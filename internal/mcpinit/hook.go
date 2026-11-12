@@ -422,21 +422,32 @@ func shownOnly(projectShown, globalsShown int) sessionTally {
 
 // RenderSessionContext is the context renderer backing the `ghost context`
 // command and opencode's plugin. It produces exactly what the SessionStart hook
-
+// would emit for the same cwd — the maintenance alert ahead of project
+// memories, globals, open tasks and recent decisions. To keep opencode's
+// injected context at parity with claude/codex it also mirrors the SessionStart
+// hook's startup side effects: it starts the Obsidian mirror when configured and
+// counts this as a new session. opencode's plugin materializes the result into
+// its instructions so every session opens with project memory (opencode has no
+// stdout-injection surface of its own).
+// An empty cwd resolves to the process working directory; a missing store, or an
+// unmatched directory with no globals and no current maintenance alert, yields
+// an empty string.
 func RenderSessionContext(cwd string) string {
 	return RenderSessionContextAt(cwd, nil)
 }
 
 // RenderSessionContextAt is RenderSessionContext for an instant: the block is the
 // memory set as it stood at asOf rather than as it stands now, which is what
-
+// replays what a past session was given (#647). A nil asOf is the current
+// reading, and the whole of the current path — every side effect, every loader —
+// unchanged.
 func RenderSessionContextAt(cwd string, asOf *time.Time) string {
 	return renderSessionContext(cwd, asOf, "")
 }
 
 // RenderSessionContextFor is RenderSessionContext for a named host: rows that
 // repeat the instruction files that host loads itself are withheld (see
-
+// hostInstructionCover). An empty host withholds nothing.
 func RenderSessionContextFor(cwd string, host hostevent.Source) string {
 	return renderSessionContext(cwd, nil, host)
 }

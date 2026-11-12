@@ -28,7 +28,7 @@ func pidInFile(pidPath string) int {
 
 // AcquireLifecycleLock claims the per-project lifecycle lock for the project
 // named by project, which may be a name, id, or path (as Store.ResolveProject
-
+// accepts).
 func AcquireLifecycleLock(project string) (func(), bool, error) {
 	noop := func() {}
 

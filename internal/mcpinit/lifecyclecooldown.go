@@ -16,7 +16,9 @@ func lifecycleLastStartFile(projectID string) string {
 
 // UnfinishedLifecycleRunError is the cause recorded for a coordinator that
 // claimed the project and wrote its start stamp, then died before it could
-
+// record an outcome: SIGKILL, the OOM killer, a power loss. Nothing inside such
+// a process can run, so the evidence is the pair of files it left behind — the
+// stamp and the claim — and this is what both readers call that evidence.
 const UnfinishedLifecycleRunError = "the previous run did not finish; the coordinator was killed before it could record an outcome"
 
 func unfinishedLifecycleRun(dataDir, projectID string) (time.Time, bool) {
@@ -96,7 +98,8 @@ func lifecycleCooldownActive(dataDir, projectID string, minInterval time.Duratio
 
 // TouchLifecycleStart records that a lifecycle run for project has just STARTED.
 // Called by the coordinator itself (cmd/ghost's runLifecycle) once it holds the
-
+// per-project lock, so the stamp is written by the process that really runs and
+// only for a run that was not turned away by another live run.
 func TouchLifecycleStart(project string) error {
 
 	dataDir, err := config.DataDirPath()

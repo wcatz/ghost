@@ -106,7 +106,10 @@ func goosePluginDir() (string, error) {
 
 // RunGoose installs Ghost's goose integration: an Agent Plugins-conformant
 // package under ~/.agents/plugins/ghost/ whose plugin.json satisfies the v1.0.0
-
+// manifest schema, whose mcp.json registers the ghost stdio MCP server with
+// the resolved absolute binary baked in, and whose hooks/hooks.json bridges
+// SessionStart/Stop/SessionEnd onto `ghost hook <event> --source goose`. It
+// never touches goose's own settings file.
 func RunGoose(w io.Writer, dryRun bool) error {
 	if dryRun {
 		_, _ = fmt.Fprintf(w, "\nDry run — showing what would change:\n\n")
@@ -206,7 +209,10 @@ func installGoosePackage(w io.Writer, ghostBin string, dryRun bool) (bool, error
 
 // StatusGoose checks the health of the Ghost ↔ goose integration. It reports
 // only goose-relevant checks — the ghost binary, the plugin package under
-
+// ~/.agents/plugins/ghost/ (which is the whole integration: MCP registration
+// plus lifecycle hooks), and the client-agnostic embedding/link stats tail
+// shared with Status and StatusOpencode. Claude-only checks (hooks,
+// permissions, autoMemory, redirects) are never reported here.
 func StatusGoose(w io.Writer) (bool, error) {
 	_, _ = fmt.Fprintf(w, "\nGhost ↔ goose integration status:\n\n")
 
