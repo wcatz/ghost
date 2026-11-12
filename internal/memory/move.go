@@ -7,11 +7,7 @@ import (
 	"fmt"
 )
 
-// ResolveMoveTarget resolves a move destination to a project id. "_global" and
-// "global" name the global bucket; anything else is resolved as a project
-// reference and must exist. field names the caller's argument in refusals
-// ("to" for the CLI --to flag, "to_project" for the MCP tool argument), so a
-// withheld value names the argument the caller sent.
+// ResolveMoveTarget resolves a move destination to a project id.
 func (s *Store) ResolveMoveTarget(ctx context.Context, field, to string) (string, error) {
 	if to == GlobalProjectID || to == "global" {
 		return GlobalProjectID, nil
@@ -26,17 +22,14 @@ func (s *Store) ResolveMoveTarget(ctx context.Context, field, to string) (string
 	return id, nil
 }
 
-// MoveMemoryOptions controls a move between projects.
+// MoveMemoryOptions controls a memory move.
 type MoveMemoryOptions struct {
-	// Confirm allows moving a pinned or persistent memory. Without it, the move is refused.
-	Confirm bool
-	// DryRun reports what would move without writing.
-	DryRun bool
-	// Provenance records who performed the move in the memory's history.
+	Confirm    bool
+	DryRun     bool
 	Provenance Provenance
 }
 
-// MoveMemoryResult reports a completed or previewed move.
+// MoveMemoryResult reports a move.
 type MoveMemoryResult struct {
 	MemoryID      string
 	FromProjectID string
@@ -45,11 +38,7 @@ type MoveMemoryResult struct {
 	Moved         bool
 }
 
-// MoveMemory moves one memory from fromProjectID to toProjectID, keeping its
-// identity, links, embeddings, provenance, flags, evidence and recorded history.
-// It refuses unknown source or target projects, and refuses a pinned or
-// persistent memory unless opts.Confirm is set. A dry run reports what would
-// move without writing. updated_at is not changed.
+// MoveMemory moves one memory between projects.
 func (s *Store) MoveMemory(ctx context.Context, fromProjectID, memoryID, toProjectID string, opts MoveMemoryOptions) (MoveMemoryResult, error) {
 	if fromProjectID == "" || memoryID == "" || toProjectID == "" {
 		return MoveMemoryResult{}, fmt.Errorf("move memory: from_project_id, memory_id and to_project_id are required")
