@@ -1,6 +1,7 @@
 // Command evalstoryline runs one multi-session storyline against a
 // scratch-isolated Ghost and grades whether the arc held together (issue #339,
-// design section 2 of docs/superpowers/specs/2026-07-27-ghost-eval-suite-design.md).
+// design section 2 of the archived eval-suite design, in git history at
+// 374ac54e7865).
 package main
 
 import (
