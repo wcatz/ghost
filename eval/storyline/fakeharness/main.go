@@ -15,6 +15,7 @@ import (
 
 // OraclePair is one pair the fake classifier calls SUPERSEDES: the OLDER note
 // carries OlderMark and the NEWER note carries NewerMark. Replaced is the
+// retired claim the rubric's replaced: field must name.
 type OraclePair struct {
 	OlderMark string `json:"older_mark"`
 	NewerMark string `json:"newer_mark"`

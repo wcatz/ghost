@@ -9,6 +9,7 @@ import (
 
 // Agent is the one harness capability a storyline run needs: run a single prompt
 // in a FRESH headless session and return the answer. Nothing about a session's
+// history can reach it, which is the property the module is built on.
 type Agent interface {
 	Ask(ctx context.Context, prompt string) (string, error)
 }

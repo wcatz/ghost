@@ -2,6 +2,8 @@ package main
 
 // RenamedEndpoint is the rename arc: an endpoint and its handler are renamed in
 // session 2, the new note naming the old path as gone. Session 3 must be told
+// the new name and not the old one, and a search for the OLD name must lead to
+// the new record rather than to the one it replaced.
 func RenamedEndpoint() Storyline {
 	return Storyline{
 		Key:     "renamed-endpoint",
@@ -72,6 +74,9 @@ func RenamedEndpoint() Storyline {
 
 // RegressedFix is the regression arc: a crash recorded in session 1 is fixed in
 // session 2, holds through session 3, and comes back in session 4. While the fix
+// holds the crash note is stale; once it regresses the fix note is, and session
+// 5 — the first one after the regression — must be told the crash is back and
+// must not be told the fix still holds.
 func RegressedFix() Storyline {
 	return Storyline{
 		Key:     "regressed-fix",
@@ -164,6 +169,9 @@ func RegressedFix() Storyline {
 
 // VersionUpgrade is the dependency arc: the database driver is upgraded a major
 // version in session 2. The two notes are near-identical sentences about one
+// pin, which is exactly the shape a near-duplicate check is built to fold, so
+// the arc also grades that the upgrade was stored as a replacement rather than
+// as a second wording of the old pin.
 func VersionUpgrade() Storyline {
 	return Storyline{
 		Key:     "version-upgrade",
@@ -253,6 +261,12 @@ func VersionUpgrade() Storyline {
 
 // ScopedSetting is the scope arc: one setting has a different value in staging
 // and in production, and the two notes say so only through their scope — their
+// prose names no environment, which is how an agent writing from inside one
+// environment naturally phrases it. A production session must not be handed the
+// staging value, a staging session must not be handed the production one, and
+// the two values are both true, so nothing may let one supersede the other (the
+// pair is a Lure: the fake classifier calls it a supersession, and only Ghost's
+// own scope guard can refuse it).
 func ScopedSetting() Storyline {
 	staging := map[string]string{"environment": "staging"}
 	production := map[string]string{"environment": "production"}
