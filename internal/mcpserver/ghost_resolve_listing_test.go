@@ -1,13 +1,6 @@
 package mcpserver
 
-// ghost_resolve's applied listing is Run's second return rendered by the
 // handler's line loop (mcpserver.go), and since #1052's freshness write a
-// confirmed row can be REFUSED: rewritten while it was being classified, it
-// stays live with its new text and is counted as stale. The listing must then
-// show it neither as resolved nor with the pre-write text a verdict was reached
-// on. Run filters its applied return to the stamped rows; this test proves the
-// refusal reaches the ghost_resolve OUTPUT end to end — through a real
-// classifier subprocess, not a fake store.
 
 import (
 	"context"
@@ -23,15 +16,6 @@ import (
 	"github.com/wcatz/ghost/internal/memory"
 )
 
-// TestGhostResolve_AppliedListingOmitsStaleRow drives the ghost_resolve handler
-// with a fake claude that answers RESOLVED, while a watcher goroutine rewrites
-// one of the two confirmed notes INSIDE the read-to-write window. The ordering
-// is a two-file handshake so the rewrite provably lands between the pass's read
-// and its write rather than around a sleep: the fake binary touches a sentinel
-// once it runs (classification has started, so the candidates are already
-// read), the watcher then rewrites the note and creates the proceed file, and
-// the fake binary answers only once proceed exists — after which the write in
-// the handler must refuse the rewritten row.
 func TestGhostResolve_AppliedListingOmitsStaleRow(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell script fake binary requires a POSIX shell")
@@ -70,8 +54,6 @@ printf '%s' 'RESOLVED | closed-by: the tracking issue closed'
 		t.Fatalf("write fake claude binary: %v", err)
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	// The harness env is allow-listed (internal/ai/harness_env.go); the two
-	// handshake paths are opt-in via GHOST_PASSTHROUGH_ENV.
 	t.Setenv("GHOST_PASSTHROUGH_ENV", "GHOST_RESOLVE_SENTINEL,GHOST_RESOLVE_PROCEED")
 	t.Setenv("GHOST_RESOLVE_SENTINEL", sentinel)
 	t.Setenv("GHOST_RESOLVE_PROCEED", proceed)
@@ -80,9 +62,6 @@ printf '%s' 'RESOLVED | closed-by: the tracking issue closed'
 
 	rewriteDone := make(chan error, 1)
 	go func() {
-		// Wait for classification to start (the fake binary ran), then rewrite
-		// the stale row and release the classifier. A bound exists so a broken
-		// handshake fails the test instead of hanging it.
 		deadline := time.Now().Add(15 * time.Second)
 		for time.Now().Before(deadline) {
 			if _, err := os.Stat(sentinel); err == nil {
@@ -120,9 +99,6 @@ printf '%s' 'RESOLVED | closed-by: the tracking issue closed'
 		t.Fatalf("expected TextContent, got %T", result.Content[0])
 	}
 
-	// The listing names only the stamped row: the rewritten row's short id and
-	// judged text are gone, the summary names it stale, and the untouched row is
-	// listed under the text the store holds.
 	if strings.Contains(text.Text, shortID(staleID)) {
 		t.Errorf("ghost_resolve listing still names the stale row %s:\n%s", shortID(staleID), text.Text)
 	}
@@ -136,8 +112,6 @@ printf '%s' 'RESOLVED | closed-by: the tracking issue closed'
 		t.Errorf("ghost_resolve listing is missing the stamped row %s:\n%s", shortID(freshID), text.Text)
 	}
 
-	// The store agrees with the listing: the untouched row is stamped under its
-	// judged text, the rewritten row keeps the NEW text and stays live.
 	rows, err := store.GetByIDs(ctx, []string{staleID, freshID})
 	if err != nil || len(rows) != 2 {
 		t.Fatalf("GetByIDs: %v (%d rows)", err, len(rows))
