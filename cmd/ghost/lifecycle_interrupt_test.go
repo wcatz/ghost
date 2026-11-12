@@ -7,14 +7,6 @@ import (
 
 // TestTheInterruptRecordNamesOnlyAStartedPhase pins the two shapes a signal
 // leaves and the one shape that records nothing.
-//
-// The phase the chain never reached must NOT be named in phases_failed: the
-// old shape recorded the next phase in line with the bare cause "context
-// canceled" — a claim about a process that was never meaningfully started, and
-// the phase the signal caught in flight, which did start, is the one that may
-// be named. And a chain that finished every enabled phase records nothing at
-// all: the signal arrived after the work, so nothing is paused and the record
-// must not invent a phase to blame.
 func TestTheInterruptRecordNamesOnlyAStartedPhase(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
@@ -84,14 +76,6 @@ func TestTheInterruptRecordNamesOnlyAStartedPhase(t *testing.T) {
 
 // TestTheSweepWaitEndsOnTheSweepOrTheBackstop pins the ways the per-phase
 // wait for the escalation ends, and the one case that must not start it.
-//
-// The escalation's sweep has to land before the coordinator goes on — on a
-// deadline exactly as on a signal, because the next phase must not start
-// beside a member of the previous phase's group that is still running. A
-// phase that ended on its own ends its watchdog at once, so waiting for it
-// costs a moment. Only a phase that never launched an escalation has
-// nothing to await. The bound is a backstop, so a sweep that never returns
-// must not hang the coordinator.
 func TestTheSweepWaitEndsOnTheSweepOrTheBackstop(t *testing.T) {
 	closed := func() <-chan time.Time { c := make(chan time.Time); close(c); return c }
 	never := make(chan time.Time)
@@ -115,11 +99,6 @@ func TestTheSweepWaitEndsOnTheSweepOrTheBackstop(t *testing.T) {
 		returned := make(chan struct{})
 		go func() {
 			defer close(returned)
-			// never: the bound must not be what ends this wait, so an
-			// implementation that ignored the closed sweep would hang here and
-			// be caught rather than passing for the wrong reason. (A select
-			// evaluates every operand up front, so the clock is consulted
-			// either way; what matters is which case commits.)
 			awaitPhaseSweep(done, func(time.Duration) <-chan time.Time { return never })
 		}()
 		select {
@@ -142,17 +121,6 @@ func TestTheSweepWaitEndsOnTheSweepOrTheBackstop(t *testing.T) {
 
 // TestTheInterruptIsAppendedToAnEarlierFailure pins how a signal's outcome
 // lands in the marker's two fields when the run has already failed.
-//
-// The marker carries ONE error string and keeps the FIRST cause, so an
-// interrupt that follows an earlier phase's failure must be appended to that
-// cause rather than passed in as a second one: otherwise the phase the signal
-// caught is named in phases_failed while its own cause — the signal, and the
-// output tail that is the only record of what it was doing — is silently
-// dropped, and the alert reads as if the earlier phase were the whole story.
-//
-// The one shape with no phase to name and no failure to append to is the run
-// itself, returned as a direct-write cause because FinishLifecycleRun reads an
-// empty failure list as success and would clear the record.
 func TestTheInterruptIsAppendedToAnEarlierFailure(t *testing.T) {
 	for _, tc := range []struct {
 		name         string
