@@ -7,44 +7,24 @@ import (
 	"time"
 )
 
-// SessionProjectCap is the session-start context cap. It is deliberately
-// smaller than the historical 25-memory context and independent of the
-// caller-supplied limit used by Store.GetTopMemories; the ranking below keeps
-// the session digest bounded while preserving the most useful memories.
-// Single definition: internal/mcpinit aliases this (sessionMemoriesCap).
+// SessionProjectCap is the session-start project context cap.
 const SessionProjectCap = 15
 
-// SessionGlobalCap is lower than the project-memories cap (SessionProjectCap)
-// since globals compete for attention across every project, not just one.
-// Single definition: internal/mcpinit aliases this (globalsCap).
+// SessionGlobalCap is the session-start global context cap.
 const SessionGlobalCap = 8
 
-// SessionProjectDisplayBytes and SessionGlobalDisplayBytes are the per-item
-// PREVIEW budgets of the rendered block, applied per bucket because a preview
-// has to SAY that it was cut (ellipsis) and ClampBytes cannot. The bucket with
-// more items spends fewer bytes on each, so the two sections stay comparable
-// in size rather than one dominating the block. Single definition:
-// internal/mcpinit aliases these (sessionDisplayBytes, globalsDisplayBytes).
+// SessionProjectDisplayBytes is the per-item preview budget for project rows.
 const SessionProjectDisplayBytes = 200
+
+// SessionGlobalDisplayBytes is the per-item preview budget for global rows.
 const SessionGlobalDisplayBytes = 300
 
-// PinnedProjectCap and PinnedGlobalCap are the session-start bucket caps for
-// the project and _global slices, bounded slot guarantee. Kept as aliases so
-// callers that name the guarantee can keep that name without re-spelling the cap.
 const (
 	PinnedProjectCap = SessionProjectCap
 	PinnedGlobalCap  = SessionGlobalCap
 )
 
-// PinnedOverflow describes a project's pinned set against its session-start
-// bucket. Count is the live pinned rows' total, Cap is what the bucket can
-// show, and CutIDs are the lowest-ranked pinned rows by importance, most at
-// risk of being cut (for awareness only, not the exact set the block drops).
-// Empty when the bucket fits. Overflow is count-only: with per-row preview
-// truncation and KeepPinned on the session-start fit pass, pinned rows are not
-// cut for bytes as a separate rule; however assemble.FitItems may cut a pinned
-// row as a last resort when no unpinned row is left, and byte budgets are not
-// used to report cuts — the overflow report is count-only.
+// PinnedOverflow describes a project's pinned set against its session-start bucket.
 type PinnedOverflow struct {
 	ProjectID string
 	Count     int
@@ -52,13 +32,6 @@ type PinnedOverflow struct {
 	CutIDs    []string
 }
 
-// PinnedOverflowExceeded reports whether the pinned set exceeds what the bucket
-// can show by count only. With per-row preview truncation and KeepPinned on the
-// session-start fit pass, a pinned row is not cut for bytes before unpinned rows
-// in the normal case; assemble.FitItems may cut a pinned row as a last resort
-// when no unpinned row is left. The preview caps keep total bytes within the
-// block budget in normal cases; the guarantee is bounded by the count cap and
-// the overflow report is count-only.
 func (o *PinnedOverflow) Exceeded() bool {
 	if o == nil {
 		return false
@@ -66,24 +39,10 @@ func (o *PinnedOverflow) Exceeded() bool {
 	return o.Count > o.Cap
 }
 
-// PinnedOverflow returns the overflow for one project's pinned set, measured
-// at now. It counts live pinned rows (pinned=1, resolved_at IS NULL) whose
-// validity window includes now and which match the configured session scope
-// (ScopeMatchesSQL), ranks them by the bucket's own order, and names the
-// lowest-ranked pinned rows by importance (most at risk of being cut) by the
-// count cap. The session-start block truncates each row to a preview
-// (sessionDisplayBytes/globalsDisplayBytes) and fits the whole block with
-// KeepPinned; pinned rows are not cut for bytes as a separate rule, but
-// assemble.FitItems may cut a pinned row as a last resort when no unpinned
-// row is left. Byte overflow is not reported — the overflow report is
-// count-only. Nil when the bucket fits. The reported ids are not guaranteed to
-// match what the block drops.
 func (s *Store) PinnedOverflow(ctx context.Context, projectID string, now time.Time, scope map[string]string) (*PinnedOverflow, error) {
 	return s.pinnedOverflow(ctx, projectID, now, scope, nil)
 }
 
-// pinnedOverflow is PinnedOverflow with a skip: a row skip reports does not
-// count against the cap (see PinnedOverflowsExcept).
 func (s *Store) pinnedOverflow(ctx context.Context, projectID string, now time.Time, scope map[string]string, skip func(Memory) bool) (*PinnedOverflow, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -107,9 +66,6 @@ func (s *Store) pinnedOverflow(ctx context.Context, projectID string, now time.T
 	if err != nil {
 		return nil, err
 	}
-	// Withhold rows whose validity window excludes now, like the
-	// session-start fetch does — a pin outside its window is not
-	// guaranteed a slot and does not count toward the guarantee.
 	var pinned []Memory
 	for _, m := range pinnedAll {
 		if m.ValidFrom != nil || m.ValidUntil != nil || m.VerifiedAt != nil {
@@ -129,10 +85,6 @@ func (s *Store) pinnedOverflow(ctx context.Context, projectID string, now time.T
 		return nil, nil
 	}
 
-	// Rank the pins among themselves by importance order (and bucket tie-breaks),
-	// as the cap does. The ids reported are the lowest-ranked by importance,
-	// most at risk of being cut (for awareness), not necessarily the exact set
-	// the session-start block will drop.
 	sort.SliceStable(pinned, func(i, j int) bool {
 		return pinnedLess(pinned[i], pinned[j], projectID, now)
 	})
@@ -150,16 +102,10 @@ func (s *Store) pinnedOverflow(ctx context.Context, projectID string, now time.T
 	}, nil
 }
 
-// PinnedOverflows returns every project whose pinned set exceeds its bucket.
 func (s *Store) PinnedOverflows(ctx context.Context, now time.Time, scope map[string]string) ([]PinnedOverflow, error) {
 	return s.PinnedOverflowsExcept(ctx, now, scope, nil)
 }
 
-// PinnedOverflowsExcept is PinnedOverflows leaving out the rows skip reports:
-// rows the session-start block withholds before the cap applies (a row the
-// host already loaded from its instruction files) never compete for a slot,
-// so counting them would report an overflow the block does not have. A nil
-// skip counts every row.
 func (s *Store) PinnedOverflowsExcept(ctx context.Context, now time.Time, scope map[string]string, skip func(Memory) bool) ([]PinnedOverflow, error) {
 	s.mu.RLock()
 	rows, err := s.queryDB().QueryContext(ctx, `SELECT DISTINCT project_id FROM memories WHERE pinned = 1 AND resolved_at IS NULL`)
@@ -198,15 +144,11 @@ func pinnedLess(a, b Memory, projectID string, now time.Time) bool {
 		if a.Importance != b.Importance {
 			return a.Importance > b.Importance
 		}
-		// UpdatedAt is lexicographic like the candidate scan: newer first.
 		if a.UpdatedAt != b.UpdatedAt {
 			return a.UpdatedAt > b.UpdatedAt
 		}
 		return a.ID < b.ID
 	}
-	// Project bucket: decay ranking, then importance, then creation, then id.
-	// Pinned rows have DecayFactor 1, so rank == importance, but keep the
-	// formula for fidelity.
 	ra := float64(a.Importance) * DecayFactor(a.Category, a.Content, a.Retention, true, ageDays(a.CreatedAt, now))
 	rb := float64(b.Importance) * DecayFactor(b.Category, b.Content, b.Retention, true, ageDays(b.CreatedAt, now))
 	if ra != rb {
