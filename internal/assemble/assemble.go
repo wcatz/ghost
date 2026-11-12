@@ -17,6 +17,7 @@ import (
 
 // Source names the surface a request came from. It decides the project mode,
 // the budget and which near-duplicate policy applies — the two surfaces
+// disagree about all three, which is why the request cannot leave it implicit.
 type Source string
 
 const (
@@ -40,6 +41,10 @@ const (
 
 // Slice is a per-bucket membership budget. MaxBytes bounds item content and
 // never includes response framing. It bounds the RAW, pre-fold content: the
+// line-break fold (Data, #911) is a display step after selection, so a rendered
+// line can differ in length from the bytes the budget counted. The same holds
+// for the agent and source_ref display caps (MaxRenderedAgentLen,
+// MaxRenderedSourceRefLen), which are applied to the raw value before folding.
 type Slice struct {
 	Bucket                string
 	MaxItems              int // 0 = unbounded within this slice
@@ -61,6 +66,15 @@ type Slice struct {
 
 // Budget is what a caller will accept. MaxItems is the total across buckets;
 // Slices are the per-bucket caps, so search applies one limit across project
+// and `_global` while injection applies independent caps. A budget that bounds
+// neither rows nor bytes is rejected: an unbounded block is not a request, it is
+// an omission. A MaxBytes cap alone is bounded, so it is honoured — the
+// retrieval window falls back to its documented ceiling, stage 9 still trims by
+// the per-slice item caps, and Run's response-fit post-pass brings the complete
+// rendered response inside MaxBytes, except that the search envelope keeps its
+// first row whole when that row alone is larger. MaxBytes is the RESPONSE's bytes, never
+// item content: Slice.MaxBytes is the item-content cap, and applying one field to
+// two units would make the effective limit depend on a caller's framing.
 type Budget struct {
 	MaxItems               int // 0 = unbounded total
 	MaxBytes               int // complete response bytes; 0 = unbounded total
@@ -86,6 +100,7 @@ const (
 
 // Request is one assembled context block. Now is required and is used end to
 // end: the candidate path never reads the wall clock, so a row's age, its
+// validity and the trace describing it cannot disagree about what time it was.
 type Request struct {
 	ProjectID                    string
 	Query                        string    // empty selects passive mode
@@ -113,6 +128,8 @@ type Request struct {
 
 // Result is the assembled block. Run owns the whole response — listing, verdict
 // sentence, filter caveat, diagnostics and the machine line — so Response is the
+// text a caller returns verbatim and Bytes is its length, never 0 on a successful
+// Run.
 type Result struct {
 	Items      []Item
 	Outcome    Outcome
@@ -130,10 +147,13 @@ type Result struct {
 
 // ErrResponseBudgetExceeded is returned when even the empty envelope exceeds
 // Budget.MaxBytes. It is an error rather than an outcome: no rows and a
+// response that cannot be rendered are different facts, and reporting the
+// second as `empty` would claim the store had nothing to say.
 var ErrResponseBudgetExceeded = errors.New("response budget exceeded")
 
 // Retriever is the one method this package depends on. It is an interface so
 // the assembler never holds a *sql.DB, and so a test can supply a candidate set
+// without a database.
 type Retriever interface {
 	Candidates(context.Context, memory.CandidateRequest) (*memory.CandidateSet, error)
 }
@@ -304,6 +324,8 @@ func windowIsACeiling(req Request) bool {
 
 // RetrievalWindow is the window Run will ask the retriever for on this request.
 // Exported so a caller whose own path has to describe the same window asks here
+// instead of repeating the rule: explain mode reports the ranking of a window,
+// and a diagnosis of a window the tool does not use describes nothing.
 func RetrievalWindow(req Request) int { return retrievalWindow(req) }
 
 func retrievalWindow(req Request) int {
@@ -464,14 +486,20 @@ func validatePassiveBudget(req Request) error {
 
 // Passive reports whether this request is a passive retrieval: no query, so the
 // block is selected by importance, decay and pin rather than by relevance to
+// anything the caller asked.
 func Passive(req Request) bool { return req.Query == "" }
 
 // ReasonNoMemories is the empty reason for a passive block: the over-fetched
 // window came back empty. It is exported because a surface that frames its own
+// block has to tell this case from a block that was EMPTIED, and only the reason
+// knows which — the two call for opposite sentences, one of which is a census and
+// the other a report of rows found and withheld. Comparing against the string
+// literal would work until the vocabulary moved.
 const ReasonNoMemories = reasonNoMemories
 
 // ReasonAllInvalid is the empty reason for a block whose every row was withheld
 // as out of date, exported for the same reason as ReasonNoMemories and beside it
+// so a caller comparing reasons reads them from one place.
 const ReasonAllInvalid = reasonAllInvalid
 
 func sliceBuckets(slices []Slice) []string {

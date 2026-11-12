@@ -12,6 +12,8 @@ const ftsRankFloor = 3
 
 // The reason vocabulary. It is closed: a result that does not fit a reason here
 // has a bug, not a new cause, and adding one is a contract change rather than a
+// patch. The empty reasons name a stage; the non-empty ones name the state of
+// the floor.
 const (
 	reasonNoMemories             = "no_memories"
 	reasonNotApplicable          = "not_applicable"
@@ -485,6 +487,12 @@ func (p *pipeline) response(res Result) string {
 
 // CutNotice is the parenthesised sentence every response the byte budget cuts
 // ends its body with — the last line of a listing, and for a search answer the
+// line just above the machine-readable verdict line, which stays last. It names
+// how many WHOLE rows went, the budget they were fitted to and the caller's own
+// advice for reaching the rest. It is exported because two renderers emit the
+// same cut: the assembler's response-fit post-pass trims a query answer, and
+// `capResponseParts` trims the five row-rendering listing tools, and one
+// sentence built in one place is how the two cannot spell the same cut two ways.
 func CutNotice(cut, budget int, advice string) string {
 	verb := "rows were"
 	if cut == 1 {
@@ -512,6 +520,7 @@ func (p *pipeline) responseCutNotice() string {
 
 // FirstKept describes the one over-budget answer a byte budget still returns:
 // its protected row — the first row, or the first pinned row — is kept whole
+// rather than dropped, so the caller has something to read.
 type FirstKept struct {
 	Cut      int    // rows cut before the protected one
 	Budget   int    // the response budget the answer was fitted to
@@ -523,6 +532,10 @@ type FirstKept struct {
 
 // FirstKeptNotice is the parenthesised sentence for a FirstKept answer. It is
 // exported for the reason CutNotice is: the assembler's response-fit post-pass
+// and `capResponseParts` both keep a protected row whole, and one sentence built
+// in one place is how the two cannot describe the same case two ways. It names
+// no advice, because the usual lever — fewer results — cannot shrink a single
+// row and naming it would send the caller to a call that comes back the same.
 func FirstKeptNotice(k FirstKept) string {
 	lead := "The " + k.Which
 	if k.Cut > 0 {

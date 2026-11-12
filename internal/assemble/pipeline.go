@@ -151,6 +151,14 @@ func runPredicates(p *pipeline) {
 
 // provenanceWeight is stage 4's weight, as the trace records it, and only that:
 // no score is multiplied by it in v1. Confidence is writable today and may be
+// non-NULL on existing rows, so a weight that changed the order would change
+// results with no measured justification behind it. Shipping the stage with the
+// decision recorded is what makes a later change measurable — but it is not a
+// one-line change: a real multiplier needs a float here, applied where
+// ProvenanceContribution and ConfidenceContribution are computed.
+// The two stage-3 verdicts are counted under their own keys as well as under
+// stagePredicates, so a reason can name the filter that emptied the set rather than
+// the stage that contained it. They are not stages: nothing runs them.
 const (
 	dropCategory  = "predicate:category"
 	dropRetention = "predicate:retention"
@@ -661,6 +669,15 @@ type diversityDeferral struct {
 
 // maxSingleLegVectorRank and maxSingleLegFTSRank are the rank ceilings that
 // admit a row found by only one retrieval leg into a QUERY block. Ranks are
+// 0-based, so rank 0 is the best, and both ceilings are 0: a single-leg row is
+// admitted only when its OWN leg ranked it first. A row found by both legs is
+// always admitted; one the vector leg found alone survives only when
+// VectorRank <= maxSingleLegVectorRank, and one the keyword leg found alone
+// only when FTSRank <= maxSingleLegFTSRank. Tuned on the synthetic bench
+// corpus (#1251), then re-measured for the injection-precision audit (#1304):
+// the rank-1 and rank-2 bands the first tuning admitted were 3.3% and 1.1%
+// relevant, so admitting them bought tokens rather than answers. Keep them
+// named constants.
 const (
 	maxSingleLegVectorRank = 0
 	maxSingleLegFTSRank    = 0

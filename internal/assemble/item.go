@@ -16,6 +16,8 @@ import (
 
 // Item is the shared output of assembly: what both surfaces render, what an
 // explanation describes, and what a context metric scores. One type for all
+// three is what stops a renderer and a metric from disagreeing about what a
+// memory is.
 type Item struct {
 	ID, Category, Content string
 	Tags                  []string
@@ -44,14 +46,27 @@ type Item struct {
 
 // MaybeReplacedMarker is the bracketed field a line carries when a newer row on
 // the same page looks like its replacement. It is worded as what it is, a guess
+// read off the text: Ghost has not related the two rows, and the reader decides
+// which one is current. It sits at a FIELD of the prefix, directly after
+// `[resolved]` (or the tags, the pin or the importance when those are absent),
+// outside the «...» data. Its words alone are not proof of it: a tag is stored
+// text printed in the same prefix, so a tag can hold the same words. A reader
+// sees such a tag JSON-quoted inside `tags:[…]`, and a check that wants the
+// marker must find it at this field (eval/storyline's carriesReplacedMarker
+// does), not anywhere before the first «.
 const MaybeReplacedMarker = "[maybe replaced by a newer note]"
 
 // SupersededMarker is the bracketed field a line carries when a row on the same
 // page replaced it through a live `supersedes` edge (Item.SupersededBy). Unlike
+// MaybeReplacedMarker it is not a guess: Ghost related the two rows. It sits at
+// the same field, so the explicit relation never shows less than the lexical
+// guess it switches off, and the same caution applies: a tag can hold its words,
+// so a check must find it at its field.
 const SupersededMarker = "[superseded by a newer note]"
 
 // Line renders the shared item prefix: the one line shape both surfaces emit for
 // a memory, so a reader comparing search output with an injected block sees the
+// same fields in the same place. Each surface keeps its own framing around it.
 func (i Item) Line() string {
 	pin := ""
 	if i.Pinned {
@@ -88,6 +103,9 @@ const maxRenderedConflictPartners = 8
 
 // ConflictsLabel renders the rows a memory contradicts, as they are rendered on
 // their own lines (Token), or "" when it contradicts none in this answer. At
+// most maxRenderedConflictPartners are named; any remainder is reported as a
+// trailing count, so a large component cannot spend the response budget on one
+// line. Item.ConflictsWith keeps the full list — only the rendering is bounded.
 func ConflictsLabel(ids []string) string {
 	return boundedIDLabel(" conflicts_with=", ids)
 }
@@ -139,6 +157,10 @@ func SupersededByLabel(ids []string) string {
 
 // SourceLabel renders a row's origin label as ` source=<label>`. The label is
 // stored text — an unrecognised value is printed rather than refused — so it goes
+// through Token like every other identifier on the line and cannot carry a line
+// break or a delimiter (#911). The known vocabulary (mcp, reflection, builtin,
+// import:…) is all bare-token characters and renders unchanged. Callers pass the
+// label memory.OriginClass returned, and "" renders as nothing.
 func SourceLabel(label string) string {
 	if label == "" {
 		return ""
@@ -159,6 +181,11 @@ func AgentLabel(agent string) string {
 
 // ProjectLabel renders the bucket a row belongs to, as ` project=<id>`, for a
 // listing that fuses rows from several projects. The id goes through Token like
+// every identifier printed outside the data delimiters. It is bounded for the
+// reason AgentLabel is: an imported project id may be as long as the path it
+// was keyed on (memory.CheckImportedProjectID permits that so a long path
+// round-trips), and a response budget that always keeps its first row whole
+// would otherwise return an answer of whatever size that id has.
 func ProjectLabel(projectID string) string {
 	if len(projectID) > MaxRenderedProjectIDLen {
 		return " project=" + Token(clampBytes(projectID, MaxRenderedProjectIDLen)) + "…[project id truncated]"
@@ -172,14 +199,27 @@ const MaxRenderedProjectIDLen = 256
 
 // MaxRenderedAgentLen is what a listing prints of an agent. It is a DISPLAY
 // bound, not a claim about the column: memory.MaxAgentLen refuses a longer one on
+// the writers that reach it, and this covers the three that deliberately do not —
+// RestoreSnapshot, CreateFromCorpus, and ReplaceNonManual, which inherits the
+// replaced row's agent onto the row a rewrite becomes.
 const MaxRenderedAgentLen = 128
 
 // MaxRenderedSourceRefLen bounds what a listing prints of a reference. It is a
 // DISPLAY bound, not a claim about what the column holds: every writer this build
+// controls refuses a longer one at write time (memory.MaxSourceRefLen), and this
+// covers what they cannot — a store written before that cap, a snapshot table
+// edited by hand, a row restored from one. It is here rather than only at the
+// writers because the renderer is the one place that cannot assume its input came
+// from a writer that enforces the cap — `RestoreSnapshot`, which writes the column
+// in SQL from the snapshot table, `CreateFromCorpus`, which reaches insertMemory
+// directly, and `ReplaceNonManual`, which inherits the replaced row's reference
+// onto the row a rewrite becomes, are the three writers that deliberately do not.
 const MaxRenderedSourceRefLen = 512
 
 // SourceRefLabel renders the reference a claim was read from, or "" when the row
 // records none. Free text on its way into a tool answer, so it is delimited: a
+// path or URL carrying « or » would otherwise close the data block early and let
+// its own tail read as instruction.
 func SourceRefLabel(ref string) string {
 	if ref == "" {
 		return ""
@@ -221,6 +261,8 @@ const tokenBytesPerToken = 4
 
 // ScopeLabel renders a memory's scope for a listing, or "" when unscoped.
 // Keys are sorted: map iteration order is random in Go, so an unsorted rendering
+// would show the same scope in a different order on each read and look like the
+// scope itself was changing.
 func ScopeLabel(scope map[string]string) string {
 	if len(scope) == 0 {
 		return ""
@@ -265,6 +307,9 @@ func boundedScopePart(s string, max int) string {
 
 // Token renders one stored value that a line prints OUTSIDE the «...» data
 // delimiters: a scope key or value, or a memory id. Both are text Ghost did not
+// author — a save argument, an imported artifact's verbatim value — and both are
+// printed on a line an agent reads as Ghost's own, so neither may be able to
+// start a line, close the construct it sits in, or open a data block of its own.
 func Token(s string) string {
 	return memory.SafeToken(s)
 }
@@ -300,6 +345,7 @@ func isLineEndingOrControl(r rune) bool {
 
 // PreviewLine returns the first line of stored text, capped at max runes with an
 // ellipsis, for the places that name a record by a glimpse of its content rather
+// than by printing all of it.
 func PreviewLine(s string, max int) string {
 	if i := strings.IndexFunc(s, isLineBreak); i >= 0 {
 		s = s[:i]
@@ -359,6 +405,7 @@ func isTokenRune(r rune) bool {
 
 // Data wraps untrusted stored text in «...» data delimiters, first rewriting
 // any literal « or » inside it so embedded delimiters cannot terminate the
+// data block early and smuggle text back out as instructions.
 func Data(s string) string {
 	return "«" + escapeControls(foldLineBreaks(neutralizeDelimiters(s))) + "»"
 }
@@ -388,6 +435,9 @@ func isEscapedControl(r rune) bool {
 
 // LineBreakEscape is what a stored line break is printed as: every memory
 // occupies exactly ONE physical line on every surface (#911), the way Token
+// already guarantees for an identifier, so a stored newline followed by
+// "- [decision] …" cannot start a line shaped like a memory line for a reader
+// that goes line by line rather than tracking «...».
 const LineBreakEscape = "⏎"
 
 func foldLineBreaks(s string) string {
@@ -440,6 +490,8 @@ func TagsLabel(tags []string) string {
 
 // MaxRenderedTagLen bounds what a listing prints of ONE tag. It is a DISPLAY
 // bound, not a claim about the column, for the reason AgentLabel and
+// SourceRefLabel carry one: the renderer is the one layer that cannot assume its
+// input came from a writer that enforces a cap.
 const MaxRenderedTagLen = 64
 
 const tagTruncationMarker = "…[tag truncated]"

@@ -6,7 +6,8 @@ import (
 	"github.com/wcatz/ghost/internal/memory"
 )
 
-// historicalQualifier returns the sentence shown above a block assembled at an instant rather than now.
+// historicalQualifier is the sentence a surface shows above a block that was
+// assembled at an instant rather than now.
 func historicalQualifier(asOf time.Time) string {
 	return memory.AsOfSourceNote(asOf) +
 		" Retrieval was keyword-only over that historical text: an embedding records current content, so no vector " +
@@ -16,7 +17,10 @@ func historicalQualifier(asOf time.Time) string {
 		"recorded evidence\" for every row because nothing was read, not because none exists."
 }
 
-// qualifiersFor builds the block's qualifiers from the request and retriever counts.
+// qualifiersFor builds the block's qualifiers from the request and what the
+// retriever reported. It is a function of the request alone plus the retriever's
+// counts, so the two disclosures cannot be derived from different places and
+// disagree about what this retrieval was.
 func qualifiersFor(req Request, set *memory.CandidateSet) []string {
 	var out []string
 	if req.AsOf != nil {
