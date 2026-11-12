@@ -8,57 +8,47 @@ import (
 
 // The fallback keeps the GHOST_* environment, and the environment parsers for
 // context.relevance_cutoff and context.no_answer_cosine read any float. Load
-// refuses an out-of-range value through checkValueChecks, so the MCP server
-// falls back — and without the same check there, the fallback re-read the bad
-// value and every ghost_memory_search failed in the assembler's request check.
-// The fallback replaces each bad value with its compiled default and says so.
-
-// badContextValues are the spellings floatValue accepts and a [0,1] value
-// cannot be.
-var badContextValues = []string{"5", "-0.5", "NaN", "Inf"}
+// refuses an out-of-range value, so the fallback must replace each bad value
+// with its compiled default and say so, or every search would fail in the
+// assembler's request check.
 
 func inUnitRange(v float64) bool {
 	return !math.IsNaN(v) && !math.IsInf(v, 0) && v >= 0 && v <= 1
 }
 
-func TestFallbackConfigNeverCarriesAnOutOfRangeRelevanceCutoff(t *testing.T) {
-	for _, bad := range badContextValues {
-		isolateConfig(t)
-		warnings := captureConfigWarnings(t)
-		t.Setenv("GHOST_CONTEXT_RELEVANCE_CUTOFF", bad)
-
-		if got := FallbackConfig().Context.RelevanceCutoff; got != DefaultRelevanceCutoff {
-			t.Errorf("FallbackConfig with GHOST_CONTEXT_RELEVANCE_CUTOFF=%s: relevance_cutoff = %v, want the %v default", bad, got, DefaultRelevanceCutoff)
+func TestFallbackConfigContextValues(t *testing.T) {
+	cases := []struct {
+		key, env string
+		get      func(*Config) float64
+		def      float64
+	}{
+		{"context.relevance_cutoff", "GHOST_CONTEXT_RELEVANCE_CUTOFF", func(c *Config) float64 { return c.Context.RelevanceCutoff }, DefaultRelevanceCutoff},
+		{"context.no_answer_cosine", "GHOST_CONTEXT_NO_ANSWER_COSINE", func(c *Config) float64 { return c.Context.NoAnswerCosine }, DefaultNoAnswerCosine},
+	}
+	for _, c := range cases {
+		for _, bad := range []string{"5", "-0.5", "NaN", "Inf"} {
+			isolateConfig(t)
+			warnings := captureConfigWarnings(t)
+			t.Setenv(c.env, bad)
+			if got := c.get(FallbackConfig()); got != c.def {
+				t.Errorf("%s=%s: %v, want the %v default", c.env, bad, got, c.def)
+			}
+			if !strings.Contains(warnings.String(), c.key) {
+				t.Errorf("%s=%s replaced without a warning naming the key: %q", c.env, bad, warnings.String())
+			}
 		}
-		if !strings.Contains(warnings.String(), "context.relevance_cutoff") {
-			t.Errorf("FallbackConfig replaced GHOST_CONTEXT_RELEVANCE_CUTOFF=%s without a warning naming the key: %q", bad, warnings.String())
+		isolateConfig(t)
+		t.Setenv(c.env, "0.3")
+		if got := c.get(FallbackConfig()); got != 0.3 {
+			t.Errorf("%s=0.3 (valid): %v, want it kept", c.env, got)
 		}
 	}
-}
 
-func TestFallbackConfigNeverCarriesAnOutOfRangeNoAnswerCosine(t *testing.T) {
-	for _, bad := range badContextValues {
-		isolateConfig(t)
-		warnings := captureConfigWarnings(t)
-		t.Setenv("GHOST_CONTEXT_NO_ANSWER_COSINE", bad)
-
-		if got := FallbackConfig().Context.NoAnswerCosine; got != DefaultNoAnswerCosine {
-			t.Errorf("FallbackConfig with GHOST_CONTEXT_NO_ANSWER_COSINE=%s: no_answer_cosine = %v, want the %v default", bad, got, DefaultNoAnswerCosine)
-		}
-		if !strings.Contains(warnings.String(), "context.no_answer_cosine") {
-			t.Errorf("FallbackConfig replaced GHOST_CONTEXT_NO_ANSWER_COSINE=%s without a warning naming the key: %q", bad, warnings.String())
-		}
-	}
-}
-
-// Both keys bad at once: each is replaced, not only the first one the check
-// reaches.
-func TestFallbackConfigReplacesEveryOutOfRangeContextValue(t *testing.T) {
+	// Both keys bad at once: each is replaced, on the hook path too.
 	isolateConfig(t)
 	captureConfigWarnings(t)
 	t.Setenv("GHOST_CONTEXT_RELEVANCE_CUTOFF", "-0.5")
 	t.Setenv("GHOST_CONTEXT_NO_ANSWER_COSINE", "5")
-
 	cfg := FallbackConfig()
 	if err := checkValueChecks(cfg); err != nil {
 		t.Errorf("FallbackConfig still carries an out-of-range context value: %v", err)
@@ -66,53 +56,20 @@ func TestFallbackConfigReplacesEveryOutOfRangeContextValue(t *testing.T) {
 	if cfg.Context.RelevanceCutoff != DefaultRelevanceCutoff || cfg.Context.NoAnswerCosine != DefaultNoAnswerCosine {
 		t.Errorf("FallbackConfig context = %+v, want both compiled defaults", cfg.Context)
 	}
-}
+	hook := LoadForHook()
+	if !inUnitRange(hook.Context.RelevanceCutoff) || !inUnitRange(hook.Context.NoAnswerCosine) {
+		t.Errorf("LoadForHook context = %+v, want values in [0,1]", hook.Context)
+	}
 
-// A rejected bar is not an explicit one: with an embedding model the default
-// bar was not measured on, the compiled default is OFF, so the replacement is
-// 0 with the model-tie note, not 0.62.
-func TestFallbackConfigRejectedNoAnswerBarFollowsTheModelTie(t *testing.T) {
+	// A rejected bar is not an explicit one: under an unmeasured model the
+	// compiled default is OFF, with the model-tie note, not 0.62.
 	isolateConfig(t)
 	captureConfigWarnings(t)
 	t.Setenv("GHOST_EMBEDDING_MODEL", "mxbai-embed-large")
 	t.Setenv("GHOST_CONTEXT_NO_ANSWER_COSINE", "5")
-
-	cfg := FallbackConfig()
-	if cfg.Context.NoAnswerCosine != 0 {
-		t.Errorf("no_answer_cosine = %v, want 0: a rejected bar under an unmeasured model must not apply 0.62", cfg.Context.NoAnswerCosine)
-	}
-	if cfg.Context.NoAnswerBarNote != NoAnswerBarOffUnmeasured {
-		t.Errorf("NoAnswerBarNote = %q, want %q", cfg.Context.NoAnswerBarNote, NoAnswerBarOffUnmeasured)
-	}
-}
-
-func TestLoadForHookNeverCarriesAnOutOfRangeContextValue(t *testing.T) {
-	isolateConfig(t)
-	captureConfigWarnings(t)
-	t.Setenv("GHOST_CONTEXT_RELEVANCE_CUTOFF", "-0.5")
-	t.Setenv("GHOST_CONTEXT_NO_ANSWER_COSINE", "5")
-
-	cfg := LoadForHook()
-	if v := cfg.Context.RelevanceCutoff; !inUnitRange(v) {
-		t.Errorf("LoadForHook relevance_cutoff = %v, want a value in [0,1]", v)
-	}
-	if v := cfg.Context.NoAnswerCosine; !inUnitRange(v) {
-		t.Errorf("LoadForHook no_answer_cosine = %v, want a value in [0,1]", v)
-	}
-}
-
-// A valid environment value survives the fallback untouched.
-func TestFallbackConfigKeepsInRangeContextValues(t *testing.T) {
-	isolateConfig(t)
-	t.Setenv("GHOST_CONTEXT_RELEVANCE_CUTOFF", "0.4")
-	t.Setenv("GHOST_CONTEXT_NO_ANSWER_COSINE", "0.3")
-
-	cfg := FallbackConfig()
-	if cfg.Context.RelevanceCutoff != 0.4 {
-		t.Errorf("relevance_cutoff = %v, want 0.4 from the environment", cfg.Context.RelevanceCutoff)
-	}
-	if cfg.Context.NoAnswerCosine != 0.3 {
-		t.Errorf("no_answer_cosine = %v, want 0.3 from the environment", cfg.Context.NoAnswerCosine)
+	cfg = FallbackConfig()
+	if cfg.Context.NoAnswerCosine != 0 || cfg.Context.NoAnswerBarNote != NoAnswerBarOffUnmeasured {
+		t.Errorf("rejected bar under an unmeasured model: %v note %q, want 0 with the note", cfg.Context.NoAnswerCosine, cfg.Context.NoAnswerBarNote)
 	}
 }
 
