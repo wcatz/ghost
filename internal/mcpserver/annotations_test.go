@@ -1,19 +1,10 @@
 package mcpserver
 
-// The tool annotations are a claim a CLIENT acts on: a host decides from them
-// whether to auto-approve a call and whether it may retry one after a timeout.
-// The MCP spec defines idempotentHint as "no additional effect on its
-// environment when repeated with the same arguments", so a tool advertised as
-// idempotent that stores a row per call makes every retry add a duplicate.
-// These tests read the hints through a real tools/list and pin them against
-// what a repeated call does.
-
 import (
 	"context"
-	"testing"
-
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/wcatz/ghost/internal/memory"
+	"testing"
 )
 
 type wantAnnotations struct {
@@ -23,8 +14,6 @@ type wantAnnotations struct {
 	why         string
 }
 
-// listedAnnotations returns the annotations of every tool as tools/list
-// reports them.
 func listedAnnotations(t *testing.T) map[string]*mcp.ToolAnnotations {
 	t.Helper()
 	_, session := newCapSession(t)
@@ -38,21 +27,15 @@ func listedAnnotations(t *testing.T) map[string]*mcp.ToolAnnotations {
 	}
 	return got
 }
-
-// TestToolAnnotationsPinned pins readOnly/destructive/idempotent/openWorld for
-// every tool. A new tool fails here until it is given a row and a reason.
 func TestToolAnnotationsPinned(t *testing.T) {
 	want := map[string]wantAnnotations{
-		// Read-only: nothing a user would confirm. DestructiveHint and
-		// IdempotentHint are meaningless alongside readOnly and stay unset.
-		"ghost_memory_search":  {readOnly: true, why: "reads; its audit row is bookkeeping, see the comment at the annotation"},
-		"ghost_memories_list":  {readOnly: true, why: "lists rows"},
-		"ghost_search_all":     {readOnly: true, why: "reads"},
-		"ghost_task_list":      {readOnly: true, why: "lists rows"},
-		"ghost_health":         {readOnly: true, why: "reports statistics"},
-		"ghost_list_projects":  {readOnly: true, why: "lists rows"},
-		"ghost_decisions_list": {readOnly: true, why: "lists rows"},
-		// Writers that add a row per call: a repeat is another row, so not idempotent.
+		"ghost_memory_search":   {readOnly: true, why: "reads; its audit row is bookkeeping, see the comment at the annotation"},
+		"ghost_memories_list":   {readOnly: true, why: "lists rows"},
+		"ghost_search_all":      {readOnly: true, why: "reads"},
+		"ghost_task_list":       {readOnly: true, why: "lists rows"},
+		"ghost_health":          {readOnly: true, why: "reports statistics"},
+		"ghost_list_projects":   {readOnly: true, why: "lists rows"},
+		"ghost_decisions_list":  {readOnly: true, why: "lists rows"},
 		"ghost_project_context": {why: "a first-contact run imports Claude auto-memory rows into an empty project"},
 		"ghost_memory_save":     {why: "a repeat stores a second row and raises the first row's importance"},
 		"ghost_save_global":     {why: "a repeat stores a second row and raises the first row's importance"},
@@ -63,15 +46,13 @@ func TestToolAnnotationsPinned(t *testing.T) {
 		"ghost_resolve":         {why: "each run classifies afresh through the harness and is billed"},
 		"ghost_memory_promote":  {why: "a repeat is refused rather than converging; not claimed idempotent"},
 		"ghost_memory_move":     {why: "moves a memory between projects; a repeat is refused once it has moved"},
-		// Writers whose repeat converges on the same state.
-		"ghost_memory_pin":    {idempotent: true, why: "sets pinned to a value"},
-		"ghost_task_update":   {idempotent: true, why: "sets fields to values"},
-		"ghost_task_complete": {idempotent: true, why: "an already-done task keeps its completed_at"},
-		"ghost_resolve_mark":  {destructive: true, idempotent: true, why: "an already-resolved memory is a reported no-op"},
-		// Destructive.
-		"ghost_memory_delete":  {destructive: true, why: "permanent delete; a repeat takes the purge path"},
-		"ghost_project_delete": {destructive: true, why: "permanent delete"},
-		"ghost_link_withdraw":  {destructive: true, why: "a repeat is an error, not a no-op"},
+		"ghost_memory_pin":      {idempotent: true, why: "sets pinned to a value"},
+		"ghost_task_update":     {idempotent: true, why: "sets fields to values"},
+		"ghost_task_complete":   {idempotent: true, why: "an already-done task keeps its completed_at"},
+		"ghost_resolve_mark":    {destructive: true, idempotent: true, why: "an already-resolved memory is a reported no-op"},
+		"ghost_memory_delete":   {destructive: true, why: "permanent delete; a repeat takes the purge path"},
+		"ghost_project_delete":  {destructive: true, why: "permanent delete"},
+		"ghost_link_withdraw":   {destructive: true, why: "a repeat is an error, not a no-op"},
 	}
 	got := listedAnnotations(t)
 	for name := range got {
@@ -107,9 +88,6 @@ func TestToolAnnotationsPinned(t *testing.T) {
 		}
 	}
 }
-
-// TestSaveToolsRepeatAddsARowSoAreNotIdempotent proves the behaviour the hint
-// is checked against: an identical repeat stores another row.
 func TestSaveToolsRepeatAddsARowSoAreNotIdempotent(t *testing.T) {
 	for _, tc := range []struct {
 		tool, project string
@@ -145,9 +123,6 @@ func TestSaveToolsRepeatAddsARowSoAreNotIdempotent(t *testing.T) {
 		})
 	}
 }
-
-// TestMemoryUpdateRepeatAppendsHistoryRow: an identical repeat of an edit
-// appends another history row, so it has an additional effect.
 func TestMemoryUpdateRepeatAppendsHistoryRow(t *testing.T) {
 	srv, session := newCapSession(t)
 	const project = "test-project"
