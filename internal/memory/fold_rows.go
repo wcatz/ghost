@@ -32,46 +32,15 @@ type FoldSkip struct {
 
 // FoldResult reports what one FoldRows call did.
 type FoldResult struct {
-	// Folded are the ids deleted into their survivors.
 	Folded []string
-	// Clusters is how many clusters had at least one row folded.
+
 	Clusters int
-	// Skipped are the rows refused. When the survivor is refused every row is
-	// listed, because nothing is written.
+
 	Skipped []FoldSkip
-	// SnapshotID names the snapshot taken, empty when nothing was written.
+
 	SnapshotID string
 }
 
-// FoldRows folds each cluster's rows into its survivor in ONE write transaction,
-// touching no other row in the store.
-//
-// It exists because whole-set replace is the wrong primitive for a fold: it
-// matches emissions to stored rows by text alone, so a byte-identical row from
-// another source can trade columns with the survivor, and a row edited between
-// plan and apply is deleted and re-inserted with its old text. A fold names the
-// rows it acts on by id and checks each one again inside the transaction.
-//
-// Every row, the survivor included, is re-read and must still be in the project,
-// source 'reflection', not pinned, not resolved, not persistent, created before
-// `since`, and unchanged since the plan (same content and updated_at). A row that
-// fails is skipped and reported; a refused survivor skips the whole cluster.
-//
-// Every cluster is checked before anything is written. On the rows that pass:
-//   - the replaceable set of the project is snapshotted ONCE, with the evidence, by the
-//     same code ReplaceNonManual uses, so a restore reads a snapshot of the shape
-//     it expects (a snapshot of only these rows would make a restore delete every
-//     other reflection row it did not find there), and old snapshots are pruned
-//     as ReplaceNonManual does;
-//   - the folded rows' evidence is carried onto the survivor, with their claims
-//     by the reuse branch's rule (absorbSourcesTx): their decision links appended
-//     to its source_ref, and a validity window, verified_at, confidence, agent or
-//     session only where the survivor states none. A cluster whose decision links
-//     would not fit in one source_ref is refused before anything is written;
-//   - each folded row gets a delete history row naming the survivor, then goes;
-//   - the survivor takes the highest importance and the union of the tags (and the
-//     longest retention tier, as every merge does) with one history row. Its
-//     content is never written.
 func (s *Store) FoldRows(ctx context.Context, projectID string, clusters []FoldCluster, since string) (FoldResult, error) {
 	var res FoldResult
 	if len(clusters) == 0 {
@@ -132,9 +101,6 @@ func (s *Store) FoldRows(ctx context.Context, projectID string, clusters []FoldC
 		return st, "", nil
 	}
 
-	// Every row is checked before anything is written, so the one snapshot below
-	// is taken before the first delete and holds the pre-fold state of the whole
-	// run, which is what a restore of the latest snapshot needs.
 	type plan struct {
 		survivor   FoldRow
 		surv       stored
@@ -187,12 +153,7 @@ func (s *Store) FoldRows(ctx context.Context, projectID string, clusters []FoldC
 		if len(p.ids) == 0 {
 			continue
 		}
-		// The survivor takes the decision links of the rows it consumes, and a
-		// union that does not fit in one source_ref would make the carry fail the
-		// whole run (boundedDecisionRefs refuses rather than truncates). So the
-		// cluster is refused here, before anything is written, and its rows stay
-		// live, each still the companion of its decision. The survivor's own links
-		// count, because the bounded join keeps them.
+
 		links, over, err := decisionLinksOverflowTx(ctx, tx, projectID, append([]string{c.Survivor.ID}, p.ids...))
 		if err != nil {
 			return res, err
@@ -223,15 +184,7 @@ func (s *Store) FoldRows(ctx context.Context, projectID string, clusters []FoldC
 	res.SnapshotID = snapshotID
 
 	for _, p := range plans {
-		// Before the delete: the foreign key takes the folded rows' evidence with
-		// them, and the claims are read from the rows themselves. The survivor is an
-		// existing row the folded rows merge into, which is the reuse branch's
-		// position, so it takes what that branch takes, by the same helper: their
-		// evidence, their decision links appended to its source_ref, and the
-		// validity window, verification, confidence, agent and session it does not
-		// state itself. The provenance stamp in it writes nothing here, because the
-		// survivor was checked to be reflection-written. Every folded row is
-		// consumed, so none is kept live.
+
 		consumed := make(map[string]bool, len(p.ids))
 		for _, id := range p.ids {
 			consumed[id] = true
@@ -262,8 +215,7 @@ func (s *Store) FoldRows(ctx context.Context, projectID string, clusters []FoldC
 			}
 		}
 		tagsJSON, _ := json.Marshal(p.tags)
-		// A raised retention tier is a change to the survivor like any other: it
-		// gets the updated_at bump and its history row.
+
 		if p.importance != p.surv.importance || string(tagsJSON) != marshalTags(p.surv.tags) || tierAfter != tierBefore {
 			if _, err := tx.ExecContext(ctx,
 				`UPDATE memories SET importance = ?, tags = ?, updated_at = datetime('now') WHERE id = ?`,

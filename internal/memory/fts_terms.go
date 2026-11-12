@@ -6,76 +6,14 @@ import (
 	"strings"
 )
 
-// Term selection for the FTS5 query sanitizer (sanitizeFTSN).
-//
-// WHY this exists: sanitizeFTSN may emit at most maxWords terms
-// (ftsSearchWordLimit for search), and the cap must not grow — measured,
-// see the ftsSearchWordLimit comment. The old behavior truncated
-// POSITIONALLY (first maxWords), and a natural-language query's first words
-// are its leading function words, while its TAIL is where the specific,
-// discriminative terms live ("... pin the ghost_windows_arm64 sha256
-// digest"). Positional truncation therefore systematically discarded exactly
-// the terms most likely to match the intended memory. Selection ranks terms
-// by value instead, keeps the top maxWords, and emits them in original query
-// order — the OR query broadens nowhere; only WHICH terms fill the fixed
-// budget changes.
-//
-// Scoring is deliberately per-term, corpus-free and dependency-free: this
-// runs per query on the search hot path, so no index/statistics lookups, no
-// external word lists.
-//
-//   - ftsTermValueStopword (0): English function words (ftsStopwords),
-//     matched on the lowercased term so casing never rescues filler
-//     ("AND" is still a stopword).
-//   - ftsTermValueContent (1): an ordinary content word.
-//   - ftsTermValueIdentifier (2): identifier-shaped tokens (see
-//     isIdentifierTerm) — mixed alnum, camelCase/snake/kebab/path shapes,
-//     version/IP-like runs, ALL-CAPS acronyms, bare numerics. These are
-//     exactly the terms that make a query's tail specific.
-//
-// Selection rule: rank by value descending, ties broken by ORIGINAL POSITION
-// (stable). The selected terms are then re-sorted into original query order
-// before joining — OR-query semantics don't care about order, but stable
-// output keeps tests and debug output readable. Stopwords are only dropped
-// when at least maxWords higher-value terms exist; otherwise they fill the
-// cap. Selection therefore never emits fewer than min(len(terms), maxWords)
-// terms (pinned by TestSanitizeFTSN_StopwordSelectionRules).
-
 const (
-	// ftsTermValueStopword is the lowest value tier: filler that only
-	// reaches the query when better terms can't fill the cap.
 	ftsTermValueStopword = iota
-	// ftsTermValueContent is an ordinary content word.
+
 	ftsTermValueContent
-	// ftsTermValueIdentifier is a high-value identifier-shaped token.
+
 	ftsTermValueIdentifier
 )
 
-// ftsStopwords is the low-value tier for FTS term selection: English
-// function words (articles, pronouns, prepositions, auxiliaries, wh-words,
-// politeness filler) carrying no retrieval signal in a natural-language
-// query.
-//
-// Provenance: a superset of the repo's existing stopword list,
-// internal/reflection's `stopwords` map (tier_sqlite.go), which cannot be
-// imported here because reflection imports internal/memory — the dependency
-// runs the other way — so the set is embedded and kept aligned by this
-// comment. It is intentionally larger than reflection's 21-word list:
-// reflection filters tokens inside a similarity score where every dropped
-// word shifts Jaccard, while selection only DEMOTES a term and never below
-// the fill rule, so a broader function-word tier is low-risk here.
-//
-// Deliberately excluded: number words ("port 8" vs "port 9" must differ —
-// numerics are signal; spelled number words such as "one" stay CONTENT
-// words, pinned as their tier by this subtest citation:
-// TestSanitizeFTSN_StopwordSelectionRules/"number words kept as content words"
-// — TestSanitizeFTS's "limits to 10 words" case pins emission of
-// "one".."twelve" as terms, not their tier) and negators ("not"/"no"
-// change query meaning).
-//
-// Matching lowercases the term; the emitted term always keeps its original
-// text (selection changes which terms are emitted, never how they are
-// escaped or cased).
 var ftsStopwords = map[string]bool{
 	"a": true, "about": true, "after": true, "also": true, "am": true,
 	"an": true, "and": true, "are": true, "as": true, "at": true,
@@ -108,10 +46,6 @@ var ftsStopwords = map[string]bool{
 	"you": true, "your": true, "yours": true,
 }
 
-// ftsTerm is one sanitized term with its selection metadata. clean is the term
-// BEFORE escaping and prefix=true records that the word carried a trailing `*`,
-// so a caller that matches terms itself (the historical keyword matcher) reads
-// the same extraction rather than parsing an FTS5 query string back apart.
 type ftsTerm struct {
 	text   string // emitted, escaped form (unchanged by selection)
 	clean  string // the term as the tokenizer will see it
@@ -120,9 +54,6 @@ type ftsTerm struct {
 	prefix bool   // the word carried a trailing `*`
 }
 
-// ftsTermValue scores a cleaned (pre-escape) term for selection. See the
-// file-level comment for the WHY; order matters: stopword is checked first
-// so casing can never promote filler (a shouted "AND" is still a stopword).
 func ftsTermValue(clean string) int {
 	if ftsStopwords[strings.ToLower(clean)] {
 		return ftsTermValueStopword
@@ -133,24 +64,6 @@ func ftsTermValue(clean string) int {
 	return ftsTermValueContent
 }
 
-// isIdentifierTerm reports whether w looks like an identifier rather than an
-// ordinary word. Matched shapes:
-//
-//   - mixed letters+digits: sha256, arm64, sev1, log2 — and hex-ish tokens
-//     with digits (a digitless hex string like "deadbeef" overlaps English
-//     words — facade, decade — too far to match safely);
-//   - bare numerics: 8080, 300 ("port 8" is signal, see ftsStopwords);
-//   - camelCase boundaries: sanitizeFTSN, SearchFTS;
-//   - snake/kebab/path separators: ghost_windows_arm64, sealed-secrets,
-//     fix/fts-term-selection;
-//   - version/IP-like digit runs: 1.2.3, 192.168.9.150;
-//   - ALL-CAPS acronyms (>= 2 letters): NDCG, SHA.
-//
-// All checks are ASCII, and a term in another script is a CONTENT word rather
-// than an identifier: the shapes above are code-domain English ones, and the
-// corpus's identifiers are ASCII even where the prose around them is not. A
-// word in another script therefore ranks with an ordinary content word, which
-// is the tier it wants.
 func isIdentifierTerm(w string) bool {
 	hasLetter, hasDigit := false, false
 	allCaps := true
@@ -194,19 +107,16 @@ func isIdentifierTerm(w string) bool {
 	return false
 }
 
-// selectFTSTERMs returns the top maxWords terms by value (ties by original
-// position), re-sorted into original query order. terms must be longer than
-// maxWords; shorter inputs are returned untouched.
 func selectFTSTERMs(terms []ftsTerm, maxWords int) []ftsTerm {
 	if len(terms) <= maxWords {
 		return terms
 	}
 	sel := make([]ftsTerm, len(terms))
 	copy(sel, terms)
-	// Stable sort keeps ties (equal value) in original position order.
+
 	sort.SliceStable(sel, func(i, j int) bool { return sel[i].value > sel[j].value })
 	sel = sel[:maxWords]
-	// Restore original query order for emission.
+
 	sort.SliceStable(sel, func(i, j int) bool { return sel[i].pos < sel[j].pos })
 	return sel
 }
@@ -214,17 +124,11 @@ func selectFTSTERMs(terms []ftsTerm, maxWords int) []ftsTerm {
 // QueryTerm is one term of a keyword query as the sanitizer reads it, for a
 // caller that has to judge a match itself rather than hand FTS5 a string.
 type QueryTerm struct {
-	// Text is the term as the tokenizer will see it.
 	Text string
-	// Identifier is true for an identifier-shaped term (a symbol, a path, a
-	// version, a mixed alphanumeric): the tier that makes a query specific.
+
 	Identifier bool
 }
 
-// maxDistinctiveScan bounds how much text DistinctiveTerms reads and how many
-// terms it extracts before selecting, so a very long message costs the same as
-// a short one and the sanitizer's own truncation warning (a stderr line) can
-// never fire on a path that must stay silent.
 const (
 	maxDistinctiveScanBytes = 8 << 10
 	maxDistinctiveScanTerms = 4096
@@ -268,9 +172,6 @@ func DistinctiveTerms(text string, max int, logger *slog.Logger) []QueryTerm {
 	return out
 }
 
-// wordYieldsTerm reports whether a single word (as split by strings.Fields)
-// yields at least one extractable term after edge trimming. It is the shared
-// predicate used by HasFTSTerm and ftsQueryTerms so they cannot drift.
 func wordYieldsTerm(word string) bool {
 	clean := strings.TrimFunc(word, ftsEdgeRuneTrimmed)
 	return ftsHasBaseRune(clean)
@@ -280,10 +181,6 @@ func wordYieldsTerm(word string) bool {
 // sanitizeFTSN's extraction. A query with none — whitespace, punctuation, or a
 // mix of separators only — matches nothing, and callers that embed the raw
 // query must not run the vector leg on it.
-//
-// It asks only whether a term EXISTS, so it never truncates the term list and
-// never logs the "fts query truncated" warning that sanitizeFTSN emits when a
-// query carries more than its cap.
 func HasFTSTerm(text string) bool {
 	for _, word := range strings.Fields(text) {
 		if wordYieldsTerm(word) {
@@ -293,11 +190,6 @@ func HasFTSTerm(text string) bool {
 	return false
 }
 
-// isFileNameTerm reports a term shaped like a file name or a dotted symbol
-// (stophook.go, config.toml, fmt.Sprintf): letters or digits on both sides of an
-// interior dot. The FTS term tiers do not call that an identifier, but in a
-// message about code it is the most specific thing a person can name, and it is
-// matched as a whole (a substring of the row), never as two ordinary words.
 func isFileNameTerm(w string) bool {
 	i := strings.IndexByte(w, '.')
 	if i <= 0 || i >= len(w)-1 {
