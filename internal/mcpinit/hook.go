@@ -413,13 +413,6 @@ func sessionCountsBase(tally assemble.BucketTally, rankPhrase, toolPhrase string
 	}
 }
 
-func shownOnly(projectShown, globalsShown int) sessionTally {
-	return sessionTally{
-		project: assemble.BucketTally{Shown: projectShown},
-		globals: assemble.BucketTally{Shown: globalsShown},
-	}
-}
-
 // RenderSessionContext is the context renderer backing the `ghost context`
 // command and opencode's plugin. It produces exactly what the SessionStart hook
 // would emit for the same cwd — the maintenance alert ahead of project
