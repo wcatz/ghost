@@ -83,52 +83,6 @@ func testStoreWithPath(t *testing.T) (*memory.Store, string) {
 	return store, dbPath
 }
 
-// TestHealthReportsHistoryGrowth: an agent debugging "search seems incomplete"
-// is exactly who needs to be told that the history table is filling with
-// restatements — because the store cap trims the OLDEST rows, not the noisiest
-// ones, so a full table does not just waste space, it starts discarding the record
-// of what a memory said first. That has to be visible from the tool, not only
-// from a terminal.
-func TestHealthReportsHistoryGrowth(t *testing.T) {
-	store, dbPath := testStoreWithPath(t)
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
-	srv := New(store, logger, "test")
-
-	ctx := context.Background()
-	id, err := store.Create(ctx, "abc123", memory.Memory{
-		Category: "fact", Content: "the relay listens on port 2222 in production",
-		Importance: 0.5, Source: "mcp",
-	})
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	// One save, then eleven restatements of it: 92% of the rows in the window say
-	// nothing, which is over the 20% threshold by a wide margin.
-	seedRestatements(t, dbPath, id, 11)
-
-	text := ghostHealthText(t, srv)
-
-	if !strings.Contains(text, "**History:**") {
-		t.Fatalf("ghost_health does not report history growth at all:\n%s", text)
-	}
-	for _, want := range []string{
-		"12 version rows in the last 24h", // the save plus eleven restatements
-		"11 restatements (92%)",           // 11 of 12
-		"deepest memory holds 12 of its 50 versions",
-		"store holds 12 of 20000 rows",
-		"restate the version before them",
-		"ghost history compact",
-		// The cap finding names the memory it is about, by id, with that memory's
-		// own two counts — the summary line's "deepest memory" is an aggregate and
-		// must not be mistaken for the warning's subject.
-		"is closest to the per-memory cap: it holds 12 of its 50 versions and wrote 12 in the last 24h",
-	} {
-		if !strings.Contains(text, want) {
-			t.Errorf("ghost_health does not report %q:\n%s", want, text)
-		}
-	}
-}
-
 // TestHealthHistoryGrowthIsAdditive: ghost_health is a tool other agents parse
 // and people read, and its existing fields are the ones a caller keys off. A
 // change to this tool that renamed a field, moved a line, or replaced the

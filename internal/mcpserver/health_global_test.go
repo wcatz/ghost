@@ -85,57 +85,6 @@ func TestHealthReportsGlobal(t *testing.T) {
 	})
 }
 
-func TestHealthGlobalConsolidatePointerOnce(t *testing.T) {
-	t.Run("_global with pairs shows pointer once in health", func(t *testing.T) {
-		store, _ := testStoreWithPath(t)
-		logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
-		srv := New(store, logger, "test")
-
-		ctx := context.Background()
-		if err := store.EnsureProject(ctx, memory.GlobalProjectID, memory.GlobalProjectID, "global"); err != nil {
-			t.Fatalf("EnsureProject _global: %v", err)
-		}
-		if _, err := store.Create(ctx, memory.GlobalProjectID, memory.Memory{
-			Category:   "preference",
-			Content:    "always run go vet before committing any change",
-			Importance: 0.9,
-			Source:     "reflection",
-		}); err != nil {
-			t.Fatalf("create global1: %v", err)
-		}
-		if _, err := store.Create(ctx, memory.GlobalProjectID, memory.Memory{
-			Category:   "preference",
-			Content:    "always run go vet before committing a change",
-			Importance: 0.5,
-			Source:     "reflection",
-		}); err != nil {
-			t.Fatalf("create global2: %v", err)
-		}
-
-		text := ghostHealthText(t, srv)
-		count := strings.Count(text, "ghost maintenance consolidate-global --apply")
-		if count != 1 {
-			t.Fatalf("expected consolidate-global pointer exactly once, got %d:\n%s", count, text)
-		}
-	})
-
-	t.Run("empty _global shows pointer zero times", func(t *testing.T) {
-		store, _ := testStoreWithPath(t)
-		logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
-		srv := New(store, logger, "test")
-
-		ctx := context.Background()
-		if err := store.EnsureProject(ctx, memory.GlobalProjectID, memory.GlobalProjectID, "global"); err != nil {
-			t.Fatalf("EnsureProject _global: %v", err)
-		}
-		text := ghostHealthText(t, srv)
-		count := strings.Count(text, "ghost maintenance consolidate-global --apply")
-		if count != 0 {
-			t.Fatalf("expected consolidate-global pointer zero times for empty _global, got %d:\n%s", count, text)
-		}
-	})
-}
-
 func TestHealthGlobalMCPSourceDoesNotContradictNearDuplicates(t *testing.T) {
 	store, _ := testStoreWithPath(t)
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))

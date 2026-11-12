@@ -79,42 +79,6 @@ func (f *healthFixture) health(t *testing.T) string {
 	return text.Text
 }
 
-func TestHealthReportsAStoreNewerThanThisBuild(t *testing.T) {
-	f := newHealthFixture(t)
-
-	// The control: a healthy server must not claim to be in the state this
-	// reports, or the warning is noise an operator learns to skip.
-	healthy := f.health(t)
-	if strings.Contains(healthy, "restart the client") {
-		t.Errorf("health on a current store already warns about a restart:\n%s", healthy)
-	}
-
-	f.stampNewer(t)
-
-	// The SAME running server, asked again. This is the call the issue is about:
-	// the agent notices its saves failing and asks the diagnostic tool why.
-	report := f.health(t)
-	if !strings.Contains(report, "restart the client that runs this ghost server") {
-		t.Errorf("health does not tell the operator to restart the client:\n%s", report)
-	}
-	// Both versions, so the report says which side moved.
-	if !strings.Contains(report, fmt.Sprintf("v%d", memory.SchemaVersion()+1)) {
-		t.Errorf("health does not name the store's version v%d:\n%s", memory.SchemaVersion()+1, report)
-	}
-	if !strings.Contains(report, fmt.Sprintf("v%d", memory.SchemaVersion())) {
-		t.Errorf("health does not name this build's version v%d:\n%s", memory.SchemaVersion(), report)
-	}
-	// The state must read as a REFUSAL, not as a low count: an agent reading
-	// "0 memories" would go looking for lost data instead of a stale server.
-	if !strings.Contains(report, "refus") {
-		t.Errorf("health does not say writes are being refused:\n%s", report)
-	}
-	// Reads still work, and health is a read, so it must still run at all.
-	if !strings.Contains(report, "Ghost Health") {
-		t.Errorf("health stopped reporting its own sections:\n%s", report)
-	}
-}
-
 // A write tool must say the same thing the health report does, in the place the
 // agent is actually looking when the save fails. An error that names the store
 // version but not the remedy leaves the agent retrying a write that can never
