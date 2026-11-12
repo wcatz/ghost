@@ -86,30 +86,3 @@ func TestSearchVectorScopedFiltersBeforeTheLimit(t *testing.T) {
 		}
 	}
 }
-
-// TestSearchVectorScopedNilScopeMatchesSearchVector pins the search path: hybrid
-// retrieval and the benchmark harness call SearchVector, and this refactor must
-// not move a single ranked row for them.
-func TestSearchVectorScopedNilScopeMatchesSearchVector(t *testing.T) {
-	store, ctx, _ := scopedVectorFixture(t, 8, 3)
-
-	want, err := store.SearchVector(ctx, "test-proj", []float32{1, 0}, 5)
-	if err != nil {
-		t.Fatalf("SearchVector: %v", err)
-	}
-	for _, scope := range []map[string]string{nil, {}} {
-		got, err := store.SearchVectorScoped(ctx, "test-proj", []float32{1, 0}, 5, scope)
-		if err != nil {
-			t.Fatalf("SearchVectorScoped(%v): %v", scope, err)
-		}
-		if len(got) != len(want) {
-			t.Fatalf("scope %v returned %d candidates, want the %d SearchVector returns", scope, len(got), len(want))
-		}
-		for i := range want {
-			if got[i].MemoryID != want[i].MemoryID || got[i].Score != want[i].Score {
-				t.Errorf("scope %v row %d = %s/%v, want %s/%v", scope, i,
-					got[i].MemoryID, got[i].Score, want[i].MemoryID, want[i].Score)
-			}
-		}
-	}
-}

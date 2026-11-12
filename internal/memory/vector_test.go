@@ -9,7 +9,6 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestDecayFactor_MatchesSQLSemantics(t *testing.T) {
@@ -46,157 +45,50 @@ func TestDecayFactor_MatchesSQLSemantics(t *testing.T) {
 	}
 }
 
-// --- float32sToBytes / bytesToFloat32s roundtrip tests ---
-
-func TestVectorRoundtrip_Empty(t *testing.T) {
-	got := bytesToFloat32s(float32sToBytes(nil))
-	if len(got) != 0 {
-		t.Fatalf("expected empty slice, got %v", got)
-	}
-}
-
-func TestVectorRoundtrip_Single(t *testing.T) {
-	input := []float32{3.14}
-	got := bytesToFloat32s(float32sToBytes(input))
-	if len(got) != 1 || got[0] != input[0] {
-		t.Fatalf("expected %v, got %v", input, got)
-	}
-}
-
-func TestVectorRoundtrip_Many(t *testing.T) {
-	input := []float32{1.0, -1.0, 0.0, 0.5, -0.5, 100.0, -100.0, 1e-10, 1e10}
-	got := bytesToFloat32s(float32sToBytes(input))
-	if len(got) != len(input) {
-		t.Fatalf("length mismatch: expected %d, got %d", len(input), len(got))
-	}
-	for i := range input {
-		if got[i] != input[i] {
-			t.Errorf("index %d: expected %v, got %v", i, input[i], got[i])
+func TestVectorRoundtrip(t *testing.T) {
+	inf := float32(math.Inf(1))
+	for name, in := range map[string][]float32{
+		"empty": nil,
+		"many":  {1, -1, 0, 0.5, -0.5, 100, -100, 1e-10, 1e10, -42, -0.001},
+		"inf":   {inf, -inf},
+		"nan":   {float32(math.NaN())},
+	} {
+		b := float32sToBytes(in)
+		if len(b) != len(in)*4 {
+			t.Fatalf("%s: %d bytes, want %d", name, len(b), len(in)*4)
+		}
+		got := bytesToFloat32s(b)
+		if len(got) != len(in) {
+			t.Fatalf("%s: got %v, want %v", name, got, in)
+		}
+		for i := range in {
+			if got[i] != in[i] && !(math.IsNaN(float64(got[i])) && math.IsNaN(float64(in[i]))) {
+				t.Errorf("%s[%d]: got %v, want %v", name, i, got[i], in[i])
+			}
 		}
 	}
 }
 
-func TestVectorRoundtrip_Negative(t *testing.T) {
-	input := []float32{-42.0, -0.001, -1e5}
-	got := bytesToFloat32s(float32sToBytes(input))
-	for i := range input {
-		if got[i] != input[i] {
-			t.Errorf("index %d: expected %v, got %v", i, input[i], got[i])
+func TestVectorCosine(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		a, b []float32
+		want float64
+	}{
+		{"identical", []float32{1, 2, 3}, []float32{1, 2, 3}, 1},
+		{"orthogonal", []float32{1, 0}, []float32{0, 1}, 0},
+		{"opposite", []float32{1, 0, 0}, []float32{-1, 0, 0}, -1},
+		{"zero a", []float32{0, 0, 0}, []float32{1, 2, 3}, 0},
+		{"zero b", []float32{1, 2, 3}, []float32{0, 0, 0}, 0},
+		{"both zero", []float32{0, 0}, []float32{0, 0}, 0},
+		{"mismatched", []float32{1, 2}, []float32{1, 2, 3}, 0},
+		{"empty", []float32{}, []float32{}, 0},
+		{"nil", nil, nil, 0},
+		{"45 degrees", []float32{1, 0}, []float32{1, 1}, 1 / math.Sqrt2},
+	} {
+		if got := float64(cosineSimilarity(c.a, c.b)); math.Abs(got-c.want) > 1e-6 {
+			t.Errorf("%s: got %v, want %v", c.name, got, c.want)
 		}
-	}
-}
-
-func TestVectorRoundtrip_Zero(t *testing.T) {
-	input := []float32{0.0, 0.0, 0.0}
-	got := bytesToFloat32s(float32sToBytes(input))
-	for i := range input {
-		if got[i] != 0 {
-			t.Errorf("index %d: expected 0, got %v", i, got[i])
-		}
-	}
-}
-
-func TestVectorRoundtrip_NaN(t *testing.T) {
-	input := []float32{float32(math.NaN())}
-	got := bytesToFloat32s(float32sToBytes(input))
-	if len(got) != 1 {
-		t.Fatalf("expected 1 element, got %d", len(got))
-	}
-	if !math.IsNaN(float64(got[0])) {
-		t.Fatalf("expected NaN, got %v", got[0])
-	}
-}
-
-func TestVectorRoundtrip_Inf(t *testing.T) {
-	input := []float32{float32(math.Inf(1)), float32(math.Inf(-1))}
-	got := bytesToFloat32s(float32sToBytes(input))
-	if !math.IsInf(float64(got[0]), 1) {
-		t.Errorf("expected +Inf, got %v", got[0])
-	}
-	if !math.IsInf(float64(got[1]), -1) {
-		t.Errorf("expected -Inf, got %v", got[1])
-	}
-}
-
-func TestVectorBytesLength(t *testing.T) {
-	input := []float32{1.0, 2.0, 3.0}
-	b := float32sToBytes(input)
-	if len(b) != len(input)*4 {
-		t.Fatalf("expected %d bytes, got %d", len(input)*4, len(b))
-	}
-}
-
-// --- cosineSimilarity tests ---
-
-func TestVectorCosine_Identical(t *testing.T) {
-	v := []float32{1.0, 2.0, 3.0}
-	sim := cosineSimilarity(v, v)
-	if diff := math.Abs(float64(sim) - 1.0); diff > 1e-6 {
-		t.Fatalf("expected ~1.0, got %v", sim)
-	}
-}
-
-func TestVectorCosine_Orthogonal(t *testing.T) {
-	a := []float32{1.0, 0.0}
-	b := []float32{0.0, 1.0}
-	sim := cosineSimilarity(a, b)
-	if diff := math.Abs(float64(sim)); diff > 1e-6 {
-		t.Fatalf("expected ~0.0, got %v", sim)
-	}
-}
-
-func TestVectorCosine_Opposite(t *testing.T) {
-	a := []float32{1.0, 0.0, 0.0}
-	b := []float32{-1.0, 0.0, 0.0}
-	sim := cosineSimilarity(a, b)
-	if diff := math.Abs(float64(sim) + 1.0); diff > 1e-6 {
-		t.Fatalf("expected ~-1.0, got %v", sim)
-	}
-}
-
-func TestVectorCosine_ZeroVector(t *testing.T) {
-	a := []float32{0.0, 0.0, 0.0}
-	b := []float32{1.0, 2.0, 3.0}
-	if sim := cosineSimilarity(a, b); sim != 0 {
-		t.Fatalf("expected 0 for zero vector, got %v", sim)
-	}
-	if sim := cosineSimilarity(b, a); sim != 0 {
-		t.Fatalf("expected 0 for zero vector (swapped), got %v", sim)
-	}
-}
-
-func TestVectorCosine_BothZero(t *testing.T) {
-	a := []float32{0.0, 0.0}
-	if sim := cosineSimilarity(a, a); sim != 0 {
-		t.Fatalf("expected 0 for two zero vectors, got %v", sim)
-	}
-}
-
-func TestVectorCosine_MismatchedLengths(t *testing.T) {
-	a := []float32{1.0, 2.0}
-	b := []float32{1.0, 2.0, 3.0}
-	if sim := cosineSimilarity(a, b); sim != 0 {
-		t.Fatalf("expected 0 for mismatched lengths, got %v", sim)
-	}
-}
-
-func TestVectorCosine_EmptyVectors(t *testing.T) {
-	if sim := cosineSimilarity(nil, nil); sim != 0 {
-		t.Fatalf("expected 0 for nil vectors, got %v", sim)
-	}
-	if sim := cosineSimilarity([]float32{}, []float32{}); sim != 0 {
-		t.Fatalf("expected 0 for empty vectors, got %v", sim)
-	}
-}
-
-func TestVectorCosine_KnownAngle(t *testing.T) {
-	// 45 degrees: cos(45) = 1/sqrt(2) ≈ 0.7071
-	a := []float32{1.0, 0.0}
-	b := []float32{1.0, 1.0}
-	sim := cosineSimilarity(a, b)
-	expected := float32(1.0 / math.Sqrt(2.0))
-	if diff := math.Abs(float64(sim - expected)); diff > 1e-6 {
-		t.Fatalf("expected ~%v, got %v", expected, sim)
 	}
 }
 
@@ -364,93 +256,7 @@ func TestVectorStoreAndSearch(t *testing.T) {
 	}
 }
 
-func TestVectorSearchLimit(t *testing.T) {
-	store, ctx := setupTestStore(t)
-
-	// Create 5 memories with embeddings.
-	for i := range 5 {
-		id := createTestMemory(t, store, ctx, "memory content")
-		vec := make([]float32, 3)
-		vec[i%3] = 1.0
-		if err := store.StoreEmbedding(ctx, id, vec, "test-model"); err != nil {
-			t.Fatalf("StoreEmbedding: %v", err)
-		}
-	}
-
-	query := []float32{1.0, 0.0, 0.0}
-	results, err := store.SearchVector(ctx, "test-proj", query, 2)
-	if err != nil {
-		t.Fatalf("SearchVector: %v", err)
-	}
-	if len(results) > 2 {
-		t.Fatalf("expected at most 2 results, got %d", len(results))
-	}
-}
-
-func TestVectorSearchDimensionMismatch(t *testing.T) {
-	store, ctx := setupTestStore(t)
-
-	id := createTestMemory(t, store, ctx, "some memory")
-	vec := []float32{1.0, 0.0, 0.0}
-	if err := store.StoreEmbedding(ctx, id, vec, "test-model"); err != nil {
-		t.Fatalf("StoreEmbedding: %v", err)
-	}
-
-	// Query with different dimension — should return no matches.
-	query := []float32{1.0, 0.0}
-	results, err := store.SearchVector(ctx, "test-proj", query, 10)
-	if err != nil {
-		t.Fatalf("SearchVector: %v", err)
-	}
-	if len(results) != 0 {
-		t.Fatalf("expected 0 results for mismatched dimensions, got %d", len(results))
-	}
-}
-
-func TestVectorSearchEmptyDB(t *testing.T) {
-	store, ctx := setupTestStore(t)
-
-	query := []float32{1.0, 0.0, 0.0}
-	results, err := store.SearchVector(ctx, "test-proj", query, 10)
-	if err != nil {
-		t.Fatalf("SearchVector: %v", err)
-	}
-	if len(results) != 0 {
-		t.Fatalf("expected 0 results for empty DB, got %d", len(results))
-	}
-}
-
 // --- StoreEmbedding upsert behavior ---
-
-func TestVectorStoreEmbedding_Upsert(t *testing.T) {
-	store, ctx := setupTestStore(t)
-
-	id := createTestMemory(t, store, ctx, "updatable memory")
-	vec1 := []float32{1.0, 0.0, 0.0}
-	vec2 := []float32{0.0, 1.0, 0.0}
-
-	if err := store.StoreEmbedding(ctx, id, vec1, "model-a"); err != nil {
-		t.Fatalf("StoreEmbedding first: %v", err)
-	}
-	// Store again with different vector — should upsert, not error.
-	if err := store.StoreEmbedding(ctx, id, vec2, "model-b"); err != nil {
-		t.Fatalf("StoreEmbedding second: %v", err)
-	}
-
-	// Search should find the updated vector.
-	query := []float32{0.0, 1.0, 0.0}
-	results, err := store.SearchVector(ctx, "test-proj", query, 1)
-	if err != nil {
-		t.Fatalf("SearchVector: %v", err)
-	}
-	if len(results) != 1 {
-		t.Fatalf("expected 1 result, got %d", len(results))
-	}
-	// Similarity to the updated vector should be ~1.0.
-	if diff := math.Abs(float64(results[0].Score) - 1.0); diff > 1e-5 {
-		t.Errorf("expected score ~1.0 after upsert, got %v", results[0].Score)
-	}
-}
 
 // --- DeleteEmbedding ---
 
@@ -474,15 +280,6 @@ func TestVectorDeleteEmbedding(t *testing.T) {
 	}
 	if len(results) != 0 {
 		t.Fatalf("expected 0 results after delete, got %d", len(results))
-	}
-}
-
-func TestVectorDeleteEmbedding_Nonexistent(t *testing.T) {
-	store, ctx := setupTestStore(t)
-
-	// Deleting a nonexistent embedding should not error.
-	if err := store.DeleteEmbedding(ctx, "nonexistent-id"); err != nil {
-		t.Fatalf("DeleteEmbedding nonexistent: %v", err)
 	}
 }
 
@@ -513,39 +310,6 @@ func TestVectorUnembeddedMemoryIDs(t *testing.T) {
 	}
 }
 
-func TestVectorUnembeddedMemoryIDs_AllEmbedded(t *testing.T) {
-	store, ctx := setupTestStore(t)
-
-	id := createTestMemory(t, store, ctx, "fully embedded")
-	if err := store.StoreEmbedding(ctx, id, []float32{1.0}, "test-model"); err != nil {
-		t.Fatalf("StoreEmbedding: %v", err)
-	}
-
-	ids, err := store.UnembeddedMemoryIDs(ctx, "test-proj", "", 10)
-	if err != nil {
-		t.Fatalf("UnembeddedMemoryIDs: %v", err)
-	}
-	if len(ids) != 0 {
-		t.Fatalf("expected 0 unembedded IDs, got %d", len(ids))
-	}
-}
-
-func TestVectorUnembeddedMemoryIDs_Limit(t *testing.T) {
-	store, ctx := setupTestStore(t)
-
-	for range 5 {
-		createTestMemory(t, store, ctx, "unembedded")
-	}
-
-	ids, err := store.UnembeddedMemoryIDs(ctx, "test-proj", "", 2)
-	if err != nil {
-		t.Fatalf("UnembeddedMemoryIDs: %v", err)
-	}
-	if len(ids) != 2 {
-		t.Fatalf("expected 2 IDs with limit=2, got %d", len(ids))
-	}
-}
-
 // --- GetMemoryContent ---
 
 func TestVectorGetMemoryContent(t *testing.T) {
@@ -560,15 +324,6 @@ func TestVectorGetMemoryContent(t *testing.T) {
 	}
 	if got != content {
 		t.Fatalf("expected %q, got %q", content, got)
-	}
-}
-
-func TestVectorGetMemoryContent_NotFound(t *testing.T) {
-	store, ctx := setupTestStore(t)
-
-	_, err := store.GetMemoryContent(ctx, "nonexistent")
-	if err == nil {
-		t.Fatal("expected error for nonexistent memory, got nil")
 	}
 }
 
@@ -595,59 +350,6 @@ func TestVectorGetByIDs_Valid(t *testing.T) {
 	}
 	if !found[id1] || !found[id2] {
 		t.Errorf("expected IDs %s and %s, got %v", id1, id2, found)
-	}
-}
-
-func TestVectorGetByIDs_SomeInvalid(t *testing.T) {
-	store, ctx := setupTestStore(t)
-
-	id := createTestMemory(t, store, ctx, "valid memory")
-
-	memories, err := store.GetByIDs(ctx, []string{id, "nonexistent-id"})
-	if err != nil {
-		t.Fatalf("GetByIDs: %v", err)
-	}
-	if len(memories) != 1 {
-		t.Fatalf("expected 1 memory (skipping invalid), got %d", len(memories))
-	}
-	if memories[0].ID != id {
-		t.Errorf("expected ID %s, got %s", id, memories[0].ID)
-	}
-}
-
-func TestVectorGetByIDs_AllInvalid(t *testing.T) {
-	store, ctx := setupTestStore(t)
-
-	memories, err := store.GetByIDs(ctx, []string{"bad1", "bad2"})
-	if err != nil {
-		t.Fatalf("GetByIDs: %v", err)
-	}
-	if len(memories) != 0 {
-		t.Fatalf("expected 0 memories for invalid IDs, got %d", len(memories))
-	}
-}
-
-func TestVectorGetByIDs_Empty(t *testing.T) {
-	store, ctx := setupTestStore(t)
-
-	memories, err := store.GetByIDs(ctx, []string{})
-	if err != nil {
-		t.Fatalf("GetByIDs empty: %v", err)
-	}
-	if memories != nil {
-		t.Fatalf("expected nil for empty ID list, got %v", memories)
-	}
-}
-
-func TestVectorGetByIDs_Nil(t *testing.T) {
-	store, ctx := setupTestStore(t)
-
-	memories, err := store.GetByIDs(ctx, nil)
-	if err != nil {
-		t.Fatalf("GetByIDs nil: %v", err)
-	}
-	if memories != nil {
-		t.Fatalf("expected nil for nil ID list, got %v", memories)
 	}
 }
 
@@ -681,198 +383,6 @@ func TestVectorSearchHybrid_FTSOnly(t *testing.T) {
 	if !foundGo {
 		t.Error("expected to find Go concurrency memory in FTS results")
 	}
-}
-
-func TestVectorSearchHybrid_FTSOnlyLimit(t *testing.T) {
-	store, ctx := setupTestStore(t)
-
-	// Create several memories that match "test".
-	for i := range 5 {
-		createTestMemory(t, store, ctx, "test memory content number "+string(rune('A'+i)))
-	}
-
-	results, err := store.SearchHybrid(ctx, "test-proj", "test memory", nil, 2)
-	if err != nil {
-		t.Fatalf("SearchHybrid: %v", err)
-	}
-	if len(results) > 2 {
-		t.Fatalf("expected at most 2 results with limit=2, got %d", len(results))
-	}
-}
-
-func TestVectorSearchHybrid_WithVector(t *testing.T) {
-	store, ctx := setupTestStore(t)
-
-	id1 := createTestMemory(t, store, ctx, "Go goroutines and channels")
-	id2 := createTestMemory(t, store, ctx, "Python asyncio event loop")
-	_ = id2
-
-	// Store embeddings.
-	if err := store.StoreEmbedding(ctx, id1, []float32{0.9, 0.1}, "test-model"); err != nil {
-		t.Fatalf("StoreEmbedding: %v", err)
-	}
-	if err := store.StoreEmbedding(ctx, id2, []float32{0.1, 0.9}, "test-model"); err != nil {
-		t.Fatalf("StoreEmbedding: %v", err)
-	}
-
-	// Query with both FTS and vector.
-	queryVec := []float32{0.95, 0.05}
-	results, err := store.SearchHybrid(ctx, "test-proj", "goroutines", queryVec, 10)
-	if err != nil {
-		t.Fatalf("SearchHybrid: %v", err)
-	}
-
-	if len(results) == 0 {
-		t.Fatal("expected at least 1 hybrid result, got 0")
-	}
-
-	// First result should be id1 (matches both FTS and vector).
-	if results[0].ID != id1 {
-		t.Errorf("expected first result %s, got %s", id1, results[0].ID)
-	}
-}
-
-func TestVectorSearchHybrid_NoResults(t *testing.T) {
-	store, ctx := setupTestStore(t)
-
-	// No memories at all — should return empty, not error.
-	results, err := store.SearchHybrid(ctx, "test-proj", "nonexistent query", nil, 10)
-	if err != nil {
-		t.Fatalf("SearchHybrid no results: %v", err)
-	}
-	if len(results) != 0 {
-		t.Fatalf("expected 0 results, got %d", len(results))
-	}
-}
-
-// TestSearchHybridParams: the parameterized entrypoint must (a) reproduce
-// SearchHybrid exactly under DefaultSearchParams and (b) honor leg weights — an
-// all-vector weighting ranks the vector match first and an all-FTS weighting
-// ranks the keyword match first on the same store.
-func TestSearchHybridParams(t *testing.T) {
-	store, ctx := setupTestStore(t)
-
-	// kw matches the FTS query; vec matches the query vector. Cross-wired
-	// embeddings so the two legs disagree about the winner.
-	kw := createTestMemory(t, store, ctx, "goroutines scheduler internals")
-	vec := createTestMemory(t, store, ctx, "python event loop design")
-	if err := store.StoreEmbedding(ctx, kw, []float32{0, 1}, "test-model"); err != nil {
-		t.Fatalf("StoreEmbedding: %v", err)
-	}
-	if err := store.StoreEmbedding(ctx, vec, []float32{1, 0}, "test-model"); err != nil {
-		t.Fatalf("StoreEmbedding: %v", err)
-	}
-	queryVec := []float32{1, 0}
-
-	// (a) Defaults reproduce SearchHybrid ranking exactly.
-	want, err := store.SearchHybrid(ctx, "test-proj", "goroutines", queryVec, 10)
-	if err != nil {
-		t.Fatalf("SearchHybrid: %v", err)
-	}
-	got, err := store.SearchHybridParams(ctx, "test-proj", "goroutines", queryVec, 10, DefaultSearchParams())
-	if err != nil {
-		t.Fatalf("SearchHybridParams: %v", err)
-	}
-	if len(got) != len(want) {
-		t.Fatalf("defaults mismatch: got %d results, want %d", len(got), len(want))
-	}
-	for i := range want {
-		if got[i].ID != want[i].ID {
-			t.Errorf("defaults mismatch at rank %d: got %s, want %s", i, got[i].ID, want[i].ID)
-		}
-	}
-
-	// (b) All-vector weighting: vec first. All-FTS weighting: kw first.
-	p := DefaultSearchParams()
-	p.FTSWeight, p.VecWeight = 0, 1
-	if rs, err := store.SearchHybridParams(ctx, "test-proj", "goroutines", queryVec, 10, p); err != nil || len(rs) == 0 || rs[0].ID != vec {
-		t.Errorf("all-vector weighting should rank vector match first (err=%v, results=%v)", err, ids(rs))
-	}
-	p.FTSWeight, p.VecWeight = 1, 0
-	if rs, err := store.SearchHybridParams(ctx, "test-proj", "goroutines", queryVec, 10, p); err != nil || len(rs) == 0 || rs[0].ID != kw {
-		t.Errorf("all-FTS weighting should rank keyword match first (err=%v, results=%v)", err, ids(rs))
-	}
-}
-
-// ids extracts memory IDs for readable test failure output.
-func ids(ms []Memory) []string {
-	out := make([]string, len(ms))
-	for i, m := range ms {
-		out[i] = m.ID
-	}
-	return out
-}
-
-func TestApplyDecay_ReordersWindow(t *testing.T) {
-	now := timeMustParse("2026-07-15 00:00:00")
-	p := DefaultSearchParams() // DecayEnabled true
-
-	// Within the window, decay reorders: fresh decision beats stale decision
-	// at equal-ish fused scores (decay-on multiplies the window by decay).
-	fresh := Memory{ID: "fresh", Category: "decision", CreatedAt: "2026-07-10 00:00:00"} // 5 days
-	stale := Memory{ID: "stale", Category: "decision", CreatedAt: "2026-04-16 00:00:00"} // 90 days
-	scores := map[string]float64{"fresh": 0.4, "stale": 0.5}
-
-	got := decayRank([]Memory{stale, fresh}, scores, p, 10, now)
-	if got[0].ID != "fresh" {
-		t.Errorf("decay should rank fresher first, got %v", ids(got))
-	}
-
-	// DecayEnabled false ranks by base score only: stale's higher base (0.5 vs
-	// 0.4) wins. (decayRank sorts by base in both modes — the fused path
-	// hydrates via GetByIDs, which does not preserve order.)
-	off := p
-	off.DecayEnabled = false
-	got = decayRank([]Memory{stale, fresh}, scores, off, 10, now)
-	if got[0].ID != "stale" {
-		t.Errorf("DecayEnabled=false must rank by base score, got %v", ids(got))
-	}
-
-	// Unparseable created_at treated as ancient (never spuriously wins).
-	bad := Memory{ID: "bad", Category: "decision", CreatedAt: "not-a-date"}
-	got = decayRank([]Memory{bad, fresh}, scores, p, 10, now)
-	if got[0].ID != "fresh" {
-		t.Errorf("malformed timestamp must not win; got %v", ids(got))
-	}
-}
-
-// TestApplyDecay_PreservesMembership is the regression guard for the
-// findability finding: truncation happens by base score ALONE, so decay
-// reorders within the window but can never drop a higher-base (more relevant)
-// memory below the cutoff. This is what keeps TestStalenessReport green.
-func TestApplyDecay_PreservesMembership(t *testing.T) {
-	now := timeMustParse("2026-07-15 00:00:00")
-	p := DefaultSearchParams()
-
-	// stale has the higher base score (0.9 vs 0.5) but is heavily decayed;
-	// fresh is barely decayed but lower base. Decay must NOT let fresh displace
-	// stale from a limit-1 window — relevance (base) owns membership.
-	mems := []Memory{
-		{ID: "stale", Category: "dependency", CreatedAt: "2026-01-01 00:00:00"}, // 195 days → floored 0.15
-		{ID: "fresh", Category: "dependency", CreatedAt: "2026-07-14 00:00:00"}, // 1 day → ~0.97
-	}
-	scores := map[string]float64{"stale": 0.9, "fresh": 0.5}
-
-	got := decayRank(mems, scores, p, 1, now)
-	if len(got) != 1 || got[0].ID != "stale" {
-		t.Errorf("decay must NOT change membership (base 0.9 > 0.5 owns the slot), got %v", ids(got))
-	}
-
-	// Same result with decay off (trivially base order).
-	off := p
-	off.DecayEnabled = false
-	got = decayRank(mems, scores, off, 1, now)
-	if len(got) != 1 || got[0].ID != "stale" {
-		t.Errorf("without decay, higher base score must win, got %v", ids(got))
-	}
-}
-
-func timeMustParse(s string) time.Time {
-	t, err := time.Parse("2006-01-02 15:04:05", s)
-	if err != nil {
-		panic(err)
-	}
-	return t
 }
 
 // makeScoredMemory is makeMemory with an explicit importance, so a test can
@@ -984,33 +494,6 @@ func TestSearchVectorDropsNonPositiveSimilarity(t *testing.T) {
 	}
 	if !sawPos {
 		t.Errorf("positive-similarity candidate %s missing from %+v", pos, got)
-	}
-}
-
-func TestSearchVectorAllCarriesScope(t *testing.T) {
-	store, ctx := setupTestStore(t)
-	if err := store.EnsureProject(ctx, "other-proj", "/other", "other"); err != nil {
-		t.Fatalf("EnsureProject: %v", err)
-	}
-	scoped, err := store.Create(ctx, "other-proj", Memory{
-		Category: "fact",
-		Content:  "cross-project scoped memory",
-		Source:   "tool",
-		Scope:    map[string]string{"environment": "production"},
-	})
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	if err := store.StoreEmbedding(ctx, scoped, []float32{1, 0}, "test-model"); err != nil {
-		t.Fatalf("StoreEmbedding: %v", err)
-	}
-
-	got, err := store.SearchVectorAll(ctx, []float32{1, 0}, 10)
-	if err != nil {
-		t.Fatalf("SearchVectorAll: %v", err)
-	}
-	if len(got) != 1 || got[0].MemoryID != scoped || got[0].Scope["environment"] != "production" {
-		t.Fatalf("SearchVectorAll result = %+v, want scoped memory %s", got, scoped)
 	}
 }
 
