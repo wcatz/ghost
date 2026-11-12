@@ -3,7 +3,6 @@ package memory
 // Package memory provides the SQLite-backed persistence layer for Ghost memories,
 // including CRUD operations, FTS5 search, hybrid vector/FTS retrieval, time-decay
 // scoring with category-aware decay, pin exemptions, project lifecycle management,
-// tasks, decisions, memory links (supersedes/contradicts/elaborates/causes).
 
 import (
 	"context"
@@ -28,13 +27,6 @@ import (
 )
 
 // GlobalProjectID is the reserved project id Ghost stores its own shipped
-// rules under. It is a persisted value, not an in-memory convention: it is the
-// projects.id row the global seeds are written into, the memories.project_id
-// every global row carries, and the value cross-project queries filter on.
-//
-// A row's project comes from the row. A caller that stamps this sentinel onto
-// memory it merely recognised as global would make the origin rewrite apply to
-// rows it never owned.
 const GlobalProjectID = "_global"
 
 // Memory represents a single discrete memory.
@@ -53,79 +45,20 @@ type Memory struct {
 	CreatedAt    string   `json:"created_at"`
 	UpdatedAt    string   `json:"updated_at"`
 
-	// Provenance: which harness wrote this, in which session, against which
-	// reference, and how much it was trusted.
-	//
-	// The three strings treat "" as unknown and carry omitempty, since there
-	// is no meaningful difference between "no agent recorded" and "an agent
-	// whose name is empty". Confidence is a pointer instead: 0.0 is a valid
-	// rating, so nil — not zero — has to mean "no belief was recorded".
-	//
-	// The database column is NULL for every memory written before schema v10
-	// and for every write that passes no Provenance. That is deliberate —
-	// Ghost never learned those values, and inventing one would be a claim
-	// nobody made.
 	Agent      string   `json:"agent,omitempty"`
 	SessionID  string   `json:"session_id,omitempty"`
 	SourceRef  string   `json:"source_ref,omitempty"`
 	Confidence *float64 `json:"confidence,omitempty"`
 
-	// Scope names where this memory applies — environment, component, and so
-	// on — as machine-readable values rather than words in the sentence.
-	//
-	// nil means "applies everywhere", which is not the same as "applies
-	// nowhere": a memory with no stated scope is the general knowledge worth
-	// keeping, and ScopeMatches treats it as eligible for every request. The
-	// column is NULL for anything written before schema v12, since inventing
-	// a scope for existing memories would claim where they apply.
 	Scope map[string]string `json:"scope,omitempty"`
 
-	// Validity: when this memory was true, and when someone last checked.
-	//
-	// All three are pointers because nil is the honest reading of a NULL
-	// column — no claim was made — while an empty string would look like a
-	// claim about the empty moment. The tools write them (ghost_memory_save,
-	// ghost_save_global, ghost_memory_update) and Create writes them, so a row
-	// with a window is now expressible; ImportMemory (which reads an artifact's
-	// stamps by the save tool's rule) and RestoreSnapshot carry the triple too,
-	// and every row written before any of those reads nil, which
-	// is what stage 2 calls unset. SQLite holds them as unconstrained text, so
-	// the values are the stored strings, not parsed times: interpreting them
-	// belongs to the caller, which is the only layer that knows the request
-	// clock. The tools normalize what they accept into memory.StoredStampLayout,
-	// but nothing here may assume it — an older import, a restored snapshot or
-	// a hand-edited row can hold the whole-day form the readers also accept.
 	ValidFrom  *string `json:"valid_from,omitempty"`
 	ValidUntil *string `json:"valid_until,omitempty"`
 	VerifiedAt *string `json:"verified_at,omitempty"`
 
-	// Retention is how long this memory is wanted: session, project (the
-	// default) or persistent. It is the lifecycle axis, and the only one that
-	// can take a row away on its own — and only a session row, only past its
-	// expiry, only past a grace period, and only behind `ghost prune --apply`.
-	//
-	// Empty means "this row came from a query that did not select the column",
-	// or "no version ever recorded one" — the historical read is the second, and
-	// leaves it empty on purpose (see AsOfRow.Retention). It is never read as
-	// session, because the one tier whose absence has consequences is the one no
-	// reader may infer.
-	Retention string `json:"retention"`
-	// ExpiresAt is when a session row stops being wanted, derived on save as
-	// now+SessionTTL. NULL for every other tier, and NULL means "no expiry is
-	// claimed": a row without one is never a prune candidate. Like the validity
-	// triple it is the stored string, not a parsed time — interpreting it belongs
-	// to the caller, the only layer that has the request clock.
+	Retention string  `json:"retention"`
 	ExpiresAt *string `json:"expires_at,omitempty"`
 
-	// ReplacesIDs names the input rows this row stands in for — the ids a
-	// consolidation folded together or rewrote into this one. Only
-	// ReplaceNonManual reads it, and only to stamp the successor id on those
-	// rows' delete history: a rewrite or a merge gives the row a NEW id, so
-	// without this a reader following one memory's history hits a wall at exactly
-	// the point where the memory changed. Set by the reflection apply path from
-	// the merge and rewrite operations, which know the ids; never persisted,
-	// hence json:"-", because it is a proposal's bookkeeping and not a field of
-	// the memory.
 	ReplacesIDs []string `json:"-"`
 }
 
@@ -139,11 +72,6 @@ type Project struct {
 }
 
 // Queryer is the read surface shared by *sql.DB and *sql.Tx. Search
-// explanations and candidate retrieval use it to keep their production result
-// and diagnostic reads on one SQLite snapshot: a method that takes a *sql.DB
-// cannot be redirected onto a transaction, and a transaction that issued its
-// reads through the pool would wait for a second connection the single-
-// connection store does not have.
 type Queryer interface {
 	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
 	QueryRowContext(context.Context, string, ...any) *sql.Row
@@ -151,100 +79,37 @@ type Queryer interface {
 
 // Store manages the SQLite memory database.
 type Store struct {
-	db *sql.DB
-	// snapshot is set only on the short-lived Store a snapshot read builds for
-	// itself. It redirects read-only search helpers to the transaction's
-	// consistent view.
+	db       *sql.DB
 	snapshot Queryer
-	// readDB is the read-only handle a production store is given so a snapshot
-	// read can take its transaction without taking the write lock the primary
-	// handle's BEGIN IMMEDIATE would. nil means "use db", which is correct for
-	// in-memory and bench stores (no concurrent writer) and logged for a
-	// file-backed one.
 	readDB   *sql.DB
 	mu       sync.RWMutex
 	warnOnce sync.Once
 	logger   *slog.Logger
 	onSave   func(projectID string) // optional callback after memory create/upsert
 
-	// afterDecisionInsert, when set, runs inside RecordDecisionSuperseding's
-	// transaction after the decision and its companion are written and before
-	// the supersede. Only tests set it, to cancel the request in that window.
 	afterDecisionInsert func()
 
-	// canon memoizes each recorded project path's canonical form for
-	// ResolveProject; see canonMemo for when it is cleared and when it expires.
 	canon canonMemo
 
-	// demotionThreshold gates near-duplicate demotion in GetTopMemories (see
-	// DemotionPenalties). Defaults to DefaultDemotionThreshold; callers that
-	// have loaded config override it via SetDemotionThreshold.
 	demotionThreshold float64
 
-	// vectorMinSimilarity is the cosine floor applied to the vector leg of
-	// hybrid search (SearchParams.MinSimilarity). Defaults to 0 (historical:
-	// only non-positive cosines dropped); config search.min_similarity
-	// overrides via SetVectorMinSimilarity.
 	vectorMinSimilarity float32
 
-	// embeddingIdentity is the vector space this process embeds into — the
-	// model, its dimensions and its task-prefix setting, as produced by
-	// embedding.VectorIdentity. Vector search only scores a stored vector whose
-	// recorded identity matches it, and the embedding worker re-embeds the ones
-	// that do not. Empty (the default, and the state of the bench harness and
-	// of tests) means no identity is configured: every recorded vector is
-	// searched and only the presence of a row matters.
-	//
-	// It is an atomic pointer rather than a plain string because a DIAGNOSTIC
-	// read has to learn it without the store's mutex: that mutex is held for
-	// the whole of an in-flight write, and a health report that waits for the
-	// write to finish to learn a value set once at startup has waited for
-	// nothing (#1738). Every reader loads it; the store's mutex does not guard
-	// it.
 	embeddingIdentity atomic.Pointer[string]
 
-	// foreignWarned gates the warning loadVectorRows logs when a search
-	// skips vectors recorded under a retired identity: it records which
-	// retired identities have already been reported, so each is logged once
-	// per process rather than once per search — a re-embed lasts many queries,
-	// and one line per query buries the state it reports. The gate is keyed on
-	// the identity rather than being a single flag because a long-lived MCP
-	// server can reconfigure twice in one session; the second retirement is a
-	// new diagnosis with its own stored_identity and must warn again. It is a
-	// pointer so the snapshot store Candidates builds shares the same gate: a
-	// retrieval must not spend a second warning on rows the real search already
-	// reported.
 	foreignWarned *foreignWarnGate
 
-	// scratch recycles the per-search corpus snapshot a vector search copies
-	// candidate rows into. Concurrent searches each take their own, and the pool
-	// exists so that a steady-state search refills the column buffers it grew last
-	// time instead of allocating the whole corpus again per query — see #556.
-	//
-	// A pointer, not a value, because a Store literal standing in for another
-	// store — the snapshot Candidates builds — must share it rather than bring its own. A sync.Pool must not be
-	// copied after use, and a pool of its own on a literal is a pool of one that is
-	// garbage the moment the literal goes out of scope: the corpus snapshot would
-	// be allocated per query and dropped with the store, which is the cost this
-	// exists to avoid.
 	scratch *vectorScratch
 
-	// vcache is the store's one shared copy of the vector corpus, valid while the
-	// database's vector_epoch has not moved (#1031). A pointer for the same
-	// reason scratch is: the snapshot store Candidates builds shares it, and a
-	// cache of its own would be dropped with that store.
 	vcache *vectorCache
 }
 
-// foreignWarnGate is the per-identity warning gate: the set of retired
-// identities whose foreign-vector warning this process has already logged.
 type foreignWarnGate struct {
 	mu     sync.Mutex
 	warned map[string]bool
 }
 
 // SetOnSave registers a callback invoked after each successful memory save.
-// The callback must be non-blocking (e.g., a non-blocking channel send).
 func (s *Store) SetOnSave(fn func(projectID string)) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -252,8 +117,6 @@ func (s *Store) SetOnSave(fn func(projectID string)) {
 }
 
 // SetDemotionThreshold overrides the near-duplicate demotion cutoff
-// GetTopMemories uses. Call after NewStore once config is loaded; until
-// called, GetTopMemories uses DefaultDemotionThreshold.
 func (s *Store) SetDemotionThreshold(threshold float64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -261,15 +124,12 @@ func (s *Store) SetDemotionThreshold(threshold float64) {
 }
 
 // SetVectorMinSimilarity overrides the vector-leg cosine floor hybrid search
-// applies before fusion. Call after NewStore once config is loaded; until
-// called, the floor is 0 (only non-positive cosines dropped).
 func (s *Store) SetVectorMinSimilarity(floor float32) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.vectorMinSimilarity = floor
 }
 
-// vectorMinSimilarityFloor returns the configured floor under the read lock.
 func (s *Store) vectorMinSimilarityFloor() float32 {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -277,32 +137,12 @@ func (s *Store) vectorMinSimilarityFloor() float32 {
 }
 
 // SetEmbeddingIdentity declares which vector space this process embeds into —
-// the model, its dimensions and its task-prefix setting, as produced by
-// embedding.VectorIdentity. Call after NewStore once config is loaded, with
-// the same string the embedding client stamps into memory_embeddings.model.
-//
-// It is what makes a model change safe: vectors recorded under a different
-// identity are excluded from the vector leg (they are not comparable with a
-// query embedded in the configured space) and reported back to the embedding
-// worker as unembedded, so they are rewritten in place. Until it is called, the
-// store searches whatever vectors exist regardless of which model wrote them —
-// the pre-identity behaviour.
-//
-// It takes the store's write lock, as every configuration change here does: a
-// search holds the read lock across its corpus pass, and the vector scan's
-// guard is written against a writer being able to take that lock.
 func (s *Store) SetEmbeddingIdentity(identity string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.embeddingIdentity.Store(&identity)
 }
 
-// embeddingIdentityValue returns the identity set by SetEmbeddingIdentity, or
-// "" when none is configured.
-//
-// It loads the atomic rather than reading the field under the store's mutex,
-// because the diagnostic read must learn the identity without waiting for an
-// in-flight write to finish (see embeddingIdentity).
 func (s *Store) embeddingIdentityValue() string {
 	if p := s.embeddingIdentity.Load(); p != nil {
 		return *p
@@ -310,33 +150,15 @@ func (s *Store) embeddingIdentityValue() string {
 	return ""
 }
 
-// identityPtr returns a pointer to the identity, for a store literal that
-// carries one.
 func identityPtr(identity string) *string {
 	return &identity
 }
 
-// configuredEmbeddingIdentity returns the identity set by
-// SetEmbeddingIdentity, or "" when none is configured.
-//
-// The value is process configuration rather than store state: it is set once,
-// when the store is built, and does not change while the server serves. It is
-// therefore read without the store's mutex, so a reader never queues behind a
-// write in flight to learn it (#1738).
 func (s *Store) configuredEmbeddingIdentity() string {
 	return s.embeddingIdentityValue()
 }
 
 // NewStore creates a new memory store from an open database.
-//
-// A nil logger means "log nothing" and is honoured as such: Store has over a
-// dozen unguarded s.logger.X call sites, and Go's log/slog panics on a nil
-// *Logger receiver (Info, Warn and Debug all dereference l.Handler), so a nil
-// passed straight through would turn any logging call into a crash. Call
-// sites such as mcpinit's lifecycle lock and marker paths pass nil
-// deliberately — they build a Store only to resolve a project identifier and
-// have no logger yet — and a discarded handler preserves that silence rather
-// than forcing every caller to construct one.
 func NewStore(db *sql.DB, logger *slog.Logger) *Store {
 	if logger == nil {
 		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -348,25 +170,12 @@ func NewStore(db *sql.DB, logger *slog.Logger) *Store {
 }
 
 // NewStoreWithRead is NewStore with a read-only handle for snapshot reads.
-//
-// The production DSN issues BEGIN IMMEDIATE, so a transaction on the primary
-// handle takes the write lock for its whole lifetime. Candidates needs a
-// transaction (legs, hydration, edges and penalty lookups on one snapshot), and
-// holding the write lock across a full retrieval would block every concurrent
-// writer in the machine — the reflection, embedding and linking workers, and
-// any save arriving on the live MCP server. FlagsByMemory's two reads take
-// theirs here for the same reason, at a smaller cost but the same lock. The
-// read handle's DSN has no _txlock, so the same transaction is a plain deferred
-// read: WAL readers do not wait on a writer, which is the whole point of
-// running the store in WAL.
 func NewStoreWithRead(db, readDB *sql.DB, logger *slog.Logger) *Store {
 	s := NewStore(db, logger)
 	s.readDB = readDB
 	return s
 }
 
-// readHandle is the handle snapshot reads run on: the injected read-only
-// connection when there is one, otherwise the primary handle.
 func (s *Store) readHandle() *sql.DB {
 	if s.readDB != nil {
 		return s.readDB
@@ -374,12 +183,6 @@ func (s *Store) readHandle() *sql.DB {
 	return s.db
 }
 
-// warnNoReadHandle records the cost of running a snapshot read on the primary
-// handle, once per store. The primary DSN issues BEGIN IMMEDIATE, so a
-// transaction there takes the write lock for its whole lifetime; a store
-// without a read handle is the in-memory, bench and test case, where there is
-// no second process and no writer to block, and a file-backed production store
-// that was wired up wrongly.
 func (s *Store) warnNoReadHandle() {
 	if s.db == nil {
 		return
@@ -389,14 +192,6 @@ func (s *Store) warnNoReadHandle() {
 	})
 }
 
-// queryDB is the read surface a store's readers use: the snapshot transaction
-// when one is in force, otherwise the store's own handle.
-//
-// It is what makes ONE implementation serve two places. A search seam reads
-// through it so the search's statements share the snapshot transaction
-// Candidates opened, and a diagnostic read reads through it so the same
-// statement runs on the read transaction BeginDiagnosticRead opened (#1738).
-// A store with neither reads its own handle, which is the ordinary case.
 func (s *Store) queryDB() Queryer {
 	if s.snapshot != nil {
 		return s.snapshot
@@ -404,9 +199,6 @@ func (s *Store) queryDB() Queryer {
 	return s.db
 }
 
-// seedGlobalMemory defines a memory that Ghost ships with out of the box.
-// These are inserted as source='builtin', pinned=1, so consolidation never
-// touches them and provenance surfaces can distinguish them from user writes.
 type seedGlobalMemory struct {
 	Category   string
 	Content    string
@@ -414,7 +206,6 @@ type seedGlobalMemory struct {
 	Tags       []string
 }
 
-// defaultSeedMemories are baked into every Ghost installation.
 var defaultSeedMemories = []seedGlobalMemory{
 	{
 		Category:   "preference",
@@ -424,16 +215,6 @@ var defaultSeedMemories = []seedGlobalMemory{
 	},
 }
 
-// shippedSeedContents returns the content of every memory Ghost ships and
-// writes itself on open.
-//
-// It is how a reader recognises one of Ghost's own seeds without asking the
-// store: `SeedGlobalMemories` writes each seed under a per-install random id, so
-// the id is no help, and the content sentence is what actually identifies the
-// row. The portable export uses it to leave the seeds out of an artifact, and
-// keying that exclusion on the CONTENT rather than on `source = 'builtin'` is
-// what keeps a user's own row — which may legally carry that source — in the
-// artifact.
 func shippedSeedContents() []string {
 	out := make([]string, 0, len(defaultSeedMemories))
 	for _, seed := range defaultSeedMemories {
@@ -443,20 +224,10 @@ func shippedSeedContents() []string {
 }
 
 // SeedGlobalMemories ensures the _global project exists and inserts any
-// missing seed memories. Seeds are pinned and source='builtin' so they
-// survive consolidation without being presented as user-authored. Idempotent —
-// skips memories whose content already exists.
-//
-// The idempotence is SQLite's, not the process's: this runs on every open, so
-// two handles — an editor-launched MCP server and a CLI command — meet on one
-// file, and s.mu is a per-Store mutex that closes nothing between them. Each
-// seed's existence probe therefore runs inside the transaction that writes it
-// (see seedMemoryTx).
 func (s *Store) SeedGlobalMemories(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Ensure _global project.
 	_, err := s.execGuardedWrite(ctx, "ensure-global-project", `
 		INSERT INTO projects (id, path, name) VALUES ('_global', '_global', 'global')
 		ON CONFLICT(id) DO NOTHING
@@ -471,11 +242,6 @@ func (s *Store) SeedGlobalMemories(ctx context.Context) error {
 
 	for _, seed := range defaultSeedMemories {
 		tags, _ := json.Marshal(seed.Tags)
-		// One transaction per seed, and a failed seed stays a warning rather
-		// than aborting the rest: this runs on every open, and a store missing
-		// a builtin rule must not be a store with no rules at all. The history
-		// row goes in the same transaction, so "which rows did Ghost ship
-		// itself" is answerable from the same table as everything else.
 		if err := s.seedMemoryTx(ctx, seed, string(tags)); err != nil {
 			s.logger.Warn("seed memory insert failed", "content", seed.Content, "error", err)
 		}
@@ -484,28 +250,6 @@ func (s *Store) SeedGlobalMemories(ctx context.Context) error {
 	return nil
 }
 
-// seedMemoryTx inserts one builtin seed and its first history row in a single
-// transaction, and skips it when the content is already there. A seed is a
-// memory like any other, so it gets a recorded origin: the phase is save rather
-// than a seed-specific value because the row's own source column already says
-// `builtin`, and a phase nothing reads is a phase no filter can use.
-//
-// The probe that decides the write reads INSIDE this transaction, which is the
-// rule docs/architecture.md states for every read that decides a write, and the
-// only thing that makes the skip true across processes. BEGIN IMMEDIATE takes
-// SQLite's write lock before the probe runs, so the probe sees whatever every
-// other handle has committed and nothing it has not: a concurrent seed either
-// lands first — and this transaction then reads it and writes nothing — or
-// lands second, and it reads that first row and writes nothing. Two copies
-// cannot both be the first.
-//
-// Probed on the pool as an autocommit read, as this function used to, the check
-// answered about a moment before the transaction existed. Two handles then both
-// read zero and both inserted a byte-identical pinned `builtin` row, in the
-// Global section of every session-start block and every project context, which
-// nothing repairs: re-seeding skips by content, consolidation does not touch
-// pinned rows and no path deletes one. A probe that cannot be read fails the
-// seed rather than writing into a store whose existing rows it could not see.
 func (s *Store) seedMemoryTx(ctx context.Context, seed seedGlobalMemory, tagsJSON string) error {
 	tx, _, err := s.beginWrite(ctx, "seed")
 	if err != nil {
@@ -536,10 +280,6 @@ func (s *Store) seedMemoryTx(ctx context.Context, seed seedGlobalMemory, tagsJSO
 }
 
 // Close closes the underlying database.
-// Close releases the store's handles. The injected read handle is a second
-// connection this Store owns, so it is closed too: leaving it open holds a WAL
-// reader for the life of the process, which is exactly what the read handle
-// exists to avoid holding during a retrieval.
 func (s *Store) Close() error {
 	err := s.db.Close()
 	if s.readDB != nil {
@@ -575,9 +315,6 @@ func (s *Store) ListProjects(ctx context.Context) ([]Project, error) {
 }
 
 // GetProjectPath returns the filesystem path recorded for a project. Callers
-// use it to inspect the working tree (e.g. reflection's git context); a
-// missing project is an error, but callers that treat the path as optional
-// can ignore it.
 func (s *Store) GetProjectPath(ctx context.Context, id string) (string, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -585,9 +322,6 @@ func (s *Store) GetProjectPath(ctx context.Context, id string) (string, error) {
 	var path string
 	err := s.db.QueryRowContext(ctx, `SELECT path FROM projects WHERE id = ?`, id).Scan(&path)
 	if err == sql.ErrNoRows {
-		// `id` can be a caller's project operand (a CLI flag or a tool argument)
-		// or an id an artifact wrote verbatim, so the refusal renders it rather
-		// than repeating it.
 		return "", fmt.Errorf("project %s not found", RefusalArg(ProjectIdentifierLabel, id))
 	}
 	if err != nil {
@@ -597,84 +331,25 @@ func (s *Store) GetProjectPath(ctx context.Context, id string) (string, error) {
 }
 
 // EnsureProject creates a project record if it doesn't exist.
-// When called with an absolute path, it auto-merges any same-name project
-// that was created with a non-absolute path (e.g., by MCP using name-as-ID).
-// EnsureProject creates or refreshes a project with no repository identity.
-// Callers that know the filesystem path should prefer EnsureProjectWithRepo,
-// which lets two checkouts of one repository collapse into a single project.
-//
-// A project this store does not ALREADY hold must be a shape `ghost import` will
-// accept, and the rule is `CheckImportedProject` — the importer's own predicate,
-// not a copy of it (#824). `ghost export` calls that same function to decide what
-// it may write, so an id, name or path it refuses is a project that leaves the
-// artifact entirely, and with it every memory, task and decision under it. A save
-// that created one would therefore open a project no backup can carry, and the
-// operator would learn it only when they ran one.
-//
-// The refusal is placed AFTER the exact-id lookup in the caller rather than
-// higher up, so a store that already holds such a project keeps working: its
-// memories stay reachable, and nothing is refused about a row that is not being
-// created. It does cover this function's refresh arm too, because the statement
-// underneath is one upsert and cannot tell the two apart — and that costs
-// nothing, since a project of this shape cannot be created by this build, so the
-// only rows a refresh here would decline are ones an earlier build, a restored
-// snapshot or a hand edit wrote. A caller holding such a project's exact id never
-// reaches this call at all (#824).
 func (s *Store) EnsureProject(ctx context.Context, id, path, name string) error {
 	return s.ensureProjectLocked(ctx, id, path, name, "")
 }
 
 // EnsureProjectWithRepo is EnsureProject plus the normalized remote URL of the
-// repository at path.
-//
-// When another project already claims that remote, this merges into it instead
-// of creating a second project — mirroring the path-based self-heal below.
-// That is the case repository identity exists for: ~/src/ghost and
-// ~/work/ghost are different paths, and an agent that changes working
-// directory would otherwise start a second project and lose everything the
-// first one knew.
-//
-// repoRemote may be empty. An empty value never clears a remote already on
-// record, so callers that cannot inspect a path (MCP tools pass path="") do
-// not erase identity that a caller which could inspect it had established.
 func (s *Store) EnsureProjectWithRepo(ctx context.Context, id, path, name, repoRemote string) error {
 	return s.ensureProjectLocked(ctx, id, path, name, repoRemote)
 }
 
 // BindNewProjectToCheckout opens project id at the checkout dir, recording the
-// physical path and, when repoRemote is not empty, the repository, and reports
-// whether it did. It is the write side of a save that creates a project from a
-// name (#957).
-//
-// It is not EnsureProjectWithRepo, and the difference is the point: that call
-// MERGES the incoming id into whatever project already owns the path or the
-// remote and deletes the incoming row, which for a save that is about to write
-// under id leaves the memory under a project that no longer exists. Here the
-// claim test and the INSERT share one write transaction, and a claim is
-// answered with bound=false and no write at all, so the caller opens the
-// project the ordinary unbound way. An id the store already holds is never
-// rebound (bound=false), nor is _global, nor a directory or remote any other
-// project records.
 func (s *Store) BindNewProjectToCheckout(ctx context.Context, id, dir, name, repoRemote string) (bool, error) {
 	repoRemote = NormalizeRepoRemote(repoRemote)
-	// The path predicate BindProjectPath asks: absolute, not a bare root, and not
-	// the id sentinel, so "usable" keeps one definition across the path writers.
 	if id == "" || id == "_global" || dir == id || !storedPathIsUsable(dir) {
 		return false, nil
 	}
-	// Every comparison below is between PHYSICAL paths, as in BindProjectPath: a
-	// caller's spelling (a symlink, a dot segment, native separators) would make
-	// the containment and equality rules inert. What is recorded is the physical
-	// path too, and a directory that cannot be resolved is not a checkout.
 	physical, err := canonicalPath(dir)
 	if err != nil || physical == id || !storedPathIsUsable(physical) {
 		return false, nil
 	}
-	// EvalSymlinks resolves a regular file exactly as it resolves a directory, so
-	// the resolved string alone does not make a checkout: a session stands in a
-	// directory, and a file recorded here would claim a location no session can
-	// be. Declined before the transaction, like every other unusable path, so the
-	// save opens its project unbound rather than bound to something it is not.
 	if info, statErr := os.Stat(physical); statErr != nil || !info.IsDir() {
 		return false, nil
 	}
@@ -699,9 +374,6 @@ func (s *Store) BindNewProjectToCheckout(ctx context.Context, id, dir, name, rep
 	if claimed > 0 {
 		return false, nil
 	}
-	// An OVERLAPPING claim is a claim too, and the guard is bind's own: a project
-	// inside dir would be swallowed by it, and dir inside a project that records
-	// no remote would be answered for by that project. Each declines the bind.
 	if err := checkBindPathConflicts(ctx, tx, id, dir); err != nil {
 		if errors.Is(err, ErrBindPathClaimed) || errors.Is(err, ErrBindPathContainsOther) || errors.Is(err, ErrBindPathInsideOther) {
 			return false, nil
@@ -719,10 +391,6 @@ func (s *Store) BindNewProjectToCheckout(ctx context.Context, id, dir, name, rep
 	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO ghost_state (project_id) VALUES (?)`, id); err != nil {
 		return false, err
 	}
-	// A path the resolver could never return for this project is not a binding:
-	// the same check `ghost project bind` makes, on the row just written. It
-	// declines (the rollback undoes the insert) and the save opens the project
-	// unbound, rather than leaving one that looks bound and no session matches.
 	if err := checkPathResolvable(ctx, tx, id, dir, repoRemote); err != nil {
 		if errors.Is(err, ErrBindPathUnmatchable) {
 			return false, nil
@@ -736,87 +404,26 @@ func (s *Store) BindNewProjectToCheckout(ctx context.Context, id, dir, name, rep
 }
 
 // BindingRefusalKind names the rule that stopped a repository from claiming
-// the project its name matched.
 type BindingRefusalKind string
 
 const (
-	// RefusedAmbiguousName: the name matched more than one project, so none
-	// of them is evidence for any of the others.
-	RefusedAmbiguousName BindingRefusalKind = "ambiguous-name"
-	// RefusedDifferentRemote: the one project of that name already records
-	// another repository.
+	RefusedAmbiguousName   BindingRefusalKind = "ambiguous-name"
 	RefusedDifferentRemote BindingRefusalKind = "different-remote"
-	// RefusedPathMismatch: the one project of that name records a checkout
-	// the saving directory is not inside.
-	RefusedPathMismatch BindingRefusalKind = "path-mismatch"
+	RefusedPathMismatch    BindingRefusalKind = "path-mismatch"
 )
 
 // BindingRefusal reports that a repository was not allowed to claim the
-// project its name matched, and names the project the save went to instead.
-//
-// Every refusal is a fail-safe, and none of them costs the save: the memory is
-// still written, to SavedTo. What a refusal costs is the caller's ability to
-// tell "this save opened a new project" from "a project of this name exists
-// and was left behind" — the second is context the agent has just stopped
-// seeing, and it is indistinguishable from the first unless it is reported.
-//
-// It is returned rather than only logged because the log is not answerable by
-// the agent that made the save. Only the caller knows which project it
-// addressed and what it can tell the user about the result.
 type BindingRefusal struct {
-	// Kind is the rule that refused the binding.
-	Kind BindingRefusalKind
-	// Name is the name derived from the remote that no project could be bound
-	// by — never a directory basename.
-	Name string
-	// ProjectIDs are the projects that record Name, id-ordered, at most
-	// maxNamedCandidates of them: the read that produces them is bounded (see
-	// projectsNamedTx), and the rest are counted rather than listed.
-	ProjectIDs []string
-	// CandidateCount is how many projects record Name in total, which is more
-	// than len(ProjectIDs) whenever the list is capped. It is what makes the
-	// notice say "7 projects" beside five names.
+	Kind           BindingRefusalKind
+	Name           string
+	ProjectIDs     []string
 	CandidateCount int
-	// RecordedPath is the checkout the refusing project records, "" for an
-	// ambiguous name and for a project that records no location.
-	RecordedPath string
-	// RecordedRemote is the repository the refusing project already claims,
-	// "" when it claims none — which is the case RefusedPathMismatch turns on.
+	RecordedPath   string
 	RecordedRemote string
-	// SavedTo is the project this save was routed to instead.
-	SavedTo string
+	SavedTo        string
 }
 
 // Notice renders the refusal for whoever asked for the save: what kept the
-// name, where the memory went, and what — if anything — the reader can run to
-// make the split go away. Empty for no refusal, so a caller can append it to
-// every save result without a nil check.
-//
-// What each kind can be repaired by is not the same, and a command that does
-// not repair it is worse than no command: a reader who follows advice that
-// does not work is further from a fix than one who was told there is nothing
-// to run. Only RefusedPathMismatch has a repair, and it takes two commands in
-// a fixed order — a merge on its own deletes the project the save landed in
-// and with it the repository it recorded, so the next save from that checkout
-// is refused again and opens a second project; the bind is what puts the
-// checkout and its repository on the project that kept the name. The merge
-// comes first because the bind is refused while the other project still
-// records that directory.
-//
-// RefusedDifferentRemote has none: two projects that claim two different
-// repositories are not a split to be closed, and the project this save used
-// already records the checkout, so the next save finds it by id. It names both
-// projects by id and by path rather than by a command to run: `ghost project`
-// dispatches delete, merge and bind and nothing else (cmd/ghost/main.go), so
-// there is no listing command for a notice here to point at.
-//
-// The commands are shell-quoted (shellQuote) rather than Go-quoted, because a
-// project id here is often a checkout path and the reader is meant to paste the
-// sentence: %q doubles the backslashes of a Windows path, leaves a $ or a
-// backtick for the shell to expand inside its double quotes, and escapes a
-// control character the shell cannot read back. Prose keeps %q, which is the
-// clearer way to set a name or a path inside a sentence that is read rather than
-// run.
 func (r *BindingRefusal) Notice() string {
 	if r == nil {
 		return ""
@@ -829,8 +436,6 @@ func (r *BindingRefusal) Notice() string {
 	if len(r.ProjectIDs) > 0 {
 		held = r.ProjectIDs[0]
 	}
-	// A refusal built without the count still says how many it found, so a
-	// caller cannot render "0 projects" for a name two projects share.
 	matched := r.CandidateCount
 	if matched < len(r.ProjectIDs) {
 		matched = len(r.ProjectIDs)
@@ -846,28 +451,13 @@ func (r *BindingRefusal) Notice() string {
 		return fmt.Sprintf("project %q already exists at %s; saved to %s instead — to write into that project rather than this one, save under %q by name or id. To make this checkout part of it instead, run both, in this order: ghost project merge %s %s (moves what was just saved here into it) then ghost project bind %s %s (records this checkout and its repository on it, so the next save from here lands there instead of splitting again)",
 			r.Name, r.RecordedPath, saved, r.Name, shellQuote(saved), shellQuote(held), shellQuote(held), shellQuote(saved))
 	default:
-		// A kind added later renders here rather than borrowing another
-		// kind's sentence, which would suggest commands that repair a split
-		// this refusal never described.
 		return fmt.Sprintf("project %q was not bound to this repository (%s); saved to %s instead — save under the project you meant, by name, id or path",
 			r.Name, r.Kind, saved)
 	}
 }
 
-// maxNamedCandidates bounds how many candidate projects a notice names, and
-// equally how many this decision carries into its log line and that notice.
-// The text is returned to the agent that made the save and is often still in
-// its context for the rest of the session, and the count of same-named
-// projects is not bounded by anything — it is exactly what a project-merge
-// accident leaves behind.
 const maxNamedCandidates = 5
 
-// namedCandidates lists the candidate ids a refusal carries, at most
-// maxNamedCandidates of them, and counts the rest. The caller has to know that
-// more exist than it is being shown — it is about to choose a project to save
-// under — while which ones to start with is not a decision this text should
-// make. matched is the true total, which is more than the ids whenever the
-// read that found them was capped.
 func namedCandidates(ids []string, matched int) string {
 	listed := ids
 	if len(listed) > maxNamedCandidates {
@@ -881,27 +471,6 @@ func namedCandidates(ids []string, matched int) string {
 }
 
 // ResolveOrCreateRepoProject resolves a repository-aware save to one project
-// and creates that project when no identity match exists. The complete
-// resolve-or-create sequence runs in one immediate SQLite transaction, so
-// separate Ghost processes cannot both create the first project for a remote.
-//
-// It returns the project the save must be written to, and a refusal when the
-// unique-name fallback was not allowed to bind the repository to the project
-// its name matched. The refusal never replaces the id: the save is still
-// routed, and a caller that reports it is telling the truth about a memory
-// that landed, not declining one. Only the log used to record it (#613).
-//
-// projectRef is the id or path ordinary resolution produced; repoName is the
-// final component of the normalized remote, never a directory basename. An
-// explicit project already bound to another repository is an error rather than
-// a reason to route the save to that remote's existing owner.
-//
-// path is the session's directory on this filesystem, not a synthetic id. The
-// unique-name fallback claims a project of the same name only when its
-// recorded path is unusable or contains path, so a caller that cannot report a
-// real directory loses that fallback: the save opens its own project instead —
-// one extra project per distinct id rather than one per save, since the
-// fallback row is then found by id.
 func (s *Store) ResolveOrCreateRepoProject(ctx context.Context, projectRef, repoName, id, path, name, repoRemote string) (string, *BindingRefusal, error) {
 	repoRemote = NormalizeRepoRemote(repoRemote)
 	if repoRemote == "" {
@@ -917,19 +486,11 @@ func (s *Store) ResolveOrCreateRepoProject(ctx context.Context, projectRef, repo
 		path = id
 	}
 
-	// Before the store lock, and this is the only reason the answer is computed
-	// here rather than inside the transaction: deciding it can cost a
-	// `git config`, and everything below holds both the store-wide mutex and the
-	// single write connection. A hung git there would stall every other reader
-	// and writer on this Store to answer one save.
 	saving := s.savingRepository(ctx, projectRef, repoRemote)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// OpenDB configures database/sql transactions as BEGIN IMMEDIATE. Holding
-	// SQLite's write lock before the first lookup serializes repository-project
-	// creation across Store handles and independent processes.
 	tx, _, err := s.beginWrite(ctx, "repo-project")
 	if err != nil {
 		return "", nil, fmt.Errorf("begin repository project tx: %w", err)
@@ -941,32 +502,6 @@ func (s *Store) ResolveOrCreateRepoProject(ctx context.Context, projectRef, repo
 		return "", nil, err
 	}
 	if canonical == "" {
-		// The SHAPE, and the importer's own predicate rather than a second one
-		// (#824). This is the second project-creation route, and it carries the
-		// check for the same reason `ensureProjectLocked` does: a path-shaped
-		// `project_id` with a detectable remote reaches this branch instead of
-		// that one, so a save that took it would otherwise create the project
-		// `ghost export` has to leave out — and with it every memory, task and
-		// decision saved under it.
-		//
-		// It is asked HERE, on the one arm that is about to INSERT, and not above
-		// `resolveRepoProjectTx`, and that is the rule rather than a saving: the
-		// answer above may be a row this store already holds, and `projectRef` is
-		// the caller's argument, which `ensureProjectFor` has already resolved by
-		// exact id, basename name and longest path prefix. A legacy project whose
-		// id is hostile and whose recorded path is ordinary is therefore reachable
-		// here by its PATH with nothing hostile left in the reference, and judging
-		// the record on the way in would refuse a save into a project that exists
-		// and holds the user's memories. The refusal belongs to the CREATE, and
-		// this is the create.
-		//
-		// It costs a `git config` to get here before the refusal, which the
-		// previous placement avoided, and that is the right trade: `savingRepository`
-		// exists to answer whether this checkout already records the remote, which
-		// is only worth asking when the answer can change which project the save
-		// lands in. Once the answer is a project that is not there, the subprocess
-		// has already paid for itself. `path` was normalized from "" to the id
-		// above, so `createdProject` judges the record as it would be stored.
 		if err := CheckImportedProject(createdProject(id, path, name, repoRemote)); err != nil {
 			return "", nil, fmt.Errorf("create project: %w", err)
 		}
@@ -1013,26 +548,10 @@ func (s *Store) resolveExplicitProjectRepoTx(ctx context.Context, tx *sql.Tx, pr
 		return "", false, fmt.Errorf("count explicit projects for repository: %w", err)
 	}
 	if count > 1 {
-		// `projectRef` is the caller's own argument on the route
-		// `ensureProjectFor` takes when a path-shaped project_id carried a
-		// detectable remote, and it reaches here UNGUARDED on the branch where the
-		// resolution above found a project — the #836 gate skips both guards
-		// there, because a path a project is already bound to must stay
-		// writable. So the same renderer that holds `ResolveProject`'s refusals
-		// holds this one, for the same reason and at the same cost: the sentence
-		// is returned to the saving agent as a tool answer.
 		return "", false, fmt.Errorf("project reference %s matches multiple projects", RefusalArg("project_id", projectRef))
 	}
 	var existingRemote, matchedPath string
 	norm := strings.ReplaceAll(projectRef, `\`, "/")
-	// prefixMatch records that the project was found by a project's recorded
-	// path containing the saving directory rather than by the caller's own
-	// reference, which is the only difference between the two lookups below and
-	// the reason one of them may not write repository identity. The exact
-	// lookup matched id = ? OR path = ?, so its candidate is the project the
-	// caller named; the prefix lookup matched a project whose path is an
-	// ANCESTOR of the saving directory, and a directory inside a checkout is not
-	// that checkout.
 	prefixMatch := false
 	if count == 0 {
 		prefixMatch = true
@@ -1071,69 +590,7 @@ func (s *Store) resolveExplicitProjectRepoTx(ctx context.Context, tx *sql.Tx, pr
 		return "", true, fmt.Errorf("project %s belongs to a different repository", RefusalArg(ProjectIdentifierLabel, id))
 	}
 
-	// The repository found in a directory is that directory's own, so the
-	// question before writing one onto a project is whether it is the project's
-	// repository at all. A checkout inside the project's directory is a
-	// different repository — a submodule, a vendored clone, a worktree of
-	// something else — and binding its remote, or merging the enclosing project
-	// into the nested checkout's own, is how a save from ~/git/infra/vendor/lib
-	// took other/lib away from ~/git/infra and then locked the real checkout out
-	// of its own project at every path except exactly its root.
-	//
-	// The save still lands in the enclosing project, which is what the prefix
-	// step decided and what a session standing in that directory expects.
-	// Routing a save is not the same claim as identifying the repository, so
-	// the refusal covers both writes below and only those; the exact-id lookup
-	// above is untouched, because there the caller named the project and a save
-	// made from inside it says nothing to contradict that.
-	//
-	// "Is the same repository" is deliberately not "is the root". A session is
-	// usually started in a subdirectory, and `git config --get remote.origin.url`
-	// walks up, so the remote found there is the enclosing checkout's own — and
-	// for a v11-era row, which is a recorded path and no remote, that save is
-	// the only thing that will ever identify the project. Keying the guard on
-	// containment instead of on the repository leaves every pre-v11 project
-	// unclaimed forever.
-	//
-	// A nested checkout does not open a project of its own as a result. The
-	// prefix match has already answered, so resolution stops here, which is
-	// deliberate: the save was told a directory, not a repository, and #612's
-	// `ghost project bind` is the command that states which checkout is which
-	// project — once the enclosing project records a remote, which is what
-	// checkBindPathConflicts requires before it will bind a path inside one. A
-	// save from the enclosing checkout's own root is what gives it one.
-	//
-	// Logged for the same reason the unique-name refusal is: the save landed
-	// somewhere and the project that answered for it is deliberately left
-	// unclaimed, which is a fact a user with a nested checkout will want.
-	//
-	// The evidence checks are the guard's own: the answer describes one project
-	// at one path, read before the lock, and it is consulted only when the
-	// transaction matched that same project at that same path. Both are needed.
-	// The id alone is not enough, because a project re-pointed by
-	// BindProjectPath between the two reads is the same row at a different
-	// checkout, and the answer says nothing about the checkout it now records —
-	// a remote identified at /a/infra does not describe /b/other. The window
-	// between the two reads is not small: it contains s.mu.Lock() and a BEGIN
-	// IMMEDIATE that can block on another process's write lock. Every other
-	// case — no answer, an answer about another row, an answer about a
-	// different path — is no evidence, and no evidence refuses, because this
-	// guard exists to stop a wrong remote being written and a missing reading is
-	// not permission to write one.
-	//
-	// The evidence keys are the pre-lock read's and describe a row that is not
-	// necessarily the one matched here, so they are named as what they are
-	// rather than as properties of recorded_path. The causes that reach this
 	// line have to be tellable apart, because each needs a different fix: a
-	// different repository found at the recorded path (evidence_project == id
-	// and evidence_recorded_remote names another remote), nothing readable there
-	// (same id, empty remote), and evidence that was never collected, or was
-	// about another row or another path (evidence_project or evidence_path
-	// empty or different, which is a project created or re-pointed between the
-	// two reads). Reporting the pre-lock values next to the transaction's
-	// recorded_path as if they described the same row would read as the second
-	// cause in the first and third, sending an operator after a nested checkout
-	// they do not have.
 	if prefixMatch && (saving.projectID != id || saving.recordedPath != matchedPath || !saving.speaksForProject) {
 		s.logger.Warn("refused to bind a repository to a project whose checkout contains this save: could not establish that the saving directory belongs to that project's own repository",
 			"project", id,
@@ -1160,81 +617,13 @@ func (s *Store) resolveExplicitProjectRepoTx(ctx context.Context, tx *sql.Tx, pr
 	return id, true, nil
 }
 
-// savingRepository is the answer to "does the saving directory belong to the
-// repository the enclosing project is a checkout of", which is the only thing
-// that lets a save identify the project it was routed to.
-//
-// It is decided before the store's write lock is taken, because deciding it can
-// cost a `git config` and everything inside that lock holds the single write
-// connection too.
-//
-// It carries the row it was read from rather than a bare yes, because the
-// transaction has to be able to tell an answer about the project it matched, at
-// the path it matched, from no answer at all. The transaction is the authority:
-// it consults this only when projectID is the project it just matched and
-// recordedPath is the path that project records, and anything else — a project
-// created or re-pointed between the two reads, or a read that failed — leaves
-// the guard with no evidence, which refuses. A guard that treated a missing
-// answer as permission would be no guard at all on exactly the paths where its
-// input could not be collected.
 type savingRepository struct {
-	// projectID is the project this answer describes, "" when there is none.
-	projectID string
-	// recordedPath is the path the answer was decided from, which is not the
-	// same question as projectID: BindProjectPath re-points a project in place,
-	// so the same id can begin recording a different checkout between this read
-	// and the transaction. Empty when there is no answer.
-	recordedPath string
-	// recordedRemote is what that project records for itself. A project that
-	// records one is never decided by this answer — the transaction returns
-	// before the guard — so it is read to skip the detection rather than to
-	// decide anything, which is what keeps every save after the first free.
-	recordedRemote string
-	// speaksForProject reports whether the saving directory belongs to the
-	// repository that project is a checkout of.
+	projectID        string
+	recordedPath     string
+	recordedRemote   string
 	speaksForProject bool
 }
 
-// savingRepository answers savingRepository for a save from projectRef, whose
-// repository the caller has already detected as repoRemote.
-//
-// Three answers, and the first two are permissions that cost nothing. The
-// project already records a remote, so when the transaction matches that same
-// row — the ordinary case — it returns before the guard is ever reached, and
-// nothing here can change what happens. (When the pre-lock read named a
-// different row, that answer is not evidence for the row the transaction
-// matched, whatever remote it recorded: the guard is reached and refuses on the
-// projectID comparison alone — unless the matched row records a remote of its
-// own, in which case the transaction has already returned or failed above.) The
-// saving directory IS the project's recorded root: one directory, so there is no
-// second repository to have meant, and still no detection spent.
-//
-// Only the third is a decision, and it is the one that costs: the saving
-// directory is somewhere else under the recorded path, so the question is
-// whether it belongs to the same repository. That is what an ordinary
-// subdirectory of the checkout looks like — sessions start in src/api more often
-// than at the root, and `git config` walks up — and what a nested checkout does
-// not. The remote at the saving directory is the one the caller already detected
-// and passed in, so the only detection here is the one at the recorded path: at
-// most one additional `git config`, bounded by repo.detectTimeout.
-//
-// Anything else refuses, and so does a recorded path whose remote cannot be
-// detected at all: that proves nothing, and it is the same direction as a
-// subdirectory that turns out to be another repository. Both refusals leave the
-// enclosing project unidentified while the save still lands in it.
-// internal/memory never spawns git itself, so a store built without a detector —
-// the default, and what every test but the ones that pin one gets — cannot tell a
-// subdirectory from a submodule here, and guessing towards handing one
-// repository's identity to another is the failure this exists to stop.
-//
-// The candidate is read on the pool rather than inside the transaction for the
-// reason above, and the read mirrors the transaction's own prefix query — the same
-// three path clauses, the same length filter, the same longest-path winner, and
-// the same exclusion of _global — so the two name the same project. Two reads
-// that both fail leave the guard without evidence, which is the safe direction to
-// be wrong in: a project this save could have identified stays unclaimed and is
-// identified by the next save, rather than being handed a repository that
-// belongs to a checkout inside it.
 func (s *Store) savingRepository(ctx context.Context, projectRef, repoRemote string) savingRepository {
 	norm := absoluteSessionPath(projectRef)
 	hasRepoRemote, err := s.hasRepoRemoteColumn(ctx)
@@ -1264,9 +653,6 @@ func (s *Store) savingRepository(ctx context.Context, projectRef, repoRemote str
 		recordedRemote:   winner.remote,
 		speaksForProject: true,
 	}
-	// The project already says which repository it is, and the transaction
-	// returns on that before the guard: this answer cannot change what happens,
-	// so it costs nothing to leave it at "speaks" and spend no detection.
 	if winner.remote != "" || savingPathIsProjectRoot(winner.path, norm) {
 		return saving
 	}
@@ -1276,21 +662,6 @@ func (s *Store) savingRepository(ctx context.Context, projectRef, repoRemote str
 	return saving
 }
 
-// savingPathIsProjectRoot reports whether the directory a save came from is the
-// project's recorded checkout root rather than a directory inside it.
-//
-// The comparison is canonicalPath on both sides followed by exact equality,
-// because canonicalPath is already this file's one definition of how a path is
-// resolved: two spellings of one directory must agree, and a symlinked checkout
-// must not read as a different place. pathsAgree is deliberately not used here:
-// it accepts a directory inside the recorded path, which is exactly the
-// containment this is not asking about — it answers "is the session standing in
-// that project", where this answers "is the session standing at its root".
-//
-// A path that cannot be resolved is not the root. canonicalPath fails on a
-// directory that does not exist, and a recorded path that no longer resolves
-// cannot be shown to be the directory the save came from, so the conservative
-// answer is the one that writes nothing.
 func savingPathIsProjectRoot(recorded, saving string) bool {
 	physicalRecorded, err := canonicalPath(recorded)
 	if err != nil {
@@ -1303,31 +674,15 @@ func savingPathIsProjectRoot(recorded, saving string) bool {
 	return physicalSaving == physicalRecorded
 }
 
-// bindUniqueProjectNameRepoTx is the last resort of write-side resolution: a
-// repository whose name matches exactly one project that has claimed no
-// remote of its own may take that project as its own — unless that project
-// says it lives somewhere the save did not come from, which is the guard
-// below and the reason savingPath is a parameter.
-//
-// A refusal is returned as well as logged, and every kind logs: the caller is
-// the one who can say what the split costs to the agent that made the save, and
-// the operator is the one who needs a durable trace of a project that was not
-// claimed — the write path is the only place the split is ever visible.
 func (s *Store) bindUniqueProjectNameRepoTx(ctx context.Context, tx *sql.Tx, name, savingPath, repoRemote string) (string, *BindingRefusal, error) {
 	candidates, matching, err := s.projectsNamedTx(ctx, tx, name, maxNamedCandidates)
 	if err != nil {
 		return "", nil, err
 	}
 	if matching == 0 {
-		// No project carries the name, so there is nothing to refuse: the
-		// fallback project the caller is about to create is a first save, and
-		// reporting it as a refusal would make the notice unreadable.
 		return "", nil, nil
 	}
 	if matching > 1 {
-		// A name two projects share is evidence for neither. They are named in
-		// the refusal because the caller's next question is which one to save
-		// under, and a count alone cannot answer it.
 		ids := make([]string, 0, len(candidates))
 		for _, c := range candidates {
 			ids = append(ids, c.id)
@@ -1349,10 +704,6 @@ func (s *Store) bindUniqueProjectNameRepoTx(ctx context.Context, tx *sql.Tx, nam
 		if existingRemote == repoRemote {
 			return id, nil, nil
 		}
-		// A project that already speaks for another repository keeps it: the
-		// remote on a project is the evidence that lets two checkouts of one
-		// repository be one project, and overwriting it here would move that
-		// project's identity onto a directory the evidence does not describe.
 		s.logger.Warn("refused to bind a repository to a project of the same name: it already belongs to another repository",
 			"project", id, "name", name, "recorded_remote", existingRemote,
 			"saving_path", savingPath, "remote", repoRemote)
@@ -1365,28 +716,7 @@ func (s *Store) bindUniqueProjectNameRepoTx(ctx context.Context, tx *sql.Tx, nam
 			RecordedRemote: existingRemote,
 		}, nil
 	}
-	// A name does not outweigh where a project says it lives. An unrelated
-	// clone whose directory is called "infra" would otherwise claim the
-	// project at ~/git/infra: it would take over that project's remote, route
-	// this save into memories that are not its own, and lock the real
-	// checkout out behind a remote conflict. So a usable recorded path must
-	// agree with the directory the save came from; only a path that cannot be
-	// compared — the id sentinel a name-as-id project records, or a relative
-	// one — leaves the name to decide alone.
-	//
-	// A recorded path that no longer resolves counts as a disagreement, which
-	// is what agreesWithSession already does on the read side: the same two
-	// rules decide both directions, so a moved or deleted checkout keeps its
-	// memories and stays addressable by a save from its own path instead of
-	// being inherited by whatever directory took its name. The price is that a
-	// second checkout of a project with no recorded remote keeps its own
-	// project rather than inheriting the first one's memories — the trade
-	// #610 asked for, and the reason the refusal is reported rather than
-	// silent.
 	if storedPathIsUsable(storedPath) && !pathsAgree(absoluteSessionPath(savingPath), storedPath) {
-		// pathsAgree fails for a path that no longer resolves as well as for
-		// one that resolves somewhere else, and the two need different fixes,
-		// so the log says which it was.
 		_, resolveErr := canonicalPath(storedPath)
 		s.logger.Warn("refused to bind a repository to a project of the same name: its recorded path does not contain the saving directory",
 			"project", name, "recorded_path", storedPath, "recorded_path_resolves", resolveErr == nil,
@@ -1405,11 +735,6 @@ func (s *Store) bindUniqueProjectNameRepoTx(ctx context.Context, tx *sql.Tx, nam
 	return id, nil, nil
 }
 
-// recordedCheckout returns the checkout a project records, or "" when the path
-// column holds the id sentinel that a project created by name records instead
-// of a location. The sentinel is a real value in that column and a useless one
-// in a sentence about where a project lives, so a refusal reports the location
-// or nothing.
 func recordedCheckout(stored string) string {
 	if !storedPathIsUsable(stored) {
 		return ""
@@ -1417,35 +742,12 @@ func recordedCheckout(stored string) string {
 	return stored
 }
 
-// nameCandidate is one project that records a given name, with the two fields
-// the unique-name decision reads: the repository it already claims, if any, and
-// the checkout it records.
 type nameCandidate struct {
 	id     string
 	remote string
 	path   string
 }
 
-// projectsNamedTx reads the projects recording name, at most limit of them and
-// id-ordered, together with how many record it in total.
-//
-// The count decides the refusal and the rows decide the rest, so both come from
-// one query: COUNT(*) OVER () is evaluated before LIMIT, which is what keeps
-// the two consistent.
-//
-// What the limit bounds is what the caller carries — at most limit rows reach
-// the Go slice, the log line and the notice. It does not bound the work SQLite
-// does under the store mutex and the write lock: the window is computed over
-// every matching row, and projects.name carries no index. The count has to be
-// there either way, and reading the names to go with it costs nothing extra.
-//
-// limit is clamped to at least one because SQLite reads LIMIT 0 as "no rows":
-// the query would then report that nothing records the name, and the decision
-// that calls it would take its no-candidate path and open a project of its own
-// and bind the repository to it — a silent duplicate of the same-named project
-// rather than a decision to bind or refuse, which is the split this whole path
-// exists to report. A negative limit means no limit at all, which costs only
-// the bound the limit was passed to set.
 func (s *Store) projectsNamedTx(ctx context.Context, tx *sql.Tx, name string, limit int) ([]nameCandidate, int, error) {
 	if limit < 1 {
 		limit = 1
@@ -1475,8 +777,6 @@ func (s *Store) projectsNamedTx(ctx context.Context, tx *sql.Tx, name string, li
 		return nil, 0, fmt.Errorf("read projects by name for repository: %w", err)
 	}
 	if len(candidates) == 0 {
-		// No rows means no project records the name, and with them the window
-		// count that would have said so.
 		return nil, 0, nil
 	}
 	return candidates, matching, nil
@@ -1585,11 +885,6 @@ func (s *Store) createRepoProjectTx(ctx context.Context, tx *sql.Tx, id, path, n
 	return id, nil
 }
 
-// reconcileMergeRepoTx binds repoRemote to a merge target that does not record
-// one yet. excluded names the other participants of the merge, which may
-// legitimately hold the remote already inside this transaction — the incoming
-// row is written before the merge runs and is deleted by it, so treating its own
-// temporary claim as a conflicting holder would make every merge fail.
 func reconcileMergeRepoTx(ctx context.Context, tx *sql.Tx, existingID, repoRemote string, excluded ...string) error {
 	if repoRemote == "" {
 		return nil
@@ -1608,11 +903,6 @@ func reconcileMergeRepoTx(ctx context.Context, tx *sql.Tx, existingID, repoRemot
 		}
 		return nil
 	}
-	// Binding a remote the target does not have can collide with a project that
-	// already records it. v15 makes repo_remote unique, so that write is refused
-	// by the index — and a raw constraint failure names neither the project
-	// already holding the identity nor the fact that two rows claim to be the
-	// same repository. Name both, and point at the migration that merges them.
 	args := []any{repoRemote, existingID}
 	clause := ""
 	for _, id := range excluded {
@@ -1649,10 +939,6 @@ func (s *Store) ensureProjectLocked(ctx context.Context, id, path, name, repoRem
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Normalize empty path to id. MCP callers pass path="" because they
-	// don't know the filesystem path; using "" as path would collide across
-	// projects since projects.path has a UNIQUE constraint. Using id as path
-	// preserves the invariant already on disk for name-as-ID projects.
 	if path == "" {
 		path = id
 	}
@@ -1678,10 +964,6 @@ func (s *Store) ensureProjectLocked(ctx context.Context, id, path, name, repoRem
 		return nil
 	}
 
-	// Repository identity: one remote means one project, whatever the local
-	// checkout path happens to be. _global is excluded on both sides for the
-	// same reason MergeProject refuses it — merging it would move or dump the
-	// bucket that global injection reads from.
 	if repoRemote != "" && id != "_global" {
 		var incomingRemote string
 		incomingErr := tx.QueryRowContext(ctx,
@@ -1709,10 +991,6 @@ func (s *Store) ensureProjectLocked(ctx context.Context, id, path, name, repoRem
 		}
 	}
 
-	// Check if another project already owns this path. If so, merge
-	// any orphaned child records into the canonical project and skip
-	// creating a duplicate. This self-heals duplicates caused by MCP
-	// passing raw filesystem paths as project IDs.
 	if filepath.IsAbs(path) && path != id {
 		var existingID string
 		scanErr := tx.QueryRowContext(ctx,
@@ -1730,47 +1008,6 @@ func (s *Store) ensureProjectLocked(ctx context.Context, id, path, name, repoRem
 		}
 	}
 
-	// The SHAPE, and the importer's own predicate rather than a second one, so a
-	// refusal reads identically whether it was reached by saving, by exporting or by
-	// restoring (#824).
-	//
-	// It is asked HERE — on the arm that is about to INSERT, after the two merges
-	// above have had their chance to fold this project into a row that already
-	// exists — and not at the top of the function, and the placement is the rule
-	// rather than a convenience. This function is an UPSERT, and it is reached with
-	// the id of a project the store ALREADY holds: `mcpserver.ensureProjectFor`
-	// looks the caller's argument up by exact id, then by basename name, then by
-	// longest path prefix, and hands the RESOLVED id down. So for a legacy project
-	// whose id is hostile but whose recorded path is ordinary — a pre-guard save
-	// later bound with `ghost project bind`, a restored snapshot, a hand edit — a
-	// save addressed by that project's PATH passes every check this boundary makes
-	// about the caller's own argument and arrives here carrying the hostile id. A
-	// predicate asked above that lookup would refuse it: "invalid project_id" for a
-	// project that exists and holds the user's memories, whose session was working
-	// in it a moment ago. Jumping straight to that answer is the failure the
-	// creation-only half of #824 exists to prevent, so the rule is exactly what the
-	// docs say: a project about to be OPENED is judged, a row already there is not.
-	//
-	// The existence test and the INSERT share one transaction, which is what makes
-	// the pair atomic rather than a check-then-write another process can interleave
-	// between — and `beginWrite` holds SQLite's write lock from the first statement
-	// in it, so the answer below is the answer the INSERT gets. `id` is the upsert's
-	// conflict target, so this is exactly the row the `ON CONFLICT(id) DO UPDATE`
-	// below would otherwise have refreshed.
-	//
-	// Skipping the predicate on the refresh arm is safe rather than merely
-	// convenient, and the upsert is why: on that arm the only fields it can change
-	// are `path`, `repo_remote` and `updated_at`, and it deliberately leaves `path`
-	// alone whenever the caller passed the id in its place — which is what
-	// `ensureProjectFor` does, so the hostile id is never written back into the
-	// path — while `repo_remote` is normalized and is not part of the predicate. A
-	// refresh therefore cannot make a held project less importable, and there is
-	// nothing here to judge.
-	//
-	// `createdProject` judges the record as it would be STORED, and the
-	// `path == ""` normalization above has already happened, so the record judged is
-	// the one after that substitution rather than a path the store has already
-	// decided what to put in it.
 	var held int
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM projects WHERE id = ?`, id).Scan(&held); err != nil {
 		return fmt.Errorf("check project before create: %w", err)
@@ -1799,9 +1036,6 @@ func (s *Store) ensureProjectLocked(ctx context.Context, id, path, name, repoRem
 		return err
 	}
 
-	// Auto-merge: if this project has a real filesystem path, merge a
-	// same-name project created by MCP only when that name has one candidate.
-	// Two candidates are ambiguous, not an arbitrary LIMIT 1 choice.
 	if path != id && filepath.IsAbs(path) {
 		var candidateCount int
 		if err := tx.QueryRowContext(ctx, `
@@ -1831,11 +1065,6 @@ func (s *Store) ensureProjectLocked(ctx context.Context, id, path, name, repoRem
 }
 
 // MergeProject reassigns all child records from oldID to newID, then deletes
-// the old project row. Use this to unify duplicate project entries.
-// Refuses _global on either side, mirroring DeleteProject: merging away from
-// _global would delete its project row and silently stop global injection
-// everywhere; merging into it would dump an arbitrary bucket into every
-// session's context.
 func (s *Store) MergeProject(ctx context.Context, oldID, newID string) error {
 	if oldID == "_global" || newID == "_global" {
 		return fmt.Errorf("refusing to merge the _global project (old=%s new=%s)", RefusalArg(ProjectIdentifierLabel, oldID), RefusalArg(ProjectIdentifierLabel, newID))
@@ -1845,17 +1074,6 @@ func (s *Store) MergeProject(ctx context.Context, oldID, newID string) error {
 	return s.mergeProjectLocked(ctx, oldID, newID)
 }
 
-// projectMergeStatements reassigns every child table from the outgoing project
-// to the survivor. Both project_id columns that CASCADE — memory_snapshots and
-// memory_history — must be in this list: a merge KEEPS the corpus and deletes
-// only the projects row, so a table missing here loses every row it holds to
-// that DELETE, and the memories it describes survive with their past erased.
-//
-// This list and the identical one inside the s.mergeProjectTx method are two
-// copies of the same reassignment, left duplicated on main since #565 because
-// the bind-recovery paths call the method and the merge/migration paths call the
-// function. Both are updated here deliberately rather than deduplicated in a
-// provenance change; collapsing them is a separate, mechanical cleanup.
 var projectMergeStatements = []string{
 	`UPDATE memories SET project_id = ? WHERE project_id = ?`,
 	`UPDATE tasks SET project_id = ? WHERE project_id = ?`,
@@ -1865,46 +1083,15 @@ var projectMergeStatements = []string{
 	`UPDATE memory_snapshots SET project_id = ? WHERE project_id = ?`,
 	`UPDATE memory_history SET project_id = ? WHERE project_id = ?`,
 	`UPDATE supersede_checked SET project_id = ? WHERE project_id = ?`,
-	// The retrieval records move with their project, and because project_id is
-	// deliberately not a foreign key nothing does this for us. A record left
-	// naming the merged-away project would outlive it: the report would attribute
-	// calls about memories that now live elsewhere to a project that no longer
-	// exists, and a later DeleteProject of that stale id could not reach it.
 	`UPDATE retrieval_record SET project_id = ? WHERE project_id = ?`,
-	// And the legacy verdicts derived from those calls (the table is read and
-	// written by nothing now), which have the same two problems: a row left
-	// naming the merged-away project is misattributed and a later DeleteProject
-	// of that stale id could not reach it.
 	`UPDATE retrieval_audit SET project_id = ? WHERE project_id = ?`,
-	// And this feature's flags (#648 slice 2), which carry all three problems
-	// exactly as the audit rows do — plus the sharper one: a flag's project_id
-	// is deliberately not a foreign key, so nothing else would move or remove it,
-	// and the evidence read is per project, meaning an orphan here is INVISIBLE
-	// rather than merely misattributed.
 	`UPDATE memory_flags SET project_id = ? WHERE project_id = ?`,
 }
 
-// mergeProjectTx folds oldID's rows into newID and deletes oldID.
-//
-// The _global refusal lives here, not in MergeProject, because this primitive
-// has three callers and only one of them is the public wrapper. migrateV14
-// discovers duplicate repository identities and picks an order for them, and
-// ensureProjectLocked's unique-constraint recovery merges whichever row already
-// holds the remote — and a v13 database can legitimately hold that remote on
-// _global, because EnsureProjectWithRepo has always written the supplied remote
-// for that ID. A guard only the wrapper applies would leave both of those paths
-// able to move a project's entire corpus into the global bucket, or delete
-// _global outright. The bucket global injection reads from is not a project, so
-// every merge involving it is refused; callers that discover such a group return
-// this error rather than choosing an order that happens to spare it.
 func mergeProjectTx(ctx context.Context, tx *sql.Tx, oldID, newID string) error {
 	if oldID == newID {
 		return nil
 	}
-	// _global is the bucket global injection reads from, not a project: merging
-	// into it would move a corpus into every session, and merging out of it
-	// would delete it. The guard lives in the shared primitive so every caller
-	// inherits it — the public wrapper, this merge, and migrateV15.
 	if oldID == "_global" || newID == "_global" {
 		return fmt.Errorf("%w: refusing to merge the _global project (old=%s new=%s)", ErrAmbiguousProject, RefusalArg(ProjectIdentifierLabel, oldID), RefusalArg(ProjectIdentifierLabel, newID))
 	}
@@ -1914,8 +1101,6 @@ func mergeProjectTx(ctx context.Context, tx *sql.Tx, oldID, newID string) error 
 		}
 	}
 
-	// Carry the outgoing project's learned context over to the survivor before
-	// its row is deleted. See mergeGhostStateTx for the rule.
 	if err := mergeGhostStateTx(ctx, tx, oldID, newID); err != nil {
 		return err
 	}
@@ -1928,8 +1113,6 @@ func mergeProjectTx(ctx context.Context, tx *sql.Tx, oldID, newID string) error 
 	return nil
 }
 
-// ghostStateRow is the mergeable slice of a ghost_state row. updated_at is not
-// read: the merged row's is written as now.
 type ghostStateRow struct {
 	interactionCount  int
 	learnedContext    string
@@ -1938,32 +1121,6 @@ type ghostStateRow struct {
 	reflectInputSig   string
 }
 
-// mergeGhostStateTx folds the outgoing project's ghost_state into the survivor's.
-//
-// learned_context, reflection_summary, reflect_input_sig and last_reflection_at
-// are ONE unit, because UpdateLearnedContext writes all four in a single
-// reflection pass: a merged row that took the survivor's learned context but the
-// outgoing project's summary, signature and timestamp would describe a
-// reflection that never happened. The unit is taken whole from one project, with
-// two deliberate choices at the edges:
-//
-//   - A survivor that holds learned_context but no last_reflection_at is treated
-//     as HAVING a reflection and keeps its own unit. It is the project the merge
-//     is into, its context is the one already injected into sessions, and a
-//     missing timestamp is not evidence that the outgoing project's reflection is
-//     newer; overwriting would discard content for no gain.
-//   - A survivor with neither learned_context nor a timestamp has no reflection,
-//     so it takes the outgoing unit wholesale (or keeps its own empty one when
-//     the outgoing has nothing either).
-//
-// When both projects have a timestamped reflection the newer one wins whole.
-//
-// interaction_count is not part of the unit: it is a monotonic counter, so the
-// larger of the two is kept.
-//
-// The survivor's row is created with INSERT OR IGNORE when it is missing, so a
-// merge into a project that has never reflected still receives the outgoing
-// context rather than matching no UPDATE row and losing it.
 func mergeGhostStateTx(ctx context.Context, tx *sql.Tx, oldID, newID string) error {
 	var surv ghostStateRow
 	err := tx.QueryRowContext(ctx, `SELECT interaction_count, COALESCE(learned_context,''), last_reflection_at, COALESCE(reflection_summary,''), COALESCE(reflect_input_sig,'') FROM ghost_state WHERE project_id = ?`, newID).
@@ -1975,8 +1132,6 @@ func mergeGhostStateTx(ctx context.Context, tx *sql.Tx, oldID, newID string) err
 	err = tx.QueryRowContext(ctx, `SELECT interaction_count, COALESCE(learned_context,''), last_reflection_at, COALESCE(reflection_summary,''), COALESCE(reflect_input_sig,'') FROM ghost_state WHERE project_id = ?`, oldID).
 		Scan(&oldg.interactionCount, &oldg.learnedContext, &oldg.lastReflectionAt, &oldg.reflectionSummary, &oldg.reflectInputSig)
 	if errors.Is(err, sql.ErrNoRows) {
-		// The outgoing project never reflected or interacted; there is nothing to
-		// carry over and no reason to create a survivor row.
 		return nil
 	}
 	if err != nil {
@@ -1994,9 +1149,6 @@ func mergeGhostStateTx(ctx context.Context, tx *sql.Tx, oldID, newID string) err
 	return nil
 }
 
-// mergeGhostStateRows applies the rule documented on mergeGhostStateTx. It is a
-// pure function so the rule can be exercised directly, but the merge paths are
-// what call it.
 func mergeGhostStateRows(surv, oldg ghostStateRow) ghostStateRow {
 	merged := surv
 	if oldg.interactionCount > merged.interactionCount {
@@ -2008,12 +1160,9 @@ func mergeGhostStateRows(surv, oldg ghostStateRow) ghostStateRow {
 
 	takeOutgoing := false
 	if !survivorHasReflection && outgoingHasReflection {
-		// The survivor has no reflection to keep, so the outgoing unit is the only
-		// content — including when the survivor row is absent entirely.
 		takeOutgoing = true
 	} else if surv.lastReflectionAt.Valid && oldg.lastReflectionAt.Valid &&
 		oldg.lastReflectionAt.String > surv.lastReflectionAt.String {
-		// Both projects have a timestamped reflection; the newer one wins whole.
 		takeOutgoing = true
 	}
 
@@ -2054,26 +1203,15 @@ func (s *Store) mergeProjectWithRepoTx(ctx context.Context, tx *sql.Tx, oldID, n
 	if oldID == "_global" || newID == "_global" {
 		return fmt.Errorf("refusing to merge the _global project (old=%s new=%s)", RefusalArg(ProjectIdentifierLabel, oldID), RefusalArg(ProjectIdentifierLabel, newID))
 	}
-	// Validate the outgoing row's recorded identity first: it must not claim a
-	// DIFFERENT repository, or the merge would silently move that project's
-	// memories under an identity they were never verified against. Read-only —
-	// the row is about to be deleted, so binding anything to it is wasted work.
 	if err := validateMergeRepoTx(ctx, tx, oldID, repoRemote); err != nil {
 		return err
 	}
-	// Then delete oldID, and only then bind the remote to the survivor. The
-	// order matters: v15 makes repo_remote unique, and the incoming row is
-	// written before the merge runs, so it already holds the identity this
-	// function may have to give the survivor. Binding first would collide with
-	// a row that is about to be deleted and fail the whole merge.
 	if err := mergeProjectTx(ctx, tx, oldID, newID); err != nil {
 		return err
 	}
 	return reconcileMergeRepoTx(ctx, tx, newID, repoRemote, oldID)
 }
 
-// validateMergeRepoTx refuses a merge whose outgoing project records a
-// different repository from the one the merge is being performed under.
 func validateMergeRepoTx(ctx context.Context, tx *sql.Tx, oldID, repoRemote string) error {
 	if repoRemote == "" {
 		return nil
@@ -2100,37 +1238,18 @@ func (s *Store) mergeProjectTx(ctx context.Context, tx *sql.Tx, oldID, newID str
 		return fmt.Errorf("refusing to merge the _global project (old=%s new=%s)", RefusalArg(ProjectIdentifierLabel, oldID), RefusalArg(ProjectIdentifierLabel, newID))
 	}
 
-	// Reassign all child records from old project to new.
 	stmts := []string{
 		`UPDATE memories SET project_id = ? WHERE project_id = ?`,
 		`UPDATE tasks SET project_id = ? WHERE project_id = ?`,
 		`UPDATE decisions SET project_id = ? WHERE project_id = ?`,
 		`UPDATE token_usage SET project_id = ? WHERE project_id = ?`,
 		`UPDATE audit_log SET project_id = ? WHERE project_id = ?`,
-		// Snapshots too: memory_snapshots.project_id is ON DELETE CASCADE, so
-		// omitting this would let the DELETE FROM projects below silently
-		// destroy the merged project's entire undo history.
 		`UPDATE memory_snapshots SET project_id = ? WHERE project_id = ?`,
-		// And the append-only history, for the same reason and with a sharper
-		// edge: a merge KEEPS the memories, so a cascade here would leave live
-		// rows whose recorded past is gone — `ghost history <id>` reporting a
-		// memory that was never written. The history travels with the corpus it
-		// describes, and the rows' own project_id is only how a reader filters.
 		`UPDATE memory_history SET project_id = ? WHERE project_id = ?`,
 		`UPDATE supersede_checked SET project_id = ? WHERE project_id = ?`,
-		// The retrieval records, and this is the SECOND of the two copies named
-		// in projectMergeStatements' comment — kept in step deliberately rather
-		// than deduplicated here. A record left naming the outgoing project names
-		// one that no longer exists, which makes it both misattributed in a report
-		// and unreachable by a later delete of that stale id.
 		`UPDATE retrieval_record SET project_id = ? WHERE project_id = ?`,
-		// And the legacy verdicts, for the reason the list's own comment gives for
-		// every table in it.
 		`UPDATE retrieval_audit SET project_id = ? WHERE project_id = ?`,
-		// And its flags, which are the same shape with nothing to fall back on:
-		// memory_flags.project_id has no foreign key, so a merge that forgot this
 		// line would orphan every flag of the outgoing project — under an id that
-		// no longer exists, in a table only the per-project evidence read reaches.
 		`UPDATE memory_flags SET project_id = ? WHERE project_id = ?`,
 	}
 	for _, stmt := range stmts {
@@ -2139,9 +1258,6 @@ func (s *Store) mergeProjectTx(ctx context.Context, tx *sql.Tx, oldID, newID str
 		}
 	}
 
-	// Carry the outgoing project's learned context over to the survivor before
-	// its row is deleted, through the same helper the free function uses so the
-	// two copies cannot drift.
 	if err := mergeGhostStateTx(ctx, tx, oldID, newID); err != nil {
 		return err
 	}
@@ -2155,67 +1271,26 @@ func (s *Store) mergeProjectTx(ctx context.Context, tx *sql.Tx, oldID, newID str
 }
 
 // DeleteProjectSummary reports what DeleteProject found (dry-run) or removed
-// (apply) for one project, across every table that references it.
 type DeleteProjectSummary struct {
-	ProjectID   string
-	ProjectName string
-	Memories    int
-	MemoryLinks int
-	Tasks       int
-	Decisions   int
-	TokenUsage  int
-	AuditLog    int
-	// RetrievalRecords is the audit trail's rows for this project (#646). It is
-	// counted and reported because the summary is documented as covering EVERY
-	// table that references the project, and a count that silently omits a table
-	// the same command deletes is a summary that under-reports its own work.
+	ProjectID        string
+	ProjectName      string
+	Memories         int
+	MemoryLinks      int
+	Tasks            int
+	Decisions        int
+	TokenUsage       int
+	AuditLog         int
 	RetrievalRecords int
-	// MemoryFlags is the same again for #648 slice 2's flags. The principle the
-	// two fields above state does not stop at the feature that first stated it:
-	// this summary covers every table that references the project, and a table the
-	// command deletes but does not report is a table the user is not told they
-	// are losing — which is what the confirmation gate is FOR.
-	MemoryFlags int
+	MemoryFlags      int
 }
 
 // DeleteProject permanently removes a project and everything under it.
-// memories (with their FTS index entries, embeddings, links, and link_scans),
-// tasks, decisions, ghost_state, and memory_snapshots all cascade from the
-// projects row via ON DELETE CASCADE (see schema.go). token_usage, audit_log,
-// retrieval_record and retrieval_audit carry a project_id column but no foreign
-// key to projects, so they're deleted explicitly in the same transaction, by
-// that column. memory_flags is reached by MEMORY OWNERSHIP instead: the memory is
-// the fact and the flag's own project_id is a name a writer has to keep in step,
-// so the delete follows the memory and leaves a flag about a memory that has
-// moved elsewhere alone. memory_snapshot_evidence has no key to follow at all, so
-// it is pruned by the same "snapshot no longer exists" statement the snapshot
-// prune uses.
-//
-// input is resolved exactly like every other command resolves a project (see
-// ResolveProject): id, name, path-prefix, or basename all work.
-//
-// apply=false computes and returns the summary without writing anything.
-// apply=true performs the same computation, then actually deletes everything
-// in one transaction, returning the summary of what was removed. _global can
-// never be deleted, in either mode — it's shared across every project's
-// context injection.
-//
-// ResolveProject takes its own RLock internally, so it's called here before
-// this method takes s.mu itself — taking s.mu first and then calling
-// ResolveProject would deadlock against sync.RWMutex's non-reentrant lock.
 func (s *Store) DeleteProject(ctx context.Context, input string, apply bool) (DeleteProjectSummary, error) {
 	id, name, err := s.ResolveProject(ctx, input)
 	if err != nil {
 		return DeleteProjectSummary{}, fmt.Errorf("resolve project: %w", err)
 	}
 	if id == "" {
-		// `ProjectIdentifierLabel` and not a field name, for the reason
-		// `ambiguousProject` gives: this store method is reached by
-		// `ghost_project_delete` (whose argument is `project`) and by
-		// `ghost project delete <name-or-id>` (a bare operand), so the one name
-		// both callers agree on is the value, not the argument. The MCP boundary
-		// wraps this sentence in `ghost_project_delete: `, which is what tells an
-		// agent which tool refused it and therefore which argument to change.
 		return DeleteProjectSummary{}, fmt.Errorf("project %s not found", RefusalArg(ProjectIdentifierLabel, input))
 	}
 	if id == "_global" {
@@ -2242,18 +1317,6 @@ func (s *Store) DeleteProject(ctx context.Context, input string, apply bool) (De
 	}
 	defer tx.Rollback() //nolint:errcheck
 
-	// database/sql's BeginTx opens a deferred transaction on this driver: it
-	// only acquires SQLite's write lock lazily, on its first write statement.
-	// Without forcing that now, a separate ghost process (CLI and MCP server
-	// each open their own *Store against the same SQLite file) could write
-	// to this project in the gap between the counts below and the deletes —
-	// and the returned/logged summary, the only durable record of what was
-	// removed once the project's own audit_log rows are gone, would silently
-	// undercount what actually got deleted. This no-op write forces the
-	// upgrade to the write lock immediately, before any counting happens;
-	// verified empirically that a concurrent writer on a separate handle
-	// blocks (and eventually times out via busy_timeout) until this
-	// transaction commits or rolls back.
 	if _, err := tx.ExecContext(ctx, `UPDATE projects SET id = id WHERE id = ?`, id); err != nil {
 		return DeleteProjectSummary{}, fmt.Errorf("acquire write lock: %w", err)
 	}
@@ -2270,30 +1333,12 @@ func (s *Store) DeleteProject(ctx context.Context, input string, apply bool) (De
 	if _, err := tx.ExecContext(ctx, `DELETE FROM audit_log WHERE project_id = ?`, id); err != nil {
 		return DeleteProjectSummary{}, fmt.Errorf("delete audit_log: %w", err)
 	}
-	// The retrieval records for the same reason, and with the same shape: a row
-	// left behind would outlive the project it describes, so a report over the
-	// store would carry calls for a project that no longer exists — evidence
-	// about a corpus an operator asked to remove. There is no foreign key to
-	// cascade this because project_id is deliberately not one (the project purge
-	// needs to reach these rows with a plain predicate), which makes this
-	// explicit delete the only thing that will.
 	if _, err := tx.ExecContext(ctx, `DELETE FROM retrieval_record WHERE project_id = ?`, id); err != nil {
 		return DeleteProjectSummary{}, fmt.Errorf("delete retrieval_record: %w", err)
 	}
-	// And any retrieval_audit rows an older build filed. Nothing reads or writes
-	// the table any more and the schema keeps it, but it has no foreign key and
-	// each row names a memory id, so a project delete reaches it by the same
-	// project_id predicate the record delete above uses rather than leaving ids
-	// of a removed project behind. It is a plain delete; nothing reads the rows.
 	if _, err := tx.ExecContext(ctx, `DELETE FROM retrieval_audit WHERE project_id = ?`, id); err != nil {
 		return DeleteProjectSummary{}, fmt.Errorf("delete retrieval_audit: %w", err)
 	}
-	// And the flags, by the same ownership rule and for the same reason. Their
-	// foreign key is to MEMORIES, not to projects, so this transaction's coming
-	// delete of the memories would take most of them by cascade; reaching by the
-	// memory states the intent in the same predicate the count was taken under,
-	// and it runs before deleteProjectRowTx so the ORDER of statements is not
-	// what decides whether the rows go.
 	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM memory_flags WHERE `+deleteProjectFlagRowsSQL, id); err != nil {
 		return DeleteProjectSummary{}, fmt.Errorf("delete memory_flags: %w", err)
@@ -2301,15 +1346,6 @@ func (s *Store) DeleteProject(ctx context.Context, input string, apply bool) (De
 	if err := deleteProjectRowTx(ctx, tx, id); err != nil {
 		return DeleteProjectSummary{}, err
 	}
-	// memory_snapshot_evidence has no foreign key — evidence is addressed by
-	// (snapshot_id, memory_id), which is not a key any cascade can follow — so
-	// the project's snapshots go with the projects cascade and would leave their
-	// evidence behind to accumulate until a later reflect prunes the snapshot
-	// again, a run that may never come. This is the same statement shape
-	// pruneSnapshotsTx uses, and for the same reason the schema states: evidence
-	// is pruned with the snapshot it describes. It runs after the snapshots are
-	// gone, and it cannot touch another project's evidence, whose snapshots still
-	// exist.
 	if _, err := tx.ExecContext(ctx, `
 		DELETE FROM memory_snapshot_evidence
 		WHERE snapshot_id NOT IN (SELECT DISTINCT snapshot_id FROM memory_snapshots)
@@ -2321,9 +1357,6 @@ func (s *Store) DeleteProject(ctx context.Context, input string, apply bool) (De
 		return DeleteProjectSummary{}, fmt.Errorf("commit delete: %w", err)
 	}
 
-	// This log line is the durable record of what was removed. (audit_log is a
-	// legacy table with no production writer — it is counted and deleted here
-	// for older databases, not because deletions are otherwise recorded there.)
 	s.logger.Info("deleted project", "project_id", RefusalArg("project_id", id), "project_name", name,
 		"memories", summary.Memories, "memory_links", summary.MemoryLinks,
 		"tasks", summary.Tasks, "decisions", summary.Decisions,
@@ -2333,27 +1366,12 @@ func (s *Store) DeleteProject(ctx context.Context, input string, apply bool) (De
 	return summary, nil
 }
 
-// queryRower is satisfied by both *sql.DB and *sql.Tx, letting
-// countProjectRows run identically as a plain autocommit read (dry-run) or
-// inside an already-open write transaction (apply — see DeleteProject).
 type queryRower interface {
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
 
-// deleteProjectFlagRowsSQL is the ONE predicate that decides which flags a
-// project delete removes and which its dry run counts, so a preview and an apply
-// can never disagree about the same store. It is MEMORY OWNERSHIP rather than the
-// row's own project_id column: the memory is the fact and the column is a name a
-// writer has to keep in step, so a row about a memory that has moved elsewhere is
-// not this project's to remove — the divergence a store written before
-// PromoteToGlobal reassigned these holds. A flag always names a live memory
-// (memory_flags.memory_id is a cascading foreign key), so there is no
-// gone-memory arm to add here.
 const deleteProjectFlagRowsSQL = `memory_id IN (SELECT id FROM memories WHERE project_id = ?)`
 
-// countProjectRows computes the per-table counts for DeleteProjectSummary.
-// It does not set ProjectID/ProjectName — the caller already has both from
-// ResolveProject and assigns them itself.
 func countProjectRows(ctx context.Context, q queryRower, id string) (DeleteProjectSummary, error) {
 	var summary DeleteProjectSummary
 	if err := q.QueryRowContext(ctx,
@@ -2401,14 +1419,6 @@ func countProjectRows(ctx context.Context, q queryRower, id string) (DeleteProje
 	return summary, nil
 }
 
-// deleteProjectRowTx deletes the projects row for id inside tx and guards
-// against the row already being gone: ResolveProject released its RLock
-// before DeleteProject acquired s.mu, so a concurrent DeleteProject/
-// MergeProject in this process — or a separate ghost process (CLI and MCP
-// server each open their own *Store against the same SQLite file) — could
-// have already deleted this project in that gap. Without this guard the
-// transaction would still commit and DeleteProject would return a
-// normal-looking success summary for a project that's already gone.
 func deleteProjectRowTx(ctx context.Context, tx *sql.Tx, id string) error {
 	res, err := tx.ExecContext(ctx, `DELETE FROM projects WHERE id = ?`, id)
 	if err != nil {
@@ -2424,22 +1434,9 @@ func deleteProjectRowTx(ctx context.Context, tx *sql.Tx, id string) error {
 	return nil
 }
 
-// ResolveProject resolves an identifier — a project name, hash ID, or
-// filesystem path — to that project's (id, name). Returns ("", "", nil)
-// on no match; a non-nil error only indicates a real DB failure.
-//
-// detectRemoteForPath maps a filesystem path to its repository remote.
-//
-// It is a package variable rather than a call to git because internal/memory
-// is deliberately a pure storage layer that never spawns a process. The
-// capability is injected instead: the application wires it in once, tests can
-// pin it, and a store built without one resolves exactly as it did before
-// repository identity existed. The zero value (the default) disables the
-// feature rather than half-enabling it.
 var detectRemoteForPath = func(string) string { return "" }
 
 // SetDetectRemote wires the repository detector used when resolving a project
-// by filesystem path. Passing nil restores the default no-op.
 func SetDetectRemote(fn func(dir string) string) {
 	if fn == nil {
 		detectRemoteForPath = func(string) string { return "" }
@@ -2449,21 +1446,9 @@ func SetDetectRemote(fn func(dir string) string) {
 }
 
 // ErrAmbiguousProject means an identifier matched more than one project and
-// choosing one would silently send a caller's data to an arbitrary project.
-// Callers that create projects must propagate this error instead of treating
-// it as a miss.
 var ErrAmbiguousProject = errors.New("project identifier is ambiguous")
 
 // ResolveProject resolves an exact ID/name, a canonical path prefix, an exact
-// repository remote, or one evidence-backed basename candidate. A genuine miss
-// returns ("", "", nil); multiple surviving candidates return ErrAmbiguousProject.
-// ResolveExactProjectID reports whether input is literally a project's id. It
-// is deliberately narrower than ResolveProject: that function also accepts a
-// path prefix, a repository remote and a basename fallback, and the write side
-// must not use those — reclassifying a save that named an existing project by
-// the repository the session happens to be standing in would move the memory to
-// a different project than the caller addressed. Only the id is a claim the
-// caller can make without evidence.
 func (s *Store) ResolveExactProjectID(ctx context.Context, id string) (string, bool, error) {
 	var name string
 	err := s.db.QueryRowContext(ctx, `SELECT id, name FROM projects WHERE id = ? LIMIT 1`, id).Scan(&id, &name)
@@ -2504,10 +1489,6 @@ func (s *Store) ResolveProject(ctx context.Context, input string) (id, name stri
 		return "", "", ambiguousProject(input, "matches multiple projects")
 	}
 
-	// inputRemote can spawn git, so the session's remote is derived at most
-	// once per resolve and only by the steps that read it. remoteOnce
-	// memoizes the cost; it does not cache it across calls, because the
-	// detector observes a directory that a save may have re-pointed since.
 	remote := ""
 	remoteDerived := false
 	remoteOnce := func() string {
@@ -2530,37 +1511,7 @@ func (s *Store) ResolveProject(ctx context.Context, input string) (id, name stri
 			return best.id, best.name, nil
 		}
 	}
-	// A name-shaped input spawns no process here, because inputRemote gates
-	// detection on IsPathShaped. It is not a no-op, though: an input that
-	// parses as a remote without carrying a separator ("github.com:owner")
-	// normalizes to one, and the repository step below is reached for it.
 
-	// Repository identity, ahead of the basename fallback: a remote is more
-	// specific than a bare directory name, and a caller naming a repository
-	// (git@host:owner/repo.git, https://host/owner/repo) is asking for that
-	// repository, not for whichever project happens to sit in a folder called
-	// "repo". Normalization makes every spelling of one remote compare equal.
-	//
-	// The input may also be a filesystem path — the second checkout of a
-	// repository whose first checkout already created a project. A path
-	// carries no identity of its own, so it is resolved through the injected
-	// detector; without that, saving from ~/work/ghost and then reading from
-	// it would disagree about which project it is.
-	//
-	// Detection is gated on the input being path-shaped rather than on
-	// filepath.IsAbs, because IsAbs is false for a drive-relative Windows
-	// path such as \work\ghost — skipping detection for exactly the shape a
-	// second checkout arrives in is how one repository became two projects.
-	// The raw input is normalised as a remote first, because a relative path
-	// such as ../checkout would otherwise be mistaken for a host/path remote;
-	// non-directory remote strings then fail the detector's os.Stat before it
-	// starts Git, and normalise normally. The cost of the gate is bounded and
-	// stated here rather than implied: an id never spawns a process, and a name
-	// never does either unless it carries a separator, which this function
-	// cannot tell apart from a path. A separator-shaped miss costs one
-	// `git config` call, which returns nothing for anything that is not a
-	// directory — once per resolve, whether or not the path step above already
-	// spent it. inputRemote is that policy, shared with the write side.
 	remote = remoteOnce()
 	if remote != "" && hasRepoRemote {
 		rows, queryErr := s.db.QueryContext(ctx, `
@@ -2593,8 +1544,6 @@ func (s *Store) ResolveProject(ctx context.Context, input string) (id, name stri
 		}
 	}
 
-	// A basename is accepted only after the same canonical-path and remote
-	// checks as the path-prefix step; ambiguity is an error, not a miss.
 	base := filepath.Base(input)
 	candidates, qErr := s.basenameCandidates(ctx, base, hasRepoRemote)
 	if qErr != nil {
@@ -2616,47 +1565,12 @@ func (s *Store) ResolveProject(ctx context.Context, input string) (id, name stri
 	return survivors[0].id, survivors[0].name, nil
 }
 
-// ambiguousProject is how ResolveProject reports a reference more than one
-// project answers to. It exists because three refusals in one function were each
-// interpolating the caller's own argument, and a value that cannot be quoted has
-// to be recognised at every one of them (#839).
-//
-// `input` is the caller's argument verbatim and the reason is named separately,
-// so the sentence is `project identifier is ambiguous: "foo" matches multiple
-// projects` for everything the credential guard does not recognise — byte for byte
-// what it was — and a placeholder carrying the guard's format and no part of the
-// value when it does.
-//
-// The placeholder names a PROJECT IDENTIFIER rather than a field, and that is the
-// limit of what this function knows. `ghost_resolve` calls it `project` and every
-// other tool calls it `project_id`, so a refusal that named the field here would
-// tell the agent to change an argument it never passed — the exact mistake
-// `RejectSecret`'s comment warns the boundary against, moved one layer in. The
-// boundary's OWN sentences do name the field, because they know it, and they are
-// the ones an agent reads when the answer is about a project that does not exist
-// rather than one that exists twice.
-//
-// Rendering rather than returning is the deliberate choice against the alternative
-// #839 weighed, which was to stop interpolating and move the value into a
-// structured field each handler rendered. That would put the credential question
-// in nineteen handler call sites instead of one, and the store's own Error() is
-// read by the CLI and by `ghost project bind` too, so there is no boundary at the
-// end of it that could be trusted to make the call. One renderer, asked once,
-// is what makes the guarantee total instead of per-handler.
-//
-// The repository refusal in the same function does not come through here: it names
-// a NormalizeRepoRemote'd remote, which has had its userinfo, query string and
-// fragment stripped, so there is no credential left in it to withhold.
 func ambiguousProject(input, reason string) error {
 	return fmt.Errorf("%w: %s %s", ErrAmbiguousProject, RefusalArg(ProjectIdentifierLabel, input), reason)
 }
 
-// basenameCandidate is one projects row that answers to a name.
 type basenameCandidate struct{ id, name, path, remote string }
 
-// hasRepoRemoteColumn reports whether the projects table has the optional
-// repository-identity column. Read-only lifecycle consumers can legitimately
-// open a pre-v11 database, so resolution must not require that column.
 func (s *Store) hasRepoRemoteColumn(ctx context.Context) (bool, error) {
 	var exists int
 	err := s.db.QueryRowContext(ctx, `
@@ -2689,9 +1603,6 @@ func scanProjectCandidates(rows *sql.Rows) ([]basenameCandidate, error) {
 	return candidates, nil
 }
 
-// basenameCandidates returns every project carrying this name. There is
-// deliberately no LIMIT: evidence can reject a candidate, and truncating the
-// set could hide a second candidate that agrees.
 func (s *Store) basenameCandidates(ctx context.Context, name string, hasRepoRemote bool) ([]basenameCandidate, error) {
 	remoteColumn := "''"
 	if hasRepoRemote {
@@ -2705,17 +1616,6 @@ func (s *Store) basenameCandidates(ctx context.Context, name string, hasRepoRemo
 	return scanProjectCandidates(rows)
 }
 
-// pathCandidatesQuery selects the rows whose recorded path text could contain
-// input, longest first. It is only a narrowing step, never proof of a project
-// match: the caller still applies storedPathIsUsable, pathsAgree, and the
-// remote checks.
-//
-// LENGTH(path) > 10 is part of the narrowing, not a rule about what a location
-// is: it drops the id sentinel and paths too short to be worth a directory
-// match, so a project whose recorded path is that short is invisible to path
-// resolution. Project binding therefore has to apply the same filter, which is
-// why the query is a named constant rather than a literal inside one function —
-// changing the filter here changes what bind is allowed to record.
 const pathCandidatesQuery = `SELECT id, name, path, %s FROM projects
 		WHERE (path = ?
 		   OR REPLACE(path, '\', '/') = ?
@@ -2723,11 +1623,6 @@ const pathCandidatesQuery = `SELECT id, name, path, %s FROM projects
 		  AND LENGTH(path) > 10
 		ORDER BY LENGTH(path) DESC`
 
-// pathCandidates returns rows whose recorded path text could contain input.
-// The caller still applies storedPathIsUsable, pathsAgree, and remote checks;
-// this query is only a narrowing step, never proof of a project match. It is
-// the textual narrowing the save side mirrors (savingRepository); ResolveProject
-// itself decides in resolved form (resolveByPath).
 func (s *Store) pathCandidates(ctx context.Context, input string, hasRepoRemote bool) ([]basenameCandidate, error) {
 	remoteColumn := "''"
 	if hasRepoRemote {
@@ -2741,35 +1636,11 @@ func (s *Store) pathCandidates(ctx context.Context, input string, hasRepoRemote 
 	return scanProjectCandidates(rows)
 }
 
-// resolveByPath is the path step of ResolveProject. The caller's directory is
-// resolved ONCE, each recorded path's resolved form comes from the Store's memo
-// (canonMemo), and a project is a survivor when the caller's directory is the
-// recorded one or inside it IN RESOLVED FORM and no remote conflicts. Among
-// survivors the deepest by resolved length wins and equal resolved length is a
-// tie, which the caller reports as ambiguity.
-//
-// Every usable recorded path is considered on every resolve, not only on a
-// total miss of a textual narrowing. That is what makes the answer independent
-// of the spelling either side was recorded or reported in: a text prefix query
-// cannot see that /link/p/child and /real/p are nested, and ranking by recorded
-// TEXT length cannot tell two spellings of one directory apart from a deeper
-// one. The textual candidates of the old narrowing are a subset of what this
-// examines, since agreement was always decided on resolved forms, so nothing
-// they found is lost. The usable-path predicate is the one the agreement step
-// uses (storedPathIsUsable) rather than a length floor.
-//
-// A caller directory that does not resolve cannot agree with anything and the
-// pass ends before it reads the table. A miss is otherwise one query over the
-// table plus a memo lookup and a string comparison per row; the filesystem is
-// read once per stored path per canonMemoTTL.
 func (s *Store) resolveByPath(ctx context.Context, input string, hasRepoRemote bool, remoteOnce func() string) (best basenameCandidate, tied, found bool, err error) {
 	inputCanon, rErr := canonicalPath(absoluteSessionPath(input))
 	if rErr != nil {
 		return basenameCandidate{}, false, false, nil
 	}
-	// Only id and path are read for the whole table: row transfer is the
-	// dominant cost of a miss, and name and remote are needed only for the few
-	// rows whose directory contains the caller's, which are fetched below.
 	rows, qErr := s.db.QueryContext(ctx, `SELECT id, path FROM projects`)
 	if qErr != nil {
 		return basenameCandidate{}, false, false, qErr
@@ -2806,11 +1677,6 @@ func (s *Store) resolveByPath(ctx context.Context, input string, hasRepoRemote b
 	}
 	bestLength := -1
 	for _, h := range hits {
-		// A survivor is confirmed against the filesystem now, so a stale
-		// memoized form cannot route a caller into a project that no longer
-		// contains it. It does NOT guard the other direction: a stale entry can
-		// exclude a deeper project, and the caller is then routed to a
-		// shallower one until the entry expires (canonMemoTTL).
 		fresh, fErr := canonicalPath(h.path)
 		if fErr != nil || !samePath(inputCanon, fresh) {
 			continue
@@ -2824,8 +1690,6 @@ func (s *Store) resolveByPath(ctx context.Context, input string, hasRepoRemote b
 			}
 			return basenameCandidate{}, false, false, scanErr
 		}
-		// The session's remote is read for one reason only: to reject a
-		// candidate that asserts a different one.
 		remote := ""
 		if c.remote != "" {
 			remote = remoteOnce()
@@ -2843,53 +1707,23 @@ func (s *Store) resolveByPath(ctx context.Context, input string, hasRepoRemote b
 	return best, tied, found, nil
 }
 
-// remoteConflicts is rule 3: both sides asserted a repository identity and the
-// two differ. A side that asserts none can neither agree nor disagree.
 func (c basenameCandidate) remoteConflicts(remote string) bool {
 	return remote != "" && c.remote != "" && remote != c.remote
 }
 
-// agreesWithSession applies the three rules in ResolveProject to one
-// candidate. They are independent, so the order they run in carries no
-// meaning; each is a reason to refuse. That is also why this is a predicate
-// over candidates rather than a sequence of guards over one: ambiguity is
-// decided on whoever survives, so a duplicate that the same evidence rejects
-// cannot strand a session standing in the project it names.
 func (c basenameCandidate) agreesWithSession(input, remote string) bool {
-	// Rule 3. remote != c.remote is redundant — an exact repo_remote match
-	// returned earlier — but it states the rule being enforced.
 	if c.remoteConflicts(remote) {
 		return false // both asserted an identity, and they disagree
 	}
 	if !IsPathShaped(input) {
 		return true // a bare name reports no location to disagree with
 	}
-	// Rule 2. A stored path that is not an absolute location with something
-	// below the root is not something a directory can be compared against:
-	// the id sentinel recorded no location at all, a relative one would be
-	// resolved against the process's working directory, and "/" contains
-	// every absolute path. Refusing here also spares the two failed
-	// EvalSymlinks calls pathsAgree would otherwise make.
 	if !storedPathIsUsable(c.path) {
 		return false
 	}
-	// Compare the absolute form, for the same reason the SQL prefilter above
-	// uses it: a relative input otherwise never matches, because EvalSymlinks
-	// leaves a relative path relative and every usable stored path is absolute.
 	return pathsAgree(absoluteSessionPath(input), c.path)
 }
 
-// absoluteSessionPath normalizes a caller-reported session directory to the
-// absolute, forward-slash form the rest of resolution compares in.
-//
-// A relative path is resolved against the process's working directory, which is
-// where a caller reporting a relative directory is standing. Paths that are
-// already absolute in either spelling are only separator-normalized: a Windows
-// path arriving on a POSIX host is absolute, and prefixing the process's
-// working directory onto it would both corrupt the string and hide a project
-// that the prefilter had already matched. So the "is it absolute" test is
-// deliberately spelling-agnostic rather than filepath.IsAbs, which is false for
-// a backslash path on Linux and for a drive-relative path on Windows.
 func absoluteSessionPath(input string) string {
 	norm := strings.ReplaceAll(input, `\`, "/")
 	if strings.HasPrefix(norm, "/") || isWindowsDrivePath(norm) || isDriveRelative(norm) {
@@ -2902,17 +1736,10 @@ func absoluteSessionPath(input string) string {
 	return strings.ReplaceAll(abs, `\`, "/")
 }
 
-// isWindowsDrivePath reports whether p begins with a drive specifier and a
-// separator, e.g. "C:/repo" — the absolute Windows form.
 func isWindowsDrivePath(p string) bool {
 	return len(p) >= 3 && p[1] == ':' && p[2] == '/' && isASCIILetter(p[0])
 }
 
-// isDriveRelative reports whether p begins with a bare drive specifier, e.g.
-// "C:repo". It is relative to that drive's current directory, which the process
-// cannot know, so it is left in its own spelling rather than resolved against
-// this host's working directory — resolving it would claim a location the
-// caller never reported.
 func isDriveRelative(p string) bool {
 	return len(p) >= 2 && p[1] == ':' && isASCIILetter(p[0])
 }
@@ -2922,24 +1749,6 @@ func isASCIILetter(c byte) bool {
 }
 
 // IsPathShaped reports whether s looks like a filesystem path rather than a
-// project name or a repository remote: it contains a path separator, or it
-// begins with a drive-relative Windows prefix such as C:repo.
-//
-// This is the one definition of "the caller is reporting a location", shared
-// by store resolution (the path steps and the basename evidence rules) and
-// by mcpserver's repository detection, so a drive-relative Windows path
-// cannot be treated as a name on one side of a boundary and as a path on the
-// other.
-//
-// filepath.IsAbs is deliberately not this test: it is false for a
-// drive-relative Windows path such as \work\ghost, which is exactly the
-// shape a second checkout of a repository arrives in. The separator check alone
-// was not enough either, because C:repo carries no separator at all — a
-// single ASCII letter, a colon, and then text — so it read as a project name
-// and both the resolver's path steps and the server's repository detection
-// skipped it. A one-letter prefix is what makes this unambiguous: it is the
-// whole of a Windows drive specifier, and a project name that begins with a
-// single letter and a colon is not a shape anything else produces.
 func IsPathShaped(s string) bool {
 	if strings.ContainsAny(s, `/\`) {
 		return true
@@ -2947,23 +1756,8 @@ func IsPathShaped(s string) bool {
 	return isDriveRelative(s)
 }
 
-// storedPathIsUsable reports whether a recorded path is a location a session
-// directory can be compared against: absolute, in either separator spelling,
-// with at least one segment below the root.
-//
-// Three shapes are refused, each for its own reason:
-//   - the id sentinel (path == id) and any relative path: nothing was
-//     recorded that a directory could contradict, and EvalSymlinks would
-//     resolve a relative path against the PROCESS working directory, so
-//     agreement would depend on where the caller happens to run rather than
-//     where the session is standing;
-//   - a bare root ("/" or "C:/"): it contains every absolute path on the
-//     machine, so a project recorded there would claim any session whose
-//     directory shares its name.
 func storedPathIsUsable(stored string) bool {
 	norm := strings.ReplaceAll(stored, `\`, "/")
-	// Drop a Windows drive prefix so the root test is the same one on both
-	// platforms: "C:/x" and "/x" are the same shape.
 	if isWindowsDrivePath(norm) {
 		norm = norm[2:]
 	}
@@ -2971,10 +1765,6 @@ func storedPathIsUsable(stored string) bool {
 	return strings.HasPrefix(norm, "/") && strings.Trim(norm, "/") != ""
 }
 
-// canonicalPath resolves one path to its canonical, forward-slash form, or
-// reports why it cannot: a path that does not exist, or cannot be resolved,
-// stays unresolved. Callers treat that as a failure to agree rather than as a
-// match.
 func canonicalPath(p string) (string, error) {
 	normalized := strings.ReplaceAll(p, `\`, "/")
 	resolved, err := filepath.EvalSymlinks(filepath.FromSlash(normalized))
@@ -2984,16 +1774,6 @@ func canonicalPath(p string) (string, error) {
 	return strings.ReplaceAll(filepath.ToSlash(resolved), `\`, "/"), nil
 }
 
-// pathsAgree reports whether input and stored are the same place: input
-// resolves to stored, or to a directory inside it. Both paths are resolved
-// before comparison, so dot segments and symlink escapes cannot pass a textual
-// prefix check and two spellings of one directory (Windows 8.3 short names
-// against the long form, a symlink in the middle, a trailing separator) do
-// agree. Comparison is separator-agnostic — Windows stores backslashes and the
-// path step above already normalizes them, so a literal prefix test using "/"
-// can never match a native Windows path. A path that does not exist or cannot
-// be resolved stays unresolved and fails, so an unreadable directory never
-// becomes evidence that it is the project it claims to be.
 func pathsAgree(input, stored string) bool {
 	resolvedInput, err := canonicalPath(input)
 	if err != nil {
@@ -3010,16 +1790,12 @@ func pathRankLength(p string) int {
 	return utf8.RuneCountInString(strings.ReplaceAll(p, `\`, "/"))
 }
 
-// samePath is exact equality or a directory-prefix match on a segment
-// boundary, so /x/infra does not accept /x/infra-other.
 func samePath(a, b string) bool {
 	b = strings.TrimSuffix(b, "/")
 	return a == b || strings.HasPrefix(a, b+"/")
 }
 
 // ListProjectNames returns all known project names, ordered the same way as
-// ListProjects (name ASC) — used to format an actionable CLI error listing
-// known projects on a resolution miss.
 func (s *Store) ListProjectNames(ctx context.Context) ([]string, error) {
 	projects, err := s.ListProjects(ctx)
 	if err != nil {
@@ -3033,54 +1809,10 @@ func (s *Store) ListProjectNames(ctx context.Context) ([]string, error) {
 }
 
 // CreateFromCorpus inserts a memory from a third-party benchmark dataset,
-// without the credential guard Create applies.
-//
-// It exists because a public eval corpus contains real credentials and a
-// benchmark that refuses to load one cannot run. Measured on longmemeval-s
-// (500 records, ~25k conversation turns) at the time this was written: three
-// distinct lines fire, and all three are genuine leaked credentials — a
-// `dckr_pat_` Docker Hub token, a `gho_` GitHub OAuth token, and a 40-character
-// hex SparkPost key. The detector is right about all three; the harness still
-// has to ingest them, because the measurement is about retrieval over the
-// corpus as published.
-//
-// That is why this is a named function rather than a flag. The claim justifying
-// it is deliberately the narrow one, stated exactly: the row lands in a scratch
-// database that dies with the run, and it is never injected into a session's
-// context, never mirrored to the Obsidian vault, and never quoted into a
-// reflect, resolve or supersede prompt. Those are the exposures the guard
-// exists for.
-//
-// "Never embedded" is NOT part of the claim. The two seeders that run a
-// non-fts condition embed every turn they ingest and send it to Ollama. The
-// narrow claim is the one that holds, and it is the one quoted, because the
-// wide one is what a future author would cite to widen this carve-out to a
-// bench run against a real store — where the vault and reflect exposures are
-// real.
-//
-// Nothing in a normal session may reach this: it is not on
-// provider.MemoryStore, it is not in the MCP surface, and its only callers are
-// the three dataset seeders under bench/.
-//
-// It is also the second false positive this round found, in the opposite
-// direction from the first: the earlier claim that guarding Create cost nothing
-// was true only of the corpora in this repository, and a downloaded corpus
-// proved it wrong on the first CI run.
 func (s *Store) CreateFromCorpus(ctx context.Context, projectID string, m Memory) (string, error) {
 	return s.insertMemory(ctx, projectID, m, insertOptions{})
 }
 
-// secretTagFields is the guard's view of a memory's tags.
-//
-// Tags are guarded, and the reason is worth keeping in one place because an
-// earlier version of secret_guard.go claimed they were not worth guarding: they
-// are marshalled into the row ghost_memory_search returns, and
-// BuildReflectionPrompt writes them into the prompt sent to a CLI harness — so a
-// token pasted as a tag is embedded, returned and quoted into a model exactly as
-// a token in the body would be. validateTags permits ten tags of 64 characters,
-// which is more than room for every provider token format.
-// secretContentAndTags is the guard's field list for a memory write: the body and
-// every tag, in that order, so the refusal names whichever was contaminated.
 func secretContentAndTags(content string, tags []string) []secretField {
 	out := make([]secretField, 0, len(tags)+1)
 	out = append(out, secretField{"content", content})
@@ -3095,16 +1827,6 @@ func secretTagFields(tags []string) []secretField {
 	return out
 }
 
-// secretSourceRefField checks a write-time source reference, or nothing when the
-// caller stated none.
-//
-// A reference is a path, a commit, a URL or a ticket, and it is stored on the same
-// row and rendered on the same line as the content — the shared item line prints
-// it as a labelled field on every listing, and an exported artifact carries it to
-// whoever imports one. A caller pasting a token into it would be storing and
-// replaying a credential by exactly the route the guard exists to close, and the
-// field is the one place on the line where a credential looks least like one:
-// a long unbroken string after "source_ref=" reads as a URL.
 func secretSourceRefField(sourceRef string) []secretField {
 	if sourceRef == "" {
 		return nil
@@ -3113,8 +1835,6 @@ func secretSourceRefField(sourceRef string) []secretField {
 }
 
 // Create inserts a new memory and returns its ID. The insert and the history
-// row that records it share one transaction, so a memory cannot exist without
-// its own first entry in its history.
 func (s *Store) Create(ctx context.Context, projectID string, m Memory) (string, error) {
 	if err := checkMemoryWrite(m); err != nil {
 		return "", err
@@ -3122,12 +1842,6 @@ func (s *Store) Create(ctx context.Context, projectID string, m Memory) (string,
 	return s.insertMemory(ctx, projectID, m, insertOptions{recordVerification: true})
 }
 
-// checkMemoryWrite is the whole of what a memory write is checked for before it
-// reaches SQL: the credential guard over the body, the tags and the source
-// reference, and the two length bounds. It is a named function rather than the
-// body of Create because CreateWithID is the same write with a different id, and
-// two copies of a guard eventually disagree about which fields it covers — the
-// failure being a check that one writer applies and the other does not.
 func checkMemoryWrite(m Memory) error {
 	if err := rejectSecretFields(secretContentAndTags(m.Content, m.Tags)...); err != nil {
 		return err
@@ -3148,29 +1862,6 @@ func checkMemoryWrite(m Memory) error {
 }
 
 // CreateWithID is Create under a caller-chosen id, and it exists for one caller:
-// the benchmark, which seeds a store from a committed corpus and needs the
-// store's contents to be a function of that corpus rather than of the id column's
-// `hex(randomblob(16))` default.
-//
-// Why the benchmark needs it: the store breaks tied fused scores by memory id
-// (fuseCandidatePool) precisely so production results are stable, and a bench
-// corpus that drew its ids at random re-drew that tie-break on every run. A grid
-// point weighting its two legs EQUALLY collides often enough that its published
-// interval moved between runs of one binary (#708). Nothing about the tie-break
-// is wrong; the benchmark was discarding the input it reads. So the ids become a
-// function of the corpus item and the production order is untouched.
-//
-// The write is otherwise Create's: same transaction, same history and evidence
-// rows, same recordVerification, and the same checks — an id a caller chose is
-// not a licence to write a body Create would have refused. An empty id is
-// refused rather than falling back to the column default, because a caller that
-// asked for a named row and silently got a random one would never find out, and
-// reproducibility is the only reason to be here.
-//
-// Not on provider.MemoryStore and not in the MCP surface: nothing a session can
-// reach names its own id. A row whose verified_at is a THIRD-PARTY DATASET's claim
-// rather than a check made through this store is not this function's business —
-// see CreateWithIDFromCorpus, which is the same write with that one bit off.
 func (s *Store) CreateWithID(ctx context.Context, projectID, id string, m Memory) (string, error) {
 	if id == "" {
 		return "", errors.New("create memory: no id given; CreateWithID stores the row under the id it is given, and an empty one would be a row the caller cannot find again")
@@ -3182,28 +1873,6 @@ func (s *Store) CreateWithID(ctx context.Context, projectID, id string, m Memory
 }
 
 // CreateWithIDFromCorpus is CreateWithID with the corpus opt-out: the caller's id,
-// the credential guard and the whole write are CreateWithID's, and the one bit that
-// differs is recordVerification — so a verified_at the DATASET states is stored
-// verbatim as the column's value and no `verified` record is appended for it.
-//
-// It exists because those are two different claims and only one of them is an
-// event. `insertOptions.recordVerification`'s comment carries the argument in full
-// — a record's stamp is the store's clock by design, so appending one for a
-// dataset's own claim says "this was checked now" about a check the dataset may
-// date to years ago, which is the inversion the store-clock rule exists to
-// prevent. CreateFromCorpus has always been the route that declines it; this is
-// that same decline for a caller which also has to name the row.
-//
-// The credential guard is the deliberate difference from CreateFromCorpus, and it
-// is the safer direction to be surprised in: THIS function still refuses a body
-// carrying a credential, and only the id and the record bit are the corpus route's.
-// The corpora that need the wider carve-out are the downloaded public eval sets
-// under bench/, and they keep calling CreateFromCorpus. The benchmark's own corpora
-// are committed fixtures a review has read, seeded into a scratch store that dies
-// with the run — so it can have the rule without giving up the guard.
-//
-// Not on provider.MemoryStore and not in the MCP surface, for the same reason
-// CreateWithID is not: a corpus row is not something a session saves.
 func (s *Store) CreateWithIDFromCorpus(ctx context.Context, projectID, id string, m Memory) (string, error) {
 	if id == "" {
 		return "", errors.New("create memory: no id given; CreateWithIDFromCorpus stores the row under the id it is given, and an empty one would be a row the caller cannot find again")
@@ -3214,84 +1883,23 @@ func (s *Store) CreateWithIDFromCorpus(ctx context.Context, projectID, id string
 	return s.insertMemory(ctx, projectID, m, insertOptions{id: id})
 }
 
-// insertOptions is the one bit insertMemory cannot infer from the Memory it is
-// given, so the caller has to say it.
-//
-// It is a parameter rather than a field on Memory because Memory is what a reader
-// gets back: a stored verified_at is true of the row whichever route wrote it, and
-// a flag on the read shape would suggest the two rows differ when the only
-// difference is who observed them.
 type insertOptions struct {
-	// recordVerification appends a `verified` evidence record when m carries a
-	// VerifiedAt. Every writer that stores a verified_at from a live call sets it.
-	//
-	// CreateFromCorpus does not, and the reason is the stamp rather than the
-	// claim. A corpus row's verified_at is DATA ABOUT THE DATASET — a third-party
-	// benchmark asserting when its own rows were checked, possibly years ago — and
-	// the record's verified_at is the STORE's clock by design, because a verifier
-	// that could date its own check could date it before the thing it checked.
-	// Appending one therefore says "this fact was checked now", which is the exact
-	// inversion that rule exists to prevent, reached through a path the rule was
-	// never stated on. The column keeps the dataset's value verbatim: losing the
-	// dataset's own data would be the opposite defect, and appendVerificationIf
-	// StatedTx's comment is what says so.
-	//
-	// Nothing can read the fabricated record today — this path's own contract says
-	// the row is never injected, mirrored or quoted, and it lands in a scratch
-	// database that dies with the run — which is exactly why the invariant is
-	// stated and pinned rather than left to the accident that no corpus sets the
-	// field yet. TestCreateFromCorpusRecordsNoVerification is that pin, and
-	// TestCreateStillRecordsAVerificationBesideTheCorpusOptOut is what keeps the
-	// opt-out from being implemented by dropping the append wholesale.
 	recordVerification bool
 
-	// id is the row's primary key, or "" to take the column's own default
-	// (`hex(randomblob(16))`). Create leaves it empty, which is why the INSERT
-	// spells both cases in one statement — a second INSERT that has to stay in
-	// step with the schema is a worse failure mode than a COALESCE, and this is
-	// the same expression importEvidenceTx already uses for the same reason.
-	//
-	// Only CreateWithID sets it, and only the benchmark calls that: every other
-	// writer draws its id, so a row's identity is still nobody's choice but the
-	// column's.
 	id string
 }
 
-// insertMemory is Create's statement, with the credential guard and nothing
-// else above it. Split out so CreateFromCorpus is the same write rather than a
-// second copy of an INSERT that has to stay in step with the schema — a worse
-// failure mode than a less obvious call graph.
 func (s *Store) insertMemory(ctx context.Context, projectID string, m Memory, opts insertOptions) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	tags, _ := json.Marshal(m.Tags)
-	// A Memory carries its own tier, and this is the writer that stores the
-	// struct rather than a list of arguments — so a caller that set Retention
-	// and got `project` back would have been silently overruled. Refused before
-	// the transaction for the same reason Upsert refuses: a bad value costs
-	// nothing.
 	retention, err := NormalizeRetention(m.Retention)
 	if err != nil {
 		return "", err
 	}
 	expires := sessionExpiry(retention, time.Now())
 	if retention == RetentionSession && m.ExpiresAt != nil {
-		// A session row's expiry may be stated rather than derived, and ONLY a
-		// session row's: the gate is the point. Without it this would put an expiry
-		// on a durable row, which is a claim about when the user stops wanting a
-		// memory that no caller ever made -- and one that prune would then ignore,
-		// so the column would lie and the prune would not even be able to say so.
-		// A durable row's NULL is the unprunable direction, and it stays.
-		//
-		// The callers that exist are the corpus seeders, which replay a row they
-		// already hold, and a test restoring a shape. `Store.RestoreSnapshot` is
-		// NOT one of them: its fresh INSERT is an INSERT ... SELECT, which does not
-		// name the column, so a RE-CREATED row takes the DEFAULT — the same
-		// "the change log holds no tier" answer as everything else in that path.
-		// Its UPDATE is a different answer and is not about expiry at all: it omits
-		// the column, so it leaves a live row's own expiry alone rather than
-		// clearing it. See docs/invariants.md's retention-tiers bullet.
 		expires = *m.ExpiresAt
 	}
 
@@ -3320,24 +1928,9 @@ func (s *Store) insertMemory(ctx context.Context, projectID string, m Memory, op
 	if err := appendHistoryTx(ctx, tx, id, phaseSave, provenanceFromMemory(m)); err != nil {
 		return "", err
 	}
-	// The evidence record shares this transaction for the same reason, and its
-	// kind is observed because that is what a save is: something reported this
-	// fact and the store kept what it reported about itself.
 	if err := appendEvidenceTx(ctx, tx, id, evidenceObserved, provenanceFromMemory(m), false); err != nil {
 		return "", err
 	}
-	// And a second record when the same call said the fact was CHECKED. A column
-	// that says verified_at and a table that says nothing would be two answers to
-	// one question, and EvidenceCounts.Verified is the one a reader is meant to
-	// trust. appendVerificationIfStatedTx carries the "stated in THIS call" rule;
-	// here a fresh INSERT has no stored value to keep, so m.VerifiedAt is exactly
-	// the caller's statement.
-	//
-	// Gated on opts.recordVerification as well, and the gate is the only reason
-	// this is not simply "append whenever m.VerifiedAt is set": the record's stamp
-	// is the store's clock, so on the corpus route it would assert that a dataset's
-	// own check happened now. See insertOptions.recordVerification, which is where
-	// that argument is written down in full.
 	if opts.recordVerification {
 		if err := appendVerificationIfStatedTx(ctx, tx, id, provenanceFromMemory(m), m.VerifiedAt); err != nil {
 			return "", err
@@ -3353,105 +1946,23 @@ func (s *Store) insertMemory(ctx context.Context, projectID string, m Memory, op
 }
 
 // Upsert checks for an existing similar memory, probing in two stages:
-// same-category first (existing bar: mergeScore — Jaccard >= 0.5 or the
-// gated overlap leg), then — only when the same-category probe misses —
-// cross-category candidates at a deliberately higher bar: token Jaccard >=
-// upsertCrossCategoryThreshold (0.7), dead records excluded. On a hit from
-// either probe it strengthens the existing memory's importance/access_count
-// and links the new content to it as a 'duplicate' — it never overwrites the
-// existing row's content or its category (the fold target keeps whatever
-// category it already has, so a save never silently recategorizes a
-// pinned/canonical memory; the linked copy carries the incoming category so
-// nothing the caller saved is lost), so a genuinely different follow-up save
-// under a manual-sourced target (or any target) is never silently discarded.
-// If no candidate scores above the applicable bar, it creates a new,
-// unlinked row. Neither probe folds into a candidate that states a different
-// value of the same fact (statesDifferentValue): that save is the claim's
-// replacement, stored as a distinct row.
 
 // MaxSourceRefLen is the byte cap on a write-time source reference, at the store
-// rather than at the tool boundary.
-//
-// The column is caller-supplied text that the shared item line prints as a labelled
-// field on every listing and every browsing surface, so an unbounded one is a
-// megabyte echoed into every answer that touches the row — and that is a property
-// of the column, not of the MCP tools — and the tools are the only writers an MCP
-// caller reaches, so the cap lives here and the refusal surfaces from the store.
-// It is not repeated in the tool argument resolver: one cap, one message, and a
-// second copy could disagree about the size without anything noticing.
-//
-// A reference is a path, a commit, a URL or a ticket — a few hundred bytes at the
-// outside — and it is NOT clamped the way content is: ClampContent cuts prose and
-// leaves a marker in its place, while a truncated path or URL is a different
-// reference, and a wrong one that looks right is worse than an error.
-//
-// THREE writers of the column do not reach the bound, and all three are the
-// deliberate exclusions this codebase already draws for MaxContentLen and the
-// credential guard. `RestoreSnapshot` copies the column in SQL from the snapshot
-// table and would need the check per restored row; `CreateFromCorpus` reaches
-// insertMemory's INSERT directly rather than through Create; and
-// `ReplaceNonManual`, since #677, inherits the replaced row's provenance onto the
-// row a rewrite becomes — a COPY of a value this database already bounded, not new
-// caller text, and filtering there deletes the stored row rather than refusing one.
-// The one part of that value a merge COMPOSES rather than copies — the decision
-// links it stands for, appended to the copied reference — is held to the bound by
-// boundedDecisionRefs, and a merge whose links alone would not fit is dropped
-// before it writes (decisionLinksOverflowTx).
-// `assemble.SourceRefLabel` bounds what a listing PRINTS for exactly those three,
-// since the renderer cannot assume its input came from a writer that enforces the
-// cap. A new statement that writes the column has to call boundedSourceRef — the
-// bound is one call each writer remembers, not something the schema enforces.
 const MaxSourceRefLen = 512
 
 // MaxAgentLen is the byte cap on a write-time agent, for the same reason and by
-// the same route as MaxSourceRefLen: the shared item line prints `agent=` beside
-// `source_ref=` on every listing, so a value with no bound is a value echoed into
-// every answer that touches the row.
-//
-// On the harness path the column holds one of four tokens, so the cap can only
-// bite on an artifact — which is the point. A portable artifact's `agent` is
-// whatever wrote the export, and internal/portable accepts a 1 MiB record, so
-// without a bound an export could plant close to a megabyte of it in a column the
-// renderer had started echoing in this change. The same three writers are exempt —
-// RestoreSnapshot, CreateFromCorpus, and ReplaceNonManual, which inherits the
-// replaced row's agent onto the row a rewrite becomes — and assemble.AgentLabel
-// bounds the display.
 const MaxAgentLen = 128
 
 // StoredStampLayout is the layout a writer stores a validity stamp in: SQLite's
-// own datetime() shape, in UTC.
-//
-// The columns are unconstrained text, so nothing in the schema enforces this and
-// a row may legitimately hold a date alone — a portable artifact, a hand edit,
-// or the short form SQLite's date() produces. Writers normalize what they accept
-// to this one layout so their own rows need a single case to read, and every
-// reader still has to try both. It lives here because the column is the storage
-// layer's and the layout is part of its contract, not a detail of any one
-// caller: a writer that stored one shape and a renderer that printed another
-// would show a caller a moment Ghost never recorded.
 const StoredStampLayout = "2006-01-02 15:04:05"
 
 // DateStampLayout is the whole-day form, the other shape SQLite's date() produces.
 const DateStampLayout = "2006-01-02"
 
 // StampLayouts is every layout a reader of a validity column accepts, in the order
-// to try them: what Ghost's own writers store first, then the whole-day form a
-// portable artifact, a hand edit or a date() call can leave behind.
-//
-// One list, owned here, because the column is the storage layer's. A writer
-// validating a value it did not store and a reader interpreting one have to agree
-// on what is readable, and two private copies of the layout set are two answers to
-// that question free to drift: a writer that accepted only the shape it writes
-// would wave through a contradiction on a date-only row, and a reader that
-// accepted only its own would read a real claim as no claim at all.
 var StampLayouts = []string{StoredStampLayout, DateStampLayout}
 
 // ParseStamp reads a stored validity stamp over every layout StampLayouts names,
-// reporting whether it was readable. The store owns it because a writer judging a
-// value it did not store and a reader interpreting one have to reach the same
-// answer: a check that understood only the shape Ghost writes would wave through
-// a contradiction on every imported, restored or hand-edited row, and a reader
-// that understood only its own would read a real claim as no claim at all.
 func ParseStamp(s string) (time.Time, bool) {
 	for _, layout := range StampLayouts {
 		if at, err := time.Parse(layout, s); err == nil {
@@ -3462,41 +1973,9 @@ func ParseStamp(s string) (time.Time, bool) {
 }
 
 // AcceptedStampForms are the forms a caller may write a validity stamp in, in
-// the order NormalizeStampArg's refusal lists them: RFC 3339, or a whole day.
-// The whole-day form is DateStampLayout because it is the same string the
-// store's readers accept. The stored layout is not among them; a caller writes
-// an instant or a day, and the stored layout is what both become.
 var AcceptedStampForms = []string{time.RFC3339, DateStampLayout}
 
 // NormalizeStampArg normalizes one caller-supplied stamp into the stored layout.
-// It is the one rule for what a written date means, shared by the writer tools
-// (internal/mcpserver's parseStampArg) and by `ghost import`
-// (NormalizeImportedStamp), so the two cannot disagree about it.
-//
-// endOfDay says whether a bare date is the end of a window rather than its
-// start, because the two mean different instants and only one of them is the
-// plain reading. A date as a window's START is midnight and needs no adjustment:
-// a claim that begins on the 1st begins then. As an END it does, because
-// ValidityState's expiry test is a strict "before now" — midnight would retire
-// the row from the first instant of the day the caller said it was true through,
-// and "valid until 2026-12-31" plainly means the whole of the 31st. The stored
-// value is therefore the last second of that day, which is the finest a
-// second-resolution text column can express: the claim stops one second before
-// the day is over rather than a day before it began. A full RFC 3339 stamp is
-// taken at the instant the caller wrote, because there they did say which one.
-//
-// Either way the stored value round-trips: assemble.stampText collapses a
-// boundary to a date only when the instant is the one that date form stands for
-// on that boundary — on a window's end that is this 23:59:59, and on a start or a
-// verification it is midnight, so a 23:59:59 the caller chose there prints in
-// full.
-//
-// A blank string is "no claim" and becomes a nil pointer, so a caller that sends
-// "" does not write a claim with no readable value. Anything else must parse: the
-// forms are tried in the order they are documented, and a value matching none is
-// an error naming the field, the accepted formats and the value itself (through
-// RefusalArg), because a rejected date is something the caller can fix and an
-// unreadable stored one is not.
 func NormalizeStampArg(field, s string, endOfDay bool) (*string, error) {
 	if strings.TrimSpace(s) == "" {
 		return nil, nil
@@ -3515,16 +1994,6 @@ func NormalizeStampArg(field, s string, endOfDay bool) (*string, error) {
 }
 
 // NormalizeImportedStamp is NormalizeStampArg for a stamp read from a portable
-// artifact. It accepts one form more, the stored layout, because that is what
-// `ghost export` writes for every row a writer tool stored. A value the stored
-// layout reads is returned as a copy of the raw text, never re-formatted:
-// time.Parse accepts a fractional second the layout does not name, and
-// formatting would truncate it, so a window ParseStamp, CheckWindowOrder and
-// readableStampSQL all order (00:00:00.2 to 00:00:00.8) would be refused over
-// values the row does not hold. Every other value is read exactly as the save
-// tool reads it, end-of-day rule included — so a bare-date valid_until an older
-// import stored, which export writes verbatim, comes back as 23:59:59 of that
-// day rather than the midnight today's readers give it.
 func NormalizeImportedStamp(field string, raw *string, endOfDay bool) (*string, error) {
 	if raw == nil {
 		return nil, nil
@@ -3537,11 +2006,6 @@ func NormalizeImportedStamp(field string, raw *string, endOfDay bool) (*string, 
 }
 
 // CheckConfidence refuses a trust rating outside [0,1], the rule the writer tools
-// and `ghost import` share. The range is checked rather than clamped: a value
-// outside it is not a low belief but a broken scale, and clamping it would
-// invent a rating nobody gave. NaN and ±Inf are refused first, because a NaN
-// passes every `f < 0 || f > 1` comparison and would be stored and then rendered
-// as "confidence NaN".
 func CheckConfidence(f float64) error {
 	if math.IsNaN(f) || math.IsInf(f, 0) {
 		return fmt.Errorf("confidence must be a finite number between 0 and 1, got %v", f)
@@ -3553,18 +2017,6 @@ func CheckConfidence(f float64) error {
 }
 
 // CheckWindowOrder refuses a window that does not end after it starts, judging the
-// effective pair: the boundaries the caller supplied, with a missing half taken
-// from what the row already holds.
-//
-// Both halves matter because a save carries a window or nothing, while an edit
-// carries one boundary and inherits the other. Only a contradiction is refused: a
-// window that has already closed, or one that has not opened, is a legitimate
-// thing to record — it is what a caller writes to say a claim is over, or not yet
-// in force.
-//
-// A half no layout reads is not a claim, and the reader treats it as unset, so
-// there is nothing here to contradict. Refusing on one would make an unrelated
-// edit fail on a row whose own stored value this build cannot interpret.
 func CheckWindowOrder(v, stored Validity) error {
 	from, until := v.ValidFrom, v.ValidUntil
 	if from == nil {
@@ -3588,77 +2040,25 @@ func CheckWindowOrder(v, stored Validity) error {
 }
 
 // Validity is the optional temporal claim attached to one write: when the
-// memory became true, when it stops being true, and when someone last checked.
-//
-// Every field is a pointer and every nil means "no claim was made", which is
-// distinct from a claim about the zero moment — the same reason the columns
-// themselves are nullable. A caller that states nothing is recorded as NULL and
-// read back as unset, so a store can tell the difference between "nobody has
-// said" and "said to be valid forever".
-//
-// It is separate from Provenance rather than a fifth field on it because the two
-// answer different questions: Provenance is who wrote this and how much they
-// were trusted, Validity is when it stopped being true. A memory can be
-// certainly true right now and expire next month, and collapsing the two would
-// make the next check of a fact look like a reason to doubt the agent that
-// stated it.
 type Validity struct {
-	// ValidFrom is when the memory became true. A time after now makes the row
-	// unreadable until then, which is a real claim about a scheduled change and
-	// not a data error.
-	ValidFrom *string
-	// ValidUntil is when the memory stops being true. A time at or before now
-	// withholds the row from ranked retrieval; see internal/assemble stage 2.
+	ValidFrom  *string
 	ValidUntil *string
-	// VerifiedAt is when a human or agent last checked the claim. In v1 it is a
-	// flag: it marks a row as re-checked and does not by itself decide anything.
 	VerifiedAt *string
 }
 
 // IsZero reports whether the claim is entirely absent, so a write can leave the
-// three columns alone without the caller having to know which of them exist. It
-// is the one place that question is answered, because the callers that need it —
-// a tool deciding whether a request stated anything at all — must not each hold
-// their own copy of it and disagree about what "stated nothing" means.
 func (v Validity) IsZero() bool {
 	return v.ValidFrom == nil && v.ValidUntil == nil && v.VerifiedAt == nil
 }
 
 // Provenance is the optional write-time context attached to a single save.
-// Every field is optional and its zero value means "not known": passing no
-// Provenance at all records NULL across the board rather than a guess.
-//
-// SessionID is never auto-populated from process state. It names a session the
-// host controls, so only a caller that has one may supply it: the MCP tools
-// pass the transport's session id, which a stdio host does not have, and every
-// other path leaves it empty. A store-invented value would be fabricated
-// provenance, which is the exact thing these columns exist to avoid.
 type Provenance struct {
-	// Agent names the harness that produced the memory. The values are the
-	// source tokens ai.NewSourceProviderForSource understands — claude-code,
-	// opencode, codex, goose — not the binary names. Claude is "claude-code"
-	// everywhere it appears as a source (SourceForClientName maps it, and
-	// detectSourceFromEnv normalizes CLAUDECODE to it), so storing anything
-	// else would split the vocabulary and make a filter on agent miss rows
-	// that ghost_resolve and the CLI already treat as claude-code.
-	//
-	// Distinct from Source, which records *how* the memory arrived (mcp,
-	// reflection, manual).
-	Agent string
-	// SessionID identifies the caller session, when one is known.
-	SessionID string
-	// SourceRef points at what the memory was read from — a file, path,
-	// commit, or URL.
-	SourceRef string
-	// Confidence is a belief rating in [0,1]. Pointer so that nil means
-	// "no belief recorded" while 0.0 remains a real rating.
+	Agent      string
+	SessionID  string
+	SourceRef  string
 	Confidence *float64
 }
 
-// nullIfEmpty maps an empty provenance string to SQL NULL rather than the
-// empty string. The distinction is real: NULL records that Ghost never
-// learned an agent or reference, while ” would claim a value that happens
-// to be empty. Queries that count recorded provenance rely on IS NOT NULL.
 func nullIfEmpty(s string) any {
 	if s == "" {
 		return nil
@@ -3666,8 +2066,6 @@ func nullIfEmpty(s string) any {
 	return s
 }
 
-// nullStringPtr turns a nullable column into the pointer shape a Validity field
-// carries, and NULL into the nil that means "no claim was made".
 func nullStringPtr(s sql.NullString) *string {
 	if !s.Valid {
 		return nil
@@ -3675,63 +2073,16 @@ func nullStringPtr(s sql.NullString) *string {
 	return &s.String
 }
 
-// readableStampPtr is nullStringPtr for the places that must not treat a value
-// Ghost cannot read as a claim.
-//
-// nullStringPtr maps only SQL NULL to nil, so a stored empty string — or any text
-// no layout parses — arrives as a non-nil boundary. That is the right answer when
-// the caller is reporting what is in the column, and the wrong one when a value is
-// being judged for whether it says anything: CheckWindowOrder deliberately returns
-// nil for a pair it cannot read, so an unreadable pair passes the check meant to
-// qualify it and looks like a real assertion. So a boundary counts as stated only
-// when ParseStamp reads it, which is the same rule nullIfEmptyPtr applies to the
-// empty moment at the writers that bind the triple.
-//
-// Such a value is reachable rather than hypothetical: Store.Create stores a stamp
-// verbatim, RestoreSnapshot writes the column with no check at all, and an import
-// made before ImportMemory read stamps by the save tool's rule did too, so a
-// database can hold a window recorded in prose.
 func readableStampPtr(s sql.NullString) *string {
 	if !s.Valid {
 		return nil
 	}
-	// A zero time is not a stated window here, even though ParseStamp reports it
-	// as readable: time.Parse succeeds on "0001-01-01 00:00:00" and yields the
-	// zero time. The reason is NOT that the readers disagree — it used to be, and
-	// that was the original justification, but #583 removed it: assemble's
-	// parseStampPtr now reads through ParseStamp, so readValidity, ValidityStateOf
-	// and ValidityLabel all treat a zero-instant stamp as a real boundary, and a
-	// row carrying one is read as a complete window. Citing that here would leave
-	// one value with two documented answers, which is what this branch exists to
-	// end.
-	//
-	// The reason that survives is what this function is FOR. Its callers are
-	// ReplaceNonManual's, which compose the SUCCESSOR's window out of the sources'
-	// windows, and a successor is a different memory written later. A source whose
-	// lower bound is the zero instant almost always carries it as a "no lower
-	// bound" artefact — a hand-edited artifact, a restored snapshot, a row written
-	// by something that filled the column with an epoch — and inheriting it would
-	// stamp the successor with a valid_from of year 1: a claim that it was true
-	// from a moment before the memory that says so existed. So this reader treats
-	// the zero instant as no lower bound stated, and says which value it is
-	// reading.
-	//
-	// That is a deliberate DIVERGENCE from the state rule, not agreement with it.
-	// The difference is between two questions — "is this row retired?" and "which
-	// bounds does the memory replacing it inherit?" — and the zero instant answers
-	// them differently. Anyone narrowing either rule has to reckon with this one;
-	// TestReplaceNonManualDoesNotTreatTheZeroInstantAsAStatedWindow pins it.
 	if at, ok := ParseStamp(s.String); !ok || at.IsZero() {
 		return nil
 	}
 	return &s.String
 }
 
-// nullIfEmptyPtr maps a validity stamp to SQL NULL, and an empty string to NULL
-// as well, so no writer can record a claim about the empty moment. A nil pointer
-// is the caller's statement that no claim was made; an empty string would be a
-// claim with no readable value, which stage 2 reports as validity_unparseable —
-// a permanently confusing row to leave in a store on the caller's behalf.
 func nullIfEmptyPtr(s *string) any {
 	if s == nil || *s == "" {
 		return nil
@@ -3739,10 +2090,6 @@ func nullIfEmptyPtr(s *string) any {
 	return *s
 }
 
-// boundedAgent applies MaxAgentLen, refusing rather than truncating, and maps an
-// empty agent to NULL. It refuses because the column's own values are short: a
-// value past the cap is not a harness name, so there is no honest prefix of it to
-// keep.
 func boundedAgent(agent string) (any, error) {
 	if agent == "" {
 		return nil, nil
@@ -3753,8 +2100,6 @@ func boundedAgent(agent string) (any, error) {
 	return agent, nil
 }
 
-// boundedSourceRef applies MaxSourceRefLen, refusing rather than truncating, and
-// maps an empty reference to NULL on the way through.
 func boundedSourceRef(s string) (any, error) {
 	if s == "" {
 		return nil, nil
@@ -3766,107 +2111,22 @@ func boundedSourceRef(s string) (any, error) {
 }
 
 // Upsert stores a memory with no provenance, exactly as before.
-// UpsertOptions carries the optional facts about one save. Provenance, scope
-// and validity are orthogonal — where a memory came from, where it applies, and
-// when it was true — so they are separate fields rather than one growing
-// parameter list, and a zero UpsertOptions is exactly what plain Upsert passes.
 type UpsertOptions struct {
 	Provenance Provenance
 	Scope      map[string]string
-	// Validity is the temporal claim this save makes, if any. A zero Validity
-	// writes NULL to all three columns, which is the record for a memory whose
-	// author stated no currency — the state of every memory written before the
-	// columns existed, and the state the tools write when the caller says
-	// nothing.
-	Validity Validity
+	Validity   Validity
 
-	// FoldOnly changes what happens when an equivalent row is found (the same
-	// text after foldOnlyEquivalent's normalization): the existing row is
-	// strengthened and returned, and the incoming text is NOT inserted as a
-	// new row. Any other text is inserted as its own row.
-	//
-	// The default fold keeps the new wording, and that is right for a save —
-	// the caller explicitly asked for that text to be stored. It is wrong for
-	// promotion into _global, where the same fact arrives as a fresh
-	// paraphrase from every project's reflection: _global accumulated 68
-	// redundant rows in 19 clusters this way, one of them nine paraphrases of
-	// a single gouroboros fact, while every project scope had none (issue
-	// #544). Those rows cost window slots and resolve and supersede work,
-	// and 93 active duplicate links were needed just to sink them again.
 	FoldOnly bool
 
-	// Pin exempts the memory this save is about from consolidation, in the same
-	// call that stores it. It is the opt-out the save path otherwise lacks:
-	// nothing an agent writes carries a source reflection excludes (seeds are
-	// 'builtin', agent saves 'mcp', reflection writes 'reflection'), so until
-	// this option the only way to protect a memory from `ghost reflect` was a
-	// SECOND call — ghost_memory_pin — and every window between the two left
-	// the memory consolidatable (issue #549).
-	//
-	// A fold pins BOTH rows: the copy inserted here, and the existing row the
-	// caller's text was merged into. The existing row is the one the corpus
-	// already holds and the one a later consolidation is most likely to absorb,
-	// so pinning only the new row would leave the fact the caller asked to
-	// protect fully consolidatable; pinning only the existing row would leave
-	// the wording that was just stored exempt from nothing. FoldOnly stores no
-	// row of its own, so there the target is the only thing the request can
-	// mean — a promotion that reported success without pinning would have
-	// stored nothing and protected nothing.
 	Pin bool
 
-	// Retention is the tier this save asks for: session, project or persistent.
-	// Empty is project — the tier a store has always had, and the only reading of
-	// "the caller said nothing" that costs nothing when it is wrong.
-	//
-	// A fold RAISES the surviving row's tier and never lowers it (see
-	// raiseRetentionTx), so this option reaches the row a later consolidation
-	// would absorb rather than only the copy this call inserts. Lowering would
-	// be the dangerous direction: a session-scoped save that demoted another
-	// memory's durable tier to its own would be scheduling that memory for
-	// deletion on the strength of a near-duplicate.
 	Retention string
 
-	// SkipExactContent makes the save write nothing when the project already
-	// holds a row whose content is byte-identical to the incoming text. The
-	// skip is reported as an empty id with duplicateOf naming the row that
-	// was found; every save that writes returns a non-empty id, so the two
-	// cannot be confused. Anything else — including a near-duplicate — takes
-	// the ordinary path: folded and linked, or inserted.
-	//
-	// It is the first step inside the write transaction, not a read the
-	// caller makes beforehand, because it is a read whose answer decides
-	// whether a write happens. Read on the pool, the window between the read
-	// and the write belongs to any other handle: two first-contact Claude
-	// imports both read an empty project and both stored every file, each one
-	// twice. Inside the transaction (BEGIN IMMEDIATE, so the write lock is
-	// held from before the lookup), the second writer waits and then finds the
-	// first one's row. Only the Claude auto-memory import sets it; the lookup
-	// is scoped to the project and ignores category, scope and resolved
-	// state, which is the same set the import's pre-read (GetAll) covers.
 	SkipExactContent bool
 
-	// foldReplaceableOnly keeps every row a reflection replace could not touch
-	// (replaceableRowSQL: a manual, builtin, pinned, resolved or
-	// retention-exempt row) out of the duplicate lookups, so the fold lands on
-	// the best replaceable match and the save inserts only when there is none.
-	// Only a promoted merge that consumes a source carrying a decision link
-	// sets it (promoteReflectionCandidate): a protected row may not take the
-	// link, so the merge folds into a replaceable carrier, or gets a row of its
-	// own beside the protected one, as a project emission does beside a manual
-	// row. Every other promotion may still fold into a protected row.
 	foldReplaceableOnly bool
 }
 
-// mergeRetention resolves a fold's two tiers into the one the surviving row
-// keeps, by taking the LONGER life. It is a pure function of the two values so
-// the rule is testable without a store, and it is the whole of the asymmetry:
-// raising is allowed because a protection the caller asked for and did not get
-// is a false report, while lowering is not, because the tier a row already has
-// is a claim about it that a near-duplicate has no standing to withdraw.
-//
-// A value that is not one of the three is ranked as project — the value a reader
-// resolves an unset column to — so an unexpected string can neither be escalated
-// to persistent by a fold nor demote anything.
 func mergeRetention(current, incoming string) string {
 	rank := func(tier string) int {
 		switch tier {
@@ -3887,25 +2147,6 @@ func mergeRetention(current, incoming string) string {
 	return RetentionProject
 }
 
-// raiseRetentionTx raises one row's tier to protect, never lowers it, and
-// reports the tier the row ended up with so the save result can name the row
-// that carries the caller's protection. now is the instant the save's own
-// expiry was derived from, so a refreshed expiry and the inserted copy's are
-// the same value rather than two clock reads.
-//
-// expires_at is cleared when the row LEAVES the session tier: a durable row with
-// an expiry is a claim about when the user stops wanting it that nobody made,
-// and the value a session row carried described the life of a tier it no longer
-// has. A row that STAYS session has its expiry REFRESHED even though its tier did
-// not move, and that is the whole of what this function does for the common fold
-// (#772). A session→session fold is what "the same fact restated" looks like, and
-// before this it returned early and wrote nothing, so the row kept the expiry its
-// ORIGINAL save derived: a memory about to expire was reinforced and pruned
-// minutes later, by the one command that is allowed to remove a session row.
-//
-// Only expires_at moves with the tier. updated_at and last_accessed are
-// deliberately untouched, for the reason pinMemoryTx gives: they carry the decay
-// recency and the --skip-unchanged fingerprint, and a fold is not a re-save.
 func raiseRetentionTx(ctx context.Context, tx *sql.Tx, id, incoming string, now time.Time) (string, error) {
 	if id == "" {
 		return incoming, nil
@@ -3920,14 +2161,6 @@ func raiseRetentionTx(ctx context.Context, tx *sql.Tx, id, incoming string, now 
 	}
 	merged := mergeRetention(current, incoming)
 	if merged == current {
-		// The tier did not change. The expiry still did, if the row is a session
-		// row: a fold is a write that says the fact is still wanted, and the tier's
-		// promise is that the row lives for SessionTTL from the last such write.
-		// This is the one write a fold makes to a row whose protection is already
-		// what the caller asked for, and it costs an UPDATE on a row the same
-		// transaction has already strengthened. A DURABLE row at the merged tier is
-		// still not written at all: it has no expiry to refresh and no protection
-		// to add, so a fold that changes nothing about a durable memory stays free.
 		if merged == RetentionSession {
 			if _, err := tx.ExecContext(ctx,
 				`UPDATE memories SET expires_at = ? WHERE id = ?`, sessionExpiry(merged, now), id); err != nil {
@@ -3946,14 +2179,6 @@ func raiseRetentionTx(ctx context.Context, tx *sql.Tx, id, incoming string, now 
 	return merged, nil
 }
 
-// sessionExpiry is the expires_at a row of that tier is stored with: derived
-// for a session save, absent for every other tier.
-//
-// One function because both tiers' shapes are the same decision — "is this row
-// scheduled to stop being wanted" — and a writer that inlined the conditional
-// would leave a second place to get the durable case wrong. The derivation is
-// the ONLY source of an expiry: a caller cannot state one on a save, so there is
-// no way for a save to schedule the memory it just wrote for deletion.
 func sessionExpiry(tier string, now time.Time) any {
 	if tier != RetentionSession {
 		return nil
@@ -3961,9 +2186,6 @@ func sessionExpiry(tier string, now time.Time) any {
 	return now.UTC().Add(SessionTTL).Format("2006-01-02 15:04:05")
 }
 
-// boolToInt is SQLite's boolean: the pinned column is an INTEGER and every
-// writer supplies it explicitly rather than leaving the DEFAULT to apply, so
-// a false must be a 0 and not a missing value.
 func boolToInt(b bool) int {
 	if b {
 		return 1
@@ -3971,19 +2193,6 @@ func boolToInt(b bool) int {
 	return 0
 }
 
-// pinMemoryTx marks one row pinned inside the caller's write transaction. It is
-// a no-op for a false pin or an empty id, so the fold paths can call it
-// unconditionally. updated_at is deliberately NOT touched: this is part of a
-// save that has already decided what it is writing, and the row's age and
-// timestamp are load-bearing for decay and for the --skip-unchanged fingerprint
-// (see reusePreservesAge) — the same reason the strengthen UPDATE leaves them
-// alone.
-//
-// The parameter is *sql.Tx rather than the sqlExecutor interface that covers
-// both it and *sql.DB, because a write that is only ever legal inside a
-// transaction should say so in its type. A wider parameter would let a future
-// caller hand it a handle, and the write would then run in autocommit outside
-// the check that refuses a store a newer Ghost owns (#746).
 func (s *Store) pinMemoryTx(ctx context.Context, tx *sql.Tx, id string, pin bool) error {
 	if !pin || id == "" {
 		return nil
@@ -3994,28 +2203,6 @@ func (s *Store) pinMemoryTx(ctx context.Context, tx *sql.Tx, id string, pin bool
 	return nil
 }
 
-// foldTargetStillLive re-verifies, inside the write transaction, that the row a
-// probe selected is still something worth folding into: still in this project,
-// still unresolved, and not the target of an active 'supersedes' edge.
-//
-// A probe result is a name, not a claim. Between the probe and the write the row
-// can be resolved by a concurrent pass, superseded, or deleted outright, and
-// folding into a dead row is the failure FoldOnly makes unrecoverable: it
-// strengthens a record injection already dropped and then returns without
-// storing the incoming wording, so the memory exists nowhere.
-//
-// A 'supersedes' edge only makes the row dead if it is a verdict the store may
-// act on, and an edge whose endpoints name the same key with different values is
-// not: a development row never replaced a production one. Reading such an edge
-// as a verdict blocks every fold of that row — so each re-save of the exact text
-// inserts a second copy instead of folding, and a fact that should occupy one
-// row fills the store with restatements. The exemption is asked in the same
-// statement that reads the row, so the answer arrives with the row instead of in
-// a second read that could disagree with it: it is a property of the edge this
-// statement already reads, not of the row. (Unlike Upsert's two dedup probes,
-// there is no candidate window here to protect — this statement names one row by
-// id — and a Go-side check would have been possible; see scopesConflictSQL.) The
-// edge is not deleted; it is merely not a reason to refuse a fold.
 func foldTargetStillLive(ctx context.Context, tx *sql.Tx, projectID, id string) (bool, error) {
 	if id == "" {
 		return false, nil
@@ -4052,9 +2239,6 @@ func (s *Store) UpsertWithProvenance(ctx context.Context, projectID, category, c
 	return s.UpsertWithOptions(ctx, projectID, category, content, source, importance, tags, UpsertOptions{Provenance: prov})
 }
 
-// sqlExecutor is the common read/write surface of *sql.DB and *sql.Tx. It
-// lets the reflection apply path reuse Upsert's duplicate/link semantics inside
-// its existing transaction instead of opening a second transaction.
 type sqlExecutor interface {
 	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
 	QueryRowContext(context.Context, string, ...any) *sql.Row
@@ -4072,70 +2256,25 @@ func storeTxFromContext(ctx context.Context) (*sql.Tx, bool) {
 	return tx, ok && tx != nil
 }
 
-// applyViewContextKey carries the ONE view both halves of an ApplyReflection
-// share. applyView.concurrent is the rows saved or edited since consolidation,
-// plus every source of an emission the corpus guard refused. ReplaceNonManual
-// seeds its own map from it, so a refused cross-project merge keeps ALL of its
-// sources from the project replace's delete set — not just the ones that moved,
-// which the guard's own sameAs check marks. Without the seed, the unchanged
-// source of a refused global emission matches no surviving emission and the
-// whole-set replace deletes it as unaccounted.
-//
-// crossProjectFrom/crossProjectDropped carry the OTHER direction: with promotion
-// off, ApplyReflection folds the surviving cross-project candidates into the
-// replace's input, and the replace guards that folded list AGAIN. The second
-// pass refuses a folded candidate the global half's guard accepted — the marks
-// this very pass makes decide it (see fedGuard.drop) — and a refusal the
-// replace makes about a folded candidate belongs to the half that PRODUCED it.
-// Without the count, ApplyReflection reports it as a project drop and the
-// caller's cross-project component over-reports a candidate nothing kept.
 type applyViewContextKey struct{}
 
-// applyView is shared state between the two halves of one apply. The replace
-// fills crossProjectDropped; ApplyReflection reads it after the replace returns.
-// crossProjectDropped is an EmissionDrops rather than a count for the reason the
-// two halves' drop counts are: a refusal is moved between halves with its REASON
-// attached, so the caller's report of "a row changed underneath" and of an
-// overflowing merge stay correct after the move.
 type applyView struct {
-	concurrent map[string]bool
-	// scopeKept is the subset of concurrent the global half's scope refusals
-	// alone marked: rows kept because a merge over them was refused, not because
-	// they moved. The replace keeps them as it keeps every concurrent row, but
-	// does not report them as survivors, for the reason it does not report an
-	// overflow drop's (#1492).
-	scopeKept map[string]bool
-	// overflowKept is the same subset for the global half's overflow refusals:
-	// rows kept because a promoted merge's decision links do not fit in one
-	// source_ref (#1228), which no later run can write either.
+	concurrent          map[string]bool
+	scopeKept           map[string]bool
 	overflowKept        map[string]bool
 	crossProjectFrom    int
 	crossProjectDropped EmissionDrops
-	// promotions are the cross-project candidates the replace promotes into
-	// _global, at the point where it knows which sources it consumes and which it
-	// keeps live, so each promoted row inherits by the rule a project successor
-	// does (promoteReflectionCandidate). The replace reports back how many landed
-	// and which it could not promote; ApplyReflection writes those back into the
-	// project once the replace has returned.
-	promotions       []pendingPromotion
-	promoted         int
-	failedPromotions []failedPromotion
-	// promotionDropped is the global half's drops the replace makes while it
-	// promotes: a promotion whose fold target leaves no room for the sources'
-	// decision links, found only at the write. ApplyReflection adds it to the
-	// global half's drops; the replace's own drops never counted it.
-	promotionDropped EmissionDrops
+	promotions          []pendingPromotion
+	promoted            int
+	failedPromotions    []failedPromotion
+	promotionDropped    EmissionDrops
 }
 
-// pendingPromotion is a cross-project candidate and the scope it inherited,
-// resolved before the replace.
 type pendingPromotion struct {
 	m     Memory
 	scope map[string]string
 }
 
-// failedPromotion is a candidate whose _global write was rolled back, kept with
-// its scope and the reason so the write-back can name both failures.
 type failedPromotion struct {
 	pendingPromotion
 	err error
@@ -4151,13 +2290,6 @@ func applyViewFromContext(ctx context.Context) (*applyView, bool) {
 }
 
 // CheckUpsertArguments is every refusal UpsertWithOptions makes from its
-// arguments alone, before it takes the lock or opens a transaction. It is the
-// SAME predicate the upsert asks first, exported so a caller that has to open a
-// project before the write — the MCP save tools — can ask it before opening
-// that project: a refused save must leave no empty project, and no checkout
-// binding, behind it. What the upsert can still refuse after this answer is nil
-// needs a row the store already holds in that project (the fold-time window
-// check), so it cannot fire on a project the caller has just opened.
 func CheckUpsertArguments(content string, tags []string, opts UpsertOptions) error {
 	if err := rejectSecretFields(secretContentAndTags(content, tags)...); err != nil {
 		return err
@@ -4171,42 +2303,25 @@ func CheckUpsertArguments(content string, tags []string, opts UpsertOptions) err
 	if _, err := boundedSourceRef(opts.Provenance.SourceRef); err != nil {
 		return err
 	}
-	// The scope is caller-supplied text printed outside the data delimiters on
-	// every listing, so it passes the same token guard as the content and is
-	// bounded at write time (scope_guard.go).
 	if err := checkScope(opts.Scope); err != nil {
 		return err
 	}
 	if _, err := boundedAgent(opts.Provenance.Agent); err != nil {
 		return err
 	}
-	// Same place, same reason, and for the same caller: a tier the vocabulary
-	// does not hold is a typo, and the refusal costs nothing and writes nothing.
-	// It has to happen before the FTS probe rather than after it, because a fold
-	// returns an existing id and writes a linked copy — a tier the fold dropped
-	// on the way would be a protection the caller was promised and did not get.
 	_, err := NormalizeRetention(opts.Retention)
 	return err
 }
 
 // UpsertWithOptions is Upsert plus provenance and/or scope.
 func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, content, source string, importance float32, tags []string, opts UpsertOptions) (id string, duplicateOf string, score float64, err error) {
-	// Before the lock, the transaction, and the FTS probe: a refused value
-	// must cost nothing and write nothing. When the upsert arrives inside a
-	// caller's transaction this error rolls that caller's work back too, which
-	// is the correct outcome — the secret is not stored, and the caller's
-	// caller is told why.
 	if err := CheckUpsertArguments(content, tags, opts); err != nil {
 		return "", "", 0, err
 	}
-	// Already judged valid by the check above; normalized here for its value.
 	retention, err := NormalizeRetention(opts.Retention)
 	if err != nil {
 		return "", "", 0, err
 	}
-	// One clock read for the whole save, so the copy this call inserts and the
-	// expiry a fold refreshes on the surviving row are the same value rather than
-	// two instants a statement apart.
 	now := time.Now()
 	expires := sessionExpiry(retention, now)
 
@@ -4216,17 +2331,6 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 		defer s.mu.Unlock()
 	}
 
-	// One write transaction covers the duplicate probe AND the writes the
-	// probe decides on. It is opened before the probe, and the DSN asks for
-	// BEGIN IMMEDIATE, so the write lock is held while the probe reads.
-	//
-	// Probing outside this transaction (issue #560) left a window between the
-	// probe and the write that any other ghost process could use: a row it
-	// strengthened in that window was overwritten by this save's arithmetic
-	// on a value read before the fact, and a row it committed in that window
-	// was invisible to the probe, so two saves of one fact became two
-	// unlinked rows. Both were cross-process races, and s.mu — a per-Store
-	// lock — cannot close either one.
 	tx := parentTx
 	ownTx := !inTx
 	var lock writeLock
@@ -4236,37 +2340,20 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 		}
 		defer tx.Rollback() //nolint:errcheck
 	}
-	// Every read and write below goes through the transaction. Note the pool
-	// must not be used here: OpenDB pins one connection per handle, so a pool
-	// query inside an open transaction on that same handle deadlocks.
 	db := sqlExecutor(tx)
 	commit := func() error {
 		if !ownTx {
 			return nil
 		}
-		// Commit only a transaction this call opened. When the upsert arrives
-		// inside a caller's transaction, committing here would end it: every
-		// later statement of the caller fails with "transaction has already
-		// been committed or rolled back", and the caller's own deferred
-		// Rollback can no longer undo the partial work.
 		if cerr := tx.Commit(); cerr != nil {
 			return fmt.Errorf("commit upsert tx: %w", cerr)
 		}
-		// The lock is free from here, so this is where the hold ends and not
-		// where this function returns: everything after the commit is
-		// bookkeeping (the onSave callback) and would be counted as time the
-		// lock was held when it was not.
 		lock.reportHold("upsert", time.Now())
 		return nil
 	}
 
 	var existingID string
 
-	// The exact-content skip, when the caller asked for it, comes before the
-	// duplicate lookups and inside the same transaction as them and as the
-	// writes they decide on (see UpsertOptions.SkipExactContent). A hit returns
-	// with nothing written: the deferred Rollback ends the transaction, and no
-	// history, evidence or onSave follows, because there is no new row.
 	if opts.SkipExactContent {
 		var present string
 		switch qerr := db.QueryRowContext(ctx, `
@@ -4279,31 +2366,7 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 		}
 	}
 
-	// Two-stage duplicate detection. Stage 1 (recall): the FTS OR-probe over
-	// the first 30 words retrieves merge candidates cheaply. Stage 2
-	// (precision): mergeScore over the full token sets confirms a true
-	// duplicate — the OR-probe alone treats a single shared word as a match,
-	// which silently swallowed unrelated saves.
 	ftsQuery := sanitizeFTSN(content, 30, s.logger)
-	// A candidate that names a shared key differently is a different fact about
-	// a different place, not a second wording of this one, so it is not a
-	// candidate at all — and "not a candidate" has to be decided before the
-	// window is cut, not after. This statement's LIMIT chooses the rows the fold
-	// is made from, so a conflicting row that spent one of the fifteen slots
-	// cost a compatible duplicate ranked just below them the fold, and a save
-	// that restated a fact already stored was written a second time, unlinked
-	// (issue #665). Stated in SQL and held to ScopesConflict by
-	// TestScopesConflictSQLAgreesWithScopesConflict, so the rule is asked once.
-	//
-	// The incoming scope is a bound parameter, not text spliced into the
-	// statement, and scopeJSONExpr names its expression twice — inside
-	// json_valid and as the value — so the predicate's two placeholders take
-	// the same argument.
-	//
-	// A save with no scope conflicts with nothing (ScopesConflict needs a key
-	// both sides name), so the predicate — a correlated subquery over two
-	// json_each scans, run once per FTS match — is only added when the save
-	// carries one. Most saves carry none.
 	incomingScope := scopeJSON(opts.Scope)
 	scopeClause := ""
 	scopeArgs := []any{}
@@ -4311,26 +2374,15 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 		scopeClause = "AND NOT " + scopesConflictSQL("m.scope", "?")
 		scopeArgs = []any{incomingScope, incomingScope}
 	}
-	// A save that may fold only into a row a reflection replace could touch
-	// (UpsertOptions.foldReplaceableOnly) never sees any other row as a
-	// candidate, in either lookup: excluded before the window is cut, for the
-	// reason the scope clause is, so the best replaceable match takes the fold
-	// and the save inserts only when there is none. Checking the winner alone
-	// inserted a second carrier whenever a protected row outranked the first.
 	if opts.foldReplaceableOnly {
 		scopeClause += " AND " + replaceableRowSQL
 	}
 	sameQuery, sameArgs := dedupLookupStatement(false, scopeClause, scopeArgs, projectID, category, ftsQuery)
 	rows, err := db.QueryContext(ctx, sameQuery, sameArgs...)
 	if err != nil {
-		// Upsert treats a failed probe as "no candidate" and inserts, so a
-		// broken statement would switch dedup off silently. Say so.
 		s.logger.Warn("upsert dedup probe failed; saving without dedup", "probe", "same-category", "err", err)
 	}
 	if err == nil {
-		// Token-free content (punctuation/single-char words only) can still
-		// FTS-match — sanitizeFTS keeps single-char words that tokenizeContent
-		// drops — and jaccard(∅,∅) scores 1.0. Never merge on empty tokens.
 		newTokens := tokenizeContent(content)
 		var bestSim float64
 		for len(newTokens) > 0 && rows.Next() {
@@ -4339,26 +2391,9 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 				continue
 			}
 			candTokens := tokenizeContent(candContent)
-			// The Jaccard bar above is a similarity test, and a similar text
-			// can state the opposite ("always deploy staging" / "never deploy
-			// staging"). The default fold keeps the caller's wording, so the
-			// incoming text survives either way; FoldOnly drops it, so it may
-			// only fold into a row whose text is equivalent — see
-			// foldOnlyEquivalent. Scoped to FoldOnly so the default fold keeps
-			// recording ordinary near-duplicate links.
 			if opts.FoldOnly && !foldOnlyEquivalent(content, candContent) {
 				continue
 			}
-			// A similar text that swaps a value of the fact — a version, a
-			// path, an identifier, a number — is the claim's replacement, not a
-			// second wording of it. Folding it linked the replacement to the
-			// claim it replaces as a 'duplicate' and strengthened the stale row
-			// (see statesDifferentValue). Skipped rather than ending the scan,
-			// so a compatible candidate ranked below it can still take the fold.
-			// A note saying the candidate's subject is gone (retires) is not a
-			// second wording of it either, and it holds no value the candidate
-			// lacks, so the value guard alone folded it into the claim it
-			// retires and strengthened that claim.
 			if statesDifferentValue(content, candContent) || retires(content, candContent) {
 				continue
 			}
@@ -4375,41 +2410,6 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 		score = bestSim
 	}
 
-	// Cross-category probe — runs ONLY when the same-category probe above
-	// missed (existingID == ""), so a save that folds within its own category
-	// pays nothing extra. One FTS query with category != surfaces
-	// other-category candidates; precision then requires token Jaccard >=
-	// upsertCrossCategoryThreshold (0.7) — stricter than the same-category
-	// mergeScore gate, because cross-category vocabulary overlap is common
-	// and near-identical wording is the only reliable duplicate signal. The
-	// fold target's category is never touched (see the fold path below): the
-	// existing memory — possibly pinned/canonical — keeps its category, and
-	// the linked copy inserted by the fold carries the incoming category.
-	// Resolved records and the targets of active 'supersedes' edges are
-	// excluded here so a re-save can never fold into a dead memory; the
-	// same-category probe predates those exclusions and keeps its behaviour
-	// deliberately, because a default upsert that re-saves the text of a
-	// resolved memory is supposed to strengthen it and leave it resolved
-	// (TestUnresolveOnWrite). FoldOnly cannot afford that: it strengthens the
-	// row and then returns WITHOUT inserting the incoming wording, so folding
-	// into a dead row would leave a promotion that reports success while the
-	// memory is in neither _global nor anywhere it is read from. Its target is
-	// therefore re-verified inside the write transaction below and the
-	// insertion is taken instead when the probe named a dead row.
-	//
-	// The exclusion is scoped, for the reason foldTargetStillLive gives in full:
-	// an edge whose endpoints name different environments asserts no
-	// replacement, and excluding the row anyway would make every re-save of it
-	// insert a duplicate. The check is inside the statement because this
-	// statement's LIMIT chooses the candidates — filtering after it would spend
-	// the budget on rows no fold may use.
-	//
-	// The candidate's own scope is excluded the same way, and for the same
-	// reason: near-identical wording across environments scores high whatever
-	// the category, so scope is the only thing that separates these
-	// candidates, and a conflicting row that reached the window ahead of a
-	// compatible duplicate cost that duplicate the fold (issue #665). Only rows
-	// a fold may use are counted against the fifteen.
 	if existingID == "" {
 		crossQuery, crossArgs := dedupLookupStatement(true, scopeClause, scopeArgs, projectID, category, ftsQuery)
 		crossRows, crossErr := db.QueryContext(ctx, crossQuery, crossArgs...)
@@ -4417,8 +2417,6 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 			s.logger.Warn("upsert dedup probe failed; saving without dedup", "probe", "cross-category", "err", crossErr)
 		}
 		if crossErr == nil {
-			// Same empty-token guard as the same-category probe: token-free
-			// content can still FTS-match, and jaccard(∅,∅) scores 1.0.
 			newTokens := tokenizeContent(content)
 			var bestJaccard float64
 			for len(newTokens) > 0 && crossRows.Next() {
@@ -4427,21 +2425,9 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 					continue
 				}
 				candTokens := tokenizeContent(candContent)
-				// The same contradiction guard the same-category probe uses, for
-				// the same reason. This probe runs whenever the same-category one
-				// misses, so a FoldOnly promotion whose candidate happens to
-				// differ in category would otherwise fold into a contradicting
-				// row: "port 80" as a fact and "port 81" as a gotcha clear the
-				// 0.7 bar easily, and the fold would strengthen one and drop the
-				// other. Scoped to FoldOnly for the same reason as before — the
-				// default fold keeps the caller's wording either way.
 				if opts.FoldOnly && !foldOnlyEquivalent(content, candContent) {
 					continue
 				}
-				// And the same value guard, for the default fold: "port 80" as a
-				// fact and "port 81" as a gotcha clear the 0.7 bar too, and a fold
-				// would strengthen the old value and link the new one to it. A
-				// retirement of the candidate is refused the same way.
 				if statesDifferentValue(content, candContent) || retires(content, candContent) {
 					continue
 				}
@@ -4459,44 +2445,13 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 				score = bestJaccard
 			}
 		}
-		// A failed cross probe falls through to the no-match insert below —
-		// same failure semantics as the same-category probe (a broken probe
-		// must never block a save).
 	}
 
 	tagsJSON, _ := json.Marshal(tags)
 
 	if existingID != "" {
-		// Found a match (same-category or cross-category probe) — strengthen
-		// the existing row, then insert the new content as its own row and
-		// link it back as a 'duplicate'. Never overwrite existingContent or
-		// the existing row's category: that silently discarded content for
-		// source='manual' targets while still reporting a merge, and would
-		// recategorize a pinned/canonical fold target. The inserted copy
-		// carries the incoming category unchanged.
-		//
-		// The UPDATE (strengthen), INSERT (new row), and INSERT (link) all run
-		// in the transaction opened above, so a failure partway through cannot
-		// leave the new memory row orphaned: unlinked, un-embedded (onSave
-		// never fires), and invisible.
 
 		if opts.FoldOnly {
-			// Re-verify the chosen target before folding into it, and take the
-			// insert path instead when the probe named a row that is not a fold
-			// target. The cross-category probe already excludes resolved and
-			// superseded rows, but the same-category probe deliberately does not
-			// (a re-save of resolved text is meant to strengthen it and leave it
-			// resolved — TestUnresolveOnWrite), so a FoldOnly save can still be
-			// handed a dead target.
-			//
-			// This is a statement about the row the probe named, not a race
-			// guard: the probe ran in this same transaction, which has held the
-			// write lock since before it, so nothing can have changed in
-			// between. Before the probe moved inside the transaction it was
-			// explicitly not a race guard either — a concurrent process could
-			// insert the same fact between probe and write, leaving one
-			// redundant row, never a lost one (issue #560 closed that window by
-			// moving the probe in).
 			live, liveErr := foldTargetStillLive(ctx, tx, projectID, existingID)
 			if liveErr != nil {
 				return "", "", 0, fmt.Errorf("re-verify fold target: %w", liveErr)
@@ -4507,40 +2462,6 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 		}
 
 		if existingID != "" {
-			// The increment is added in SQL, against the value the row holds
-			// when this statement runs, and not computed from an importance
-			// read earlier: with the read outside the write transaction, any
-			// save that strengthened this row in between was silently
-			// overwritten (issue #560). MIN(1.0, …) is the same cap the Go
-			// arithmetic applied.
-			//
-			// The caller's claim rides along to the target, for the reason pin
-			// does: the target is the row that keeps being retrieved and the one a
-			// later consolidation absorbs, so a save of near-identical text
-			// carrying valid_until that reached only the copy just inserted would
-			// report success and leave the row search returns with no window at
-			// all. COALESCE, as in the update path, so a save that says nothing
-			// about the window leaves whatever the target already holds — a fold
-			// re-states a fact, and re-stating it is not a retraction of a
-			// boundary somebody else recorded.
-			//
-			// agent and source_ref take the same COALESCE(NULLIF(?, ''), …) form
-			// for the same reason: an empty value means "the caller said nothing",
-			// and a detectable harness on this save is no evidence against the
-			// author of the row being folded into.
-			//
-			// Merging a stated boundary onto the target's other one makes this the
-			// second writer that can produce a window out of two halves stated
-			// independently, so it is judged the same way UpdateMemoryWithOptions
-			// judges it and for the same reason: the read is inside the transaction
-			// that already holds the write lock, so the pair is the target's window
-			// at the moment the merge lands. Before this COALESCE the target kept
-			// its own consistent pair and a contradictory claim stayed on the copy
-			// this save inserts; readValidity tests expiry first, so the merged row
-			// would read as `future` and then `expired` and drop out of ranked
-			// retrieval with no error anywhere. Gated on the caller stating a
-			// boundary, for the update path's reason: a fold that says nothing about
-			// the window cannot make it inconsistent.
 			if opts.Validity.ValidFrom != nil || opts.Validity.ValidUntil != nil {
 				var targetFrom, targetUntil sql.NullString
 				readErr := tx.QueryRowContext(ctx,
@@ -4557,13 +2478,6 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 					return "", "", 0, orderErr
 				}
 			}
-			// The reference the caller stated is written onto the fold target, and
-			// the target may be a decision's companion: the link it carries is
-			// what finds that decision's companion memory and it is Ghost's to
-			// manage, so it is kept beside the caller's reference rather than
-			// replaced by it. A save that folded onto the companion and carried
-			// its own reference dropped the link, and the decision was left with
-			// no companion at all.
 			targetSourceRef := opts.Provenance.SourceRef
 			if targetSourceRef != "" {
 				var targetRef sql.NullString
@@ -4599,12 +2513,6 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 			if updateErr != nil {
 				return "", "", 0, fmt.Errorf("strengthen memory: %w", updateErr)
 			}
-			// A target that this transaction's own re-check did not clear can
-			// still report zero rows affected if it was deleted or moved by an
-			// earlier statement in the same transaction. Reporting that as a
-			// successful fold would count a promotion that stored nothing, so
-			// it is a check on the statement's own report rather than a race
-			// guard: no other writer can run between the two.
 			affected, affectedErr := res.RowsAffected()
 			if affectedErr != nil {
 				return "", "", 0, fmt.Errorf("strengthen memory rows: %w", affectedErr)
@@ -4612,18 +2520,6 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 			if affected == 0 {
 				return "", "", 0, fmt.Errorf("fold target %s disappeared during the update", RefusalArg("memory_id", existingID))
 			}
-			// The fold is a write to the target — it raises its importance and
-			// access count — so it gets its own history entry, attributed to the
-			// agent whose save did the folding rather than to whoever wrote the
-			// row first.
-			//
-			// FoldOnly additionally records the incoming wording, because that is
-			// the one path that throws it away: the ordinary fold stores the new
-			// text as a linked copy of its own (so it is already in the history,
-			// under its own id), while a FoldOnly fold returns the target and
-			// stores nothing. Without this the only record of a promotion's
-			// discarded paraphrase was the database itself, before this table
-			// existed.
 			if opts.FoldOnly {
 				err := appendHistoryEventsTx(ctx, tx, []historyEvent{{
 					phase:         phaseMerge,
@@ -4636,47 +2532,18 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 			} else if err := appendHistoryTx(ctx, tx, existingID, phaseMerge, opts.Provenance); err != nil {
 				return "", "", 0, err
 			}
-			// A second REPORT of the same fact, which is not the same thing as a
-			// second memory: the survivor is the row the corpus keeps, so the
-			// evidence the fold was about has to land on it. Before this the folding
-			// agent and session went with the incoming wording, and the store could
-			// say who wrote a memory first but never that a second agent later
-			// agreed with it.
-			//
-			// Appended for FoldOnly too, and that path needs it more: it stores no
-			// row of its own, so without this the report would leave no trace.
 			if err := appendEvidenceTx(ctx, tx, existingID, evidenceObserved, opts.Provenance, false); err != nil {
 				return "", "", 0, err
 			}
-			// And the same for a VERIFICATION this call stated, on the same
-			// survivor and for the same reason: the copy that fold inserted may be
-			// the row a reader never sees, while this one is what the corpus keeps
-			// and what a later consolidation absorbs. Gated on what the CALLER
-			// stated, never on what the row now holds — the target may already be
-			// verified from an earlier save, and re-recording that would inflate
-			// EvidenceCounts.Verified for a check nobody repeated.
 			if err := appendVerificationIfStatedTx(ctx, tx, existingID, opts.Provenance, opts.Validity.VerifiedAt); err != nil {
 				return "", "", 0, err
 			}
 		}
 
 		if opts.FoldOnly && existingID != "" {
-			// The caller does not want the incoming wording stored — a
-			// promotion whose fact _global already knows. The strengthen above
-			// is still the right outcome: the duplicate is evidence the fact
-			// keeps recurring, and throwing that away would make promotion
-			// lose the signal. Only the UPDATE is wanted.
-			//
-			// A Pin still has to land here: this path stores no row of its own,
-			// so the target is the only thing the request can mean, and a fold
-			// that reported success without it would leave the memory the
-			// caller asked to protect fully consolidatable.
 			if err = s.pinMemoryTx(ctx, tx, existingID, opts.Pin); err != nil {
 				return "", "", 0, err
 			}
-			// The tier reaches the target here for the same reason the pin does:
-			// this path stores no row of its own, so the target is the only thing
-			// the request can mean.
 			if _, err = raiseRetentionTx(ctx, tx, existingID, retention, now); err != nil {
 				return "", "", 0, err
 			}
@@ -4704,46 +2571,20 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 		if err := appendHistoryTx(ctx, tx, id, phaseSave, opts.Provenance); err != nil {
 			return "", "", 0, err
 		}
-		// Evidence for the row just inserted, in the same transaction. The stored
-		// copy carries its own observation even on a fold, because it is a row of
-		// its own with its own text; the fold's SECOND report is the one that goes on
-		// the survivor above.
 		if err := appendEvidenceTx(ctx, tx, id, evidenceObserved, opts.Provenance, false); err != nil {
 			return "", "", 0, err
 		}
-		// And its own verification, for the same reason the observation is its own:
-		// this row's verified_at column says somebody checked the text on this row,
-		// and a record that counted only the survivor's would leave the two
-		// disagreeing about whether THIS memory was checked.
 		if err := appendVerificationIfStatedTx(ctx, tx, id, opts.Provenance, opts.Validity.VerifiedAt); err != nil {
 			return "", "", 0, err
 		}
 
-		// The row this save folded into is the one a later consolidation can
-		// absorb — it is the text the corpus already holds, and the copy inserted
-		// above is only linked to it — so Pin has to reach it too. Same
-		// transaction as the strengthen and the link, or a failure here would
-		// report a successful save whose request was silently dropped.
 		if err = s.pinMemoryTx(ctx, tx, existingID, opts.Pin); err != nil {
 			return "", "", 0, err
 		}
-		// And the tier, for the reason raiseRetentionTx gives: the row a fold
-		// strengthens is the one the corpus keeps, so a tier the caller asked
-		// for has to land there rather than only on the copy inserted above.
-		// Same transaction as the strengthen and the link, or a failure here
-		// would report a save whose request was silently dropped.
 		if _, err = raiseRetentionTx(ctx, tx, existingID, retention, now); err != nil {
 			return "", "", 0, err
 		}
 
-		// CreateLink takes s.mu itself — calling it here would deadlock, since
-		// Upsert already holds the lock for its entire body. Inline the same
-		// upsert-link SQL directly instead. Direction is fixed (source_id=new,
-		// target_id=existing), not normalized like symmetric relations.
-		//
-		// No link when the fold target was cleared above: the row that was
-		// re-verified as dead is not a duplicate of anything worth linking to,
-		// and the insert would fail the foreign key on an empty id.
 		if existingID != "" {
 			if _, err = tx.ExecContext(ctx, `
 				INSERT INTO memory_links (source_id, target_id, relation, strength, source)
@@ -4766,9 +2607,6 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 		return id, existingID, score, nil
 	}
 
-	// No match — create new, in the same transaction as the probe that found
-	// nothing: a save that decides to create must not be interleaved with
-	// another writer between that decision and the row.
 	if err = db.QueryRowContext(ctx, `
 		INSERT INTO memories (project_id, category, content, source, importance, tags,
 		                      agent, session_id, source_ref, confidence, scope, pinned,
@@ -4790,9 +2628,6 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 	if err := appendEvidenceTx(ctx, tx, id, evidenceObserved, opts.Provenance, false); err != nil {
 		return "", "", 0, err
 	}
-	// A save that verified the fact it is storing leaves a record of the check as
-	// well as the column: a fresh row's verified_at is written by the INSERT above,
-	// and the table is where a reader counts checks.
 	if err := appendVerificationIfStatedTx(ctx, tx, id, opts.Provenance, opts.Validity.VerifiedAt); err != nil {
 		return "", "", 0, err
 	}
@@ -4806,46 +2641,9 @@ func (s *Store) UpsertWithOptions(ctx context.Context, projectID, category, cont
 }
 
 // DecayRankingSQL is the composite-score ranking expression shared by
-// GetTopMemories below and the session-start hook's own read-only query
-// (internal/mcpinit/hook.go's loadSessionContext) — a single source of truth
-// for the category-aware time-decay + pinned-exemption formula so the two
-// callers can never drift apart. It is a fragment, not a full query: callers
-// interpolate it into their own "ORDER BY (...) DESC" clause.
-// The 0.15 and 0.3 floors create a dead zone at the low end of each decaying
-// category: a brand-new memory saved at importance 0.15 (or 0.3) scores
-// identically to a maximally-important, fully-decayed one of the same
-// category (1.0 * 0.15 == 0.15 * 1.0). Accepted — importance that low is rare
-// in practice (defaults are 0.5+) — but if ranking ever looks off for a
-// low-importance category member, this tie is why.
-// Pinned is a full decay exemption (factor 1.0), not a multiplier on top of
-// the decayed/floored score — a pinned memory always scores at its raw
-// importance regardless of age or category. preference and convention never
-// decay; a fact never decays unless its content carries a calendar date, in
-// which case it decays on the pattern/architecture curve. The tier factor is the
-// one that has to multiply rather than stand in, because a session row decays by
-// its category AND by how long it is wanted.
-//
-// A var, not a const, because the tier half is built from the Go constants that
-// define its floor — see retentionDecayFactorSQL. Every reader interpolates it
-// into its own ORDER BY, so the two spellings cannot disagree.
 var DecayRankingSQL = decayRankingSQL(true)
 
 // DecayRankingSQLWithTier is the same expression with or without the tier half,
-// for a reader that may not be able to name memories.retention. The
-// session-start loaders hold a read-only handle that runs no migration
-// (memory.OpenReadDB), so on a store from before schema v19 the column is not
-// there and naming it fails the whole query with SQLite's "no such column" —
-// which a passive read takes as no rows, so a user whose first session after the
-// upgrade starts the hook would get a digest with no memories and nothing saying
-// why. That is the same window memories.scope has always had, and the remedy is
-// the same shape: the expression a reader cannot afford to fail on drops the half
-// it cannot spell. passiveColumnsFor picks which half, and it is the only place
-// that does — a second version floor in a caller is a second answer to "which
-// columns does this store have".
-//
-// One template, so the category half cannot drift from DecayRankingSQL — a second
-// hand-copied expression is the failure mode DecayFactor's parity test exists to
-// prevent, and this is the same formula by another route.
 func DecayRankingSQLWithTier(hasTier bool) string {
 	return decayRankingSQL(hasTier)
 }
@@ -4871,7 +2669,6 @@ func decayRankingSQL(hasTier bool) string {
 }
 
 // GetTopMemories returns the top N memories ranked by composite score
-// with category-aware time decay and pinned exemption.
 func (s *Store) GetTopMemories(ctx context.Context, projectID string, limit int) ([]Memory, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -4893,21 +2690,11 @@ func (s *Store) GetTopMemories(ctx context.Context, projectID string, limit int)
 		return nil, err
 	}
 
-	// Supersede demote runs whenever the window has a pair to reorder —
-	// membership-preserving, same helper the search path uses — so a
-	// superseded memory cannot outrank its replacement in injection even
-	// when the result fits under limit (order alone still matters).
 	if len(results) >= 2 {
 		ids := make([]string, len(results))
 		supersedeProtected := make(map[string]bool, len(results))
 		for i, m := range results {
 			ids[i] = m.ID
-			// The KEEP-FOREVER tier only — a `supersedes` edge says the target's
-			// claim was replaced, and a pin keeps a row visible rather than
-			// declaring it current, so a pinned superseded target sinks exactly as
-			// it did before tiers existed. Same rule as the search path's
-			// demoteSuperseded, and unlike the near-duplicate map below, whose
-			// pin half predates tiers and is described there.
 			supersedeProtected[m.ID] = RetentionExempt(m)
 		}
 		penalty, err := SupersedePenalties(ctx, s.queryDB(), ids, supersedeProtected)
@@ -4919,24 +2706,11 @@ func (s *Store) GetTopMemories(ctx context.Context, projectID string, limit int)
 	}
 	if len(results) > limit {
 		ids := make([]string, len(results))
-		// A protection map, not a pin list (see DemotionPenalties): this is the
-		// session-start injection read, so a keep-forever memory that is the
-		// lower-ranked member of a near-duplicate pair would be cut out of the
-		// very block the tier exists to keep it in. Unlike the supersede
-		// protection above, THIS map still carries a plain pin: sparing a pinned
-		// row from the near-duplicate demotion is what DemotionPenalties did
-		// before tiers existed, and the tier only extends that standing rule to
-		// keep-forever rows.
 		protected := make(map[string]bool, len(results))
 		for i, m := range results {
 			ids[i] = m.ID
 			protected[m.ID] = m.Pinned || RetentionExempt(m)
 		}
-		// DemotionPenalties' edge read, then the lexical replacement exemption
-		// every demotion reader applies (exemptReplacementPairs): without it a
-		// cosine edge between a claim and its replacement sank the replacement,
-		// and the cut below then dropped it from the list while the claim it
-		// replaced stayed. A failed exemption read demotes as before.
 		pairs, err := nearDuplicatePenaltyRows(ctx, s.queryDB(), ids, protected, s.demotionThreshold)
 		if err != nil {
 			s.logger.Debug("get top memories: demotion lookup failed", "error", err)
@@ -4954,10 +2728,6 @@ func (s *Store) GetTopMemories(ctx context.Context, projectID string, limit int)
 }
 
 // SearchFTS searches memories using full-text search. It returns every match in
-// the window, an expired row included: the browse surfaces show a row outside
-// its window MARKED, not withheld, so this reader must not filter. The query
-// path calls searchFTSValidating directly, which applies the window predicate
-// before the LIMIT (#1053); the two share one statement so they cannot drift.
 func (s *Store) SearchFTS(ctx context.Context, projectID, query string, limit int) ([]Memory, error) {
 	memories, err := s.searchFTSValidating(ctx, projectID, query, limit, time.Time{}, false)
 	if err != nil {
@@ -4981,23 +2751,6 @@ func (s *Store) SearchFTSAll(ctx context.Context, query string, limit int) ([]Me
 	return memories, nil
 }
 
-// searchFTSValidating is the one full-text statement SearchFTS, SearchFTSAll and
-// the query path's keyword leg run. A non-zero now applies the validity window
-// predicate in SQL, BEFORE the LIMIT; a zero now — the browse wrappers — is the
-// same statement without it. The statement is ftsSearchStatement, which reads
-// the project's and _global's FTS buckets alone (schema v28).
-//
-// Why before the LIMIT is the whole point of #1053: the LIMIT picks which rows
-// the leg ever sees, and stage 2 withholds an out-of-window row afterwards. With
-// the predicate applied after the cut, expired rows fill the leg's depth and a
-// valid match ranked below it is never fetched, so a small window reports nothing
-// while a match exists. docs/architecture.md states the rule: filters precede
-// window closure.
-//
-// The predicate is a SUPERSET of Go's ValidityState (see validityMatchesSQLFor):
-// it may admit a row stage 2 then drops — that costs one slot, never a valid row.
-// The columns are already named by memoryColumnsPrefixed, so a store that can run
-// SearchFTS at all has them; there is nothing to gate on.
 func (s *Store) searchFTSValidating(ctx context.Context, projectID, query string, limit int, now time.Time, allProjects bool) ([]Memory, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -5053,28 +2806,6 @@ func (s *Store) GetAll(ctx context.Context, projectID string, limit int) ([]Memo
 }
 
 // ListMemories returns a project's memories for browsing, narrowed by the two
-// row-level filters a caller can state and left open for everything else. An
-// empty category or retention is no filter on that axis.
-//
-// It is one query rather than GetAll followed by a filter, for the same reason
-// the assembler's predicates run before the window closes: a filter applied to
-// the result spends the LIMIT on rows the caller cannot use and then reports the
-// ones it wanted as absent. The tier predicate is bound, never interpolated, and
-// the vocabulary is checked here rather than trusted — a browse surface that
-// silently ignored a value it did not recognise would answer a mistyped filter
-// with the whole corpus.
-//
-// The SCOPE is the project's own rows alone, which is what the unfiltered browse
-// has always answered: a caller asking "what does this project know" is asking
-// about the project. A filtered browse also brings the `_global` rows, which is
-// what the category filter has always done and what makes a tier filter useful on
-// a keep-forever rule the user wrote once for every repository. That asymmetry is
-// inherited from the two readers this replaces (GetAll and GetByCategory
-// disagreed about it) and is kept rather than tidied, because the wider reading
-// applied to the DEFAULT answer is a behaviour change nobody asked for: a project
-// with no memories of its own would come back holding the per-install builtin
-// seeds, and the "no memories yet" answer a caller reads as a measurement would
-// become unreachable.
 func (s *Store) ListMemories(ctx context.Context, projectID, category, retention string, limit int) ([]Memory, error) {
 	if category != "" && !IsValidCategory(category) {
 		return nil, fmt.Errorf("invalid category %s — must be one of %s", RefusalArg("category", category), categoryList())
@@ -5087,9 +2818,6 @@ func (s *Store) ListMemories(ctx context.Context, projectID, category, retention
 
 	scope := "project_id = ?"
 	if category != "" || retention != "" {
-		// A filtered browse keeps the wider scope the category filter has always
-		// had. See the method comment: this is inherited, not chosen, and it is
-		// deliberately NOT applied to the unfiltered default.
 		scope = "(project_id = ? OR project_id = '_global')"
 	}
 	query := `
@@ -5117,21 +2845,11 @@ func (s *Store) ListMemories(ctx context.Context, projectID, category, retention
 	return scanMemories(rows)
 }
 
-// categoryList is the category vocabulary in schema order, for the refusal
-// ListMemories names. The map cannot be ranged in that order, which is why this
-// is a list rather than a join over the map's keys.
 func categoryList() string {
 	return "architecture, decision, pattern, convention, gotcha, dependency, preference, fact"
 }
 
 // Touch increments access_count and updates last_accessed.
-//
-// It is guarded like every other write (#746), so an access counter is never the
-// one field an old server keeps bumping in a store a newer Ghost owns. It has no
-// production caller today — the search paths that would have used it do not touch
-// access_count — and that is the reason it is worth saying out loud: an
-// unreferenced method is exactly the kind of thing that gets wired up on a read
-// path later, where a refusal would turn a search into an error.
 func (s *Store) Touch(ctx context.Context, ids []string) error {
 	if len(ids) == 0 {
 		return nil
@@ -5158,11 +2876,6 @@ func (s *Store) Touch(ctx context.Context, ids []string) error {
 }
 
 // ResolveCandidates returns the project's memories that are eligible for
-// resolution classification: not yet resolved, not pinned, and not in a
-// standing-preference category (convention/preference are never evictable —
-// see the guardrail in the resolution-classifier spec §4). Globals are
-// excluded by the project_id filter. Newest first, so a batch reviews the most
-// recent work first.
 func (s *Store) ResolveCandidates(ctx context.Context, projectID string) ([]Memory, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -5185,13 +2898,6 @@ func (s *Store) ResolveCandidates(ctx context.Context, projectID string) ([]Memo
 }
 
 // ResolvedCandidates returns the project's memories resolve has ALREADY
-// stamped resolved_at, in ResolveCandidates' eligibility shape with the
-// resolved_at predicate inverted: not pinned, and not in a standing-preference
-// category. Those two exclusions are load-bearing for the repair path
-// (internal/resolve.Reassess, issue #640) — a pin is an explicit user override
-// and an exempt category is never resolve's to change — and Newest first, so
-// the report reads like the ordinary pass. Globals are excluded by the
-// project_id filter.
 func (s *Store) ResolvedCandidates(ctx context.Context, projectID string) ([]Memory, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -5214,29 +2920,6 @@ func (s *Store) ResolvedCandidates(ctx context.Context, projectID string) ([]Mem
 }
 
 // ClearResolved clears resolved_at on the given memory IDs, returning them to
-// ranked injection and browse while leaving them searchable — the inverse of
-// SetResolved, used by `ghost resolve --reassess` to repair a resolution that
-// should not have been made (issue #640). The WHERE clause re-checks the same
-// guard as SetResolved (already resolved, unpinned) and binds project_id, so a
-// stale or wrong-project caller cannot resurrect another project's rows.
-// Returns the count actually cleared, which callers should report instead of
-// len(ids). A no-op on an empty slice.
-//
-// All batches run in ONE transaction, unlike SetResolved's independent ones: a
-// repair is reported as a single outcome, and a caller that treats an error as
-// "nothing happened" must be able to trust that. Half a repair reported as a
-// failure is the same class of harm as a false repair, so the rollback is the
-// behaviour, not a nicety.
-//
-// updated_at is deliberately untouched: nothing about the memory's content or
-// authorship changed, only resolve's verdict about it, and bumping freshness
-// would perturb the reflect signature and decay ranking for every repaired note.
-//
-// The transaction also records one history row per row it changed, so both
-// verdicts stay readable: a memory stamped resolved by one pass and cleared by a
-// later --reassess says so. The ids are read inside the transaction, which has
-// held the write lock since its first statement, so the set a row is recorded
-// for is exactly the set the UPDATE changed.
 func (s *Store) ClearResolved(ctx context.Context, projectID string, ids []string) (int, error) {
 	if len(ids) == 0 {
 		return 0, nil
@@ -5301,32 +2984,9 @@ func (s *Store) ClearResolved(ctx context.Context, projectID string, ids []strin
 	return total, nil
 }
 
-// setResolvedBatchSize bounds how many IDs go into a single IN (...) clause
-// per SetResolved call, well under SQLite's SQLITE_MAX_VARIABLE_NUMBER
-// (32766 on modern builds) so an unusually large batch can't hit that limit.
 const setResolvedBatchSize = 500
 
-// The statements SetResolved, SetResolvedJudged and MarkResolved issue, written
-// once so the three writers cannot drift apart on the guard that decides what
-// resolve is allowed to stamp. They differ in the id-or-pair list they bind —
-// and, for the judged form, in whether an id is paired with the content the
-// verdict was judged against — and in nothing else, which is the point: the
-// ordinary pass, a freshness-checked pass and an operator's named mark are the
-// same decision about the same row, so the row must reach the same answer
-// whichever door it came through.
 const (
-	// setResolvedGuardSQL is the write-time eligibility predicate every resolve
-	// writer carries, as ONE string rather than a predicate copied into each
-	// statement: resolve's eligibility is one decision, and a protection asked by
-	// only some of the writers is lost the moment they disagree — the same reason
-	// retentionExemptSQL is shared. The project predicate is the `?` bound to
-	// projectID when there is one (SetResolved and SetResolvedJudged pass "");
-	// SQLite treats `project_id = ''` as false against every real id, which is how
-	// one statement serves a caller that has no project to bind and one that must
-	// not reach outside its own. It is eligibility and NOT the judged CAS:
-	// scope freshness lives in the `(id, content, project_id)` triple the judged
-	// statements carry, because a promoted row must be REPORTED stale (eligible,
-	// no longer the row the verdict was about) rather than skipped in silence.
 	setResolvedGuardSQL = `
 		  AND project_id != ''
 		  AND (? = '' OR project_id = ?)
@@ -5334,80 +2994,32 @@ const (
 		  AND pinned = 0
 		  AND category NOT IN ('convention', 'preference')
 		  AND ` + retentionExemptSQL
-	// setResolvedSelectSQL reads the ids an UPDATE is about to change, inside
-	// the transaction that will change them.
 	setResolvedSelectSQL = `
 		SELECT id FROM memories
 		WHERE id IN (%s)
 		` + setResolvedGuardSQL
-	// setResolvedUpdateSQL stamps the row and drops its KEEP cache in ONE
-	// statement, so no reader can observe a resolved row still holding a
-	// verdict the next pass would honour.
 	setResolvedUpdateSQL = `
 		UPDATE memories SET resolved_at = datetime('now'), resolve_kept_hash = ''
 		WHERE id IN (%s)
 		` + setResolvedGuardSQL
-	// setResolvedJudgedSelectSQL reads the eligible ids whose identity STILL
-	// equals what the verdict was judged against — row-value `(id, content,
-	// project_id) IN (VALUES ...)`, one `(?,?,?)` per memory. It is what tells a
-	// row a concurrent write rewrote apart from one that never matched the
-	// verdict: both are eligible and neither is stamped, but only the changed one
-	// is reported as stale, and the difference between this read and
-	// setResolvedSelectSQL's eligible set is exactly that.
-	//
-	// The triple covers TWO axes, because a verdict is scoped to both. Content
-	// is one: the classifier is handed content and decides about content — the
-	// KEEP cache is content-keyed for the same reason — so a metadata-only edit
-	// does not invalidate a verdict, and two writes inside one clock second
-	// cannot make updated_at unable to tell a rewrite from the write that saved
-	// the judged text. Project is the other: PromoteToGlobal moves a row by
-	// changing `project_id` ONLY, so a content match alone would keep a verdict
-	// alive over a row the pass's project no longer owns. The candidate was read
-	// under one project, and stamping it after it left that project is a
-	// project-scoped pass deciding for `_global` — the MarkResolved rule.
 	setResolvedJudgedSelectSQL = `
 		SELECT id FROM memories
 		WHERE (id, content, project_id) IN (VALUES %s)
 		` + setResolvedGuardSQL
-	// setResolvedJudgedUpdateSQL is setResolvedUpdateSQL with the same
-	// freshness in its WHERE clause, so the stamp is refused by the STATEMENT
-	// that would write it and not only by the read above it — a protection asked
-	// at only one of them is lost the moment the two disagree, which is the rule
-	// setResolvedGuardSQL states for retention. The CAS is the verdict's own
-	// freshness, over TWO axes: the row is stamped only when it still holds the
-	// EXACT content the classifier judged AND still sits in the project the pass
-	// read it under.
 	setResolvedJudgedUpdateSQL = `
 		UPDATE memories SET resolved_at = datetime('now'), resolve_kept_hash = ''
 		WHERE (id, content, project_id) IN (VALUES %s)
 		` + setResolvedGuardSQL
 )
 
-// judgedRow is the read-time identity of one judged candidate, and it has two
-// fields because a verdict is scoped to two things: the content the classifier
-// was actually handed, and the project the row sat in when the pass read it. The
-// write compares BOTH (see setResolvedJudgedSelectSQL), so a concurrent edit
-// invalidates the first and a concurrent PromoteToGlobal the second.
 type judgedRow struct {
 	content string
 	project string
 }
 
 // ResolveJustification is the deterministic signal a resolve pass read, before
-// its classify call, as the reason to demote one row without asking the
-// classifier (#1389). The stamp is only as good as that signal, and the signal
-// can be withdrawn in the window: a supersedes edge invalidated, a correction
-// memory deleted or rewritten. A row is stamped only while AT LEAST ONE of its
-// signals still holds at write time, checked inside the stamping transaction.
-// The zero value justifies nothing and means "no signal to re-check", which is
-// how a classifier verdict is written: that verdict's own freshness is the
-// content and project CAS.
 type ResolveJustification struct {
-	// EdgeSources are the sources of the live 'supersedes'/'llm' edges that
-	// pointed at the row when the pass read them.
 	EdgeSources []string
-	// Corrections are the correction memories that paired the row, as read: a
-	// pairing holds only while the correction still exists with that content.
 	Corrections []Memory
 }
 
@@ -5415,10 +3027,6 @@ func (j ResolveJustification) empty() bool {
 	return len(j.EdgeSources) == 0 && len(j.Corrections) == 0
 }
 
-// resolveJustificationHoldsTx reports whether any signal in j still holds for
-// the target, read inside the stamping transaction. A supersedes edge holds
-// while it is live; a correction holds while its row still has the content the
-// pass paired against.
 func resolveJustificationHoldsTx(ctx context.Context, tx *sql.Tx, target string, j ResolveJustification) (bool, error) {
 	for _, src := range j.EdgeSources {
 		var one int
@@ -5446,32 +3054,6 @@ func resolveJustificationHoldsTx(ctx context.Context, tx *sql.Tx, target string,
 	return false, nil
 }
 
-// setResolvedStampTx is the shared body of the resolve writers: one transaction,
-// batches of setResolvedBatchSize, and one history row per row the UPDATE
-// actually changed. It returns the ids it stamped and the ids it found STALE,
-// which is what a caller that has to report per-row outcomes needs, and len() of
-// the first is the count the older caller returns. An error returns NO ids and
-// NO stale rows, because an error here is always a rollback of everything this
-// call wrote.
-//
-// projectID empty means the caller's ids are already project-scoped by the
-// selection it made — which is the ordinary pass's position, since it read
-// ResolveCandidates for one project — and is deliberately not "any project":
-// binding the project here costs one compared parameter and makes the guard the
-// same statement as the projection, so a caller cannot forget it.
-//
-// judged nil is the freshness-blind write SetResolved and MarkResolved make. A
-// non-nil judged map turns on the identity CAS (#1052): each id is stamped only
-// when the row still holds judged[id] — the exact content the verdict was judged
-// against, in the project it was read under. An eligible row whose content
-// differs is NOT stamped and is returned as stale, because the verdict was about
-// text the row no longer holds and stamping it would hide the new text on a
-// judgement about the old one; a row promoted to _global mid-pass is stale for
-// the same reason — the verdict was scoped to a project that row has left. A row
-// that is ineligible for any other reason (pinned, recategorized, already
-// resolved, retention-exempt) is neither stamped nor stale, exactly as before:
-// "no longer eligible" and "changed since judged" are different states and only
-// the second is this writer's to report.
 func (s *Store) setResolvedStampTx(ctx context.Context, ids []string, projectID string, prov Provenance, judged map[string]judgedRow, why map[string]ResolveJustification) (stamped, stale []string, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -5480,10 +3062,6 @@ func (s *Store) setResolvedStampTx(ctx context.Context, ids []string, projectID 
 	if err != nil {
 		return nil, nil, fmt.Errorf("begin set resolved: %w", err)
 	}
-	// A rollback is the whole point of one transaction, so every error path
-	// returns EMPTY lists rather than the ids it had collected. Returning them
-	// would claim a stamp that the rollback undid, which is the one thing a
-	// caller of this method has no way to check for itself.
 	defer func() { _ = tx.Rollback() }()
 
 	for len(ids) > 0 {
@@ -5524,14 +3102,6 @@ func (s *Store) setResolvedStampTx(ctx context.Context, ids []string, projectID 
 			continue
 		}
 
-		// Judged path. Two reads, because they answer two different questions:
-		// the eligible set (guard only) and the still-identical set (guard plus
-		// content and project equal to what was judged). An eligible row absent
-		// from the matching set was REWRITTEN or PROMOTED since the verdict, so
-		// it is reported as stale; a row absent from the eligible set is declined
-		// for some other reason and says nothing. Both reads and the UPDATE carry
-		// the identity match in SQL, so no full memory text is copied into Go to
-		// compare and the stamp is refused by the statement that writes it.
 		eligible, err := selectIDs(ctx, tx, fmt.Sprintf(setResolvedSelectSQL, in), args...)
 		if err != nil {
 			return nil, nil, fmt.Errorf("select rows to resolve: %w", err)
@@ -5562,10 +3132,6 @@ func (s *Store) setResolvedStampTx(ctx context.Context, ids []string, projectID 
 				stale = append(stale, id)
 			}
 		}
-		// #1389: a demotion that rests on a deterministic signal is refused when
-		// that signal was withdrawn during the classify call. The check is here,
-		// inside the transaction that holds the write lock, so no withdrawal can
-		// land between it and the UPDATE; a refused row is stale, like a rewrite.
 		if len(why) > 0 {
 			held := fresh[:0:0]
 			for _, id := range fresh {
@@ -5589,8 +3155,6 @@ func (s *Store) setResolvedStampTx(ctx context.Context, ids []string, projectID 
 		if len(fresh) == 0 {
 			continue
 		}
-		// The UPDATE binds the rows that passed every check, not the whole batch:
-		// a row refused for its justification still matches the content CAS.
 		pairs = pairs[:0]
 		pairArgs = pairArgs[:0]
 		for _, id := range fresh {
@@ -5613,31 +3177,6 @@ func (s *Store) setResolvedStampTx(ctx context.Context, ids []string, projectID 
 }
 
 // SetResolved stamps resolved_at = now on the given memory IDs, dropping them
-// from the ranked injection/browse surface while leaving them searchable. The
-// WHERE clause re-checks the same eligibility guard as ResolveCandidates
-// (unresolved, unpinned, non-exempt category) at write time, not just at read
-// time — a candidate pinned or recategorized during the classify loop is
-// excluded rather than stamped anyway. Returns the count actually stamped,
-// which callers should report instead of len(ids). A no-op on an empty slice.
-//
-// It does NOT check content freshness: a verdict about text the row no longer
-// holds is stamped all the same. That is right for a caller whose ids are not a
-// judgement about content — MarkResolved's operator named rows, a test, a
-// consolidation — and wrong for the resolve pass, which is why the pass goes
-// through SetResolvedJudged instead.
-//
-// Every batch runs in one transaction (it used to be an independent statement
-// each) and records one history row per row it stamped, so "which pass resolved
-// this, and when" is answerable from the database. The transaction is what makes
-// the history exact: it has held the write lock since its first statement, so
-// the ids read inside it are the ids the UPDATE goes on to change.
-//
-// It passes no project and no provenance, and both are deliberate. Its ids come
-// from ResolveCandidates for ONE project, so a project predicate would be a
-// second statement of what the caller already ensured — and a lifecycle pass
-// knows no session, so the `resolve` history row it writes carries no performer
-// and an empty field is an admission rather than a claim. An operator's named
-// mark is neither of those things: see MarkResolved.
 func (s *Store) SetResolved(ctx context.Context, ids []string) (int, error) {
 	if len(ids) == 0 {
 		return 0, nil
@@ -5647,54 +3186,11 @@ func (s *Store) SetResolved(ctx context.Context, ids []string) (int, error) {
 }
 
 // SetResolvedJudged stamps resolved_at on the memories a classifier confirmed
-// resolved, but only those that still hold the EXACT identity the verdict was
-// judged against (#1052). It returns the ids it stamped and the ids it found
-// stale — eligible rows whose content changed while they were being classified,
-// or that were promoted to another project in that window — each in
-// first-appearance order and each disjoint.
-//
-// It is the resolve pass's writer and SetResolved is the general one. The pass
-// reads candidates, spends a CLI-harness call per batch (seconds to minutes),
-// and only then writes; a concurrent save or edit that rewrites a candidate's
-// text in that window leaves the verdict about text the row no longer holds.
-// resolved_at is persistent and removes a row from every session start, so
-// stamping the rewritten row would hide a fresh instruction on a judgement about
-// its previous text — the exact harm the issue reproduces. supersede already
-// guards its edges this way (memory.CreateLinkJudged stamps the freshness of
-// what was judged, not the clock); resolve now does too.
-//
-// Content, not updated_at, is the freshness key, and the two are not
-// interchangeable: the classifier is handed content and decides about content,
-// the KEEP cache is content-keyed for the same reason, and two writes inside one
-// clock second make updated_at unable to tell a rewrite from the write that
-// saved the judged text. A tag- or importance-only edit therefore does not
-// invalidate a verdict — it never changed what the verdict was about — and the
-// CAS is in the UPDATE's WHERE clause, not only in the read above it.
-//
-// The project is the CAS's second field, and it closes the one hole the content
-// match cannot see. PromoteToGlobal moves a row to _global by changing
-// project_id ONLY — no content, no updated_at — so a promoted candidate still
-// matches its verdict byte for byte, and an unbound writer stamps it: a
-// project-scoped pass deciding for the shared scope, which is exactly what
-// MarkResolved refuses ("a lifecycle pass over one project cannot decide for all
-// of them"). Comparing the read-time project_id too makes the promoted row
-// eligible-but-unchanged-in-content-yet-unmatched: it is NOT stamped and it is
-// REPORTED stale, like a rewrite, rather than buried in silence.
-//
-// Duplicate ids collapse to their first content: the pass already dedups, and a
-// caller that named one id twice with two texts has no single row to judge.
-// A no-op on an empty slice.
 func (s *Store) SetResolvedJudged(ctx context.Context, judged []Memory) (stamped, stale []string, err error) {
 	return s.SetResolvedJustified(ctx, judged, nil)
 }
 
 // SetResolvedJustified is SetResolvedJudged for a pass that demoted some rows on
-// a deterministic signal rather than a verdict (#1389). why maps a row id to the
-// signal it was demoted on; a row with an entry is stamped only while one of its
-// signals still holds, read inside the stamping transaction, and is reported
-// stale otherwise — the same outcome as a row rewritten mid-pass. A row with no
-// entry is written exactly as SetResolvedJudged writes it. A nil or empty why is
-// SetResolvedJudged.
 func (s *Store) SetResolvedJustified(ctx context.Context, judged []Memory, why map[string]ResolveJustification) (stamped, stale []string, err error) {
 	if len(judged) == 0 {
 		return nil, nil, nil
@@ -5708,75 +3204,18 @@ func (s *Store) SetResolvedJustified(ctx context.Context, judged []Memory, why m
 		want[m.ID] = judgedRow{content: m.Content, project: m.ProjectID}
 		ids = append(ids, m.ID)
 	}
-	// projectID "" deliberately: the guard stays eligibility-only, so a promoted
-	// row is REPORTED stale instead of being silently ineligible. The pass's
-	// project rides in the judged map, where it is compared as the CAS's second
-	// field.
 	return s.setResolvedStampTx(ctx, ids, "", Provenance{}, want, why)
 }
 
 // MarkResolved stamps resolved_at on the named ids IN projectID and returns the
-// ids it actually stamped, in the order it stamped them. It is SetResolved for a
-// caller that names its rows — `ghost resolve --mark` (#714) — and the two
-// differences are the point of the separate method rather than a wrapper:
-//
-//   - It BINDS projectID. A ref resolves through the project (plus _global), so
-//     a promoted row is nameable from here; a stamp that reached one would let a
-//     project's repair pass bury a memory every project shares, which is not
-//     what a caller that asked about ONE project meant.
-//   - It RECORDS the performer. The history row an operator's mark writes is the
-//     only resolve row that can say a person did it, and it is the one worth
-//     being able to say: a name on a `resolve` row is a statement that nobody
-//     passed a classifier over that note, which is precisely the judgement a
-//     reader of the history cannot otherwise check.
-//
-// It also drops resolve_kept_hash on every row it stamps, in the same
-// statement. The cache is a KEEP verdict under resolve.KeepStamp (content plus
-// any flag count), and a row the operator has just stamped is
-// not a KEEP the next pass may honour: leaving the
-// hash would make the ordinary pass skip the row as `N KEEP cached` for as long
-// as its text stood, so a note buried on purpose came straight back the moment
-// anything rewrote it. SetResolved reaches the same statement, so a row a pass
-// resolves cannot be resurrected by a verdict from before it.
-//
-// Returns the stamped ids and no count, because a caller that names rows has to
-// say which of them moved: an already-resolved row, a pinned one and one in a
-// standing category are all rows this method declines, and they are declined for
-// different reasons the caller can only read off the row it already loaded.
-//
-// An error is fatal for the whole request and returns no ids. One transaction
-// covers every batch, so a failure is a rollback and a caller may treat the error
-// as "nothing happened" — which is the property a repair needs to be reportable
-// as a single outcome rather than as a count of whatever it reached before the
-// failure.
-//
-// That leaves one outcome the caller cannot see, and it is why the guard is a
-// read-time AND a write-time check rather than either: a row that was eligible
-// when the caller read it and is not by the time this runs is simply absent from
-// the returned ids. It is not an error — a concurrent pin or a recategorisation
-// is somebody else's decision, not a failure here — so the caller has to treat
-// "not returned" as its own state rather than as a stamp.
 func (s *Store) MarkResolved(ctx context.Context, projectID string, ids []string, prov Provenance) ([]string, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}
 	switch projectID {
 	case "":
-		// The one guard this method exists to hold. A caller with no project has
-		// not asked about a project, and the shared statement treats an empty
-		// binding as "no binding" — so the refusal is here rather than left to
-		// the argument it would otherwise weaken.
 		return nil, fmt.Errorf("mark resolved: a project is required, so no memory can be reached from it")
 	case GlobalProjectID:
-		// And the sentinel, for the same reason one layer up: `_global` is not a
-		// project a caller runs a lifecycle pass against. It holds promoted rows
-		// that EVERY project injects, so naming it would let one command bury a
-		// memory in all of them — and a caller that got there by typing the
-		// reserved name would be doing it deliberately, which is exactly the case
-		// the guard is for. Every other store method that refuses `_global` refuses
-		// it here (see DeleteProject), so the refusal is at this layer rather than
-		// left to each caller to re-derive: a guard one caller re-implements is a
-		// guard the next caller forgets.
 		return nil, fmt.Errorf("mark resolved: refusing to mark in the %s project — it holds the promoted memories every project injects, and a lifecycle pass over one project cannot decide for all of them", GlobalProjectID)
 	}
 	stamped, _, err := s.setResolvedStampTx(ctx, ids, projectID, prov, nil, nil)
@@ -5784,9 +3223,6 @@ func (s *Store) MarkResolved(ctx context.Context, projectID string, ids []string
 }
 
 // ResolveKeptHashes returns the key resolve recorded when it last judged each
-// memory KEEP, keyed by memory ID — the content hash, or that hash combined
-// with the flag count the verdict was judged with (#880), which
-// is resolve.KeepStamp's two shapes. Only rows with a recorded key appear.
 func (s *Store) ResolveKeptHashes(ctx context.Context, projectID string) (map[string]string, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -5813,12 +3249,6 @@ func (s *Store) ResolveKeptHashes(ctx context.Context, projectID string) (map[st
 }
 
 // MarkResolveKept records KEEP verdicts (id -> resolve's keep stamp: the
-// content hash, plus the flag count the verdict was judged with
-// when there was any — see resolve.KeepStamp, #880) for memories resolve
-// classified as not-resolved. It deliberately does not touch
-// updated_at: the content did not change, and bumping freshness would perturb
-// the reflect signature and decay ranking. The update is project-scoped, so a
-// stale caller cannot write another project's rows. A no-op on an empty map.
 func (s *Store) MarkResolveKept(ctx context.Context, projectID string, hashes map[string]string) error {
 	if len(hashes) == 0 {
 		return nil
@@ -5844,15 +3274,12 @@ func (s *Store) MarkResolveKept(ctx context.Context, projectID string, hashes ma
 }
 
 // SupersedeCheck is a cached NEITHER verdict for an ordered pair: the content
-// hashes it was judged on. A pair is only skipped while both hashes still
-// match.
 type SupersedeCheck struct {
 	NewerHash string
 	OlderHash string
 }
 
 // SupersedeChecked returns the cached NEITHER verdicts for a project, keyed by
-// {newerID, olderID}. Pairs never judged NEITHER are absent from the map.
 func (s *Store) SupersedeChecked(ctx context.Context, projectID string) (map[[2]string]SupersedeCheck, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -5880,16 +3307,6 @@ func (s *Store) SupersedeChecked(ctx context.Context, projectID string) (map[[2]
 }
 
 // MarkSupersedeNeither records (or refreshes) NEITHER verdicts for a project,
-// keyed by {newerID, olderID}. A re-mark updates the stored hashes in place so
-// a stale row cannot accumulate beside a refreshed one. A no-op on an empty
-// map.
-//
-// The caller is responsible for projectID matching the pair's memories: unlike
-// MarkResolveKept, this does not re-check ownership per row, so a mismatched
-// call would label a row with the wrong project. That is safe for the only
-// caller today — supersede.Run passes its own projectID and candidate pairs it
-// loaded from that project — and memory IDs are globally unique, so a
-// mislabeled row still cascades away with its endpoints.
 func (s *Store) MarkSupersedeNeither(ctx context.Context, projectID string, checks map[[2]string]SupersedeCheck) error {
 	if len(checks) == 0 {
 		return nil
@@ -5920,64 +3337,27 @@ func (s *Store) MarkSupersedeNeither(ctx context.Context, projectID string, chec
 
 // DeleteOptions is what one delete is asked to do beyond removing the row.
 type DeleteOptions struct {
-	// PurgeHistory removes every memory_history row for this memory in the
-	// same transaction, leaving nothing behind.
-	//
-	// It is the redaction path, and the default is deliberately not it. The
-	// history keeps the text a memory USED to hold, so a plain delete preserves
-	// it — which is what makes the history worth having, and is also how a
-	// credential "removed" by deleting its memory survives in a table with a
-	// longer life than the row. A delete meant to ERASE rather than to retire has
-	// to say so here. It erases every copy of the text this database holds,
-	// including the reflection snapshot that could restore the row and the
-	// deleted bytes themselves: the write connection runs secure_delete, the
-	// purge rebuilds the full-text index from the surviving rows, and a
-	// checkpoint folds the zeroed pages out of the WAL (rebuildFTSAfterPurgeTx
-	// and checkpointAfterPurge). It cannot reach a backup taken earlier, nor
-	// bytes an older build freed before secure_delete was on — those stay in
-	// the file's free space until a compaction rewrites it, and only a fresh
-	// `ghost backup` (VACUUM INTO) is a copy without them. See the
-	// ghost_memory_delete purge_history argument and `ghost history purge`.
 	PurgeHistory bool
-	// ProjectID, when set, scopes the delete to the memory's owning project: a
-	// row that is not in that project is refused with "not found in project"
-	// and nothing is written — no tombstone, no purge. The check is a read
-	// inside the delete's own write transaction, before either of those, so a
-	// row another handle promoted to _global after the caller's own ownership
-	// read cannot be deleted or purged by a project-scoped call (#1154). Empty
-	// is the operator path that names a row by id alone (`ghost history purge`).
-	ProjectID string
+	ProjectID    string
 }
 
 // Delete removes a specific memory and KEEPS its history. The row's last state is
-// recorded first, in the same transaction: memory_history.memory_id
-// deliberately has no foreign key, so a delete leaves behind a tombstone carrying
-// the text the memory held — the only remaining record of it, and the reason a
-// cascading history table would be empty exactly when the audit is asked.
-//
-// For a redaction, use DeleteWithOptions with PurgeHistory.
 func (s *Store) Delete(ctx context.Context, id string) error {
 	return s.DeleteWithOptions(ctx, id, DeleteOptions{})
 }
 
 // DeleteWithOptions is Delete with the caller's choice about the history: kept (a
-// tombstone) or purged (nothing). Both happen inside the one transaction that
-// removes the row, so a memory and its history can never come apart.
 func (s *Store) DeleteWithOptions(ctx context.Context, id string, opts DeleteOptions) error {
 	_, err := s.deleteWithOptionsLocked(ctx, id, opts)
 	return err
 }
 
 // DeletePurge deletes a memory and erases every recorded copy of its text,
-// reporting what the purge reached. It is DeleteWithOptions(PurgeHistory: true)
-// with the checkpoint's result; that call delegates here and drops the detail.
 func (s *Store) DeletePurge(ctx context.Context, id string) (PurgeOutcome, error) {
 	return s.deleteWithOptionsLocked(ctx, id, DeleteOptions{PurgeHistory: true})
 }
 
 // DeletePurgeInProject is DeletePurge scoped to the memory's owning project, the
-// way DeleteOptions.ProjectID scopes a delete: a row outside projectID is refused
-// inside the write and nothing is purged.
 func (s *Store) DeletePurgeInProject(ctx context.Context, projectID, id string) (PurgeOutcome, error) {
 	if projectID == "" {
 		return PurgeOutcome{}, fmt.Errorf("delete purge: project_id is required")
@@ -5997,11 +3377,6 @@ func (s *Store) deleteWithOptionsLocked(ctx context.Context, id string, opts Del
 	defer func() { _ = tx.Rollback() }()
 
 	if opts.ProjectID != "" {
-		// The ownership read is in the write, ahead of the tombstone and the
-		// purge, because it is what decides them: read on the pool before the
-		// transaction, it left a window in which another handle could move the
-		// row to _global and this call would delete it anyway (#1154). A missing
-		// row falls through to the DELETE, which reports it in its own words.
 		var owner string
 		err := tx.QueryRowContext(ctx, `SELECT project_id FROM memories WHERE id = ?`, id).Scan(&owner)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
@@ -6014,24 +3389,12 @@ func (s *Store) deleteWithOptionsLocked(ctx context.Context, id string, opts Del
 	}
 
 	if !opts.PurgeHistory {
-		// Before the DELETE, because afterwards there is nothing left to read. A
-		// missing row is not this call's error to report: the DELETE below says
-		// "memory not found" in its own words, and a bad id must produce that.
 		if err := appendHistoryTx(ctx, tx, id, phaseDelete, Provenance{}); err != nil &&
 			!errors.Is(err, errHistoryNoMemory) {
 			return out, err
 		}
 	}
 
-	// A purge runs BEFORE the DELETE, not after. The text it has to erase is the
-	// text the row holds, and once the row is gone the collection that finds it
-	// comes back empty — a redaction that silently ran with nothing to redact is
-	// the one failure a redaction must not have. The DELETE below still reports
-	// "memory not found" for a bad id, and the rollback that follows undoes the
-	// purge with it, so a failed delete leaves the tombstone-free history intact.
-	//
-	// And it writes no tombstone of its own, which is the point: a purge must
-	// leave nothing behind that could carry the text being redacted.
 	if opts.PurgeHistory {
 		n, err := purgeHistoryTx(ctx, tx, id)
 		if err != nil {
@@ -6048,11 +3411,6 @@ func (s *Store) deleteWithOptionsLocked(ctx context.Context, id string, opts Del
 	if n == 0 {
 		return out, fmt.Errorf("memory not found: %s", RefusalArg("memory_id", id))
 	}
-	// After the DELETE, so the row is gone from the content table the rebuild
-	// reads: the index still carries the deleted row's tokens in segments the
-	// trigger's 'delete' tombstone does not rewrite, and rebuilding is what
-	// removes them. It belongs in this transaction so the row and every index
-	// of it move together; see rebuildFTSAfterPurgeTx.
 	if opts.PurgeHistory {
 		if err := rebuildFTSAfterPurgeTx(ctx, tx); err != nil {
 			return out, err
@@ -6062,58 +3420,22 @@ func (s *Store) deleteWithOptionsLocked(ctx context.Context, id string, opts Del
 		return out, err
 	}
 	if opts.PurgeHistory {
-		// The delete has committed, so the checkpoint can only add a warning
-		// about the file: an incomplete one is reported through the outcome, and
-		// it is never returned as an error for a row that is already gone.
 		out.CheckpointComplete = s.checkpointAfterPurgeUncancelled(ctx)
 	}
 	return out, nil
 }
 
 // UpdateOptions is the optional set of facts an edit may change. Every field is
-// optional and its zero value means "not part of this edit", which is what makes
-// the edit partial: a caller correcting a port number must not silently drop the
-// validity window and the source reference the row already carries.
-//
-// The one asymmetry is Tags, where nil means keep and a non-nil empty slice
-// means clear. A caller that wants to remove every tag has no other way to say
-// it, and an empty tag list is a real state rather than an absent one.
 type UpdateOptions struct {
 	Content    *string
 	Category   *string
 	Importance *float32
 	Tags       []string
-	// Validity replaces only the stamps it carries. A nil field leaves the
-	// stored value alone, so a caller restating one boundary does not erase the
-	// other, and an edit about something else erases nothing.
-	Validity Validity
-	// Provenance re-attributes the row to the session performing this edit. An
-	// empty field keeps the stored value rather than clearing it, because a
-	// write whose author Ghost could not identify is no evidence that the
-	// author of the previous write was wrong.
+	Validity   Validity
 	Provenance Provenance
 }
 
 // UpdateMemory applies a partial update to a memory. Nil content/category/
-// importance preserve current values; a non-nil tags slice replaces the tag
-// list (pass an empty slice to clear). Source and pinned are never touched.
-// When the content changes, the embedding and link-scan rows are deleted in
-// the same transaction so the background workers re-embed and re-link the
-// memory; FTS needs nothing — the memories_au trigger re-syncs it.
-//
-// The write is project-scoped: the in-transaction ownership lookup is keyed
-// by (id, project_id), so ownership is verified and the update applied
-// atomically inside a single transaction — closing the check-then-write race
-// where a separate lookup-then-write could target a memory that moved to a
-// different project (e.g. via PromoteToGlobal) between the check and the write.
-//
-// The validity triple and the provenance fields are not reachable through this
-// signature: they need UpdateMemoryWithOptions, which is the only path that
-// writes them. This wrapper keeps the pre-existing callers (the reflection and
-// maintenance paths, which know no validity claim) from having to spell out a
-// zero UpdateOptions each. The credential guards are in the method it delegates
-// to, not here, so that the options path is guarded on the same terms as this
-// one.
 func (s *Store) UpdateMemory(ctx context.Context, projectID, id string, content, category *string, importance *float32, tags []string) error {
 	return s.UpdateMemoryWithOptions(ctx, projectID, id, UpdateOptions{
 		Content: content, Category: category, Importance: importance, Tags: tags,
@@ -6121,41 +3443,15 @@ func (s *Store) UpdateMemory(ctx context.Context, projectID, id string, content,
 }
 
 // UpdateMemoryWithOptions is UpdateMemory over the full partial-edit set, adding
-// the validity triple and the write-time provenance an MCP edit may carry.
-//
-// A validity stamp that changes does not invalidate the embedding: the vector
-// describes the text, and an edit that only re-dates a claim leaves the text —
-// and therefore the vector — exactly as it was. Invalidating it would re-embed
-// every row whose window was merely corrected, for no change in what the memory
-// says.
 func (s *Store) UpdateMemoryWithOptions(ctx context.Context, projectID, id string, opts UpdateOptions) error {
-	// The credential guards live here rather than in UpdateMemory, because this
-	// is where the fields arrive on both paths and a guard one call above would
-	// leave the options path — the one the MCP edit tool uses — unguarded.
-	//
-	// The incoming content only, never the composed result. A row written before
-	// the guard existed can hold a credential, and a user clearing it out must
-	// still be able to retag, re-categorise, or re-prioritise that row on the way
-	// to deleting it — refusing a metadata-only edit would strand it with
-	// ghost_memory_delete as the only remaining move.
 	if opts.Content != nil {
 		if err := rejectSecret("content", *opts.Content); err != nil {
 			return err
 		}
 	}
-	// The tags, unconditionally, and that unconditional part is the point: this
-	// method is reachable with tags and no content, so a content-only guard skips
-	// exactly the call that carries them. validateTags upstream caps the shape at
-	// ten tags of 64 characters and nothing else, and a tag is returned by search
-	// and quoted into the next reflect prompt — so the exposure is the same one
-	// the body has.
 	if err := rejectSecretList("tags", opts.Tags); err != nil {
 		return err
 	}
-	// The reference, on the same terms as the content and the tags: it is
-	// caller-supplied text stored on the row and rendered beside the content on
-	// every listing. Empty is skipped, so a caller that mentions no reference is
-	// not charged for a check.
 	if err := rejectSecretFields(secretSourceRefField(opts.Provenance.SourceRef)...); err != nil {
 		return err
 	}
@@ -6171,10 +3467,6 @@ func (s *Store) UpdateMemoryWithOptions(ctx context.Context, projectID, id strin
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// An edit is a knowledge write like a save, so it gets the same bounded
-	// BEGIN retry and is measured under the same budget: the multi-process
-	// fleet's `cli` role edits as well as saves, and under saturation it is
-	// the edit that failed when the save did not (issue #671).
 	tx, lock, err := s.beginWrite(ctx, "update")
 	if err != nil {
 		return fmt.Errorf("begin update: %w", err)
@@ -6183,20 +3475,7 @@ func (s *Store) UpdateMemoryWithOptions(ctx context.Context, projectID, id strin
 
 	var curContent, curCategory, curTags string
 	var curImportance float32
-	// The stored window comes out of the same statement as the fields this edit
-	// replaces, because it is judged against and has to be the row's at the moment
-	// the write lands. Reading it before the transaction — as a tool-level
-	// pre-check does — would leave two concurrent edits to two different
-	// boundaries able to each pass against a snapshot the other has already
-	// invalidated, and store a window that ends before it starts.
-	//
-	// The two boundaries only, because the rule is the window's: verified_at has
-	// no order to be out of, and the UPDATE below writes all three by COALESCE
-	// rather than read-modify-write, so nothing here would use it.
 	var curFrom, curUntil sql.NullString
-	// The stored reference comes out of the same statement, for the same reason:
-	// the links this row carries are what the write below has to keep, and they
-	// have to be the ones the row holds at the moment the write lands.
 	var curSourceRef string
 	err = tx.QueryRowContext(ctx,
 		`SELECT content, category, importance, tags, valid_from, valid_until,
@@ -6211,15 +3490,6 @@ func (s *Store) UpdateMemoryWithOptions(ctx context.Context, projectID, id strin
 		return fmt.Errorf("lookup memory: %w", err)
 	}
 
-	//
-	// Only when the caller supplied a boundary, which is the only way an edit can
-	// change the window. With nothing supplied the stored pair is judged against
-	// itself, and a row whose own window was written out of order — Store.Create
-	// and RestoreSnapshot pass the stamps through with no order check, and an
-	// import made before ImportMemory checked it did too — would refuse an
-	// unrelated content or tag edit over a defect the caller cannot see or fix
-	// without restating a window they never touched. An edit that only moves
-	// verified_at is not a window edit either, and is not refused.
 	if opts.Validity.ValidFrom != nil || opts.Validity.ValidUntil != nil {
 		if err := CheckWindowOrder(opts.Validity, Validity{
 			ValidFrom:  nullStringPtr(curFrom),
@@ -6247,41 +3517,14 @@ func (s *Store) UpdateMemoryWithOptions(ctx context.Context, projectID, id strin
 		newTags = string(b)
 	}
 
-	// A memory with NO history yet is pre-v17 — migrateV17 records no starting
-	// row — and this write is the one that overwrites text nothing else keeps. So
-	// the state it held a moment ago is filed first, while the row still holds it;
-	// see recordBaselineHistoryTx, whose contract is that it runs before its
-	// caller's write. It is a no-op for every memory this build wrote, so the
-	// common case pays one indexed existence check.
 	if err := recordBaselineHistoryTx(ctx, tx, id, phaseBaseline, Provenance{}); err != nil {
 		return err
 	}
 
-	// resolved_at is a resolve pass's verdict, not part of the editable fields.
-	// Only a content change may clear it — a metadata-only edit (tags,
-	// importance, category) must not resurrect resolved evidence into ranked
-	// injection. Content edits are treated as the memory being reasserted.
 	clearResolved := 0
 	if newContent != curContent {
 		clearResolved = 1
 	}
-	// The validity and provenance columns are written with COALESCE rather than
-	// read, merged and written back: this statement is the only thing that
-	// touches them, so an omitted field has to be the stored value by
-	// construction. A read-modify-write would make two concurrent edits to two
-	// different fields of the same row able to lose one of the two, and it would
-	// put the current values in Go variables the caller cannot see.
-	//
-	// NULLIF(?, '') is what makes an empty provenance string mean "keep" rather
-	// than "clear": an undetectable harness is no evidence against the author of
-	// the previous write, and NULLIF turns "" into the NULL COALESCE skips.
-	//
-	// The reference the caller wrote is composed with the decision links this
-	// row already carries before it is written, because the link is what finds
-	// the decision's companion memory and it is Ghost's to manage: an edit
-	// that replaced it left the decision with no companion, and the supersede
-	// answered a plain success while the reversed decision kept ranking. An
-	// omitted reference keeps the stored value whole, links and all.
 	newSourceRef := opts.Provenance.SourceRef
 	if newSourceRef != "" {
 		keptRef, refErr := preserveDecisionLinks(newSourceRef, curSourceRef)
@@ -6320,31 +3563,9 @@ func (s *Store) UpdateMemoryWithOptions(ctx context.Context, projectID, id strin
 			return fmt.Errorf("invalidate link scan: %w", err)
 		}
 	}
-	// The state this write produced, which is the only other copy of the new text
-	// once the next edit overwrites it.
-	//
-	// The caller's Provenance, not a zero one: a history row records who
-	// performed the write, and an edit through a session knows that. The MCP
-	// path passes provenanceFor's result, whose empty fields mean "nobody
-	// reported an agent" rather than "nobody acted" — which is the same
-	// admission every other history phase makes, and the reason this row can
-	// name an editor that the pre-history UPDATE could not.
 	if err := appendHistoryTx(ctx, tx, id, phaseUpdate, opts.Provenance); err != nil {
 		return err
 	}
-	// An edit that also asserted the fact was CHECKED leaves a record of the
-	// check, in the transaction that wrote verified_at, so a row cannot read
-	// verified with no account of who checked it. Note what this path does NOT
-	// append: an `observed` record. #682's writers append one to Create and to
-	// every Upsert branch but not here, and an edit is not a new report of a fact
-	// — it is a change to one that is already recorded. Adding the observed leg
-	// here would be widening #673's design from inside a PR about #575, and it
-	// would make every content edit inflate Observations.
-	//
-	// Gated on the caller's stated verified_at, and the gate is what makes this
-	// path's COALESCE safe: an edit that fixes a typo on a memory verified last
-	// month leaves the stored column alone, and appending for that would
-	// manufacture a check. See appendVerificationIfStatedTx.
 	if err := appendVerificationIfStatedTx(ctx, tx, id, opts.Provenance, opts.Validity.VerifiedAt); err != nil {
 		return err
 	}
@@ -6359,56 +3580,6 @@ func (s *Store) UpdateMemoryWithOptions(ctx context.Context, projectID, id strin
 }
 
 // PromoteToGlobal moves a memory into the shared _global project. The memory
-// keeps its ID, so its embedding and graph links survive; pinned state and
-// importance are preserved. The _global project row is ensured inline (the
-// FK on memories.project_id requires it) — EnsureProject can't be called
-// here because s.mu is already held.
-//
-// The write is project-scoped: the UPDATE's WHERE clause binds both id and
-// projectID, so ownership is verified and the move applied atomically in a
-// single statement — closing the check-then-write race where a separate
-// lookup-then-write could promote a memory that moved to a different
-// project between the check and the write. As a side effect, promoting an
-// already-global memory (project_id = '_global') also fails this ownership
-// match, which is desired: re-promotion is rejected with a
-// not-found-in-project error, not a silently accepted no-op.
-//
-// The memory's history moves with it, in the same transaction. It has to:
-// memory_history.project_id is ON DELETE CASCADE, so history rows left
-// naming the project the memory just left are taken by the next
-// `ghost project delete` of that project — while the promoted memory, now in
-// _global, survives with no recorded past at all.
-//
-// It does NOT touch memories.updated_at, and that is the whole of what this
-// write leaves alone (#807). A promotion is a MOVE: the note's text, its
-// created_at, its category and its importance are all exactly what they were,
-// and updated_at is the column two supersede readers take to mean "the CONTENT
-// of this row changed". `ghost supersede` orients every candidate pair by it
-// (orient) and fingerprints a live edge's freshness with it (skip-if-unchanged),
-// so a bump here claims the note was just rewritten when nothing about it was.
-// The consequences were measured, not argued: a pair re-classified for an edit
-// nobody made — which is a paid way to reach the re-rolling #792 removed and
-// #779 measured — and, on a CYCLE, the repair pass asked which of the two notes
-// is newer in the wrong direction, so `ghost supersede --reassess` stood the
-// backwards edge #641 found in the wild and withdrew the correct one. Neither is
-// hypothetical: `ghost_memory_promote` is an MCP tool an agent calls mid-session,
-// over the same graph a stop hook's lifecycle phase or a manual pass is reading,
-// and it is the only caller of this method in production.
-//
-// `ghost reflect --promote-globals` is a DIFFERENT write and none of this reaches
-// it, because it does not move a live row between projects: it folds the candidate
-// into an existing `_global` row or inserts a new one, and the project's own row
-// goes with the consolidation that produced the candidate. A fold is a content
-// rewrite of that `_global` row, so its `updated_at` moving is correct, and a row
-// that is deleted takes its edges with it rather than reorienting them.
-//
-// One reader's view of the world does change, and it is stated here rather than
-// left to be discovered: `ghost prune` measures a row's grace from
-// pruneActivitySQL, whose newest term is updated_at, so a promotion no longer
-// refreshes it. That is the right direction for a column that means content
-// freshness — a memory promoted because it holds everywhere is not thereby
-// rewritten — and the operator who wants it kept says so with a `persistent`
-// retention tier or a pin, which is what those two are for.
 func (s *Store) PromoteToGlobal(ctx context.Context, projectID, id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -6427,11 +3598,6 @@ func (s *Store) PromoteToGlobal(ctx context.Context, projectID, id string) error
 	}
 	_, _ = tx.ExecContext(ctx, `INSERT OR IGNORE INTO ghost_state (project_id) VALUES ('_global')`)
 
-	// project_id only. The absence of updated_at is the decision the doc comment
-	// above sets out, and it is visible HERE on purpose: this statement used to
-	// carry `updated_at = datetime('now')` beside the move, and a reader who has
-	// to diff it against the comment has to be able to see that one column is
-	// missing rather than infer it.
 	res, err := tx.ExecContext(ctx, `
 		UPDATE memories SET project_id = '_global'
 		WHERE id = ? AND project_id = ?
@@ -6452,33 +3618,11 @@ func (s *Store) PromoteToGlobal(ctx context.Context, projectID, id string) error
 	); err != nil {
 		return fmt.Errorf("promote memory history: %w", err)
 	}
-	// The rest of the memory's rows travel with it, and each is reached by a
-	// different predicate because each names the memory differently. The schema
-	// comment on memory_history states the rule for every writer that moves a
-	// memory BETWEEN projects; these are the rows a promotion used to leave
-	// behind, so that a later DeleteProject of the old project took them from a
-	// memory that had already left it.
-	//
-	// retrieval_audit is deliberately NOT among them. Its project_id is the
-	// project of the retrieval CALL a row was filed against, so the row belongs
-	// with the call, not with the memory the call admitted; moving it would
-	// detach it from the call its record_rowid still names. Nothing reads or
-	// writes the table now, so a promotion leaves it alone and a project delete
-	// takes it with the calls whose project it records.
-	//
-	//   - memory_flags.project_id carries no foreign key, so nothing cascades it
-	//     and a flag left naming the old project is one the per-project evidence
-	//     read no longer reaches. Keyed by memory_id, the column that names the
-	//     memory itself.
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE memory_flags SET project_id = ? WHERE memory_id = ?`, GlobalProjectID, id,
 	); err != nil {
 		return fmt.Errorf("promote memory flags: %w", err)
 	}
-	//   - supersede_checked names the memory as one of TWO endpoints and its
-	//     project_id cascades from projects, so a row left naming the old project
-	//     is destroyed when that project is deleted, discarding a verdict the
-	//     pass had already paid for.
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE supersede_checked SET project_id = ? WHERE newer_id = ? OR older_id = ?`,
 		GlobalProjectID, id, id,
@@ -6489,64 +3633,11 @@ func (s *Store) PromoteToGlobal(ctx context.Context, projectID, id string) error
 }
 
 // TogglePin sets or clears the pinned flag.
-//
-// It deliberately does NOT move `updated_at`, and that is a decision (#820)
-// rather than an oversight, in the same shape as PromoteToGlobal's above. A pin
-// is a decision about how a memory is SURFACED: the `_global` passive bucket
-// orders by `pinned DESC`, the composite ranking exempts a pinned row from
-// decay, and `ghost resolve`'s hold-back refuses to stamp one. `pinned` is the
-// column those readers read, and it is the one this call writes.
-//
-// `updated_at` is a different column with a different meaning, and two readers
-// in another package take it to mean "the CONTENT of this row changed": the
-// supersede pass orients every candidate pair by it (internal/supersede's
-// orient) and fingerprints a live edge's freshness against it
-// (skip-if-unchanged). So bumping it here made pinning an endpoint of a live
-// edge re-arm the reclassify half — a classify call for a pair nobody edited,
-// which is the paid route to the withdraw-then-recreate cycle #779 measured —
-// and on a pair live in BOTH directions it flipped the direction
-// `ghost supersede --reassess` asks about, standing the backwards edge #641
-// found in the wild. `pinMemoryTx`, the save-time pin on the Upsert path, has
-// always left the stamp alone; this brings the operator's explicit call into
-// step with it.
-//
-// What no longer moves with a pin, named:
-//
-//   - the supersede pass's chronology and its change detector, above.
-//
-//   - `ghost prune`'s grace, which pruneActivitySQL measures from the newest of
-//     `updated_at`, `created_at` and `expires_at`. Pinning a memory no longer
-//     refreshes it, so a pinned row is not thereby held off the prune. That is
-//     the same trade the promotion takes and for the same reason: the grace
-//     measures the row's last WRITE, and a pin is not a write of the note. An
-//     operator who wants a row kept for good says so with the `persistent`
-//     retention tier, and `ghost prune` is never run for anyone (no lifecycle
-//     phase, hook or scheduler calls it).
-//
-//   - the `updated_at` TIE-BREAK in the `_global` passive bucket's own order
-//     (`pinned DESC, importance DESC, updated_at DESC, id`,
-//     OrderPinnedImportanceUpdated). Nothing else about that order changes:
-//     `pinned DESC` is its PRIMARY key, so a pin still reorders the row it
-//     names, and what is given up is only the ability of a pin to reorder two
-//     rows that tie on (pinned, importance) — which is a tie-break deciding a
-//     tie, on a column that is not about the decision the pin records.
-//
-// The pin itself is still a real decision and is still written. What is NOT
-// written is a `memory_history` version: this statement changes none of the
-// columns a version records, and the row that does change (pinned) is one the
-// history table does not carry — the same rule Touch and the resolve KEEP cache
-// already follow.
-//
-// It names the row by id alone; a caller acting for a project uses
-// TogglePinInProject, which refuses a row outside it.
 func (s *Store) TogglePin(ctx context.Context, id string, pinned bool) error {
 	return s.togglePin(ctx, "", id, pinned)
 }
 
 // TogglePinInProject is TogglePin scoped the way PromoteToGlobal is: the UPDATE
-// matches (id, project_id), so a row that is not in projectID — including one
-// another handle promoted to _global after the caller's own ownership read
-// (#1154) — is refused as "not found in project" and left as it was.
 func (s *Store) TogglePinInProject(ctx context.Context, projectID, id string, pinned bool) error {
 	if projectID == "" {
 		return fmt.Errorf("toggle pin: project_id is required")
@@ -6562,10 +3653,6 @@ func (s *Store) togglePin(ctx context.Context, projectID, id string, pinned bool
 	if pinned {
 		pinnedInt = 1
 	}
-	// pinned only. The absence of updated_at is visible HERE on purpose, for
-	// the reason PromoteToGlobal's is: a reader diffing this statement against
-	// the comment above has to be able to see that one column is missing rather
-	// than infer it.
 	res, err := s.execGuardedWrite(ctx, "toggle-pin", `
 		UPDATE memories SET pinned = ? WHERE id = ? AND (? = '' OR project_id = ?)
 	`, pinnedInt, id, projectID, projectID)
@@ -6587,9 +3674,6 @@ func (s *Store) togglePin(ctx context.Context, projectID, id string, pinned bool
 }
 
 // CurrentTimestamp returns the database's own notion of "now", formatted
-// exactly like the created_at columns (UTC, via SQLite's datetime('now')).
-// Callers can later filter rows by created_at against this value with a plain
-// string comparison, with no clock-skew risk between the Go process and SQLite.
 func (s *Store) CurrentTimestamp(ctx context.Context) (string, error) {
 	var ts string
 	if err := s.db.QueryRowContext(ctx, `SELECT datetime('now')`).Scan(&ts); err != nil {
@@ -6598,10 +3682,6 @@ func (s *Store) CurrentTimestamp(ctx context.Context) (string, error) {
 	return ts, nil
 }
 
-// replaceCandidate is a stored row ReplaceNonManual may delete, or an emitted
-// memory may reuse in place: the identity it would reuse, plus the stored state
-// the two reuse decisions are made from — reusePreservesAge reads the text and
-// category, and reuseChangesNothing (below) reads all five recorded fields.
 type replaceCandidate struct {
 	id         string
 	content    string
@@ -6609,33 +3689,10 @@ type replaceCandidate struct {
 	importance float64
 	tags       string
 	scope      sql.NullString
-	// updatedAt is the row's write clock as the pass will compare it: the fed
-	// corpus carries the value read before the harness answered, and a row whose
-	// column has moved since is not the row the pass is about (#1051).
-	updatedAt string
+	updatedAt  string
 }
 
 // CorpusRow is one row as a reflection pass READ it: the identity and the state
-// the write transaction re-checks before a claim on it is honoured. A row is
-// only replaceable while the store still holds that content, at that write
-// clock, carrying the same metadata the harness was shown; anything else is a
-// concurrent edit, the row is kept as it is, and any emission claiming it is
-// dropped rather than written beside it.
-//
-// The metadata columns are here because updated_at is not the whole signal. A
-// save that only folds a duplicate — UpsertWithOptions' strengthen-memory update
-// — raises importance WITHOUT moving updated_at, so a row the pass answered
-// about can sit at the write clock it read with its importance already drifted,
-// and the reuse branch would then write the stale value back over the edit.
-// Comparing the columns that branch writes closes that gap. Scope is
-// deliberately absent: the reuse branch reaches a scope only through COALESCE,
-// so an emission that states none can never erase a concurrent one.
-//
-// updated_at is a write clock, not a content clock (#879), and that is the safe
-// direction here: UpdateMemory moves it on a retag, a reweight or a scope
-// narrowing alone, and treating such a row as concurrent keeps the edit and
-// drops the emission where reading it as "content unchanged" would let the
-// re-emission overwrite a change it never saw.
 type CorpusRow struct {
 	ID         string
 	Content    string
@@ -6645,10 +3702,6 @@ type CorpusRow struct {
 	Tags       []string
 }
 
-// sameAs reports whether the stored candidate is still the row this corpus
-// entry read. It compares exactly what the reuse branch writes into a row it
-// re-emits — content, category, importance, tags — plus the write clock, which
-// stands for every other column an edit moves.
 func (f CorpusRow) sameAs(c replaceCandidate) bool {
 	return f.Content == c.content &&
 		f.UpdatedAt == c.updatedAt &&
@@ -6657,39 +3710,15 @@ func (f CorpusRow) sameAs(c replaceCandidate) bool {
 		sameTags(c.tags, f.Tags)
 }
 
-// fedGuard is the #1051 concurrency guard over ONE replaceable candidate set.
-// It is built before the write that consumes the emissions so that every half of
-// an apply reads the same view of the project: ReplaceNonManual uses it for the
-// project replace, and ApplyReflection uses it for the cross-project promotions
-// that name those rows but are written into _global, where the project's reuse
-// map is not consulted.
 type fedGuard struct {
-	// inactive is a caller that carried no corpus: the pre-#1051 behaviour
-	// exactly, with no row kept and no emission dropped on this guard's account.
 	inactive        bool
 	candidates      []replaceCandidate
 	candidateByID   map[string]replaceCandidate
 	fedIDsByContent map[string][]string
-	// concurrent is the caller's map, already holding the rows a concurrent
-	// writer saved during the round trip, so the two guards keep one definition
-	// of "concurrent" and one preserved list.
-	concurrent map[string]bool
-	// sameSecond holds the rows of that map that were written in the SECOND the
-	// consolidation window opened (#1745). They are concurrent only because the
-	// window's stamp and the row's own stamp share a second, so a claim over one
-	// of them is refused for want of proof rather than for a change, and the
-	// caller says so. A row that also moved since the pass read it is not in
-	// this set: that one really changed.
-	sameSecond map[string]bool
+	concurrent      map[string]bool
+	sameSecond      map[string]bool
 }
 
-// newFedGuard marks every candidate the pass did not read, or read differently,
-// as concurrent: an edit or a delete landed while the harness was answering.
-//
-// sameSecond is the window's own answer — the rows written in the second the
-// window opened — and only the ones the pass read UNCHANGED stay in it. A row
-// that moved since the pass read it, or that the pass never read at all, is a
-// real concurrency event and is counted as one.
 func newFedGuard(candidates []replaceCandidate, fed []CorpusRow, concurrent map[string]bool, sameSecond map[string]bool) *fedGuard {
 	g := &fedGuard{
 		candidates:      candidates,
@@ -6723,21 +3752,6 @@ func newFedGuard(candidates []replaceCandidate, fed []CorpusRow, concurrent map[
 	return g
 }
 
-// dropReasonFor reports whether the emission must not be written at all, and
-// keeps every row it would otherwise have taken. A keep restates its source
-// byte-for-byte, so the emitted text IS the claim on the fed row carrying that
-// text; a merge or a rewrite claims the ids it names in ReplacesIDs. Either
-// claim is void the moment the row it points at changed or is gone, and the
-// caller that honours a void claim writes a duplicate beside a live edit or
-// resurrects a delete.
-//
-// The reason is the REFUSAL'S, and it is not decoration (#1745): a claim over a
-// row that really moved is a concurrent change, and a claim over a row the
-// pass read and that was only marked concurrent because it was written in the
-// same second the window opened is a held-back proposal — the next pass can
-// apply it, and reporting it as a change told the operator that a memory
-// moved when nothing did. A claim that fails on both kinds of row is a
-// change: it is void for a reason a later pass cannot undo by waiting.
 func (g *fedGuard) dropReasonFor(m Memory) dropReason {
 	if g.inactive {
 		return dropNone
@@ -6746,20 +3760,6 @@ func (g *fedGuard) dropReasonFor(m Memory) dropReason {
 	if len(fails) == 0 {
 		return dropNone
 	}
-	// Keep every row this emission would otherwise have deleted: the sources it
-	// names, and any stored row carrying the text it emits. Nothing may be lost
-	// to a claim the pass is not allowed to make.
-	//
-	// The marking is ORDER-DEPENDENT and must be: the whole drop loop runs
-	// before any reuse claim is made, so an emission refused here marks every
-	// row it names as concurrent even when an earlier emission in the same pass
-	// was accepted and also claims one of them — an accepted merge and a refused
-	// keep can share a source. The accepted merge then cannot reuse the shared
-	// row: it inserts a fresh copy instead, and the source survives BESIDE the
-	// merged row, excluded from the delete set by its concurrent mark and
-	// reported in preserved. The direction is deliberate — a refused emission
-	// errs toward keeping, never toward an overlap where its void claim could
-	// delete a row a live claim reaches for.
 	for _, replaced := range m.ReplacesIDs {
 		if _, stored := g.candidateByID[replaced]; stored {
 			g.concurrent[replaced] = true
@@ -6778,10 +3778,6 @@ func (g *fedGuard) dropReasonFor(m Memory) dropReason {
 	return dropSameSecond
 }
 
-// claimFailures returns the rows whose state made the emission's claim void:
-// the stored rows carrying the text it emits, and the sources it names. A row
-// that is not stored at all is gone (or stopped being replaceable) and fails
-// the claim like a row that moved.
 func (g *fedGuard) claimFailures(m Memory) []string {
 	var fails []string
 	for _, fid := range g.fedIDsByContent[m.Content] {
@@ -6797,9 +3793,6 @@ func (g *fedGuard) claimFailures(m Memory) []string {
 	return fails
 }
 
-// emissionClaimIDs is every candidate an emission could write over: the sources
-// it names and any stored row carrying the text it emits (the row a reuse would
-// take).
 func emissionClaimIDs(candidates []replaceCandidate, m Memory) []string {
 	ids := append([]string(nil), m.ReplacesIDs...)
 	for _, c := range candidates {
@@ -6811,21 +3804,10 @@ func emissionClaimIDs(candidates []replaceCandidate, m Memory) []string {
 }
 
 // EmissionClaimsRow reports whether an emission whose sources are named and
-// whose text is content claims the stored row (rowID, rowContent): the row is
-// one of its named sources, or it already carries the emission's text. It is
-// keepEmissionClaims' predicate, exported so the reflect accounting lists the
-// rows an overflowing merge keeps — its text twins included — by the same rule
-// the replace keeps them, rather than by a copy of it.
 func EmissionClaimsRow(named map[string]bool, content, rowID, rowContent string) bool {
 	return named[rowID] || rowContent == content
 }
 
-// keepEmissionClaims marks every candidate an emission that is not written would
-// otherwise have taken as kept, exactly as fedGuard.drop does for a void claim,
-// and returns the ids it marked so the caller can tell WHICH refusal kept which
-// row. The overflow drop needs that distinction (#1228): its claims are kept
-// alive so nothing is lost, but no later run can act on them, so they must not
-// be reported as survivors a later round has to merge.
 func keepEmissionClaims(candidates []replaceCandidate, concurrent map[string]bool, m Memory) []string {
 	named := make(map[string]bool, len(m.ReplacesIDs))
 	for _, id := range m.ReplacesIDs {
@@ -6841,88 +3823,10 @@ func keepEmissionClaims(candidates []replaceCandidate, concurrent map[string]boo
 	return kept
 }
 
-// reusePreservesAge reports whether a reused row is unchanged by this replace
-// — the consolidator re-emitted the stored text byte-identically, in the same
-// category — and must therefore keep its created_at, source and provenance
-// instead of being stamped as newly consolidated (#623).
-//
-// Reuse is matched on content alone, so an identical sentence re-emitted under
-// a different category also lands here. That is a rewrite, and must keep
-// #279's behaviour: category is one of the two things DecayRankingSQL decays
-// on, so a recategorized row is not the same knowledge with a new age. Only
-// the fields reflection actually restated move in the unchanged case — a
-// reweight, retag or scope narrowing is still applied.
-//
-// The bug this guards: RetainGuardedDrops (#549, every category since #619)
-// hands back a memory the consolidator omitted as stale, byte-identically, and
-// the reuse UPDATE then re-stamped it created_at = datetime('now') and
-// source = 'reflection'. Omitting a memory therefore made it rank fresher than
-// folding it would have — its 30/45-day decay restarted on every applied
-// reflect, so an architecture/decision/pattern memory the model kept dropping
-// never aged out, and its original mcp provenance was overwritten.
-//
-// Note that emitted.Source plays no part: the one caller does set it
-// (cmd/ghost's reflectMemoriesToMemory hardcodes 'reflection'), but this
-// function never reads it, and neither does the insert or the rewrite path
-// below — both hardcode 'reflection' in SQL. The stored source therefore
-// survives an unchanged re-emission only because that branch stopped assigning
-// it, which is also why a future reader of Memory.Source must not assume it
-// decides this.
 func reusePreservesAge(stored replaceCandidate, emitted Memory) bool {
 	return stored.content == emitted.Content && stored.category == emitted.Category
 }
 
-// reuseChangesNothing reports whether this replace leaves the reused row exactly
-// as it found it — the emission restates every field the row records, so there
-// is no write to make (#727).
-//
-// It is a STRICTER question than reusePreservesAge, and the two are separate on
-// purpose. reusePreservesAge asks whether the row is the same knowledge with the
-// same age, which decides created_at and source; this asks whether anything at
-// all moves, which decides whether the pass writes the row and records it. A
-// reweight, a retag or a stated scope passes the first and fails the second,
-// because each of those is a change to what the memory says about itself.
-//
-// The five fields are the ones the reuse UPDATE writes, which is what makes this
-// predicate checkable against the statement rather than against a reading of
-// "unchanged": anything the UPDATE would assign, this compares. source and
-// created_at are not here because the unchanged branch does not assign them.
-//
-// A value that cannot be read counts as CHANGED, never as unchanged. The safe
-// direction is the loud one — a tags column that is not a JSON list makes the
-// pass write the row and record it, where treating it as equal would leave a
-// value the caller asked for unrecorded and its timestamp unmoved.
-//
-// importance is compared at the EMISSION's precision, and that is the whole
-// reason this predicate is not a plain ==. Memory.Importance is a float32, the
-// column is a float64, and the READ already narrows the column into a Memory
-// (scanMemories), so that is the precision at which anything downstream can tell
-// one value from another. Upsert's strengthen is `SET importance = MIN(1.0,
-// importance + ?)` with `importance*0.2` BOUND as a float32, so the multiply is
-// Go arithmetic on the caller's own value and the ADDITION is the one SQLite
-// does in its own float64 — the add is what #655 moved into SQL, where it had
-// been Go arithmetic on a float32 that left the column holding a float32-exact
-// value. The increment is therefore the caller's float32, NOT the column's value
-// times 0.2, and the two are not the same number. Either way the sum is a float64
-// a float32 cannot name: float32(0.55) is 0.550000011920929, the bound increment
-// widens to 0.11000000685453415, and the column lands at 0.6600000187754631,
-// which narrows to 0.6600000262260437. (The column's own value times 0.2 gives
-// 0.66000001430511479 — a different float64, though it narrows to the same
-// float32, so the defect and the fix are the same either way.) Comparing the two
-// at full width therefore reported a change on a row that had not moved, so
-// every applied reflect appended a byte-identical version of it and stamped it
-// touched — the whole of #727 reinstated for every strengthened memory (15 of
-// 1,170 on the store it was measured on) #750.
-//
-// So the stored value is NARROWED to the emission's precision and the two are
-// then equal. That is the only lossy direction, and what it loses is one float32
-// ULP: an emission of 0.66 reads as equal to a row holding 0.6600000187754631.
-// No reader can observe that, because every reader narrows this column the same
-// way the emission does, and a reweight is a different float32, which no
-// rounding of the stored value imitates. The float64 the column holds is left
-// alone rather than rounded, because a no-op is a no-op — a write here would
-// replace a fold's exact value with the emission's widening of it and change
-// nothing else.
 func reuseChangesNothing(stored replaceCandidate, emitted Memory) bool {
 	return stored.content == emitted.Content &&
 		stored.category == emitted.Category &&
@@ -6931,18 +3835,6 @@ func reuseChangesNothing(stored replaceCandidate, emitted Memory) bool {
 		scopeUnchanged(stored.scope, emitted.Scope)
 }
 
-// sameTags compares the stored tags column with an emission's list by VALUE
-// rather than by the bytes json.Marshal produced for each.
-//
-// The bytes are not a stable spelling of the same list. A row saved with no tags
-// holds "null" and a keep that normalises nil to an empty list holds "[]", and
-// the two read back identically — GetByIDs hands both to the caller as the same
-// empty list — so comparing the column text would report a difference on every
-// run of a corpus whose memories were saved untagged, and a pass that reported a
-// difference writes the row and stamps it touched. That is the whole defect
-// #727 removes, reached by a different road.
-//
-// An unreadable column is not equal (see reuseChangesNothing).
 func sameTags(stored string, emitted []string) bool {
 	var parsed []string
 	if err := json.Unmarshal([]byte(stored), &parsed); err != nil {
@@ -6959,16 +3851,6 @@ func sameTags(stored string, emitted []string) bool {
 	return true
 }
 
-// scopeUnchanged reports whether the emission's scope leaves the stored scope
-// alone, which is the reuse UPDATE's own COALESCE rule read as a predicate.
-//
-// An emission that states no scope never changes the column — reflection has no
-// machine-readable scope, so every memory it emits arrives with none, and
-// "unchanged" is the answer the UPDATE already gives it. A stated scope is
-// compared through parseScope, because that is how every reader in the codebase
-// reads the column: a value it cannot parse is no scope, so a stored column that
-// decodes to nothing equals an emission that states nothing, and an emission
-// that states something is a change the UPDATE applies.
 func scopeUnchanged(stored sql.NullString, emitted map[string]string) bool {
 	if len(emitted) == 0 {
 		return true
@@ -6976,31 +3858,6 @@ func scopeUnchanged(stored sql.NullString, emitted map[string]string) bool {
 	return maps.Equal(parseScope(stored), emitted)
 }
 
-// takeReusableRow removes and returns the row an emitted memory should reuse
-// from the same-content candidates left for it, along with the rest. A project
-// legitimately holds one text under several categories — Upsert keeps the
-// incoming category on a linked copy so nothing the caller saved is lost — so
-// the content-only bucket is not a single row, and claiming the wrong one
-// makes reusePreservesAge report a category change: the memory that IS the same
-// knowledge would be deleted, its other-category twin recategorized onto it, and
-// both re-stamped. Preferring the category the consolidator actually emitted
-// keeps the retention case a retention.
-//
-// Falls back to the first candidate when no category matches, so a genuine
-// recategorization still updates its row in place — the behaviour the
-// content-only match had, and the one the rewrite branch's "must still be
-// applied in place" case depends on. Without the fallback the recategorized
-// row would be left in the bucket, deleted with the rest of the unmatched
-// candidates, and the emission inserted under a fresh id: the row identity
-// gone and, because memory_embeddings and memory_links are ON DELETE CASCADE,
-// its embedding and link graph with it (#452), plus a reset created_at. So the
-// failure mode this guards is a lost row, not a redundant one. In the fallback
-// case the caller takes the rewrite branch, exactly as it did previously.
-//
-// Returns false for an empty bucket, so a future caller cannot index an empty
-// slice here. Callers pass candidates already ordered oldest first (see the
-// candidate query), so the fallback keeps the oldest age and stays
-// deterministic.
 func takeReusableRow(matches []replaceCandidate, emitted Memory) (replaceCandidate, []replaceCandidate, bool) {
 	if len(matches) == 0 {
 		return replaceCandidate{}, nil, false
@@ -7013,18 +3870,7 @@ func takeReusableRow(matches []replaceCandidate, emitted Memory) (replaceCandida
 	return matches[0], matches[1:], true
 }
 
-// pruneSnapshotsTx keeps the 10 most recent snapshots per project and drops the
-// evidence of any snapshot that is gone. A failure is logged, never returned:
-// an unpruned snapshot is a cost, not a reason to undo the write.
 func (s *Store) pruneSnapshotsTx(ctx context.Context, tx *sql.Tx, projectID string) {
-	// Prune old snapshots — keep only the 10 most recent per project. Order by
-	// snapshot_id, not created_at: snapshot_id embeds UnixNano, while
-	// created_at is only second-precision, so same-second snapshots would
-	// otherwise prune in arbitrary order.
-	//
-	// Widened from 3: with a restore no longer consuming the snapshot it
-	// read, three was a handful of reflections of history — one bad round
-	// and there was nothing left to roll back to.
 	_, err := tx.ExecContext(ctx, `
 		DELETE FROM memory_snapshots
 		WHERE project_id = ? AND snapshot_id NOT IN (
@@ -7037,11 +3883,6 @@ func (s *Store) pruneSnapshotsTx(ctx context.Context, tx *sql.Tx, projectID stri
 	if err != nil && s.logger != nil {
 		s.logger.Warn("prune old snapshots", "error", err, "project_id", RefusalArg("project_id", projectID))
 	}
-	// The evidence goes with the snapshot it belongs to, and the same statement
-	// shape: memory_snapshot_evidence has no foreign key to cascade from (the
-	// snapshots it describes are addressed by (snapshot_id, memory_id), which is
-	// not a key), so a pruned snapshot's evidence would otherwise accumulate
-	// forever — the only unbounded growth this table would have had.
 	if _, err = tx.ExecContext(ctx, `
 		DELETE FROM memory_snapshot_evidence
 		WHERE snapshot_id NOT IN (SELECT DISTINCT snapshot_id FROM memory_snapshots)
@@ -7050,10 +3891,6 @@ func (s *Store) pruneSnapshotsTx(ctx context.Context, tx *sql.Tx, projectID stri
 	}
 }
 
-// snapshotReplaceableTx snapshots, and its evidence, every row ReplaceNonManual
-// may replace in the project, and returns the snapshot id. It is the one place
-// the snapshot is taken, shared by ReplaceNonManual and FoldRows, so a restore
-// reads the same shape whichever wrote it.
 func (s *Store) snapshotReplaceableTx(ctx context.Context, tx *sql.Tx, projectID string) (snapshotID string, err error) {
 	snapshotID = fmt.Sprintf("%s-%d", projectID, time.Now().UnixNano())
 	_, err = tx.ExecContext(ctx, `
@@ -7079,16 +3916,6 @@ func (s *Store) snapshotReplaceableTx(ctx context.Context, tx *sql.Tx, projectID
 	if err != nil {
 		return "", fmt.Errorf("snapshot memories: %w", err)
 	}
-	// The evidence those memories carry, in the second read rather than a column on
-	// the snapshot row: a memory can have several records, and this is the only
-	// copy that will exist by the time the rows are gone.
-	//
-	// It is here for the restore. A consolidation that rewrites a memory deletes
-	// the row, and the foreign key takes its evidence with it, so a restore that
-	// brought back only the text would return a memory that reads as never observed
-	// — in a database that still had the evidence to return. Joining through the
-	// snapshot's own rows bounds the read to the memories this snapshot covers, so
-	// nothing outside the replaced corpus is copied.
 	if _, err = tx.ExecContext(ctx, `
 		INSERT INTO memory_snapshot_evidence
 			(snapshot_id, memory_id, kind, agent, session_id, source_ref, confidence, observed_at, verified_at)
@@ -7103,73 +3930,12 @@ func (s *Store) snapshotReplaceableTx(ctx context.Context, tx *sql.Tx, projectID
 	return snapshotID, nil
 }
 
-// ReplaceNonManual atomically replaces all non-manual memories for a project.
-// Manual-sourced memories are preserved. Refuses to replace with an empty set.
-//
-// It returns the IDs of memories preserved because they were saved during the
-// consolidation round trip (the consolidatedSince race) — callers must not
-// treat the post-apply corpus as fully consolidated when this is non-empty.
-//
-// dropped is the count of emissions the #1051 corpus guard refused. deleted is
-// the count of stored rows this replace removed — the unmatched candidates —
-// so a caller can tell a round that wrote nothing from one that changed the
-// corpus, and can base its "nothing happened" report and its restore hint on
-// what was actually written or deleted rather than on the drop count alone.
-// appliedByCategory counts what the replace landed per category — every
-// emission that survived the guard (reused, verbatim-kept, or freshly
-// inserted) — so a summary can break down the applied total without counting
-// an emission the guard refused.
-//
-// rowClaims is the set of columns a rewrite inherits from the rows it replaces: the
-// validity triple, the trust rating, and the three provenance strings.
 type rowClaims struct {
 	validFrom, validUntil, verifiedAt *string
 	confidence                        *float64
 	agent, sessionID, sourceRef       string
 }
 
-// inheritedClaims resolves the columns a rewritten or merged row takes from the
-// rows it stands in for.
-//
-// One rule, the same one the reuse branch inside ReplaceNonManual already follows:
-// a value the EMISSION states wins, and silence inherits. Nothing is defaulted and
-// nothing invented, because a consolidation has no authority to re-attribute a
-// claim it was never told about. The sources are read in the order ReplacesIDs
-// names them — for a merge that is the consolidator's own order — and the FIRST
-// source stating a value supplies it, so the result is a function of the proposal
-// rather than of rowid order.
-//
-// THE WINDOW IS THE EXCEPTION, and it is not a smaller version of that rule. The
-// two boundaries are resolved TOGETHER after every source has been read, because
-// filling them independently composes a pair no row ever asserted, and deciding
-// per source lets a single-boundary row lock the unit and lose a later source's
-// complementary end — a loss that depends on the order the consolidator named. See
-// the resolution below for the order of preference. verified_at, confidence, agent
-// and session_id remain first-source-wins: each is one value with no partner to
-// disagree with, and a half-window problem cannot arise for any of them. source_ref
-// is one value EXCEPT for a decision link, which is a LIST: a merge that folds
-// several decision companions stands in for every one of them, so those links are
-// gathered and joined rather than truncated to the first, and the decision lookup
-// reads the whole list. verified_at is a single value by that same reasoning AND is read by the
-// same reader as the two boundaries, so it is judged by readability too rather
-// than for pairing alone. A maintainer reading this paragraph must not
-// reimplement the window the per-value way — that is the bug, and the resolution
-// below exists because of it.
-//
-// It is the SOURCES rather than the emission alone because an emission carries none
-// of this: reflectMemoriesToMemory builds it from the consolidator's output and has
-// nothing to copy a window from, so binding only the emission's columns would store
-// NULL every time and fix nothing. Read here because the delete below is what
-// disposes of the sources, and this loop runs before it — the same reordering
-// carryEvidenceTx already depends on.
-//
-// CLAIMS FOLLOW EVIDENCE. A source in keptLive — a candidate the pass keeps live
-// rather than deleting — supplies no claim, because its records are not carried
-// onto the row (sourcesNotKeptLive). It keeps its records, so its window,
-// verification, confidence and provenance strings stay with it too; a
-// verified_at taken from it would stand on the successor with no verification
-// record behind it. What such a source still gives is its decision links,
-// gathered into the list below with every other source's.
 func inheritedClaims(ctx context.Context, tx *sql.Tx, projectID string, m Memory, keptLive map[string]bool) (rowClaims, error) {
 	claims := rowClaims{
 		validFrom:  m.ValidFrom,
@@ -7180,9 +3946,6 @@ func inheritedClaims(ctx context.Context, tx *sql.Tx, projectID string, m Memory
 		sessionID:  m.SessionID,
 		sourceRef:  m.SourceRef,
 	}
-	// The window is decided AFTER every source has been read, because the choice
-	// between a complete pair and a single boundary is only knowable once the whole
-	// set has been seen — deciding per source is the bug this shape exists to fix.
 	var completeWindow, firstHalfWindow Validity
 	var haveComplete, haveHalf bool
 	var decisionRefs []string
@@ -7198,46 +3961,24 @@ func inheritedClaims(ctx context.Context, tx *sql.Tx, projectID string, m Memory
 			 FROM memories WHERE id = ? AND project_id = ?`, id, projectID,
 		).Scan(&validFrom, &validUntil, &verifiedAt, &confidence, &agent, &sessionID, &sourceRef)
 		if err == sql.ErrNoRows {
-			// A source the proposal named but this store does not hold, or one
-			// another writer took. Its evidence is not carried either, so there is
-			// nothing to inherit and the row is written on what the emission said.
 			continue
 		}
 		if err != nil {
 			return rowClaims{}, fmt.Errorf("read replaced memory %s claims: %w", RefusalArg("memory_id", id), err)
 		}
 		if keptLive[id] {
-			// A source this pass keeps live: its decision links and nothing else.
-			// See CLAIMS FOLLOW EVIDENCE above.
 			decisionRefs = append(decisionRefs, decisionRefsInSourceRef(sourceRef.String)...)
 			continue
 		}
-		// This source is a WINDOW CANDIDATE, remembered rather than decided on.
-		// See the resolution after the loop for why, and for what a candidate is
-		// allowed to become. Only a boundary readableStampPtr recognises counts:
-		// a source whose window is prose in the column states nothing Ghost can
-		// act on, and letting it qualify as a complete pair would let it win rule
-		// 1 from any position and discard a real window.
 		candidate := Validity{ValidFrom: readableStampPtr(validFrom), ValidUntil: readableStampPtr(validUntil)}
 		switch {
 		case candidate.ValidFrom != nil && candidate.ValidUntil != nil:
-			// A source states a COMPLETE window. It is preferred, but only if the
-			// pair it states is one that passes CheckWindowOrder; a source whose
-			// own window is out of order contributes NOTHING, not a half. Keeping
-			// one of its boundaries would pick a side the row itself never took,
-			// and the pair is the only thing it ever asserted.
 			if err := CheckWindowOrder(candidate, Validity{}); err == nil && !haveComplete {
 				completeWindow, haveComplete = candidate, true
 			}
 		case !haveHalf && (candidate.ValidFrom != nil || candidate.ValidUntil != nil):
-			// Exactly one boundary: a genuine half, and the fallback's source.
 			firstHalfWindow, haveHalf = candidate, true
 		}
-		// verified_at is the third value of the same triple and is read by the same
-		// reader, so it takes the same rule: a value no layout reads is not a stated
-		// verification. nullIfEmptyPtr at the INSERT maps only the empty string, so
-		// without this a source's prose in the column was copied onto the successor
-		// verbatim and stage 2 reported validity_unparseable forever.
 		if claims.verifiedAt == nil {
 			claims.verifiedAt = readableStampPtr(verifiedAt)
 		}
@@ -7254,60 +3995,13 @@ func inheritedClaims(ctx context.Context, tx *sql.Tx, projectID string, m Memory
 		if claims.sourceRef == "" {
 			claims.sourceRef = sourceRef.String
 		}
-		// A decision link is gathered as a list, not a single value: a merge that
-		// folds two decision companions stands in for BOTH decisions, and carrying
-		// only the first link is what let supersede silently miss the second while
-		// wrongly retiring the row when the first was superseded.
 		decisionRefs = append(decisionRefs, decisionRefsInSourceRef(sourceRef.String)...)
 	}
-	// A successor records every decision link it stands for, so no decision is
-	// left without its companion and none is retired on the strength of a link
-	// that names a different decision. The links EXTEND the value chosen above —
-	// the emission's own, else the first source's — rather than replacing it, so
-	// that value's precedence survives and a lone link behind a non-decision first
-	// source is not dropped. boundedDecisionRefs holds the result to
-	// MaxSourceRefLen; ReplaceNonManual has already dropped a merge whose links
-	// alone would not fit.
 	ref, err := boundedDecisionRefs(claims.sourceRef, decisionRefs)
 	if err != nil {
 		return rowClaims{}, err
 	}
 	claims.sourceRef = ref
-	// The window is inherited AS A UNIT, from one source or from none — never half
-	// from one row and half from another.
-	//
-	// Filling the two boundaries independently is what a merge must not do. A source
-	// stating only valid_from and another stating only valid_until compose a pair
-	// neither row ever asserted, and the halves can land backwards: a row born
-	// expired, with both sources' evidence carried onto it as though the pair were
-	// one claim, so stage 2 withholds it from ranked retrieval with no error
-	// anywhere. That is the contradiction UpdateMemoryWithOptions and
-	// UpsertWithOptions' fold both refuse by running CheckWindowOrder over the pair
-	// they compose.
-	//
-	// Order of preference, and the second rule is the one a single-pass version
-	// gets wrong:
-	//
-	//  1. A source holding a COMPLETE consistent pair of READABLE stamps wins,
-	//     whichever id the consolidator named first. Readable is load-bearing
-	//     here, not decoration: rule 1 is position-independent, so an unreadable
-	//     pair that qualified would win from anywhere and discard a real window,
-	//     which is the mirror of the loss these rules exist to remove. Deciding per source instead would let a
-	//     single-boundary row claim the unit and lock the window, discarding a
-	//     later source's complete pair — and a row that inherits a start and
-	//     loses its end never retires, which is the outcome valid_until exists to
-	//     prevent, on a path that runs unattended over the whole corpus.
-	//  2. Failing that, ONE boundary from the first source that states any. Half a
-	//     real claim beats none, and the other half is not invented. Which half
-	//     survives is the first id's, and that order dependence is a stated cost
-	//     rather than a silent one: it is bounded by rule 1 removing it whenever
-	//     any source in the set states a complete pair.
-	//
-	// The CheckWindowOrder on rule 1 is not redundant with the unit. A source row
-	// can hold a window that is ITSELF out of order, because Store.Create and
-	// RestoreSnapshot write the triple with no order check, and an import made
-	// before ImportMemory checked it did too, so inheriting a pair whole still
-	// needs judging. A source failing it falls to rule 2 and contributes no half.
 	if claims.validFrom == nil && claims.validUntil == nil {
 		switch {
 		case haveComplete:
@@ -7319,34 +4013,6 @@ func inheritedClaims(ctx context.Context, tx *sql.Tx, projectID string, m Memory
 	return claims, nil
 }
 
-// inheritedRetention is the tier a consolidation successor takes from the rows it
-// stands in for (#773). It is raiseRetentionTx's rule — mergeRetention, longest
-// life wins, never lower — over the SOURCES rather than over a fold's two tiers,
-// and it is the same rule for the same reason: an emission inherits rather than
-// invents, so a merge of two session memories arrives as a session memory rather
-// than as a project one that nothing will ever prune.
-//
-// Two properties are load-bearing and neither is obvious from the signature.
-//
-// The fold runs over the sources ALONE. The emission's own Retention is used only
-// when no source named a tier, because it is empty on every emission reflection
-// produces and NormalizeRetention would read that silence as the project default
-// — folding it in would raise every merge to project, which is the whole defect
-// this function exists to remove. A caller that states a tier on an emission with
-// no sources still gets it (#587's own save path, one writer down).
-//
-// A keep-forever source is not a consolidation input: retentionExemptSQL keeps it
-// out of the snapshot, the replaceable set and the concurrent-save set, so it is
-// never deleted here. It CAN still be named in ReplacesIDs, and a successor that
-// came out shorter-lived than the one row nobody was allowed to consolidate would
-// be a demotion the user declared against. mergeRetention cannot produce that
-// direction, and reading the sources rather than trusting the emission is what
-// makes it true even when the emission is silent.
-//
-// Read here because the delete below is what takes the sources, exactly as
-// inheritedClaims is read for the same rows. A source the proposal named but this
-// store does not hold contributes nothing, for inheritedClaims' reason: there is
-// nothing to inherit and the row is written on what the emission said.
 func inheritedRetention(ctx context.Context, tx *sql.Tx, projectID string, m Memory) (string, error) {
 	merged, ok, err := sourceRetentionTx(ctx, tx, projectID, m.ReplacesIDs)
 	if err != nil {
@@ -7355,30 +4021,9 @@ func inheritedRetention(ctx context.Context, tx *sql.Tx, projectID string, m Mem
 	if ok {
 		return merged, nil
 	}
-	// Nothing to inherit from, so the emission decides — through the one function
-	// that applies the default, so a tier the vocabulary does not hold is refused
-	// with its own wording rather than taking the whole round down on a column
-	// CHECK.
 	return NormalizeRetention(m.Retention)
 }
 
-// foldedRetention is the tier a fresh successor takes: the longest life among
-// the sources it folds (folded, the split sourcesNotKeptLive makes), and when it
-// folds none, the longest among the kept-live sources it names (m).
-//
-// The fallback is a choice, and it is not the claims rule. A claim is backed by
-// a record, and a claim copied from a row whose records stayed behind stands on
-// the successor with nothing recording it, so claims follow evidence and a
-// kept-live source gives none. A tier is backed by nothing: it is how long a row
-// lives, and the only rule it answers to is that a successor never outlives every
-// row it restates. When the emission folds a source, that source's tier answers
-// it, and a kept-live source's tier is not added, since its knowledge is still
-// live on its own row. When it folds none — a `rewrite X` whose X the guard
-// re-added verbatim, or a merge every source of which is reused, kept as
-// concurrent or kept for a refusal — the emission restates only rows that stay,
-// and the default is the wrong answer: a rewrite of a session row would land as
-// a project row nothing expires, the longer life inheritedRetention exists to
-// prevent. Their tier is the one value that keeps the rule, so it is read.
 func foldedRetention(ctx context.Context, tx *sql.Tx, projectID string, m, folded Memory) (string, error) {
 	if tier, ok, err := sourceRetentionTx(ctx, tx, projectID, folded.ReplacesIDs); err != nil || ok {
 		return tier, err
@@ -7386,36 +4031,9 @@ func foldedRetention(ctx context.Context, tx *sql.Tx, projectID string, m, folde
 	return inheritedRetention(ctx, tx, projectID, m)
 }
 
-// errScopeConflict marks the refusal inheritedScope makes when the rows it
-// reads cannot agree on one scope: they state different scopes, or a mix of
-// scoped and unscoped rows. It is a refusal of the EMISSION — the callers drop
-// it and keep its sources — and it is deliberately distinct from a read or
-// decode failure, which is returned unwrapped and aborts the replace the way
-// inheritedClaims and inheritedRetention propagate theirs. A refusal the caller
-// can act on (keep the sources and report the drop) and a failure it cannot are
-// not one error.
 var errScopeConflict = errors.New("scope conflict")
 
-// inheritedScope computes the scope a consolidation successor should inherit
-// from the rows it replaces. It follows the same "inherits rather than invents"
-// principle as inheritedClaims and inheritedRetention.
-//
-// Rules:
-//   - If the emission states a scope, it wins (the emission is explicit).
-//   - Otherwise, read the scope from each source named in ReplacesIDs.
-//   - If the scoped sources all agree, return that scope.
-//   - If they disagree, or a scoped source mixes with an unscoped one, return
-//     an error wrapping errScopeConflict so the caller refuses the emission and
-//     keeps its sources rather than silently widening scope.
-//   - If no source is scoped, return nil (applies everywhere).
-//
-// The decision is ORDER-INDEPENDENT: scoped and unscoped rows are tallied
-// independently, so a mix is a conflict whichever way ReplacesIDs lists them.
-// A single-source rewrite therefore keeps the source's scope, a merge with
-// agreeing sources keeps the shared scope, and a merge that cannot agree is
-// refused.
 func inheritedScope(ctx context.Context, tx *sql.Tx, projectID string, m Memory) (map[string]string, error) {
-	// If the emission explicitly states a scope, it wins.
 	if m.Scope != nil {
 		return m.Scope, nil
 	}
@@ -7430,7 +4048,6 @@ func inheritedScope(ctx context.Context, tx *sql.Tx, projectID string, m Memory)
 			`SELECT scope FROM memories WHERE id = ? AND project_id = ?`, id, projectID,
 		).Scan(&scopeJSONStr)
 		if errors.Is(err, sql.ErrNoRows) {
-			// Source doesn't exist in this store; skip it.
 			continue
 		}
 		if err != nil {
@@ -7451,27 +4068,18 @@ func inheritedScope(ctx context.Context, tx *sql.Tx, projectID string, m Memory)
 	return fold.result()
 }
 
-// scopeFold is the agreement rule inheritedScope applies to the sources it
-// reads, kept apart from the reads so the reflect dry run can ask the same
-// question of the rows it was given (FoldSourceScopes) and predict the refusal
-// the apply will make, rather than restating the rule (#1492). Scoped and
-// unscoped sources are tallied independently, which is what makes the answer
-// independent of source order.
 type scopeFold struct {
 	agreed       map[string]string
 	haveAgreed   bool
 	haveUnscoped bool
 }
 
-// add folds one source's scope in, and refuses a scoped source that disagrees
-// with the scoped sources already folded.
 func (f *scopeFold) add(id string, sourceScope map[string]string) error {
 	if sourceScope == nil {
 		f.haveUnscoped = true
 		return nil
 	}
 	if !f.haveAgreed {
-		// First scoped source we've seen.
 		f.agreed = sourceScope
 		f.haveAgreed = true
 		return nil
@@ -7482,8 +4090,6 @@ func (f *scopeFold) add(id string, sourceScope map[string]string) error {
 	return nil
 }
 
-// result is the agreed scope, nil when no source was scoped, or a conflict when
-// scoped and unscoped sources were mixed.
 func (f *scopeFold) result() (map[string]string, error) {
 	if f.haveAgreed && f.haveUnscoped {
 		return nil, fmt.Errorf("%w: sources mix scoped and unscoped rows", errScopeConflict)
@@ -7498,11 +4104,6 @@ type SourceScope struct {
 }
 
 // FoldSourceScopes is inheritedScope's agreement rule over rows the caller
-// already holds: the scope a successor of these sources inherits, or an error
-// (IsScopeConflict) when their scopes disagree or mix scoped with unscoped rows
-// — the refusal ReplaceNonManual and ApplyReflection make at the write. The
-// reflect accounting calls it so a dry run lists such a merge as refused instead
-// of as a merge the apply will not write.
 func FoldSourceScopes(sources []SourceScope) (map[string]string, error) {
 	var fold scopeFold
 	for _, src := range sources {
@@ -7514,20 +4115,8 @@ func FoldSourceScopes(sources []SourceScope) (map[string]string, error) {
 }
 
 // IsScopeConflict reports whether err is the scope refusal FoldSourceScopes
-// and the replace make.
 func IsScopeConflict(err error) bool { return errors.Is(err, errScopeConflict) }
 
-// sourceRetentionTx folds the tiers of the given source rows into the one life
-// they share, and reports whether any of them named one. The second answer is
-// what keeps the two callers apart: the fresh INSERT has no row of its own, so a
-// set that names nothing leaves the emission to decide, while a REUSED row
-// already has a tier and a set that names nothing leaves it exactly as it was.
-// Reading the emission's silence as the project default in that second case would
-// make every session memory durable on the next reflect pass.
-//
-// The fold is over the ids as given, so a caller passes the ones it wants: the
-// fresh insert passes the whole ReplacesIDs, and the reuse raise passes them
-// minus the reused row, whose own tier it already holds.
 func sourceRetentionTx(ctx context.Context, tx *sql.Tx, projectID string, ids []string) (tier string, found bool, err error) {
 	for _, id := range ids {
 		if id == "" {
@@ -7552,29 +4141,6 @@ func sourceRetentionTx(ctx context.Context, tx *sql.Tx, projectID string, ids []
 	return tier, found, nil
 }
 
-// raiseReusedRetentionTx raises a REUSED row's tier to the longest life any of
-// the emission's OTHER sources named (#773, through the reuse path).
-//
-// The reuse branches update a row in place, so the row keeps its own tier — which
-// is right when the emission re-states that row and names nothing else, and wrong
-// the moment ReplacesIDs also names a source beside it. Those sources are deleted
-// into this row, and a session-tier row absorbing a project-tier one would take
-// the project's knowledge to its own expiry: a fact the user had declared durable
-// removed by a `ghost prune` a month later, because the consolidation that merged
-// it into a conversation-scoped row never looked at the tier.
-//
-// The raise is its own statement rather than a column on the reuse UPDATEs, and it
-// runs for all three branches including reuseChangesNothing, which writes nothing
-// at all. That is the branch a verbatim re-emission takes on every applied
-// reflect, so a raise expressed as a column of the other two UPDATEs would be
-// skipped exactly where the leak is most common.
-//
-// It RAISES and never extends. expires_at is cleared when the result leaves the
-// session tier and left alone when it does not, so a re-emission — which is not a
-// new assertion of the fact by anybody — cannot renew a session row's life once
-// per reflect pass and turn a conversation-scoped memory into a permanent one.
-// That is the deliberate difference from a FOLD, which is a new assertion and
-// does refresh (#772).
 func raiseReusedRetentionTx(ctx context.Context, tx *sql.Tx, projectID, id string, m Memory) error {
 	var current string
 	if err := tx.QueryRowContext(ctx,
@@ -7582,8 +4148,6 @@ func raiseReusedRetentionTx(ctx context.Context, tx *sql.Tx, projectID, id strin
 	).Scan(&current); err != nil {
 		return fmt.Errorf("read the reused memory's retention: %w", err)
 	}
-	// The reused row is a source of itself, so it is folded in as the seed rather
-	// than read twice — the same answer, one fewer statement.
 	others := make([]string, 0, len(m.ReplacesIDs))
 	for _, replaced := range m.ReplacesIDs {
 		if replaced != id {
@@ -7595,10 +4159,6 @@ func raiseReusedRetentionTx(ctx context.Context, tx *sql.Tx, projectID, id strin
 		return err
 	}
 	if !found {
-		// The row restating itself. mergeRetention would return its own tier, but
-		// saying so explicitly is the point: this is the case that was already
-		// right, and a rule that read the emission's silence as a longer life would
-		// be wrong here rather than merely redundant.
 		return nil
 	}
 	merged := mergeRetention(current, inherited)
@@ -7612,32 +4172,6 @@ func raiseReusedRetentionTx(ctx context.Context, tx *sql.Tx, projectID, id strin
 	return nil
 }
 
-// fillReusedClaimsTx gives a REUSED row the claims of the OTHER sources an
-// emission merged into it, filling only what the row left unset.
-//
-// It is the reuse-branch half of inheritedClaims, for the reason
-// raiseReusedRetentionTx is the reuse-branch half of inheritedRetention: when
-// ReplacesIDs names a source beside the reused row, that source is deleted into
-// this row, and its window, verification, confidence and provenance strings went
-// with it — a decision companion's `decision:<id>` link among them — while the
-// fresh INSERT path keeps every one. The reused row is the FIRST source: its own
-// value wins, and an absorbed source supplies a value only where the row has none,
-// in ReplacesIDs order, by inheritedClaims' own rules — except that the decision
-// links the absorbed sources carried are APPENDED to the row's own source_ref,
-// since a link is a list and keeping only the row's value drops a decision.
-//
-// The window is still a unit. It is filled only when the reused row states
-// neither boundary; a row holding one boundary keeps exactly that half, because
-// completing it from another row composes a pair no row asserted. The emission's
-// own columns play no part, as on the reuse UPDATEs above, which never wrote them.
-//
-// No updated_at and no history row: memory_history records none of these
-// columns, and the evidence that backs them is carried by the caller in the same
-// transaction (carryEvidenceTx), so a filled verified_at stands beside the record
-// that claims it, as on the fresh INSERT. That holds because the claims come
-// from the same sources the carry reads: keptLive is the candidates the pass
-// keeps live, and a named source among them gives only its decision links
-// (inheritedClaims).
 func fillReusedClaimsTx(ctx context.Context, tx *sql.Tx, projectID, id string, m Memory, keptLive map[string]bool) error {
 	others := make([]string, 0, len(m.ReplacesIDs))
 	for _, replaced := range m.ReplacesIDs {
@@ -7655,12 +4189,6 @@ func fillReusedClaimsTx(ctx context.Context, tx *sql.Tx, projectID, id string, m
 	if claims == (rowClaims{}) {
 		return nil
 	}
-	// source_ref is resolved here rather than by a COALESCE, because a decision
-	// link is a LIST: the reused row's own reference wins, but the decision links
-	// the absorbed sources carried are appended to it, exactly as on the fresh
-	// INSERT. A COALESCE kept the row's own value whole and threw the gathered
-	// links away, so an absorbed decision lost its only companion. A row with no
-	// reference of its own takes the inherited value, as before.
 	sourceRef := claims.sourceRef
 	var own sql.NullString
 	if err := tx.QueryRowContext(ctx, `SELECT source_ref FROM memories WHERE id = ?`, id).Scan(&own); err != nil {
@@ -7671,8 +4199,6 @@ func fillReusedClaimsTx(ctx context.Context, tx *sql.Tx, projectID, id string, m
 			return err
 		}
 	}
-	// SQLite evaluates every SET expression against the row as it was, so the
-	// valid_until CASE reads the ORIGINAL valid_from and the window moves together.
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE memories SET
 			valid_from  = CASE WHEN NULLIF(valid_from, '') IS NULL AND NULLIF(valid_until, '') IS NULL
@@ -7693,35 +4219,6 @@ func fillReusedClaimsTx(ctx context.Context, tx *sql.Tx, projectID, id string, m
 	return nil
 }
 
-// markReusedSuccessorSourceTx stamps reflection provenance on a REUSED row when
-// the emission absorbed a source into it (#1283), and reports whether it wrote.
-//
-// A reuse keeps the reused row's own provenance while the emission re-states
-// that row alone — the row has not been re-asserted by anybody, and overwriting
-// its source would relabel an agent save as consolidation output. The moment
-// the pass folds another row into this one, though, the reused row is the
-// merge's successor, exactly as a fresh INSERT's row is, and
-// findDecisionCompanionsTx reads `source = 'reflection'` as one of the arms that
-// trust a carried `decision:<id>` link. Without this stamp a merge that absorbed
-// a decision companion left the link on a row the lookup rejected, so
-// SupersedeDecisionReport found nothing, answered a clean success, and the
-// reversed decision kept answering search and session start.
-//
-// Absorption means a row the pass CONSUMES, not merely one ReplacesIDs names:
-// an id no row holds, a manual or builtin row, a pinned row and a concurrently
-// edited row the pass keeps are all named by an emission but never folded into
-// the reused row, and relabelling it for them would announce a merge that did
-// not happen. consumed is the pass's delete set.
-//
-// The write sets `source` and moves `updated_at` in the SAME statement. The
-// stamp is a real provenance change, and every writer of the reflect phase must
-// move the live row's stamp in the statement that files its version — a reflect
-// version whose writer left the stamp alone would make the phase an unreliable
-// witness for the `--fix-updated-at` anchor (see stampMovingPhases in
-// history_compact.go). Because it moves the column, the caller appends the id to
-// its reflected set and the pass files the version through the ordinary history
-// append. `created_at` is not touched, so a self-restating row keeps its age.
-// The bool is true when the UPDATE changed a row.
 func markReusedSuccessorSourceTx(ctx context.Context, tx *sql.Tx, id string, m Memory, consumed map[string]bool) (bool, error) {
 	if !reuseAbsorbsConsumed(id, m, consumed) {
 		return false, nil
@@ -7738,30 +4235,11 @@ func markReusedSuccessorSourceTx(ctx context.Context, tx *sql.Tx, id string, m M
 	return n > 0, nil
 }
 
-// absorbSourcesTx is what a row that already exists takes from the sources an
-// emission merges into it: the reflection provenance the decision lookup trusts
-// (markReusedSuccessorSourceTx), the records of the sources it folds
-// (carryEvidenceTx over folded, the sourcesNotKeptLive split) and their claims
-// (fillReusedClaimsTx, where a kept-live source gives its decision links alone).
-// It returns whether the provenance stamp wrote, so the caller can file the
-// version.
-//
-// Three callers, one rule: the reuse branch of ReplaceNonManual, a merge
-// promoted into _global (promoteReflectionCandidate), whose row is in the reused
-// row's position — it exists when the sources are merged into it, whether the
-// promotion inserted it or folded into a row _global already held — and the
-// survivor of a FoldRows cluster, which is in the same position. The tier is
-// the caller's, because a reuse and a fold raise their row's own tier and a
-// promotion hands foldedRetention to the upsert that writes the row.
 func absorbSourcesTx(ctx context.Context, tx *sql.Tx, projectID, id string, m, folded Memory, keptLive, consumed map[string]bool) (bool, error) {
 	stamped, err := markReusedSuccessorSourceTx(ctx, tx, id, m, consumed)
 	if err != nil {
 		return false, err
 	}
-	// A merge that kept one row deletes the rest into it, and the cascade takes
-	// their evidence the moment the replace's delete runs, so the carry runs
-	// before it. A merge that names no other source carries nothing, because the
-	// row's own evidence never left it. See fillReusedClaimsTx.
 	if err := carryEvidenceTx(ctx, tx, id, folded.ReplacesIDs); err != nil {
 		return false, err
 	}
@@ -7771,14 +4249,9 @@ func absorbSourcesTx(ctx context.Context, tx *sql.Tx, projectID, id string, m, f
 	return stamped, nil
 }
 
-// replaceableRowSQL is the predicate a row a reflection replace may delete,
-// reuse or merge into passes: not a manual or builtin row, not pinned, not
-// resolved and not retention-exempt. replaceableCandidatesTx selects the
-// project's candidates with it, and replaceableRowTx asks it of one row.
 const replaceableRowSQL = `source NOT IN ('manual', 'builtin') AND pinned = 0 AND resolved_at IS NULL
 		  AND ` + retentionExemptSQL
 
-// replaceableRowTx reports whether the row id passes replaceableRowSQL.
 func replaceableRowTx(ctx context.Context, tx *sql.Tx, id string) (bool, error) {
 	var n int
 	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM memories WHERE id = ? AND `+replaceableRowSQL, id).Scan(&n); err != nil {
@@ -7787,52 +4260,7 @@ func replaceableRowTx(ctx context.Context, tx *sql.Tx, id string) (bool, error) 
 	return n == 1, nil
 }
 
-// sourcesNotKeptLive drops from an emission's ReplacesIDs every source that is
-// a candidate this pass keeps live rather than deleting, so the row stays live
-// as itself. keptLive is that set: the rows the pass reuses in place and the
-// ones it keeps as concurrent or for a refused emission.
-//
-// The split is deliberate. The drop guard's re-add is the shape that first
-// needed it: RetainGuardedDrops re-adds a merge source verbatim, the re-add
-// byte-matches the stored row and reuses it, and the merge still names that
-// row. It is not the only one: a direct caller's accepted emission can name a
-// row the pass keeps because it changed during the round trip, or because a
-// refused emission named it too. None of those rows is deleted, so what the
-// merge would otherwise take from them is wrong:
-//   - its evidence (carryEvidenceTx): the row keeps its own records, so a copy
-//     on the merge counts the same support on two live rows;
-//   - its claims (inheritedClaims, fillReusedClaimsTx): claims follow evidence,
-//     so a verified_at, confidence or window taken from a row whose records
-//     stayed behind would stand on the merge with nothing recording it;
-//   - its retention (inheritedRetention, raiseReusedRetentionTx): the row's tier
-//     still governs the row, and it is not knowledge folded into the merge;
-//   - a delete-history successor pointer (successorOf, linkSuccessorTx): the row
-//     has no successor while it is live.
-//
-// Of what a merge inherits, only the decision links come from the FULL list: the
-// claim readers take them from every named source, and everything else from
-// this list alone. Whether the merge text still restates the kept
-// row is not something the store can tell — a paraphrase the guard scored below
-// its bar, or a rewrite elsewhere that happened to reuse the row, both leave a
-// merge that asserts the decision — and a merge that asserts a decision without
-// its link is one no supersede can ever find. Keeping the link means two live
-// rows carry it, and the supersede then reports them as ambiguous rather than
-// retiring one and answering clean. The corpus guard, a refusal's kept sources,
-// the inherited scope, the link-overflow check and the provenance stamp read
-// the full list as well; each of them only refuses an emission, keeps its
-// sources or reads the pass's delete set.
-//
-// A source the emission reuses ITSELF is dropped too, and that is equivalent to
-// keeping it: every consumer above already skips the row's own id
-// (carryEvidenceTx and raiseReusedRetentionTx exclude it, linkSuccessorTx
-// ignores a row named as its own successor), and an insert reuses nothing. So
-// no emission index is compared here.
-//
-// A named row that was never a candidate — a manual, builtin, pinned or
-// retention-exempt row, or an id no row holds — is outside the split and keeps
-// what it had: a merge still inherits its claims and its tier, as before.
 func sourcesNotKeptLive(ids []string, keptLive map[string]bool) []string {
-	// A fresh slice, never ids[:0]: the caller's slice is not rewritten.
 	out := make([]string, 0, len(ids))
 	for _, id := range ids {
 		if keptLive[id] {
@@ -7843,11 +4271,6 @@ func sourcesNotKeptLive(ids []string, keptLive map[string]bool) []string {
 	return out
 }
 
-// reuseAbsorbsConsumed reports whether the emission names a source other than
-// the reused row itself that this pass actually consumes, which is what tells a
-// consolidation successor from a row restating itself. An empty entry is not a
-// source, matching the discrimination fillReusedClaimsTx makes when it gathers
-// the absorbed sources.
 func reuseAbsorbsConsumed(id string, m Memory, consumed map[string]bool) bool {
 	for _, replaced := range m.ReplacesIDs {
 		if replaced != "" && replaced != id && consumed[replaced] {
@@ -7857,31 +4280,6 @@ func reuseAbsorbsConsumed(id string, m Memory, consumed map[string]bool) bool {
 	return false
 }
 
-// The fresh INSERT below is the one writer in the package that mints a row a save
-// did not ask for, so it is the one that has to decide a tier nobody stated: the
-// successor of rows that are being replaced. It inherits (inheritedRetention)
-// beside inheritedClaims, which already carries their validity and provenance, and
-// expires_at follows from that tier through the same sessionExpiry every other
-// writer uses — the ONLY source of an expiry in the product, so a consolidation
-// cannot schedule the memory it just wrote for deletion any more than a save can.
-// The REUSE branches do not mint a row, so they have no tier to derive — but they
-// are not exempt from the rule. A reuse keeps the reused row's own tier only while
-// the emission re-states that row ALONE; when ReplacesIDs names another source
-// beside it, those rows are merged into this one and the merged knowledge takes
-// the longest life any of them had (raiseReusedRetentionTx, #773).
-//
-// replaceableCandidatesTx is the set of rows a reflection apply may delete,
-// reuse, or have to leave alone: every row that is not a manual/builtin
-// preservation class, not pinned, not resolved, and not retention-exempt.
-//
-// ORDER BY pins the order takeReusableRow consumes, so which same-content row a
-// reuse claims is a decision and not whatever order the planner happens to
-// return (this predicate is served by idx_memories_project_cat or
-// idx_memories_project_source). created_at ascending means a duplicate keeps the
-// age of the oldest copy — the one the age belongs to — and id breaks
-// same-second ties deterministically. Before #623 the order was irrelevant,
-// because every reused row was re-stamped created_at = now anyway; now it
-// decides the age that survives.
 func (s *Store) replaceableCandidatesTx(ctx context.Context, tx *sql.Tx, projectID string) ([]replaceCandidate, error) {
 	rows, err := tx.QueryContext(ctx, `
 		SELECT id, content, category, importance, tags, scope, updated_at FROM memories
@@ -7908,21 +4306,6 @@ func (s *Store) replaceableCandidatesTx(ctx context.Context, tx *sql.Tx, project
 	return candidates, nil
 }
 
-// concurrentSinceTx adds to concurrent the ids of memories saved during the
-// consolidation round trip: they never reached the consolidator, so they must
-// survive untouched — the same predicate as ReplaceNonManual's, matched by ID so
-// the row itself is never deleted. >= (not >) errs toward a rare same-second
-// duplicate, which the next reflection merges, rather than toward silent loss.
-// An empty consolidatedSince writes nothing.
-//
-// The rows written in the SAME SECOND the window opened are added to
-// sameSecond as well, and that is the whole of what they are: the window's
-// stamp and the row's own stamp share a second, so the fail-safe comparison
-// cannot tell such a row from one that arrived during the round. The row may
-// well be one the pass read — it was written before the pass fetched the
-// corpus — and a claim over it is refused all the same, because the pass
-// cannot prove which it was. The refusal stands; only the reason differs, and
-// the caller says that nothing changed (#1745).
 func (s *Store) concurrentSinceTx(ctx context.Context, tx *sql.Tx, projectID, consolidatedSince string, concurrent, sameSecond map[string]bool) error {
 	if consolidatedSince == "" {
 		return nil
@@ -7954,21 +4337,6 @@ func (s *Store) concurrentSinceTx(ctx context.Context, tx *sql.Tx, projectID, co
 	return nil
 }
 
-// fedGuardFor builds the #1051 guard over projectID's replaceable set, reading
-// the same candidates and the same concurrent window ReplaceNonManual reads.
-// ApplyReflection calls it before that replace, because a cross-project
-// candidate names rows the project replace is also deciding the fate of, and
-// both halves have to answer from one view: an emission the project half may not
-// apply must not reach _global through the promotion loop. It runs inside the
-// caller's transaction, which already holds the write lock, so the read is the
-// same one the replace makes — it is not a second race window.
-//
-// The caller supplies `concurrent` rather than fedGuardFor minting one, because
-// that map must be the same one the replace consumes: drop() marks every source
-// of an emission it refuses into the guard's map, and a refused cross-project
-// merge keeps all of its sources only if that marking reaches the replace's
-// delete set. ReplaceNonManual picks the shared map up from the context and
-// seeds its own from it.
 func (s *Store) fedGuardFor(ctx context.Context, tx *sql.Tx, projectID, consolidatedSince string, fed []CorpusRow, concurrent map[string]bool) (*fedGuard, error) {
 	candidates, err := s.replaceableCandidatesTx(ctx, tx, projectID)
 	if err != nil {
@@ -7982,33 +4350,6 @@ func (s *Store) fedGuardFor(ctx context.Context, tx *sql.Tx, projectID, consolid
 }
 
 // consolidatedSince should be a timestamp (see CurrentTimestamp) captured
-// before the caller fetched the memories it fed to the consolidator. ghost
-// reflect runs as a separate process from the long-lived MCP server, so a
-// ghost_memory_save landing on the live server during the multi-minute
-// consolidation round trip would otherwise be silently deleted here — it was
-// durably written but never part of what the consolidator saw. Any non-manual
-// memory created at/after that timestamp is preserved through the replace
-// instead. Pass "" to skip the check (tests that don't exercise the race).
-// The two preserved []string / dropped int returns answer the caller's two
-// "did anything change" questions separately. preserved is the ids of rows kept
-// untouched: the ones edited or saved during the round trip, and the ones a
-// refused emission named as its sources — those did not change, but they were
-// spared from the delete set and nothing consumed them, so they need the next
-// run as much as an edited row does. dropped is how many EMISSIONS the corpus
-// guard refused because the row they claimed changed or is gone. A dropped
-// emission is invisible to preserved in the delete case — the row it claimed no
-// longer exists, so there is nothing to preserve — but the caller must still know
-// the round wrote nothing, or it will print "Applied" and record a skip
-// fingerprint over a project the consolidator's answer never landed in. Either
-// value non-zero means the next run has to revisit the corpus. dropped counts
-// the refused emissions BY REASON (EmissionDrops): the corpus guard's, whose
-// claimed row is still live and still needs consolidating, and the overflowing
-// merges, whose decision links do not fit in a source_ref and which no later run
-// can write either, and the merges whose sources' scopes disagree, which every
-// later run refuses again for the same reason. The distinction is the caller's,
-// not decoration: the first has to suppress the skip fingerprint so the next run
-// re-merges the survivor, and the other two must not, because they would
-// re-propose the same merge on every run forever (#1228, #1492).
 func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories []Memory, consolidatedSince string, fed []CorpusRow) (preserved []string, dropped EmissionDrops, deleted int, appliedByCategory map[string]int, err error) {
 	if len(memories) == 0 {
 		return nil, EmissionDrops{}, 0, nil, fmt.Errorf("refusing to replace memories with empty set — reflection likely malformed")
@@ -8030,35 +4371,15 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 		defer tx.Rollback() //nolint:errcheck
 	}
 
-	// Snapshot existing non-manual/non-builtin memories before deleting.
-	// Pinned memories and resolved memories are excluded throughout this
-	// function — manual and builtin sources are explicit preservation classes,
-	// while a pin is an explicit user override and a resolved_at stamp is a
-	// resolve pass's verdict. Reflection must never delete, rewrite, or
-	// silently drop any of them (it has no way to know a consolidated memory
-	// it emits corresponds to a pinned/resolved one it never saw as such, so
-	// preservation has to mean "don't touch it" rather than "carry the flag
-	// through"). See issue #318.
 	snapshotID, err := s.snapshotReplaceableTx(ctx, tx, projectID)
 	if err != nil {
 		return nil, EmissionDrops{}, 0, nil, err
 	}
 
-	// Identify which existing rows this replace may delete, and which emitted
-	// memory can reuse one. A row whose content the consolidator re-emits
-	// unchanged is updated in place instead of being deleted and re-inserted: a fresh ID
-	// would cascade its memory_embeddings and memory_links away (both are ON
-	// DELETE CASCADE), so identical content used to mean a re-embedded memory
-	// and a lost link graph on every reflection. Rows saved concurrently with
-	// the consolidation round trip are kept in place for the same reason.
 	candidates, err := s.replaceableCandidatesTx(ctx, tx, projectID)
 	if err != nil {
 		return nil, EmissionDrops{}, 0, nil, err
 	}
-	// Seed the concurrent window from the shared view when this replace is one
-	// half of an ApplyReflection: the global half's guard has already marked
-	// every source of an emission it refused into that map, and those sources
-	// must survive this replace's delete set whether they moved or not (#1051).
 	view, shared := applyViewFromContext(ctx)
 	concurrent := make(map[string]bool)
 	if shared {
@@ -8071,43 +4392,20 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 		return nil, EmissionDrops{}, 0, nil, err
 	}
 
-	// The corpus the pass READ (#1051). A candidate that is not in it, or whose
-	// content, write clock or metadata has moved since it was read, is not the
-	// row the pass was given: an edit or a delete landed while the harness was
-	// answering. Such a row is kept as it is, and any emission claiming it is
-	// dropped rather than written beside it. This is the same guard FoldRows
-	// applies with FoldRow.UpdatedAt; a caller that carries no corpus keeps the
-	// behaviour above exactly.
 	guard := newFedGuard(candidates, fed, concurrent, sameSecond)
-	// candidatesByID backs the scope refusals below: a refused emission's
-	// sources are kept, and knowing which named rows are real candidates lets
-	// the replace mark exactly those.
 	candidatesByID := make(map[string]replaceCandidate, len(candidates))
 	for _, c := range candidates {
 		candidatesByID[c.id] = c
 	}
-	// fedIDs is the corpus the pass was handed, so the retained count below can
-	// tell a reuse of a corpus row from a reuse of a row the corpus did not
-	// carry: the corpus row is counted with the corpus, and only the other is
-	// counted on its own.
 	fedIDs := make(map[string]bool, len(fed))
 	for _, row := range fed {
 		fedIDs[row.ID] = true
 	}
 	dropEmission := make([]bool, len(memories))
-	// dropReasons is why each refused emission was refused, so the count below
-	// lands in the field that reason owns: a claim over a row that really
-	// moved is a concurrent change, and one over a row written in the same
-	// second the window opened is a held-back proposal (#1745).
 	dropReasons := make([]dropReason, len(memories))
 	overflowed := make([]bool, len(memories))
 	overflowLinks := make([]int, len(memories))
 	scopeRefused := make([]bool, len(memories))
-	// The rows the round trip itself found moved, captured before the drop loop
-	// marks any refused emission's sources. A source an OVERFLOW or SCOPE drop
-	// kept is still a source that needs merging when it also changed underneath
-	// the pass, so the sets cannot be conflated. A row the global half's scope
-	// refusal alone marked in the shared view did not move (#1492).
 	moved := make(map[string]bool, len(concurrent))
 	for id := range concurrent {
 		if shared && (view.scopeKept[id] || view.overflowKept[id]) {
@@ -8115,21 +4413,12 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 		}
 		moved[id] = true
 	}
-	// scopeKept is every row a scope refusal kept, whichever half refused it.
 	scopeKept := make(map[string]bool)
 	if shared {
 		for id := range view.scopeKept {
 			scopeKept[id] = true
 		}
 	}
-	// keepRefusedSources keeps every source an emission named, and every row
-	// carrying its text, exactly as they are: excluded from the reuse map so no
-	// later emission updates them in place, and from the delete set so the
-	// refused emission's knowledge is not removed with it. A scope refusal is
-	// permanent, not a transient concurrent edit like the corpus guard's, but
-	// the keep-the-sources effect is the same: a disagreement is never resolved
-	// by writing over one side. The rows it keeps are recorded in scopeKept so
-	// they are not reported as survivors a later run can merge (#1492).
 	keepRefusedSources := func(m Memory) {
 		for _, replaced := range m.ReplacesIDs {
 			if _, stored := candidatesByID[replaced]; stored {
@@ -8144,26 +4433,15 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 			}
 		}
 	}
-	// Seeded from the global half's overflow refusals, as scopeKept is from its
-	// scope refusals.
 	overflowKept := make(map[string]bool)
 	if shared {
 		for id := range view.overflowKept {
 			overflowKept[id] = true
 		}
 	}
-	// refusalKept is a row a refusal (an overflow or a scope conflict) keeps
-	// live although nothing moved it. Such a row is still the corpus the pass
-	// read, so a verbatim re-emission of it — a keep, or the drop guard's re-add
-	// — is a claim the row already satisfies, not a claim on a moved row.
 	refusalKept := func(id string) bool {
 		return (overflowKept[id] || scopeKept[id]) && !moved[id]
 	}
-	// verbatimOfKept reports whether m restates, byte for byte and with no
-	// sources or scope of its own, a row a refusal already keeps. The guard is
-	// not asked about it: its concurrent marks for those rows are the refusal's,
-	// and refusing the re-add as a moved claim would withhold the fingerprint
-	// for a row that never moved.
 	verbatimOfKept := func(m Memory) bool {
 		if len(m.ReplacesIDs) != 0 || m.Scope != nil {
 			return false
@@ -8187,12 +4465,6 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 			dropReasons[i] = guard.dropReasonFor(m)
 			dropEmission[i] = dropReasons[i] != dropNone
 		}
-		// A merge whose decision links alone would not fit in a source_ref is not
-		// written: truncating the list is the silent supersede miss, and failing
-		// the pass would re-propose the same merge forever. Its sources and any
-		// row carrying its text are kept, as a refused claim's are — but unlike a
-		// void claim, re-running would refuse this merge again for the same
-		// reason, so those keeps are not survivors a later round can act on.
 		if !dropEmission[i] {
 			links, over, err := decisionLinksOverflowTx(ctx, tx, projectID, emissionClaimIDs(candidates, m))
 			if err != nil {
@@ -8209,14 +4481,6 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 		}
 	}
 
-	// The scope each surviving emission inherits from the rows it stands in
-	// for, resolved ONCE so the conflict guard, the reuse check below and the
-	// writes all read the same answer. inheritedScope returns the emission's own
-	// scope when it states one — reflection never does, but a direct caller may
-	// — and otherwise folds its sources. A conflict refuses the emission and
-	// keeps its sources; any other error is a read or decode failure and fails
-	// the replace, exactly as inheritedClaims and inheritedRetention propagate
-	// theirs rather than counting a broken source as a refusal.
 	emittedScope := make([]map[string]string, len(memories))
 	for i, m := range memories {
 		if dropEmission[i] {
@@ -8235,12 +4499,6 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 		emittedScope[i] = sc
 	}
 
-	// Content -> reusable rows. Concurrent rows are excluded: they are kept
-	// as they are, never claimed by an emitted memory. The whole stored row
-	// travels, not just its ID, because the reuse decisions read the stored
-	// state rather than the emission alone — reusePreservesAge needs the
-	// category, and reuseChangesNothing needs every field the reuse UPDATE
-	// writes.
 	reusable := make(map[string][]replaceCandidate)
 	for _, c := range candidates {
 		if concurrent[c.id] {
@@ -8253,27 +4511,11 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 		if dropEmission[i] {
 			continue
 		}
-		// Matching is exact, not trimmed: reuse preserves the existing
-		// embedding, so it is only valid when the stored text is byte-identical
-		// to what the consolidator emitted. A whitespace-only difference takes
-		// the insert path instead, which leaves the memory to be re-embedded
-		// rather than keeping a vector that no longer describes its content.
 		if chosen, rest, ok := takeReusableRow(reusable[m.Content], m); ok {
 			reuseFor[i] = chosen
 			reusable[m.Content] = rest
 		}
 	}
-	// A reuse updates an existing row in place, and its UPDATE writes the scope
-	// through COALESCE — so the row keeps ITS OWN scope. takeReusableRow picks
-	// that row by CONTENT, and it need not be one of the emission's sources: a
-	// merge can land on a same-text row consolidation never named. When the
-	// inherited scope disagrees with the reused row's scope, the merge would
-	// leave the reused row's scope in place instead of the one the sources
-	// agreed on, which is the silent scope change the fresh INSERT now refuses.
-	// Hold reuse to the same rule: refuse the emission and keep both rows. An
-	// emission that states its own scope is skipped, because a stated scope is
-	// what the reuse UPDATE applies, and one that names no source has nothing
-	// to disagree with.
 	for i, m := range memories {
 		if dropEmission[i] || m.Scope != nil || len(m.ReplacesIDs) == 0 {
 			continue
@@ -8293,14 +4535,6 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 		keepRefusedSources(m)
 	}
 
-	// A verbatim re-emission of a row a refusal keeps lands ON that row, as a
-	// keep: nothing is written to it, and no fresh row is inserted. The reuse map
-	// above excludes every concurrent row, so without this the re-add — the drop
-	// guard hands back a merge source the merge did not carry — became a fresh
-	// INSERT beside the kept row, and with no scope of its own it was a copy of a
-	// scoped row that applied in every environment. Only an emission naming no
-	// sources and stating no scope qualifies, so a merge or rewrite that names a
-	// kept row can never claim it this way, and each kept row is claimed once.
 	keptAsIs := make(map[int]bool)
 	keptClaimed := make(map[string]bool)
 	for i, m := range memories {
@@ -8328,35 +4562,17 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 			case scopeRefused[i]:
 				reason = dropScope
 			default:
-				// The corpus guard's own reason: a concurrent change, or a
-				// proposal held back because its memory was written in the same
-				// second the window opened (#1745).
 				if r := dropReasons[i]; r != dropNone {
 					reason = r
 				}
 			}
 			dropped.record(reason, overflowLinks[i])
-			// A refusal about a FOLDED cross-project candidate belongs to the
-			// half that produced it, not to the project replace that happens to
-			// evaluate it: ApplyReflection subtracted both halves' drops from
-			// different summary components, and a candidate counted as kept
-			// project-scoped that was refused is a line that contradicts the
-			// applied total beside it. Only meaningful while this replace is one
-			// half of an apply.
 			if shared && view.crossProjectFrom >= 0 && i >= view.crossProjectFrom {
 				view.crossProjectDropped.record(reason, overflowLinks[i])
 			}
 		}
 	}
 
-	// Report the survivors so the caller can avoid recording a skip
-	// fingerprint that would absorb them into the next no-op gate. A row held
-	// alive only by an overflow drop is excluded: nothing can be merged out of
-	// it (the merge that would have does not fit), so calling it a survivor
-	// asked the caller to hold the project open forever for a refusal that
-	// resolves itself no sooner (#1228). A row held alive only by a scope
-	// refusal is excluded for the same reason: its stored scope is what refuses
-	// the merge, and it refuses it again on every run (#1492).
 	preserved = make([]string, 0, len(concurrent))
 	for id := range concurrent {
 		if (overflowKept[id] || scopeKept[id]) && !moved[id] {
@@ -8368,78 +4584,23 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	var deleteIDs []string
 	for _, unmatched := range reusable {
 		for _, c := range unmatched {
-			// A row a scope refusal marked concurrent after the reuse map was
-			// built is kept, exactly as one excluded before it was built.
 			if concurrent[c.id] {
 				continue
 			}
 			deleteIDs = append(deleteIDs, c.id)
 		}
 	}
-	// deleted is the number of rows this replace will actually remove — the
-	// candidates no emission claimed. A caller that reports the round by its
-	// drop count alone can call a round that changed the corpus "nothing
-	// written": an all-dropped round (every emission refused) still deletes
-	// the unclaimed candidates beside the refused claims, and the snapshot it
-	// took must then be offered for restore.
 	deleted = len(deleteIDs)
-	// consumed is the delete set as a lookup, so a reuse can tell whether the
-	// source it names is a row this pass actually folds into it. An id no row
-	// holds, a manual, builtin, pinned or retention-exempt row, and a
-	// concurrently edited row this pass keeps are all named by an emission but
-	// are NOT absorbed, so they must not relabel the row they would have been
-	// merged into (#1283).
 	consumed := make(map[string]bool, len(deleteIDs))
 	for _, id := range deleteIDs {
 		consumed[id] = true
 	}
-	// The emissions run BEFORE the delete below, which is a reordering with a
-	// reason: a rewrite or a merge carries its sources' evidence onto the row it
-	// becomes, and that copy has to READ those rows. The foreign key takes them
-	// the moment the source memory is deleted, and there is no second copy — the
-	// snapshot holds the pre-replace corpus, not the post-rewrite one. So the carry
-	// is the constraint, and the delete waits for it.
-	//
-	// Nothing else in the two blocks depends on the order. The delete set was
-	// decided above, from the candidates takeReusableRow did NOT claim, so a row
-	// this loop updates in place is never one the delete removes; the fresh inserts
-	// mint their own ids and collide with nothing; and every statement here runs
-	// inside one transaction that already holds the write lock, so no other writer
-	// can see the interval.
-	// reflected is every row this pass WROTE, collected so the history appends
-	// happen in one place at the end: the ids of the fresh inserts are only known
-	// as they are made, and interleaving the two statements per row would triple
-	// the statement count for no gain. A verbatim re-emission leaves the list
-	// (#727) — it wrote nothing, so there is no version to record — unless the
-	// provenance stamp below makes it a write after all.
 	var reflected []string
 	reused := 0
-	// reusedIDs are the rows this replace updated in place. They are rows the
-	// project holds AND rows this replace wrote, so the retained count below
-	// needs them: a reuse of a row the corpus did not carry is counted on its
-	// own, and a reuse of a corpus row is counted with the corpus.
 	var reusedIDs []string
-	// fresh is the rows this replace INSERTS, which are the part of what the
-	// project holds afterwards that no pre-replace candidate accounts for.
 	fresh := 0
-	// successorOf maps the ids this pass consumed to the row that now holds
-	// their content, so the consumed rows' delete history can say where their
-	// knowledge went. Only ids the caller declared (Memory.ReplacesIDs, which the
-	// reflection operations fill in) are eligible: a row this pass deleted for
-	// any other reason — a drop, a concurrent save it outran — has no successor
-	// and must not be given one.
 	successorOf := map[string]string{}
-	// appliedByCategory counts what this replace LANDS per category: every
-	// emission that survived the guard, whether it is a fresh insert, a reuse
-	// update, or a verbatim re-emission that writes nothing (#727). The caller's
-	// "memories consolidated" total is the sum of this map, and the category
-	// breakdown next to it must come from the SAME map — counting the emitted
-	// slices instead would include an emission the guard refused, and the parts
-	// would no longer sum to the total.
 	appliedByCategory = make(map[string]int, len(memories))
-	// keptLive is every candidate this pass keeps live rather than deleting: a
-	// row the final reuse assignment updates in place, and a row kept as
-	// concurrent or for a refused emission. See sourcesNotKeptLive.
 	keptLive := make(map[string]bool, len(candidates))
 	for _, c := range candidates {
 		if !consumed[c.id] {
@@ -8450,56 +4611,20 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 		if dropEmission[i] {
 			continue
 		}
-		// The sources whose evidence, claims, retention and history this emission
-		// takes over: m.ReplacesIDs minus the candidates this pass keeps live. Only
-		// the decision links still come from the full list. See sourcesNotKeptLive.
 		folded := m
 		folded.ReplacesIDs = sourcesNotKeptLive(m.ReplacesIDs, keptLive)
 		appliedByCategory[m.Category]++
 		if keptAsIs[i] {
-			// Kept exactly as it is: the refusal that kept it promised as much.
 			continue
 		}
 		tags, _ := json.Marshal(m.Tags)
 		if stored, reusedRow := reuseFor[i]; reusedRow {
 			id := stored.id
 			reusedIDs = append(reusedIDs, id)
-			// created_at is reset deliberately: consolidated knowledge counts
-			// as refreshed (issue #279). The row identity — and with it its
-			// embeddings, links, and access stats — survives.
-			// A replacement that states no scope must not erase the scope the
-			// live row already carries. `ghost reflect --apply` is the only
-			// caller and reflection.ReflectMemory has no machine-readable
-			// scope, so every emitted memory arrives here with Scope nil: with
-			// a plain `scope = ?` the reuse path NULLed out a real scope on
-			// every reflection that re-emitted a scoped fact verbatim, and
-			// nothing else about the row moved to make it visible. COALESCE
-			// keeps "not stated" reading as "leave it alone" and still lets a
-			// replacement that does state a scope rewrite it. There is no
-			// clear-the-scope operation anywhere in the API, so nothing can
-			// express "deliberately unscoped" and the ambiguity is not
-			// hiding a real case.
-			// Two exceptions: reusePreservesAge (#623) below, and
-			// reuseChangesNothing (#727), which skips the write entirely.
-			//
-			// verbatim is that second branch, read once because the provenance
-			// stamp below decides whether it stays a write-free pass for this row.
 			verbatim := reuseChangesNothing(stored, m)
 			switch {
 			case verbatim:
-				// A verbatim re-emission is not a write (#727). The row keeps
-				// its updated_at, and the pass records no version of it, because
-				// there is no new state to record. Measured on a real store, the
-				// row-per-run this replaced was 80% of memory_history and put
-				// both caps days from evicting real events; updated_at became
-				// "the last reflect that saw this row", which is what supersede
-				// orients a candidate pair by and what --skip-unchanged's
-				// fingerprint carries. Which run touched it is not state, and
-				// the run is already in lifecycle.log.
 			case reusePreservesAge(stored, m):
-				// Unchanged re-emission, not a rewrite: the row keeps its
-				// created_at and its source, and only the fields reflection
-				// actually restated move. See reusePreservesAge.
 				if _, err := tx.ExecContext(ctx, `
 					UPDATE memories
 					SET category = ?, content = ?, importance = ?, tags = ?,
@@ -8522,32 +4647,14 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 				}
 				reflected = append(reflected, id)
 			}
-			// The tier, after the switch and outside it, because the reused row keeps
-			// its own tier only while the emission re-states that row alone. Naming a
-			// second source means the rows are merged into this one, and the merged
-			// knowledge gets the longest life any of them had. Its own statement
-			// because the branch above wrote nothing at all — a verbatim re-emission
-			// is the commonest case and the one that leaked. See
-			// raiseReusedRetentionTx, and #773 for the fresh-INSERT half of the same
-			// rule. Only the folded sources raise it: a kept-live source still holds
-			// its knowledge on its own row under its own tier, so nothing durable is
-			// left on this one alone, and the row's own tier is never a default the
-			// way an INSERT's is (foldedRetention).
 			if err := raiseReusedRetentionTx(ctx, tx, projectID, id, folded); err != nil {
 				return nil, EmissionDrops{}, 0, nil, err
 			}
-			// The provenance stamp, the other sources' support and their claims:
-			// absorbSourcesTx, shared with a promoted merge. Their own statements for
-			// the reason the tier raise is: the verbatim branch above wrote nothing
-			// at all, and that is the branch a merge of byte-identical text takes.
 			stamped, err := absorbSourcesTx(ctx, tx, projectID, id, m, folded, keptLive, consumed)
 			if err != nil {
 				return nil, EmissionDrops{}, 0, nil, err
 			}
 			if stamped && verbatim {
-				// The stamp is this row's only write, so it is the version the
-				// pass records — the same event a content rewrite files. The
-				// other two branches already added the id above.
 				reflected = append(reflected, id)
 			}
 			reused++
@@ -8556,46 +4663,14 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 			}
 			continue
 		}
-		// The claims the row stands in for, resolved from the rows it replaces. The
-		// insert below used to list none of these columns, so a rewrite or a merge
-		// dropped a source row's window, its verification, its confidence and its
-		// reference while carryEvidenceTx carried that row's EVIDENCE forward — which
-		// is how a row comes to read verified_at NULL beside evidence that says
-		// somebody checked it, and a reader comparing the two finds the table
-		// contradicting the memory it describes.
-		//
-		// From the SOURCES, not from the emission, because an emission carries none:
-		// reflectMemoriesToMemory builds it from the consolidator's output and has
-		// nothing to copy a window from, so binding m's columns here would store
-		// NULL every time and fix nothing. It is also the rule the reuse branch
-		// above already follows — an emission inherits rather than invents — and the
-		// one carryEvidenceTx follows for the records.
-		//
-		// Read here because the delete below is what takes the sources, and this loop
-		// runs before it: the same reordering the carry already depends on.
 		claims, err := inheritedClaims(ctx, tx, projectID, m, keptLive)
 		if err != nil {
 			return nil, EmissionDrops{}, 0, nil, err
 		}
-		// The tier, from the same rows and for the same reason: the successor
-		// stands in for the memories this pass is about to delete, so it inherits
-		// their life as well as their evidence and their window. Before this the
-		// statement named neither column, so the row took the DEFAULT — and a merge
-		// of two session memories came out as a project memory that nothing will
-		// ever expire, which is the tier the user asked to escape (#773).
-		//
-		// Read here for the same reason as the claims above and for the same
-		// reordering: the delete below is what takes the sources. See
-		// foldedRetention for an emission every source of which stays live.
 		tier, err := foldedRetention(ctx, tx, projectID, m, folded)
 		if err != nil {
 			return nil, EmissionDrops{}, 0, nil, err
 		}
-		// The scope, inherited from the source rows. If the emission states a
-		// scope it wins; otherwise it is the scope its sources agreed on,
-		// resolved above where a disagreement refused the emission. Read from
-		// the slice rather than resolved here so the conflict guard, the reuse
-		// check and this write cannot disagree about the answer.
 		scope := emittedScope[i]
 		var newID string
 		if err = tx.QueryRowContext(ctx, `
@@ -8613,18 +4688,6 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 			nullIfEmpty(claims.sourceRef), tier, sessionExpiry(tier, time.Now())).Scan(&newID); err != nil {
 			return nil, EmissionDrops{}, 0, nil, fmt.Errorf("insert memory: %w", err)
 		}
-		// The support this emission was consolidated FROM, carried onto the row that
-		// now holds the text. Without it a rewrite or a merge mints an id whose
-		// evidence the foreign key has just deleted, and every consolidated memory
-		// reads "no recorded evidence" from then on — the one write path that runs
-		// unattended over the whole corpus, silently forgetting the whole corpus's
-		// support.
-		//
-		// The reuse branch above carries only for the OTHER sources it names: the
-		// reused row is updated in place, so its own evidence never left it, but the
-		// rows merged into it are deleted like any other source. And an emission
-		// with no ReplacesIDs carries nothing, because a brand-new memory has no
-		// inherited support and "none" is the answer.
 		if err := carryEvidenceTx(ctx, tx, newID, folded.ReplacesIDs); err != nil {
 			return nil, EmissionDrops{}, 0, nil, err
 		}
@@ -8635,13 +4698,6 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 		}
 	}
 
-	// The cross-project candidates of a promoting apply, written into _global
-	// HERE: after the delete set, keptLive and consumed are fixed, and before the
-	// delete takes the sources. A promoted merge is the successor of the rows this
-	// pass consumes exactly as a project emission is, so it inherits from them by
-	// the same rule (sourcesNotKeptLive, foldedRetention, absorbSourcesTx), and its
-	// sources' delete rows name it through the same successorOf below. Written
-	// after the replace, it found its sources gone and inherited nothing (#1491).
 	if shared {
 		for _, p := range view.promotions {
 			folded := p.m
@@ -8651,16 +4707,6 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 			if err != nil {
 				return nil, EmissionDrops{}, 0, nil, err
 			}
-			// A promotion whose fold target leaves no room for the sources'
-			// decision links is the pre-check's overflow found at the write, and
-			// refused as that one is: the sources it would have consumed, and any
-			// row carrying its text, leave the delete set, so each companion keeps
-			// its link live, and the merge is an overflow drop rather than a
-			// write-back into the project, which would carry no link. A row an
-			// earlier emission already took as its source keeps that successor.
-			// None of them is reported as a survivor: preserved is fixed above,
-			// and the same merge overflows again on the next run for as long as
-			// the fold target's own links are unchanged.
 			var overflow *promotionOverflowError
 			if errors.As(promoteErr, &overflow) {
 				named := make(map[string]bool, len(p.m.ReplacesIDs))
@@ -8700,16 +4746,10 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 				}
 			}
 		}
-		// A refused promotion above may have kept rows out of the delete set.
 		deleted = len(deleteIDs)
 	}
 
 	if len(deleteIDs) > 0 {
-		// Recorded before the rows go, and in the same transaction, so the
-		// consolidation's dropped memories keep the text that explains why
-		// they are missing. This is the writer that makes an unbounded history
-		// a real concern rather than a theoretical one: one applied reflect can
-		// drop and rewrite the whole non-manual corpus at once.
 		if err := appendHistoryForIDsTx(ctx, tx, deleteIDs, phaseDelete, Provenance{}); err != nil {
 			return nil, EmissionDrops{}, 0, nil, err
 		}
@@ -8726,46 +4766,20 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 		stmt.Close() //nolint:errcheck
 	}
 
-	// One append for every row this pass actually WROTE, reused and fresh
-	// alike: from outside, a reflection rewrite and the row it rewrote are the
-	// same event, and phaseReflect is what answers "which consolidation run
-	// changed this". A verbatim re-emission is not in reflected (#727): it wrote
-	// nothing, and a version row records the state a write left behind.
 	if err := appendHistoryForIDsTx(ctx, tx, reflected, phaseReflect, Provenance{}); err != nil {
 		return nil, EmissionDrops{}, 0, nil, err
 	}
-	// Now that every emission's final id is known, close the chain: each consumed
-	// row's delete row names the row that replaced it. Without this a rewrite or a
-	// merge ends one memory's history at a wall, because the row it became has a
-	// different id and nothing says so.
 	for oldID, newID := range successorOf {
 		if err := linkSuccessorTx(ctx, tx, oldID, newID); err != nil {
 			return nil, EmissionDrops{}, 0, nil, err
 		}
 	}
 
-	// What the project holds from this replace: every row of the corpus the
-	// pass was handed that is still there, plus every row it wrote. A refused
-	// merge contributes all its sources here and none of them as an emitted
-	// row, which is the correction a caller counting proposals from the result
-	// would otherwise miss.
-	//
-	// The corpus is re-read rather than taken from keptLive. keptLive is built
-	// from the replaceable rows, and a corpus row that was pinned, resolved or
-	// made persistent while the harness was answering is no longer one: it is
-	// in neither the delete set nor keptLive, and it is still a row the project
-	// holds. A count that skipped it understated what the project held, and
-	// could raise a reduction warning on a round that lost nothing. A corpus
-	// row this replace consumed is gone, and so is one deleted while the
-	// harness was answering, so neither is counted.
 	stillThere, err := corpusRowsStillPresent(ctx, tx, projectID, fed)
 	if err != nil {
 		return nil, EmissionDrops{}, 0, nil, err
 	}
 	retained := fresh + stillThere
-	// A reuse of a row the corpus did not carry is a row this replace wrote and
-	// the corpus part above cannot see. A reuse of a corpus row is already
-	// counted there.
 	for _, id := range reusedIDs {
 		if !fedIDs[id] {
 			retained++
@@ -8792,20 +4806,8 @@ func (s *Store) ReplaceNonManual(ctx context.Context, projectID string, memories
 	return preserved, dropped, deleted, appliedByCategory, nil
 }
 
-// corpusChunkIDs is how many corpus ids one count query names, so a large
-// corpus does not build a statement with more parameters than SQLite accepts.
 const corpusChunkIDs = 200
 
-// corpusRowsStillPresent counts the rows of a corpus that are still in the
-// table, whatever their pinned, resolved or retention state is now.
-//
-// It is read inside the caller's transaction, so it sees that transaction's own
-// deletes: a row the replace consumed is gone and is not counted, and neither
-// is one deleted while the harness was answering. A row that is still there is
-// a row the project holds, and a corpus row that was pinned, resolved or made
-// persistent in that window is one the replace never reaches — it is not a
-// replaceable candidate, so it is in neither the delete set nor the set of
-// candidates the pass keeps live, and it is still there.
 func corpusRowsStillPresent(ctx context.Context, tx *sql.Tx, projectID string, fed []CorpusRow) (int, error) {
 	if len(fed) == 0 {
 		return 0, nil
@@ -8836,42 +4838,12 @@ func corpusRowsStillPresent(ctx context.Context, tx *sql.Tx, projectID string, f
 }
 
 // RestoreResult is what a restore did, for the caller that reports it.
-//
-// The count alone is not the whole answer, and the missing half is the half a
-// reader would otherwise have to assume: a snapshot taken before schema v26
-// recorded no retention tier, so the restore could not put one back for any of
-// its rows (issue #1341). Reporting the count says an undo was incomplete
-// instead of leaving the operator to find out later, when the row they thought
-// was short-lived turns up in every session's context.
 type RestoreResult struct {
-	// Restored is the number of memories the restore changed: rows it removed
-	// (the replace's output), rows it rewrote in place because a recorded
-	// column differed, plus rows it re-inserted under their old ids. A row it
-	// matched and found already equal to the snapshot is not counted, so a
-	// repeat run reports zero.
-	Restored int
-	// UncapturedRetention is the count of the marker-0 rows the restore
-	// actually covered — a "covered" row being one the restore rewrote in
-	// place (a live row in this project, neither pinned nor resolved nor
-	// persistent) or one it re-inserted (genuinely gone since). Pinned,
-	// persistent and promoted rows the restore never touched do not count,
-	// because none of their tiers was the restore's to put back. Among the
-	// counted rows, retention_captured = 0 means the row predates the column
-	// (or was backfilled by hand); the restore left each live such row's own
-	// tier alone and re-inserted a genuinely-gone one at the column DEFAULT.
-	// Zero on every snapshot this build writes.
+	Restored            int
 	UncapturedRetention int
 }
 
 // RestoreSnapshot restores memories from the most recent snapshot for a project,
-// putting back the content, the scope and the retention tier the snapshot
-// recorded. The expiry is re-derived through sessionExpiry exactly as a save
-// does (#1341) — except that a session row whose tier never moved (already
-// session, carrying an expiry) keeps the expiry it holds, so a restore never
-// extends an untouched row's life and a second run leaves the corpus alone.
-// The result carries both the number of memories restored and the number of
-// covered snapshot rows that predate the retention column, so a caller can
-// report an undo that could not be complete.
 func (s *Store) RestoreSnapshot(ctx context.Context, projectID string) (RestoreResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -8882,18 +4854,6 @@ func (s *Store) RestoreSnapshot(ctx context.Context, projectID string) (RestoreR
 	}
 	defer tx.Rollback() //nolint:errcheck
 
-	// Find the latest snapshot. Order by snapshot_id (embeds UnixNano), not
-	// created_at (second-precision, so same-second snapshots order
-	// arbitrarily). Older Unix()-suffixed IDs sort before newer
-	// UnixNano()-suffixed ones because the shorter numeric suffix is a prefix
-	// of the longer, so mixed-vintage databases still order correctly.
-	//
-	// The read runs inside the write transaction, after BEGIN IMMEDIATE took
-	// the lock (#1190). Read on the pool first, a reflection another process
-	// committed while this restore waited for the lock was serialised before
-	// the restore and still skipped by it: the restore applied the older
-	// snapshot, and a memory the newer reflection consumed — not in the older
-	// snapshot — stayed deleted while the command reported success.
 	var snapshotID string
 	err = tx.QueryRowContext(ctx, `
 		SELECT snapshot_id FROM memory_snapshots
@@ -8908,16 +4868,6 @@ func (s *Store) RestoreSnapshot(ctx context.Context, projectID string) (RestoreR
 		return RestoreResult{}, fmt.Errorf("find snapshot: %w", err)
 	}
 
-	// What the snapshot could not tell the restore, read here so the report
-	// below is a fact rather than a guess about the rows (#1341). Only the
-	// rows the restore actually covered count: the rows it rewrote in place
-	// (a live twin in this project, neither pinned nor resolved nor exempt
-	// under the persistent tier) plus the rows it re-inserted (gone since, or
-	// with no live twin here — a promoted memory is neither). Pinned,
-	// persistent and promoted rows the restore never touched do not inflate the
-	// number, because none of their tiers was the restore's to put back. A
-	// snapshot this build wrote has none in any covered row, and a whole
-	// snapshot from before schema v26 reads as every covered one.
 	var uncapturedRetention int
 	if err := tx.QueryRowContext(ctx, `
 		SELECT count(*) FROM memory_snapshots s
@@ -8937,36 +4887,8 @@ func (s *Store) RestoreSnapshot(ctx context.Context, projectID string) (RestoreR
 		return RestoreResult{}, fmt.Errorf("count covered rows without a recorded tier: %w", err)
 	}
 
-	// The one expiry a session row may be restored with, derived here rather
-	// than stored on the snapshot: expires_at has exactly one source
-	// (sessionExpiry) everywhere else, and a snapshot column would be a second
-	// one. The statement below binds this same value for every session row it
-	// puts back, which is what a save does.
 	sessionExp := sessionExpiry(RetentionSession, time.Now())
 
-	// Remove what the replace created — and only that.
-	//
-	// "Rows created after the snapshot" cannot be the rule, tempting as it
-	// sounds: the replacements the revert exists to undo ARE created after
-	// the snapshot, in the same transaction that takes it. Deleting them by
-	// age would leave the reflection's output sitting next to the state it
-	// replaced, so a restore added rows back without ever undoing anything.
-	//
-	// Identity gives a cleaner cut. ReplaceNonManual hardcodes
-	// source='reflection' for everything it emits, and every reflection row
-	// that existed before the snapshot is in the snapshot by id — so a
-	// reflection row NOT in this snapshot can only be output of this replace
-	// (or a later one, which is equally superseded). A save made afterwards
-	// through the MCP server carries source='mcp' and is never touched, which
-	// is the data-loss half of this bug: it was never in the snapshot, so
-	// deleting it had no way back.
-	//
-	// Pinned and resolved rows stay excluded throughout (issue #318).
-	//
-	// The rows going are selected before they are deleted, by the identical
-	// predicate, so the delete tombstones in memory_history name exactly the
-	// rows this statement removes. One transaction has held the write lock
-	// since its first statement, so the two selects cannot disagree.
 	removedIDs, err := selectIDs(ctx, tx, `
 		SELECT id FROM memories
 		WHERE project_id = ? AND source = 'reflection' AND pinned = 0 AND resolved_at IS NULL
@@ -9001,40 +4923,6 @@ func (s *Store) RestoreSnapshot(ctx context.Context, projectID string) (RestoreR
 	}
 	removedN, _ := del.RowsAffected()
 
-	// Restore in place instead of delete-then-reinsert.
-	//
-	// The old shape deleted EVERY non-manual row and re-inserted the
-	// snapshot. Because memory_embeddings and memory_links both reference
-	// memories(id) ON DELETE CASCADE, re-inserting under a fresh id destroyed
-	// the embedding and the link graph of every row the restore "brought
-	// back", while the text looked perfectly fine — and the reset
-	// created_at/access_count made decay treat an old memory as new.
-	//
-	// Updating the row that still exists keeps its identity, its embeddings
-	// and its links; the FTS triggers refresh the index on content change.
-	//
-	// Which rows the UPDATE will actually change is read FIRST, because the
-	// history append below runs after it and needs the set. Restore is explicitly
-	// repeatable — the snapshot is deliberately kept and a second run must leave
-	// the corpus alone — so the id set cannot be re-derived afterwards: by then
-	// every row matches the snapshot, and a row a previous run already restored
-	// looks exactly like one this run restores. The same join with a difference
-	// predicate on the recorded columns is what separates them, and it is decided
-	// before the write so the append still records the restored state.
-	//
-	// Only the recorded columns gate it (content, category, importance, source).
-	// A restore that revives nothing but a row's tags, age or provenance changes
-	// no state the history holds, so it records nothing — the rule every other
-	// writer follows.
-	//
-	// The project predicate is what keeps a restore inside the project that took
-	// the snapshot. A memory promoted to `_global` keeps its id AND its snapshot
-	// rows — PromoteToGlobal moves the memory and its history, not its snapshot —
-	// so matching by id alone rewrote the shared row back to its pre-promotion
-	// text: a project-scoped command mutating the one scope every session reads.
-	// Requiring memories.project_id = s.project_id leaves the promoted row to the
-	// scope that now owns it; the UPDATE below carries the same predicate, or the
-	// two would disagree about which rows this restore changed.
 	changedIDs, err := selectIDs(ctx, tx, `
 		SELECT s.memory_id FROM memory_snapshots s
 		JOIN memories m ON m.id = s.memory_id
@@ -9048,25 +4936,6 @@ func (s *Store) RestoreSnapshot(ctx context.Context, projectID string) (RestoreR
 		return RestoreResult{}, fmt.Errorf("find rows this restore changes: %w", err)
 	}
 
-	// A row whose CONTENT this restore reverts loses its embedding and its
-	// link scan in this same transaction, exactly as UpdateMemoryWithOptions
-	// invalidates both on a content edit. The store's rule is that an
-	// embedding — and the scan slot that records which neighbours were
-	// compared in its space — is valid only while the text is byte-identical
-	// to what it was computed from. The restore just put the old text back
-	// over that vector: the row then scores for bytes it no longer holds,
-	// and UnembeddedMemoryIDs cannot repair it, because a row with a vector
-	// under the configured identity is not unembedded. Deleting both rows
-	// re-queues the re-embed and the re-link for the reverted text.
-	//
-	// The delete has to be decided from the pre-UPDATE state, which is why
-	// it runs here rather than after the UPDATE: its predicate is the
-	// difference between the live row and the snapshot, and once the UPDATE
-	// writes the snapshot's content there is nothing left to match. It is
-	// scoped to the CONTENT difference alone, not the UPDATE's four-column
-	// difference — a metadata-only revert (category, importance, source)
-	// restores no text, and a row whose content the restore leaves alone
-	// keeps its vector and its scan slot, the way a tags-only edit does.
 	revertTextIDsSQL := `
 		SELECT m.id FROM memories m
 		JOIN memory_snapshots s ON s.memory_id = m.id
@@ -9082,15 +4951,6 @@ func (s *Store) RestoreSnapshot(ctx context.Context, projectID string) (RestoreR
 		`DELETE FROM link_scans WHERE memory_id IN (`+revertTextIDsSQL+`)`, snapshotID); err != nil {
 		return RestoreResult{}, fmt.Errorf("invalidate reverted link scan: %w", err)
 	}
-	// The rows the UPDATE below actually changes, for the count the caller
-	// reports. This is WIDER than changedIDs: that set is the history gate and
-	// compares the four recorded columns only, while the UPDATE also rewrites
-	// tags, timestamps, access counters, provenance, scope, retention and the
-	// expiry, and a row whose only difference is one of those was still changed
-	// by the restore. IS NOT keeps a NULL on either side comparable, and scope,
-	// retention and the expiry are compared the way the UPDATE assigns them
-	// (under their captured markers), so a row the UPDATE leaves as it is never
-	// counts. It is read before the UPDATE for the same reason changedIDs is.
 	changedRowIDs, err := selectIDs(ctx, tx, `
 		SELECT m.id FROM memories m
 		JOIN memory_snapshots s ON s.memory_id = m.id
@@ -9185,22 +5045,8 @@ func (s *Store) RestoreSnapshot(ctx context.Context, projectID string) (RestoreR
 	`, sessionExp, snapshotID); err != nil {
 		return RestoreResult{}, fmt.Errorf("restore existing rows: %w", err)
 	}
-	// The UPDATE's RowsAffected would count every covered row, changed or not,
-	// so a repeat run would report work it never did; the count is the set read
-	// before it.
 	updatedN := int64(len(changedRowIDs))
 
-	// Bring back rows that are genuinely gone, under the id they had, so
-	// anything still pointing at them resolves again.
-	//
-	// memory_id is NULL only for snapshots written before schema v13, whose
-	// ids were never recorded. Those match on content instead: that can only
-	// add a row that is missing and never overwrites a live one, so a repeated
-	// restore stays a no-op rather than duplicating what it just wrote.
-	//
-	// RETURNING rather than RowsAffected because the history rows below need
-	// the ids, and a pre-v13 snapshot mints a fresh one per restored row — so
-	// they cannot be known before the statement runs.
 	insertedRows, err := tx.QueryContext(ctx, `
 		INSERT INTO memories (id, project_id, category, content, source, importance, tags,
 		                      created_at, updated_at, access_count, last_accessed,
@@ -9263,23 +5109,6 @@ func (s *Store) RestoreSnapshot(ctx context.Context, projectID string) (RestoreR
 	insertedRows.Close() //nolint:errcheck
 	insertedN := int64(len(reinserted))
 
-	// The evidence of the rows that were genuinely GONE, from the snapshot that
-	// carried it. Only the reinserted half needs it: a row restored IN PLACE was
-	// never deleted, so its evidence was never in danger, and copying it would
-	// double its records on every repeated restore. What an in-place row DID gain
-	// is the copies a merge carried onto it from the rows coming back here, and
-	// those go (uncarryRestoredSourcesTx), so each restored record exists once.
-	//
-	// The copy replaces rather than appends, and it is scoped to the ids the
-	// INSERT above just created — so it cannot touch a row that came back earlier
-	// or one this restore left alone. The records come back verbatim, with
-	// carried_from empty: a restore puts a row back where it was, under its own id,
-	// so its evidence is its own again rather than a successor's.
-	//
-	// A pre-v13 snapshot recorded no memory_id, so it carries no evidence to
-	// restore and the row comes back with none. That is the truth — this database
-	// never recorded the support of a row it could not name — and the alternative
-	// would be inventing it.
 	if err := uncarryRestoredSourcesTx(ctx, tx, snapshotID); err != nil {
 		return RestoreResult{}, err
 	}
@@ -9289,24 +5118,9 @@ func (s *Store) RestoreSnapshot(ctx context.Context, projectID string) (RestoreR
 		}
 	}
 
-	// One history row per row this restore actually changed, in the same
-	// transaction: without them the corpus reads as though the replace never
-	// happened, and the state a restore reverted FROM is unrecoverable from the
-	// history. The in-place restorers are the set read before the UPDATE, and the
-	// reinserted rows report theirs above — a pre-v13 snapshot mints a fresh id
-	// per restored row, so that half cannot be known before its statement runs.
-	//
-	// A row an earlier restore already put back is not in the set, so re-running
-	// a restore appends nothing. The event says the row was restored; appending it
-	// again per run would spend one of the per-memory version slots the growth
-	// policy keeps on a row that changed nothing.
 	restored := make([]string, 0, len(changedIDs)+len(reinserted))
 	restored = append(restored, changedIDs...)
 	for _, id := range reinserted {
-		// An id can be in both sets only if the INSERT re-created a row the
-		// UPDATE had just restored, which the mutually exclusive predicates
-		// above make impossible — and a duplicate would append the same event
-		// twice, so it is dropped rather than assumed away.
 		if !slices.Contains(changedIDs, id) {
 			restored = append(restored, id)
 		}
@@ -9314,10 +5128,6 @@ func (s *Store) RestoreSnapshot(ctx context.Context, projectID string) (RestoreR
 	if err := appendHistoryForIDsTx(ctx, tx, restored, phaseRestore, Provenance{}); err != nil {
 		return RestoreResult{}, err
 	}
-
-	// The snapshot is deliberately kept. Restore is idempotent — re-running
-	// it produces the same state — so deleting it only meant a second attempt
-	// failed with "no snapshots found" while burning one of the few retained.
 
 	if err := tx.Commit(); err != nil {
 		return RestoreResult{}, fmt.Errorf("commit: %w", err)
@@ -9341,10 +5151,6 @@ func (s *Store) CountMemories(ctx context.Context, projectID string) (int, error
 }
 
 // ConsolidatableCounts reports how many consolidatable memories each project
-// holds. A memory is consolidatable when reflection may rewrite it: not pinned,
-// not manual or builtin, not persistent, and not resolved. _global is never
-// counted, because no lifecycle pass runs for it. One GROUP BY, so the cost
-// does not grow with the project count the caller is about to iterate over.
 func (s *Store) ConsolidatableCounts(ctx context.Context) (map[string]int, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -9377,33 +5183,6 @@ func (s *Store) ConsolidatableCounts(ctx context.Context) (map[string]int, error
 }
 
 // CountActiveMemories counts the project's memories that pass the one predicate
-// every retrieval window binds regardless of caller: `resolved_at IS NULL`. It is
-// not CountMemories with a filter applied for tidiness — the two answer different
-// questions, and the difference is the whole of what each is for.
-//
-// A withdrawn row is one `ghost resolve` has ruled on. It stays in the store, stays
-// listed by `ghost_memories_list`, and stays countable by CountMemories; it is out
-// of every window a ranking surface reads, because the passive key scan (`passiveKeyScanSQL`)
-// and the query path both bind `resolved_at IS NULL`. So "how many does this project hold" and
-// "how many of its rows a window could even consider" are different counts, and a
-// caller that needs the second cannot derive it from the first.
-//
-// IT DELIBERATELY DOES NOT APPLY THE VALIDITY PREDICATE, unlike `passiveKeyScanSQL`,
-// and its one caller is why. `projectContextOwnRowsNote` uses this count to decide
-// whether an exclusion verdict may be rendered as a claim about the requested
-// project: a validity-invalid row of that project's own IS the cause the validity
-// abstention names, so it has to be counted here or the gate is inert for exactly
-// the case it was written for. A row withdrawn by `ghost resolve` is excluded,
-// because then the exclusion the verdict describes belongs to somebody else (the
-// `_global` half of the union) and naming this project would be the misattribution
-// the count exists to prevent.
-//
-// A caller must therefore not infer two things this count is not. It is not the
-// number of rows a block can render: a validity-invalid row is counted here and
-// withheld from the block. And it is not filtered by the request's session scope,
-// which only the window can apply. It is the population a window could CONSIDER
-// before validity and scope — which is what a cause-naming sentence is reconciled
-// against.
 func (s *Store) CountActiveMemories(ctx context.Context, projectID string) (int, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -9415,11 +5194,6 @@ func (s *Store) CountActiveMemories(ctx context.Context, projectID string) (int,
 }
 
 // CountConsolidatableMemories counts the project\'s memories that `ghost reflect`
-// would rewrite: non-resolved, unpinned, non-manual/non-builtin and not
-// persistent-tier rows. It mirrors the consolidatable predicate in
-// cmd/ghost/lifecycle.go, and is what the unattended reflect bound is measured
-// against — the count that decides whether the phase is skipped, and the count
-// the health diagnostics report as over the bound.
 func (s *Store) CountConsolidatableMemories(ctx context.Context, projectID string) (int, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -9436,12 +5210,6 @@ func (s *Store) IncrementInteraction(ctx context.Context, projectID string) (int
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// A guarded transaction, for the same reason CreateTask is one (#746):
-	// `RETURNING interaction_count` is a read, and the value comes back from
-	// the UPDATE that produced it. The `+ 1` stays atomic — it is one statement,
-	// and the transaction here exists to run the newer-store check, not to make
-	// the arithmetic atomic, which SQLite already guarantees for a single
-	// statement.
 	tx, lock, err := s.beginWrite(ctx, "increment-interaction")
 	if err != nil {
 		return 0, err
@@ -9477,22 +5245,6 @@ func (s *Store) GetLearnedContext(ctx context.Context, projectID string) (string
 }
 
 // UpdateLearnedContext updates the learned context and reflection metadata.
-//
-// Both fields are model-written text, and both are injected verbatim into every
-// later session for the project, so they are guarded like any other save.
-// A refusal here is the cheap outcome: the caller is the reflect command,
-// which already treats a failure on this write as a warning and carries on
-// (cmd/ghost/lifecycle.go), so a hallucinated credential costs one unrecorded
-// summary rather than the whole consolidation — the memories it summarised have
-// already been applied by this point.
-//
-// A project with no ghost_state row is a failure too, and it is the reason this
-// is not a fire-and-forget UPDATE. The row is written by every project creation
-// route, so a missing one means a store this build did not create that row for —
-// notably a project imported before ImportProject wrote it — and an UPDATE that
-// matched nothing returns nil just as an UPDATE that wrote does. Reporting the
-// empty result instead turns that silent loss into the warning the caller
-// already knows how to print.
 func (s *Store) UpdateLearnedContext(ctx context.Context, projectID, learnedContext, summary string) error {
 	if err := rejectSecret("learned_context", learnedContext); err != nil {
 		return err
@@ -9523,8 +5275,6 @@ func (s *Store) UpdateLearnedContext(ctx context.Context, projectID, learnedCont
 }
 
 // GetReflectInputSignature returns the fingerprint of the memory set that
-// produced the last applied consolidation for projectID, or "" when none was
-// recorded.
 func (s *Store) GetReflectInputSignature(ctx context.Context, projectID string) (string, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -9542,7 +5292,6 @@ func (s *Store) GetReflectInputSignature(ctx context.Context, projectID string) 
 }
 
 // SetReflectInputSignature records the fingerprint of the memory set that just
-// produced an applied consolidation.
 func (s *Store) SetReflectInputSignature(ctx context.Context, projectID, sig string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -9558,16 +5307,6 @@ func (s *Store) SetReflectInputSignature(ctx context.Context, projectID, sig str
 	return nil
 }
 
-// memoryColumns is the column list every full-row reader selects, in the order
-// scanMemories scans them. One list for six queries: a column added to Memory and
-// forgotten in one reader hydrates as a zero value in that reader and a real one
-// everywhere else, which reads as a bug in the column rather than as the omission
-// it is — and the omission is silent precisely where it matters, because a
-// session row that reads as "no tier stated" is one a prune cannot see.
-//
-// A reader that selects a SUBSET on purpose (the portable artifact, an as_of
-// version, a snapshot) keeps its own list and its own scanner; this one is for
-// the readers that hydrate a whole Memory.
 var memoryColumnNames = []string{
 	"id", "project_id", "category", "content", "importance", "access_count",
 	"last_accessed", "source", "tags", "pinned", "resolved_at", "created_at", "updated_at",
@@ -9576,20 +5315,10 @@ var memoryColumnNames = []string{
 	"retention", "expires_at",
 }
 
-// memoryColumnsPrefixed is the same list with every column qualified, for the
-// two FTS queries that alias memories as m (and therefore cannot say `scope` or
-// `retention` unqualified beside the FTS table). Derived from the one list for
-// the reason that list exists.
 var memoryColumnsPrefixed = qualifyColumns("m")
 
 func qualifyColumns(prefix string) string { return qualifyColumnsFrom(memoryColumnNames, prefix) }
 
-// qualifyColumnsFrom is qualifyColumns over a CALLER'S list, for the one reader
-// that cannot use the whole of memoryColumnNames: a read against a store below a
-// column's floor has to select a NULL literal in that column's place, and the
-// position of every other column has to stay exactly where scanMemories expects
-// it. Deriving the list here is what keeps that in step with the scanner rather
-// than in a hand-written SELECT beside it.
 func qualifyColumnsFrom(names []string, prefix string) string {
 	out := make([]string, len(names))
 	for i, c := range names {
@@ -9619,11 +5348,6 @@ func scanMemories(rows *sql.Rows) ([]Memory, error) {
 	return memories, nil
 }
 
-// scanMemoryRow scans ONE row of a statement selecting memoryColumns, so a
-// reader that must not materialise a whole result set can stream it: the passive
-// fetch keeps a bounded window out of the project's population and never holds
-// the bucket. It is the same column order and the same post-processing
-// scanMemories has always applied, split out so the two readers cannot drift.
 func scanMemoryRow(rows *sql.Rows) (Memory, error) {
 	var m Memory
 	var lastAccessed sql.NullString
@@ -9655,11 +5379,6 @@ func scanMemoryRow(rows *sql.Rows) (Memory, error) {
 	}
 	m.Pinned = pinned == 1
 
-	// NULL provenance reads back as the empty string. There is no
-	// meaningful empty value for an agent, session or reference, so
-	// collapsing NULL to "" costs nothing — while Confidence stays a
-	// pointer, because nil ("no belief recorded") and 0.0 ("rated
-	// worthless") are different claims.
 	if agent.Valid {
 		m.Agent = agent.String
 	}
@@ -9673,10 +5392,6 @@ func scanMemoryRow(rows *sql.Rows) (Memory, error) {
 		m.Confidence = &confidence.Float64
 	}
 	m.Scope = parseScope(scopeRaw)
-	// Validity columns are read the way they are stored: SQLite holds them
-	// as unconstrained text, and deciding what a value means needs the
-	// request clock, which lives above this layer. NULL stays nil so "no
-	// claim" cannot be confused with a claim about the empty string.
 	if validFrom.Valid {
 		m.ValidFrom = &validFrom.String
 	}
@@ -9686,17 +5401,9 @@ func scanMemoryRow(rows *sql.Rows) (Memory, error) {
 	if verifiedAt.Valid {
 		m.VerifiedAt = &verifiedAt.String
 	}
-	// Same rule as the validity triple: the expiry is the stored string, and
-	// NULL stays nil because "no expiry is claimed" is the claim that keeps a
-	// row out of a prune's candidate set.
 	if expiresAt.Valid {
 		m.ExpiresAt = &expiresAt.String
 	}
-	// A row whose tier reads empty is a row a query did not select, not a
-	// fourth tier. Resolving it here — once — means no reader downstream has
-	// to know that shape exists, and the one value it resolves to is the one
-	// that costs nothing: a row nobody classified behaves as the corpus
-	// always has.
 	if m.Retention == "" {
 		m.Retention = RetentionProject
 	}
@@ -9708,75 +5415,16 @@ func scanMemoryRow(rows *sql.Rows) (Memory, error) {
 	return m, nil
 }
 
-// sanitizeFTS strips FTS5 special operators from text to prevent query injection.
-// Extracts plain words and quotes each one so they're treated as literals.
-//
-// upsertMergeThreshold is the minimum Jaccard similarity between full token
-// sets for Upsert to treat two memories as duplicates. Matches the 0.5 gate
-// reflection's SQLite tier uses (internal/reflection/tier_sqlite.go), so
-// save-time and reflection-time dedup agree on what "duplicate" means for
-// same-length restatements — except for a pair that swaps a value or a note
-// that retires the other, which the save path refuses (statesDifferentValue,
-// retires) and reflection's tier does not.
-//
-// Save-time dedup deliberately goes *further* than reflection's tier via the
-// overlap leg below: Upsert sees one candidate against a live corpus and its
-// misses accumulate in the ranked window until they bury distinct facts,
-// whereas reflection re-scores the whole set offline and has an LLM tier
-// behind it. The divergence is intentional, not drift.
 const upsertMergeThreshold = 0.5
 
-// upsertCrossCategoryThreshold is the bar a candidate from ANOTHER category
-// must clear before Upsert folds a save into it: token Jaccard >= 0.7 on the
-// full content token sets, with no overlap-coefficient leg. The deliberately
-// higher bar (same-category keeps its existing mergeScore gate untouched)
-// exists because different categories legitimately hold different facts with
-// overlapping vocabulary — "deploy staging" vs "deploy production" may both
-// read like gotchas without being one rule. What it must catch is the shape
-// that produced the 12-copy production-safety incident: the REFLECT
-// consolidator re-emitting one rule as paraphrases split across
-// preference/gotcha, which then walked past the same-category-only probe on
-// every later re-save. Dead records are never candidates regardless of score
-// (resolved_at IS NULL, no active 'supersedes' edge): a fold must not
-// strengthen a record injection already dropped.
-//
-// Cost: one extra FTS query, issued only when the same-category probe misses
-// (genuinely new facts pay it; a save that folds within its own category does
-// not), bounded by the same LIMIT 15 candidate window the same-category probe
-// uses.
 const upsertCrossCategoryThreshold = 0.7
 
-// The overlap leg's gates. The overlap coefficient's one known failure mode is
-// subset-of-a-much-larger-text: a short save whose few tokens all happen to
-// appear in a long unrelated memory scores 1.0. The min-token and min-ratio
-// gates — not the threshold — are what exclude that shape, which is why the
-// threshold can sit as low as it does.
-//
-//   - upsertOverlapThreshold: minimum |A∩B| / min(|A|,|B|) — at least half of
-//     the shorter memory's distinct vocabulary must also appear in the other.
-//     0.5 is empirical, not inherited from the Jaccard gate it happens to
-//     equal: the same-fact restatements in
-//     TestStoreUpsertMergesLengthAsymmetricParaphrases score 0.857, 0.600 and
-//     0.545 against the accumulated memory, so any threshold above 0.545
-//     leaves saves that plainly restate one fact unmerged.
-//   - upsertOverlapMinTokens: minimum token count on the shorter side. Below
-//     it, containment is too easy to hit by accident.
-//   - upsertOverlapMinRatio: minimum len(shorter)/len(longer). Genuine
-//     restatements of one fact are comparably sized (~0.9); the accidental
-//     containment case is lopsided (~0.2). A terse fact and a much wordier
-//     version of it are therefore NOT merged — deliberately, because nothing
-//     lexical distinguishes that from accidental containment, and a false
-//     merge destroys information while a false split is recoverable by
-//     reflection.
 const (
 	upsertOverlapThreshold = 0.5
 	upsertOverlapMinTokens = 5
 	upsertOverlapMinRatio  = 0.6
 )
 
-// tokenizeContent lowercases s and splits it into a set of alphanumeric
-// tokens longer than one rune. Mirrors reflection's tokenize so both dedup
-// layers score similarity identically.
 func tokenizeContent(s string) map[string]bool {
 	tokens := make(map[string]bool)
 	for _, word := range strings.FieldsFunc(strings.ToLower(s), func(r rune) bool {
@@ -9789,7 +5437,6 @@ func tokenizeContent(s string) map[string]bool {
 	return tokens
 }
 
-// jaccard computes the Jaccard similarity coefficient between two token sets.
 func jaccard(a, b map[string]bool) float64 {
 	if len(a) == 0 && len(b) == 0 {
 		return 1.0
@@ -9807,10 +5454,6 @@ func jaccard(a, b map[string]bool) float64 {
 	return float64(intersection) / float64(union)
 }
 
-// overlapCoefficient (Szymkiewicz–Simpson) is |A∩B| / min(|A|,|B|). Unlike
-// Jaccard it does not penalize length asymmetry, so a terse fact and a verbose
-// restatement of the same fact score high instead of being pulled apart by the
-// longer side's extra filler tokens.
 func overlapCoefficient(a, b map[string]bool) float64 {
 	smaller := len(a)
 	if len(b) < smaller {
@@ -9828,22 +5471,6 @@ func overlapCoefficient(a, b map[string]bool) float64 {
 	return float64(intersection) / float64(smaller)
 }
 
-// mergeScore reports whether two candidate contents' token sets are
-// near-duplicates for Upsert purposes.
-//
-// Jaccard alone under-merges on the dominant real-world case: the same fact
-// restated at a different length. "cache TTL is 300s" vs "the cache TTL is set
-// to 300 seconds" is Jaccard 0.22 — far below any threshold that isn't itself
-// catastrophically over-merging — because the union grows with the wordier
-// side while the intersection cannot. The overlap coefficient scores that pair
-// 0.75 and is the standard fix for exactly this asymmetry.
-//
-// Overlap alone over-merges though: a 2-token save whose tokens both happen to
-// appear in a long unrelated memory scores 1.0. So the overlap leg is gated on
-// token count and length ratio (see the constants) to exclude that shape.
-// Anything the gates reject keeps the original Jaccard-only behavior.
-// It returns 0 when the pair must not merge, and otherwise a positive score
-// used only to pick the best of several candidates.
 func mergeScore(a, b map[string]bool) float64 {
 	if len(a) == 0 || len(b) == 0 {
 		return 0
@@ -9867,36 +5494,12 @@ func mergeScore(a, b map[string]bool) float64 {
 	return 0
 }
 
-// ftsSearchWordLimit caps how many query terms reach the FTS leg, and it is
-// deliberately 10. WHICH terms fill that budget is decided by term
-// selection — see selectFTSTERMs/ftsTermValue in fts_terms.go for the
-// scoring (identifier-shaped tokens outrank content words, stopwords last,
-// ties by original position), which is how a natural-language query's tail
-// terms reach FTS without the budget itself growing.
-//
-// The cap itself must not grow: raising it to 15/20/25/30 broadened the OR
-// query enough that FTS-only NDCG@10 rose above the fused hybrid and
-// inverted TestBenchRegressionFloors (fusion must beat either single leg),
-// measured on the v2 benchmark. Any future change must be re-run against the
-// current graded dataset rather than relying on older experiment numbers.
 const ftsSearchWordLimit = 10
 
-// sanitizeFTS sanitizes text into an FTS5 OR-query. Used on the search path
-// (SearchFTS, SearchFTSAll); capped by ftsSearchWordLimit.
 func sanitizeFTS(text string, logger *slog.Logger) string {
 	return sanitizeFTSN(text, ftsSearchWordLimit, logger)
 }
 
-// sanitizeFTSN sanitizes text into an FTS5 OR-query, capped at maxWords
-// terms SELECTED by value (ftsTermValue in fts_terms.go) and emitted in
-// original query order — a natural-language query's specific tail terms must
-// reach FTS, not just its first maxWords words. The cap itself exists to
-// keep the OR query narrow (see ftsSearchWordLimit); selection only decides
-// which terms fill it. Upsert's duplicate-recall probe uses a wider cap than
-// plain search (see sanitizeFTS) because a broader OR-probe over more of the
-// content improves candidate recall for the precision pass (mergeScore) that
-// follows; widening the cap globally would instead perturb ranked search
-// results.
 func sanitizeFTSN(text string, maxWords int, logger *slog.Logger) string {
 	terms := ftsQueryTerms(text, maxWords, logger)
 	if len(terms) == 0 {
@@ -9909,29 +5512,10 @@ func sanitizeFTSN(text string, maxWords int, logger *slog.Logger) string {
 	return strings.Join(words, " OR ")
 }
 
-// ftsEdgeRuneTrimmed reports whether a rune is trimmed from a query word's
-// edges.
-//
-// The kept set is a letter, a digit and a mark of ANY script, not the ASCII
-// letters and digits it was: a word written in a script the ASCII set does not
-// name trimmed to nothing, so the query reached the index as an empty term
-// list and a memory written in that script could not be found by a query in it.
-// A MARK is kept because it belongs to the letter it follows — a decomposed
-// accent would otherwise leave a bare letter behind, and the term would then
-// name a different word than the caller wrote.
-//
-// The trim still removes what FTS5 reads as a separator at a word's edge
-// (punctuation, symbols, whitespace), and the interior is untouched either way:
-// the interior punctuation of an exact identifier (192.168.9.150,
-// sealed-secrets) is what the index's own tokenizer splits on.
 func ftsEdgeRuneTrimmed(r rune) bool {
 	return !unicode.IsLetter(r) && !unicode.IsDigit(r) && !unicode.IsMark(r)
 }
 
-// ftsHasBaseRune reports whether a trimmed word holds a letter or a digit. A
-// mark is kept at a word's edge so an accent stays on the word it belongs to,
-// but a word made only of marks is not a term: it would match nothing and
-// still take a slot from the term budget.
 func ftsHasBaseRune(word string) bool {
 	for _, r := range word {
 		if unicode.IsLetter(r) || unicode.IsDigit(r) {
@@ -9941,48 +5525,19 @@ func ftsHasBaseRune(word string) bool {
 	return false
 }
 
-// ftsQueryTerms is the term extraction sanitizeFTSN emits, one step earlier: the
-// cleaned terms, their selection values and the prefix flag, capped at maxWords
-// SELECTED by value. It is a function because two callers need the terms
-// themselves rather than an FTS5 query string, and a second extraction would be
-// free to disagree with the first about which terms a query has.
-//
-// The only other caller is the historical keyword matcher (asof.go), which
-// cannot hand a query to FTS5: the index holds CURRENT content, and a read at T
-// has to match the text as it stood at T. It reuses the term selection and the
-// phrase/prefix semantics here, so an as_of query selects the same terms a
-// current one would.
 func ftsQueryTerms(text string, maxWords int, logger *slog.Logger) []ftsTerm {
 	if logger == nil {
 		logger = slog.Default()
 	}
 
-	// Remove FTS5 operators and punctuation, keep only words.
 	var terms []ftsTerm
 	for _, word := range strings.Fields(text) {
-		// A trailing '*' is an FTS5 prefix operator. Capture it before the edge
-		// trim (which would strip it) and re-attach it outside the quotes as
-		// "term"*, so the 'sqlite*' syntax advertised in the tool description
-		// actually works instead of degrading to an exact-token match.
 		prefix := strings.HasSuffix(word, "*")
-		// Strip what FTS5 would read as a separator from edges only — interior
-		// punctuation (192.168.9.150, sealed-secrets) is preserved so FTS5's
-		// tokenizer can still split and match exact identifiers.
 		clean := strings.TrimFunc(word, ftsEdgeRuneTrimmed)
-		// A NUL byte is a separator to FTS5's tokenizer, but it is not
-		// whitespace, so it survives strings.Fields and the edge trim above.
-		// Left in place it is quoted into the MATCH string, where it
-		// truncates the C string SQLite receives and breaks the query. Turn
-		// any surviving (interior) NUL into a space so it stays a separator
-		// inside the quoted phrase instead of terminating it.
 		clean = strings.ReplaceAll(clean, "\x00", " ")
 		if !wordYieldsTerm(word) {
 			continue
 		}
-		// Quote each word to treat as literal. An interior quote survives
-		// the edge trim and must be doubled per FTS5's escaping rule —
-		// otherwise it unbalances the "..." wrapper and lets the token
-		// re-enter raw FTS5 query grammar instead of staying a literal.
 		escaped := strings.ReplaceAll(clean, `"`, `""`)
 		term := `"` + escaped + `"`
 		if prefix {
@@ -9999,8 +5554,6 @@ func ftsQueryTerms(text string, maxWords int, logger *slog.Logger) []ftsTerm {
 	if len(terms) == 0 {
 		return nil
 	}
-	// Select the maxWords highest-value terms (stopwords only fill the cap
-	// when content words can't) instead of truncating the tail positionally.
 	if len(terms) > maxWords {
 		logger.Warn("fts query truncated",
 			"original_terms", len(terms),
