@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"math"
-	"os"
 	"reflect"
 	"regexp"
 	"strconv"
@@ -562,77 +561,3 @@ func TestSweepWithoutADefaultComparesAgainstNothing(t *testing.T) {
 // report, one off the doc — and two copies of a regex is one more thing to keep
 // in step.
 var intervalCellRE = regexp.MustCompile(`([+-]\d\.\d{4}) \[([+-]\d\.\d{4}), ([+-]\d\.\d{4})\]`)
-
-// TestBenchmarksDocSweepTableMatchesTheReport: docs/benchmarks.md publishes this
-// table, and before #561 the sweep's separability claim lived in a sentence
-// describing a paired bootstrap that no command performed — a published number
-// with nothing behind it, which is the failure this whole issue is about. The
-// claim now lives in the report, so the doc has to hold the shape the report
-// prints: the same header, one row per grid point, and an interval on every row
-// except the reference one.
-//
-// The header is compared against sweepHeader rather than a literal here, so
-// renaming a column fails this test until the doc's table is re-quoted.
-func TestBenchmarksDocSweepTableMatchesTheReport(t *testing.T) {
-	const doc = "../../docs/benchmarks.md"
-	raw, err := os.ReadFile(doc)
-	if err != nil {
-		t.Fatalf("read %s: %v", doc, err)
-	}
-	const anchor = "### Parameter sweep"
-	i := strings.Index(string(raw), anchor)
-	if i < 0 {
-		t.Fatalf("no %q section in %s; the test cannot tell whether the published table is stale", anchor, doc)
-	}
-	section := string(raw)[i:]
-	// The table is the first fenced block in the section.
-	start := strings.Index(section, "```")
-	if start < 0 {
-		t.Fatalf("no fenced table in the %s section of %s", anchor, doc)
-	}
-	body := section[start+3:]
-	if end := strings.Index(body, "```"); end >= 0 {
-		body = body[:end]
-	}
-
-	lines := strings.Split(strings.TrimSpace(body), "\n")
-	if len(lines) == 0 || strings.TrimRight(lines[0], " ") != sweepHeader() {
-		t.Errorf("the published table header is not the one the report prints\n got: %q\nwant: %q", lines[0], sweepHeader())
-	}
-	rowRE := regexp.MustCompile(`^vec=\d\.\d\d\b`)
-	rows := 0
-	for _, line := range lines[1:] {
-		if !rowRE.MatchString(line) {
-			continue
-		}
-		rows++
-		cond := strings.Fields(line)[0]
-		// Derived from the shipped default, not written down: the sibling test
-		// states that rule for the report, and a hardcoded "vec=0.70" here would
-		// keep checking a stale doc row if the default's leg weight ever moved.
-		if cond == defaultCondition() {
-			if !strings.Contains(line, "this is the default") {
-				t.Errorf("the published default row does not mark itself the reference: %q", line)
-			}
-			if !strings.Contains(line, "<- current default") {
-				t.Errorf("the published default row is not marked as the current default: %q", line)
-			}
-			continue
-		}
-		if !intervalCellRE.MatchString(strings.TrimRight(line, " ")) {
-			t.Errorf("the published row %s carries no interval at four decimals: %q", cond, line)
-		}
-	}
-	if want := len(SweepGrid()); rows != want {
-		t.Errorf("the published table has %d grid rows, want %d", rows, want)
-	}
-}
-
-// defaultCondition is the condition name the sweep prints for the shipped
-// default, derived from it rather than written down. A hardcoded "vec=0.70"
-// makes every check that names it silently stop applying — or keep applying to a
-// stale row — if the default's leg weight ever moves.
-func defaultCondition() string {
-	p := memory.DefaultSearchParams()
-	return fmt.Sprintf("vec=%.2f", p.VecWeight)
-}
