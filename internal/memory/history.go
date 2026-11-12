@@ -117,7 +117,8 @@ func selectIDs(ctx context.Context, tx *sql.Tx, query string, args ...any) ([]st
 }
 
 // HistoryEntry is one recorded event in a memory's history: the state the
-
+// memory held once the write named by Phase landed, plus who performed that
+// write when the write path knew.
 type HistoryEntry struct {
 	ID         string  `json:"id"`
 	MemoryID   string  `json:"memory_id"`
@@ -384,7 +385,6 @@ func rebuildFTSAfterPurgeTx(ctx context.Context, tx *sql.Tx) error {
 }
 
 // PurgeOutcome reports what a purge reached.
-
 type PurgeOutcome struct {
 	Rows               int64
 	CheckpointComplete bool

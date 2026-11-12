@@ -3,11 +3,15 @@ package memory
 import "fmt"
 
 // ExplainProvenanceOff is the value provenance_weight carries when no
-
+// provenance multiplier is applied. It is the string "off" rather than a number
+// on purpose: a multiplier of 1.0 is a claim that the ranking considered
+// provenance and decided it did not matter, which is not what happens — nothing
+// reads provenance at all. A reader seeing "off" cannot mistake a missing
+// implementation for a neutral one.
 const ExplainProvenanceOff = "off"
 
 // ExplainRow is one candidate's contribution to a search, with every signal
-
+// that moved it stated separately.
 type ExplainRow struct {
 	ID          string  `json:"memory_id"`
 	Category    string  `json:"category"`
@@ -64,7 +68,7 @@ type ExplainRow struct {
 }
 
 // SearchExplain is the diagnosis for one search: which legs ran, what each
-
+// candidate scored, and why anything was left out.
 type SearchExplain struct {
 	ProjectID       string            `json:"project_id"`
 	Query           string            `json:"query"`
@@ -78,7 +82,9 @@ type SearchExplain struct {
 }
 
 // ExplainTruncation records that the payload was cut to fit the documented
-
+// budget, and says what was cut and why. RowsOmitted counts candidate rows the
+// budget would not carry; MaxRows is the budget itself, published so a reader can
+// judge whether the cut could plausibly have hidden the row it cares about.
 type ExplainTruncation struct {
 	RowsOmitted int    `json:"rows_omitted"`
 	MaxRows     int    `json:"max_rows"`
@@ -86,15 +92,14 @@ type ExplainTruncation struct {
 }
 
 // ExplainMaxRows is the documented size budget for one explanation, in rows.
-
 const ExplainMaxRows = 150
 
 // ExplainSnippetRunes bounds the content a row carries: the identifying opening
-
+// words matter more than the full text, and the answer itself holds the rest.
 const ExplainSnippetRunes = 120
 
 // BoundExplainRows applies the documented size budget, and records the cut when
-
+// it applies one.
 func BoundExplainRows(rows []ExplainRow) ([]ExplainRow, *ExplainTruncation) {
 	if len(rows) <= ExplainMaxRows {
 		return rows, nil
@@ -156,7 +161,8 @@ func BoundExplainRows(rows []ExplainRow) ([]ExplainRow, *ExplainTruncation) {
 }
 
 // ExplainSnippet shortens content for a diagnostic listing. Explanations are
-
+// read by a human or an agent debugging a query, so the identifying opening
+// words matter more than the full text.
 func ExplainSnippet(s string, max int) string {
 	r := []rune(s)
 	if len(r) <= max {

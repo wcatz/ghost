@@ -90,7 +90,10 @@ func recordDecisionTx(ctx context.Context, tx *sql.Tx, projectID, title, decisio
 }
 
 // CheckDecisionArguments is every refusal RecordDecision makes from its
-
+// arguments alone. It is the SAME predicate RecordDecision asks first, exported
+// so ghost_decision_record can ask it before it opens the project the decision
+// is written to: a refused decision must leave no empty project, and no checkout
+// binding, behind it.
 func CheckDecisionArguments(title, decision, rationale string, alternatives, tags []string) error {
 	if err := rejectSecretFields(
 		secretField{"title", title},
@@ -112,7 +115,8 @@ func decisionCompanionContent(title, decision, rationale string) (content string
 }
 
 // DecisionRetirement is what a supersede did to the old decision's companion
-
+// memory, so a caller can say so instead of reporting a decisions-row flip as
+// if it were the whole of the change.
 type DecisionRetirement struct {
 	Retired []string
 
@@ -272,7 +276,9 @@ func (s *Store) RecordDecisionSuperseding(ctx context.Context, projectID, title,
 }
 
 // DecisionSuccessorError is the refusal SupersedeDecisionReport returns when
-
+// the old decision is already superseded by a different decision that is still
+// live. Successor is that decision's id, a stored value; Error renders it through
+// SafeToken.
 type DecisionSuccessorError struct {
 	Successor string
 }
@@ -413,7 +419,11 @@ func decisionLinksOverflowTx(ctx context.Context, tx *sql.Tx, projectID string, 
 }
 
 // DecisionLinksOverflow is decisionLinksOverflowTx's rule over source_refs the
-
+// caller already holds: how many distinct decision links they name between them,
+// and whether those links joined exceed MaxSourceRefLen — the merge the replace
+// drops before it writes. The reflect accounting calls it with the input rows'
+// source_refs, so a dry run lists such a merge as refused instead of as a merge
+// the apply will not write, and the two cannot disagree about the rule.
 func DecisionLinksOverflow(sourceRefs []string) (links int, over bool) {
 	var refs []string
 	for _, ref := range sourceRefs {
@@ -893,7 +903,7 @@ func scanDecisions(rows *sql.Rows) ([]Decision, error) {
 }
 
 // DecisionRevisitMarker renders the label the injected decision surfaces put
-
+// beside a decision flagged for reconsideration.
 func DecisionRevisitMarker(status string) string {
 	if status == "revisit" {
 		return " (revisit)"

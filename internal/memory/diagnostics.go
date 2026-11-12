@@ -7,7 +7,7 @@ import (
 )
 
 // DiagnosticRead is one diagnostic read: a read transaction on the store's
-
+// read handle, and the store bound to it.
 type DiagnosticRead struct {
 	store *Store
 	tx    *sql.Tx

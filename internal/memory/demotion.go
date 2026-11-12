@@ -10,11 +10,14 @@ import (
 )
 
 // DefaultDemotionThreshold is the near-duplicate demotion cutoff used until
-
+// config overrides it (see Store.SetDemotionThreshold and
+// internal/mcpinit/hook.go's own fallback for the config-less hook path).
 const DefaultDemotionThreshold = 0.90
 
 // DemotionPenalties returns a penalty count per candidate ID, mirroring
-
+// SupersedesWithin's batched-lookup shape (internal/memory/links.go) but over
+// near-duplicate edges instead of 'supersedes' edges: 'related' edges at or
+// above threshold, plus Upsert's own 'duplicate' edges.
 func DemotionPenalties(ctx context.Context, db Queryer, ids []string, protected map[string]bool, threshold float64) (map[string]int, error) {
 	penalty, err := nearDuplicateVerdicts(ctx, db, ids, protected, threshold, nil)
 	if err != nil {
@@ -246,7 +249,9 @@ func demoteStatus(pool []*hybridCandidate, p SearchParams) {
 }
 
 // StableDemote reorders items ascending by penalty (ties keep existing
-
+// relative order), mirroring demoteSuperseded's sort.SliceStable pattern
+// (internal/memory/vector.go) generically over any item shape that can name
+// its own ID via the id accessor.
 func StableDemote[T any](items []T, id func(T) string, penalty map[string]int) []T {
 	sort.SliceStable(items, func(i, j int) bool {
 		return penalty[id(items[i])] < penalty[id(items[j])]
@@ -255,7 +260,14 @@ func StableDemote[T any](items []T, id func(T) string, penalty map[string]int) [
 }
 
 // SupersedePenalties returns a penalty count per candidate ID for 'supersedes'
-
+// edges whose BOTH endpoints are in ids (same window rule as SupersedesWithin):
+// the superseded ID's penalty is incremented once per present superseder, so a
+// memory with no co-present superseder keeps penalty 0. Batched-lookup shape
+// mirrors DemotionPenalties so injection paths (GetTopMemories, the session
+// hook) can share one query with the search path's demoteSuperseded. No
+// locking: same contract as DemotionPenalties — callers holding Store's
+// s.mu.RLock (GetTopMemories) pass its read handle; the hook passes its own
+// read-only handle.
 func SupersedePenalties(ctx context.Context, db Queryer, ids []string, protected map[string]bool) (map[string]int, error) {
 	penalty, err := supersedeVerdicts(ctx, db, ids, nil, protected)
 	if err != nil {

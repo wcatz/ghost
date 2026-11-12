@@ -18,7 +18,7 @@ const (
 )
 
 // Evidence is one record of support for a memory: a moment somebody or something
-
+// reported this fact, and whatever it reported about itself.
 type Evidence struct {
 	ID        string
 	MemoryID  string
@@ -38,7 +38,8 @@ type Evidence struct {
 }
 
 // EvidenceCounts is what a reader can say about a memory's support without
-
+// reading its records: how many observations back it, and how many of them
+// carry a verification.
 type EvidenceCounts struct {
 	Observations int
 
@@ -85,7 +86,7 @@ func verifiedAtExpr(isVerification bool) string {
 }
 
 // AppendVerifiedEvidenceTx records that somebody CHECKED a memory, in the
-
+// caller's transaction.
 func AppendVerifiedEvidenceTx(ctx context.Context, tx *sql.Tx, memoryID string, prov Provenance) error {
 	return appendEvidenceTx(ctx, tx, memoryID, evidenceVerified, prov, true)
 }
@@ -188,7 +189,7 @@ var validEvidenceKinds = map[string]bool{
 }
 
 // IsValidEvidenceKind reports whether kind is one of the four the table's CHECK
-
+// accepts.
 func IsValidEvidenceKind(kind string) bool { return validEvidenceKinds[kind] }
 
 func importEvidenceTx(ctx context.Context, tx *sql.Tx, memoryID string, e PortableEvidence) error {

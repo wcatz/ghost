@@ -11,7 +11,7 @@ import (
 )
 
 // FoldRow is the planner's view of one row: the id and the two stamps that say
-
+// it is the row the plan was made about.
 type FoldRow struct {
 	ID        string
 	Content   string

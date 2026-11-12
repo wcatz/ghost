@@ -122,7 +122,7 @@ func selectFTSTERMs(terms []ftsTerm, maxWords int) []ftsTerm {
 }
 
 // QueryTerm is one term of a keyword query as the sanitizer reads it, for a
-
+// caller that has to judge a match itself rather than hand FTS5 a string.
 type QueryTerm struct {
 	Text string
 
@@ -135,7 +135,11 @@ const (
 )
 
 // DistinctiveTerms returns the terms of text that can carry a keyword match:
-
+// stopwords are dropped, duplicates (case-insensitively) collapse to the first
+// occurrence, and at most max terms are kept, identifier-shaped terms first and
+// then content words, each tier in original order. It is the SAME extraction
+// the FTS query uses (ftsQueryTerms), so a caller judging a match and the leg
+// retrieving it cannot disagree about what the query's terms are.
 func DistinctiveTerms(text string, max int, logger *slog.Logger) []QueryTerm {
 	if max <= 0 {
 		return nil
@@ -174,7 +178,9 @@ func wordYieldsTerm(word string) bool {
 }
 
 // HasFTSTerm reports whether text yields at least one extractable term under
-
+// sanitizeFTSN's extraction. A query with none — whitespace, punctuation, or a
+// mix of separators only — matches nothing, and callers that embed the raw
+// query must not run the vector leg on it.
 func HasFTSTerm(text string) bool {
 	for _, word := range strings.Fields(text) {
 		if wordYieldsTerm(word) {

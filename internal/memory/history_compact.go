@@ -26,7 +26,10 @@ func compactablePhases() []string {
 const reflectNoOpCutoff = "2026-09-28 17:14:07"
 
 // ResolveCompactCutoff is the cutoff a run will use, normalized to the layout the
-
+// comparison above is exact for. Exported because the report has to NAME the bound
+// that produced its numbers: a count with an unstated bound is not a number an
+// operator can reason about, and a bound they cannot see is a bound they cannot
+// widen.
 func ResolveCompactCutoff(before string) (string, error) {
 	if before == "" {
 		return reflectNoOpCutoff, nil
@@ -41,7 +44,8 @@ func ResolveCompactCutoff(before string) (string, error) {
 }
 
 // WidenedCompactCutoff reports whether a RESOLVED cutoff reaches rows that a
-
+// current build wrote, which is what makes it wider than the default and what the
+// command warns about before it is told to act on one.
 func WidenedCompactCutoff(cutoff string) bool {
 	return cutoff > reflectNoOpCutoff
 }
@@ -164,7 +168,8 @@ type HistoryCompactOptions struct {
 }
 
 // HistoryCompactResult is what one project's compaction found and did. The counts
-
+// are the same numbers in a dry run and in an apply, which is what makes the dry
+// run a preview rather than an estimate; see the fixed-point note on CompactHistory.
 type HistoryCompactResult struct {
 	ProjectID string `json:"project_id"`
 

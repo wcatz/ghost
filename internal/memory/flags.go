@@ -15,7 +15,6 @@ const (
 )
 
 // FlagReasonMax bounds the reason in RUNES, not bytes.
-
 const FlagReasonMax = 500
 
 var (
@@ -29,7 +28,6 @@ var (
 )
 
 // FlagMemoryRequest is one agent's flag on one memory.
-
 type FlagMemoryRequest struct {
 	ProjectID string
 	MemoryID  string
