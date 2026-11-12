@@ -358,33 +358,194 @@ func withdrawSupersedesEdge(ctx context.Context, store vectorStore, c *Classifie
 
 // Result summarizes a pass.
 type Result struct {
-	Candidates          int
-	Confirmed           int // SUPERSEDES verdicts
-	Created             int // supersedes links written (0 in dry-run)
-	CausesCreated       int // CAUSES verdicts (not writes — see CausesWritten)
-	CausesWritten       int
-	Reclassified        int // existing links whose relation changed or was invalidated
-	WithdrawSuppressed  int
-	StaleSkipped        int
-	StaleAtWrite        int
-	Skipped             int // fresh pairs skipped via the NEITHER cache
-	Unclassified        int // pairs skipped because the classifier answer was unparseable
-	Reversed            int // REVERSED verdicts: refused, never written
-	Vetoed              int
-	Unscored            int
+	Candidates int
+	Confirmed  int // SUPERSEDES verdicts
+	Created    int // supersedes links written (0 in dry-run)
+	// CausesCreated counts CAUSES VERDICTS, which is not what Created counts:
+	// Created is a WRITE count and this is not, because the 'causes' write is
+	// guarded and can be refused in the same run that reached the verdict (#823
+	// made that reachable, since before it the write was unguarded and always
+	// landed). A field named for what a relation "created" and counting verdicts
+	// is read as a write count by every caller that is not holding the diff in
+	// its head — which is the whole report, and the reason the write count is its
+	// own field, CausesWritten.
+	CausesCreated int // CAUSES verdicts (not writes — see CausesWritten)
+	// CausesWritten counts 'causes' links actually written, and is Created's
+	// twin: 0 in a dry run (nothing is attempted), and CausesCreated minus the
+	// pairs the guarded writer refused. It is what a report has to count under
+	// --apply, because "1 causes" over a refusal is a claim about the graph that
+	// the refusal line two lines below it takes back (#834).
+	CausesWritten int
+	// Reclassified counts the pairs whose live edge's RELATION changed, or whose
+	// live edge was invalidated — a verdict that re-affirmed the relation the
+	// pair already held is not one of them, and the distinction is what
+	// Classified.ReclassifiedFrom is for.
+	Reclassified int // existing links whose relation changed or was invalidated
+	// WithdrawSuppressed counts the pairs whose live 'supersedes' edge a denying
+	// verdict would have removed and this pass reported instead (#845). It is a
+	// count of its own rather than a subtraction from Reclassified because the
+	// two are different findings for the operator: Reclassified says the graph
+	// changed, this says an edge is still in it that the current rules no longer
+	// support, and only a command a person asked for takes that edge out. Counted
+	// in both modes — the rule is the pass's, not the flag's — and a pair is
+	// counted at most once, because a supersession is written in one direction
+	// and a pair that carried the edge in the other is the cycle Result.Bidirectional
+	// refuses rather than judges.
+	WithdrawSuppressed int
+	// StaleSkipped is the PRE-CLASSIFY existence drop: a candidate whose endpoint
+	// a concurrent pass had already replaced when the pass re-read the graph, so
+	// the pair was discarded BEFORE any harness call was spent on it. It happens in
+	// a dry run exactly as it does under --apply, and it is not in
+	// Result.Candidates, which is recomputed from the surviving set afterwards.
+	StaleSkipped int
+	// StaleAtWrite is the OTHER population and the one that needed the counter:
+	// a pair that was classified, and then found its endpoint replaced again
+	// between the classify and the write, so a verdict was reached and paid for and
+	// no edge was written. It is 0 in a dry run, which attempts no write, and it is
+	// counted apart from StaleSkipped because a report line about it may not claim
+	// a classify call was spent — StaleSkipped's guarantee is that none was.
+	StaleAtWrite int
+	Skipped      int // fresh pairs skipped via the NEITHER cache
+	Unclassified int // pairs skipped because the classifier answer was unparseable
+	Reversed     int // REVERSED verdicts: refused, never written
+	// Vetoed counts pairs the deterministic imperative veto settled as
+	// no-supersedes-edge with no harness call (see VetoSupersede). They are
+	// counted rather than silently dropped, because a run that declines work it
+	// did not do and reports the same totals as one that found nothing to do
+	// reads as "nothing was skipped".
+	Vetoed int
+	// Unscored counts the project's memories the candidate scan could not score
+	// at all, for want of a usable vector — none yet, or one written under
+	// another model, width or task prefix. The pairs the pass proposed as NEW
+	// candidates are therefore bounded by the part of the project the scan could
+	// read, and a caller that reports them without this one reports a partial
+	// scan in the voice of a complete one. It is the difference between "this
+	// project holds no near-duplicate pair" and "this pass could not read all of
+	// it", and the vectors it is waiting for belong to the embedding worker.
+	//
+	// Only the NEW candidates. A counted memory can still be an endpoint of a
+	// reclassified pair, because that half of the pass works from link rows and
+	// reads no vector — so Reclassified, and the Candidates total that mixes
+	// both halves, are NOT bounded by what the scan could score, and neither is
+	// any verdict counted over such a pair. A report that claims such a memory
+	// is "in no pair this run considered" is wrong the first time a model change
+	// retires a project's vectors and an edited edge comes back for re-judging.
+	Unscored int
+	// ReclassifiedNoWrite counts the reclassify pairs whose --apply effect is
+	// purely destructive: a reversal and a NEITHER both only invalidate the
+	// links they find, so neither re-links the pair.
 	ReclassifiedNoWrite int
-	Unoriented          int
-	OppositeLive        int
-	Bidirectional       int
-	ReverseLive         int
-	Consensus           int
+	// Unoriented counts the near-neighbour pairs the scan REFUSED to propose
+	// because both rows carry the same updated_at and the same created_at, so
+	// the pass has no chronology to order them by (see orient and
+	// Selection.Unoriented). No classify call, no link, no cache row: a
+	// direction invented from a hash is the #641 harm wearing a tiebreak.
+	Unoriented int
+	// OppositeLive counts the pairs whose fresh proposal was the REVERSE of a
+	// live edge — 'supersedes' or 'causes' (#823) — and whose fresh orientation
+	// the pass therefore refused (#778). It counts REFUSED PROPOSALS, not
+	// classifications: a
+	// refused pair still has to survive the endpoint-existence check,
+	// skip-if-unchanged (a live edge whose endpoints have not moved since it was
+	// last judged is not re-judged, whichever way the scan proposed it), the
+	// scope and persistent filters and the imperative veto before any of them
+	// reaches the classifier, so a counted pair may be one the pass spent no
+	// call on. What the count is exactly is what the pass decided HERE — the
+	// graph's direction beat the scan's — which is why the report line says the
+	// orientation was refused rather than claiming a judgment, and why the pairs
+	// the classifier did see in the link's direction are the ordinary
+	// Candidate/Reclassified totals above. A proposal that AGREED with the edge
+	// is not counted at all: nothing was refused.
+	OppositeLive int
+	// Bidirectional counts the pairs the graph already claims in BOTH directions
+	// in 'supersedes' — the cycle a pass before #778 could write, left in place for
+	// `--reassess` to withdraw. This pass refuses the pair outright: it judges
+	// nothing, writes nothing, and withdraws nothing (that is
+	// `ghost supersede <project> --reassess`, the repair path), because a cycle
+	// demotes both endpoints and no orientation of it can be judged into a
+	// state worth keeping.
+	//
+	// 'supersedes' and only 'supersedes' — and that is not a gap in the count but
+	// the consequence of the harm the rule exists for. A 'causes' cycle demotes
+	// nothing, and neither of its two edges can be re-read as a claim about which
+	// note is current, so the ordinary pass settles such a pair instead of
+	// refusing it: it is judged ONCE in the direction the timestamps give (the
+	// only direction a pair claimed both ways has) and whichever verdict comes
+	// back converges, because an affirming verdict writes that direction and drops
+	// the other and a denying one drops both. A refused pair is a pair nothing
+	// will ever judge, and `--reassess` cannot reach a 'causes' edge at all, so
+	// refusing one would leave a contradiction in the graph with a repair line
+	// pointing at a command that cannot see it.
+	Bidirectional int
+	// ReverseLive counts the edges this run had a verdict for and did NOT write,
+	// because the pair's opposite direction was already live by the time the
+	// write reached the store — a concurrent `ghost supersede
+	// --apply` that read the same unclaimed pair, scanned it the other way round,
+	// and wrote first (#806). It is the write-time twin of OppositeLive: that one
+	// is the graph's direction beating this pass's SCAN, this one is the graph
+	// beating this pass's WRITE, and a pass can lose the second race having won
+	// the first.
+	//
+	// It is counted rather than absorbed into Created for the reason every other
+	// refusal here is: a pass that proposed an edge and wrote nothing reads
+	// exactly like a pass that proposed nothing, and an operator reading a report
+	// has to be able to tell a racing pass from a quiet corpus. The repair is the
+	// next ordinary pass, which reads the live edge and judges the pair in ITS
+	// direction — and `ghost supersede --reassess` if the two disagree about
+	// which of them is current.
+	//
+	// BOTH relations since #823. The guarded writer refuses the second direction
+	// of a pair whatever the relation is, and a pair can only reach the guarded
+	// write in the direction the live edge asserts — so the refusal is a one-off
+	// race for 'causes' exactly as it is for 'supersedes'. Before #823 the
+	// 'causes' write went through the unguarded spell, because with no direction
+	// override for that relation the pair was re-proposed in the flipped direction
+	// on every pass and a guard would have refused it on every pass, forever: a
+	// permanent paid refusal is worse than the contradiction it prevents, which
+	// is why the override and the guard had to land together.
+	ReverseLive int
+	// Consensus is the number of classification passes this run made over the
+	// candidate set: 1 for the ordinary pass, N for a consensus-gated one. It is
+	// on the report because it is the multiplier on the pass's cost, and a caller
+	// reporting classify calls without it cannot say what was paid for.
+	Consensus int
+	// ConsensusPairsAsked is how many PAIRS the passes were asked about in
+	// total, which is Consensus times the pairs that survived every free filter.
+	// It is not the provider call count — batching means one call carries up to
+	// eight pairs — so it is the number a caller compares against the candidate
+	// total to see the multiplier actually applied, and the number a test asserts
+	// against rather than inferring from a mock's call log.
 	ConsensusPairsAsked int
-	NotAgreed           int
-	Disputed            []Disputed
+	// NotAgreed counts the pairs the N passes did not all answer the same way,
+	// and Disputed is one record per such pair. Nothing was written for any of
+	// them: no link, no withdrawal, no NEITHER cache row, no decided row.
+	//
+	// It is a counted, named outcome rather than a silent drop for the reason
+	// every other refusal here is: a gated run that proposed edges and wrote none
+	// reads exactly like a run that found nothing, and an operator deciding
+	// whether to keep a consensus gate needs the count of what it suppressed to
+	// judge the gate at all.
+	NotAgreed int
+	// Disputed names the pairs NotAgreed counts, one record each with the tally
+	// that failed to reach a quorum — because "not agreed" without the numbers is
+	// not actionable, and the ids are what the operator reads or re-runs.
+	Disputed []Disputed
 }
 
 // Disputed is one pair the consensus gate refused, and it carries the evidence
 // for the refusal rather than only its existence.
+//
+// The two verdicts it must be able to distinguish are the ones that call for
+// different next steps, and the remedies have to be named correctly here because
+// this is the comment a maintainer reads before changing the split path. A split
+// between two READABLE verdicts is a model that cannot decide the pair, and the
+// remedies are a re-run (fresh passes may agree) or a different harness — NOT a
+// higher N, which is the opposite of a remedy: raising N makes unanimity
+// STRICTLY HARDER, since a pair that split 2-1 at N=3 then has to satisfy one
+// more pass at N=4. A tally short because some pass's reply could not be parsed
+// is a harness or prompt problem, and the remedy is neither of those. Collapsing
+// them into one count would send an operator to raise N for what is really an
+// unreadable answer, and N is the wrong dial in the other case too.
 type Disputed struct {
 	NewerID    string
 	OlderID    string
