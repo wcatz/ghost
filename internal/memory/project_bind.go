@@ -44,6 +44,7 @@ func (b ProjectBinding) Changed() bool { return b.PathChanged || b.RemoteSet }
 
 // UnboundProject is a project no session directory can resolve: its recorded
 // path is not a usable location and it records no repository. Such a project
+// gets no session-start injection and no Stop-hook lifecycle work, silently.
 type UnboundProject struct {
 	ID   string
 	Name string
@@ -52,6 +53,9 @@ type UnboundProject struct {
 
 // StoredPathIsUsable reports whether stored is a location a session directory
 // can be compared against — the rule resolution applies to a recorded path
+// before it will agree with one. Exported for callers that validate a path
+// before writing it, so "usable" has one definition rather than a second one
+// next to the write.
 func StoredPathIsUsable(stored string) bool { return storedPathIsUsable(stored) }
 
 func (s *Store) BindProjectPath(ctx context.Context, id, path, detectedRemote string) (ProjectBinding, error) {

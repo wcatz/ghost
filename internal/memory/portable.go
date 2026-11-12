@@ -51,6 +51,7 @@ type PortableMemory struct {
 
 // PortableEvidence is one evidence record as the artifact carries it: the same
 // columns the table holds, minus memory_id, which the enclosing memory record
+// already names, and minus carried_from, for the reason below.
 type PortableEvidence struct {
 	ID         string   `json:"id,omitempty"`
 	Kind       string   `json:"kind"`
@@ -74,6 +75,7 @@ type PortableLink struct {
 
 // CarriedLinkRelations are the relations of the memory graph the portable
 // artifact carries, and the rule for which ones they are is the rule the rest
+// of the artifact follows: a value travels when nothing recomputes it.
 func CarriedLinkRelations() []string {
 	return []string{"supersedes", "causes"}
 }
@@ -117,6 +119,10 @@ type ImportOptions struct {
 
 // DowngradedSource is the source every imported memory is stamped with unless
 // the run was told to trust the artifact's own. `onboarding` is the value
+// internal/claudeimport already uses for memories brought in from outside Ghost
+// at first contact, and it is the only one of the eight that means "this did not
+// originate in a session" without also claiming authorship. It is in the
+// memories table's CHECK already, so downgrading needs no migration.
 const DowngradedSource = "onboarding"
 
 var validMemorySources = map[string]bool{

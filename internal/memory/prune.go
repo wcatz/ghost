@@ -10,6 +10,7 @@ import (
 
 // DefaultPruneGrace is DefaultSessionGrace, spelled as its own name so the
 // command's default and the tier's documented margin cannot be read as two
+// different numbers.
 const DefaultPruneGrace = DefaultSessionGrace
 
 var errPruneInterrupted = errors.New("prune: interrupted before the delete")
@@ -24,6 +25,7 @@ func setPruneBeforeDelete(fn func() error) (restore func()) {
 
 // PruneOptions is what one prune run is doing. The zero value is a dry run over
 // every project with the documented grace, which is the shape a caller gets for
+// asking nothing.
 type PruneOptions struct {
 	Apply     bool
 	Grace     time.Duration
@@ -33,6 +35,9 @@ type PruneOptions struct {
 
 // PruneCandidate is one row a prune would remove, with everything the report
 // needs to be checkable by a reader: which tier it is, when it expires, when
+// anything last touched it, and what the grace is measured from. The text is
+// included because a report of rows the operator cannot recognise is a report
+// they cannot approve.
 type PruneCandidate struct {
 	ID         string
 	ProjectID  string
