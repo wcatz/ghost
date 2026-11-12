@@ -14,7 +14,7 @@ import (
 
 func TestTheSessionStartRecordCarriesThePayloadsSessionID(t *testing.T) {
 	projDir, dbPath := sessionRecordFixture(t)
-	loadSessionContextFor(projDir, config.LoadForHook(), "hook-session-7")
+	loadSessionContextFor(projDir, config.LoadForHook(), "hook-session-7", nil)
 	calls := recordedCalls(t, dbPath)
 	if len(calls) != 1 || calls[0].source != "session_start" {
 		t.Fatalf("recorded %+v, want exactly one session_start call", calls)

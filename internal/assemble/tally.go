@@ -208,6 +208,10 @@ func (t BucketTally) WithheldNote() string {
 	if t.Shown != 0 || t.Withheld == 0 || t.RankedOut-t.Beyond != 0 {
 		return ""
 	}
+	if t.Reason == ReasonHostInstructions {
+		// The validity pointer talks about a window these rows do not carry.
+		return withheldSentence(t.Reason) + " Call ghost_memories_list to see them."
+	}
 	return withheldSentence(t.Reason) + WithheldPointer
 }
 
@@ -243,6 +247,8 @@ func withheldSentence(reason string) string {
 		return p.abstention(OutcomeEmpty, reasonAllInvalid)
 	case "scope_contradiction":
 		return p.abstention(OutcomeEmpty, reasonAllOutOfScope)
+	case ReasonHostInstructions:
+		return "Every candidate in this block restates a rule from the instruction files this host already loaded, so none is repeated here."
 	default:
 		return "No sufficiently trustworthy memory found: the candidates this block was assembled from were " +
 			"withheld before the answer was assembled."

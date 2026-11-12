@@ -16,6 +16,7 @@ import (
 
 	"github.com/wcatz/ghost/internal/assemble"
 	"github.com/wcatz/ghost/internal/config"
+	"github.com/wcatz/ghost/internal/hostevent"
 	"github.com/wcatz/ghost/internal/memory"
 	_ "modernc.org/sqlite"
 )
@@ -230,7 +231,7 @@ type sessionStartInput struct {
 // beyond the contract core (Claude's agent_id/agent_type subagent gate and
 // source resume/clear/compact short-circuits) stay available here; strict
 // envelope validation already happened in RunHostEvent.
-func runSessionStart(data []byte, stdout io.Writer) {
+func runSessionStart(data []byte, host hostevent.Source, stdout io.Writer) {
 	var input sessionStartInput
 	_ = json.Unmarshal(data, &input)
 
@@ -273,7 +274,7 @@ func runSessionStart(data []byte, stdout io.Writer) {
 	// halves are the same session. A broken config therefore reports once, not
 	// once per half.
 	cfg := config.LoadForHook()
-	projectID, project, memories, globals, learned, tasks, decisions, interactionCount, tally := loadSessionContextFor(cwd, cfg, input.SessionID)
+	projectID, project, memories, globals, learned, tasks, decisions, interactionCount, tally := loadSessionContextFor(cwd, cfg, input.SessionID, hostInstructionCover(host, cwd))
 
 	// Surface a failed auto-consolidation chain from an earlier session as
 	// ONE labeled line ahead of the context block (after plugin finalize in
@@ -828,7 +829,7 @@ func RenderSessionContextAt(cwd string, asOf *time.Time) string {
 // configuration rather than reading the wall clock and the user's config files.
 // `ghost bench --passive` is its only caller.
 func SessionBlockAt(dbPath, cwd string, cfg *config.Config, now time.Time) string {
-	projectID, project, memories, globals, learned, tasks, decisions, interactionCount, tally := loadSessionContextFrom(dbPath, cwd, cfg, func() time.Time { return now }, "")
+	projectID, project, memories, globals, learned, tasks, decisions, interactionCount, tally := loadSessionContextFrom(dbPath, cwd, cfg, func() time.Time { return now }, "", nil)
 	// The same guard as RenderSessionContextAt's: a wholly-withheld global
 	// bucket still renders, so the measured block is the one the hook prints;
 	// and a byte-cut global bucket renders its heading and counts line (#1837).
@@ -1171,19 +1172,19 @@ type sessionMemory struct {
 // came from the other is exactly how a block ended up saying rows were "ranked
 // out" when a stage had withheld them.
 func loadSessionContext(cwd string, cfg *config.Config) (projectID, project string, memories, globals []sessionMemory, learned string, tasks [][4]string, decisions [][4]string, interactionCount int, tally sessionTally) {
-	return loadSessionContextFor(cwd, cfg, "")
+	return loadSessionContextFor(cwd, cfg, "", nil)
 }
 
 // loadSessionContextFor is loadSessionContext for a session the host named: the
 // block's retrieval record carries sessionID, so the audit can judge that call against
 // the text of the session it opened. "" is a caller with no hook payload (`ghost
 // context`, opencode's plugin) and records none, which the audit leaves unjudged.
-func loadSessionContextFor(cwd string, cfg *config.Config, sessionID string) (projectID, project string, memories, globals []sessionMemory, learned string, tasks [][4]string, decisions [][4]string, interactionCount int, tally sessionTally) {
+func loadSessionContextFor(cwd string, cfg *config.Config, sessionID string, covered func(memory.Candidate) bool) (projectID, project string, memories, globals []sessionMemory, learned string, tasks [][4]string, decisions [][4]string, interactionCount int, tally sessionTally) {
 	dataDir, err := config.DataDir()
 	if err != nil {
 		return // a refused data dir reads exactly as no store: no DB access, no blocked session (#721)
 	}
-	return loadSessionContextFrom(filepath.Join(dataDir, "ghost.db"), cwd, cfg, time.Now, sessionID)
+	return loadSessionContextFrom(filepath.Join(dataDir, "ghost.db"), cwd, cfg, time.Now, sessionID, covered)
 }
 
 // loadSessionContextFrom is loadSessionContext's body for a store at dbPath, with
@@ -1191,7 +1192,7 @@ func loadSessionContextFor(cwd string, cfg *config.Config, sessionID string) (pr
 // fixed instant so a block can be measured rather than merely run. Nothing else
 // differs between the two, which is the point of the split — a bench that
 // re-implemented this would be measuring its own copy.
-func loadSessionContextFrom(dbPath, cwd string, cfg *config.Config, clock func() time.Time, sessionID string) (projectID, project string, memories, globals []sessionMemory, learned string, tasks [][4]string, decisions [][4]string, interactionCount int, tally sessionTally) {
+func loadSessionContextFrom(dbPath, cwd string, cfg *config.Config, clock func() time.Time, sessionID string, covered func(memory.Candidate) bool) (projectID, project string, memories, globals []sessionMemory, learned string, tasks [][4]string, decisions [][4]string, interactionCount int, tally sessionTally) {
 	db, err := memory.OpenReadDB(dbPath)
 	if err != nil {
 		return // no store yet — OpenReadDB refuses to create one
@@ -1230,7 +1231,7 @@ func loadSessionContextFrom(dbPath, cwd string, cfg *config.Config, clock func()
 		// start records nothing — and silently, because a store that cannot record must
 		// not print a refusal on every session a user opens in a directory Ghost has
 		// never seen. The block still renders, which is the half that must not change.
-		_, globals, tally = loadSessionPassive(context.Background(), store, cfg, "", clock(), nil, "")
+		_, globals, tally = loadSessionPassive(context.Background(), store, cfg, "", clock(), nil, "", sessionFrame{covered: covered})
 		return
 	}
 
@@ -1327,6 +1328,7 @@ func loadSessionContextFrom(dbPath, cwd string, cfg *config.Config, clock func()
 	// sink with a no-op close, so there is no error path here to write.
 	record, closeRecord := sessionRecordSink(dbPath)
 	memories, globals, tally = loadSessionPassive(context.Background(), store, cfg, projectID, now, record, sessionID, sessionFrame{
+		covered: covered,
 		project: project, learned: learned, tasks: tasks, decisions: decisions, interactionCount: interactionCount,
 	})
 	closeRecord()
