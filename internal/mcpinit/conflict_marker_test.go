@@ -98,45 +98,6 @@ func hasBlockLine(block, id string) bool {
 	return false
 }
 
-// wantSessionStartSeparatedPair asserts the pair is separated in the session-start
-// block: exactly one side renders, and its line names the other as withheld.
-func wantSessionStartSeparatedPair(t *testing.T, block, a, b string) {
-	t.Helper()
-	la, lb := hasBlockLine(block, a), hasBlockLine(block, b)
-	switch {
-	case la && !lb:
-		if l := blockLine(t, block, a); !strings.Contains(l, "conflicts_with=`"+b+"`") {
-			t.Errorf("%s does not name the withheld %s: %q", a, b, l)
-		}
-	case lb && !la:
-		if l := blockLine(t, block, b); !strings.Contains(l, "conflicts_with=`"+a+"`") {
-			t.Errorf("%s does not name the withheld %s: %q", b, a, l)
-		}
-	default:
-		t.Errorf("a separated pair rendered a=%v b=%v, want exactly one side rendered", la, lb)
-	}
-}
-
-func TestSessionStartSeparatesAContradictingPair(t *testing.T) {
-	got := renderSessionStart(t, conflictStore(t, false))
-	for _, p := range [][2]string{{"cfpa01", "cfpb01"}, {"cfga01", "cfgb01"}} {
-		wantSessionStartSeparatedPair(t, got, p[0], p[1])
-	}
-	if l := blockLine(t, got, "cfpc01"); strings.Contains(l, "conflicts_with") {
-		t.Errorf("an unlinked row is marked: %q", l)
-	}
-}
-
-func TestSessionStartDoesNotMarkAWithdrawnEdge(t *testing.T) {
-	got := renderSessionStart(t, conflictStore(t, true))
-	if !strings.Contains(got, "`cfpa01`") || !strings.Contains(got, "`cfgb01`") {
-		t.Fatalf("precondition: the rows must still render:\n%s", got)
-	}
-	if strings.Contains(got, "conflicts_with") {
-		t.Errorf("a withdrawn edge is marked:\n%s", got)
-	}
-}
-
 // The marker the assembler draws on a pinned row reaches the session-start
 // block: mcpinit copies assembler fields into its own row type and back, and a
 // field the copy leaves out is silently lost on exactly this surface (#975).

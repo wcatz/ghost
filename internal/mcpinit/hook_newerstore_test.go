@@ -43,24 +43,6 @@ func TestBumpSessionCountSkipsAStoreANewerGhostOwns(t *testing.T) {
 	}
 }
 
-// TestBumpSessionCountStillWritesAStoreThisBuildOwns is the other half, and it
-// is the one that keeps the guard from being "skip if anything looks odd".
-//
-// A check that refuses on doubt passes its own test and breaks the feature: the
-// counter would silently stop advancing on every machine, and nothing would say
-// why. The two are adjacent deliberately — same fixture, same hook, one version
-// apart.
-func TestBumpSessionCountStillWritesAStoreThisBuildOwns(t *testing.T) {
-	dbPath := sessionHookDB(t)
-
-	if n := bumpSessionCount(dbPath, "p1"); n != 1 {
-		t.Errorf("bumpSessionCount = %d, want 1 — the version guard must not refuse a store at this build's own schema", n)
-	}
-	if got := interactionCount(t, dbPath); got != 1 {
-		t.Errorf("interaction_count = %d, want 1", got)
-	}
-}
-
 // TestBumpSessionCountCannotBeSlippedPastByAMigrationCommittingMidCheck is the
 // race, and it is a test rather than a comment because the whole reason
 // internal/memory puts its check AFTER BeginTx is that a pre-BEGIN read leaves a

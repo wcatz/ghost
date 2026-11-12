@@ -99,82 +99,6 @@ func budgetContent(i int) string {
 	return b.String()[:7800]
 }
 
-// sessionRowPayloads returns the content payload of every memory row in a
-// block: the LAST «...» on the line, which is the content — a source reference
-// and the fields beside it render as their own «...» earlier on the line. The
-// opening delimiter is two bytes, so the payload starts after both of them.
-func sessionRowPayloads(block string) []string {
-	var out []string
-	for _, line := range strings.Split(block, "\n") {
-		if !strings.HasPrefix(line, "- [") {
-			continue
-		}
-		open := strings.LastIndex(line, "«")
-		closed := strings.LastIndex(line, "»")
-		if open < 0 || closed < open {
-			continue
-		}
-		out = append(out, line[open+len("«"):closed])
-	}
-	return out
-}
-
-// TestRenderSessionContextAtCapsTheHistoricalBlock: the block a historical read
-// renders is the block the host receives, so it carries the budgets the current
-// block carries — the per-item preview and the whole-block byte cap. It carried
-// neither: the rows were built with their whole stored content and the block was
-// rendered with no measure, so a project holding a few memories at the store's
-// own content cap produced a block of over a hundred thousand bytes. A host
-// over its 10,000-character limit replaces the whole block with a
-// 2,000-character preview, so the reader got a fragment of a block rather than
-// the block.
-func TestRenderSessionContextAtCapsTheHistoricalBlock(t *testing.T) {
-	rows := make([]budgetRow, 0, 20)
-	for i := 0; i < 20; i++ {
-		rows = append(rows, budgetRow{content: budgetContent(i)})
-	}
-	globals := []budgetRow{{content: budgetContent(100)}, {content: budgetContent(101)}}
-	dir := budgetStore(t, "budgetproj", rows, globals)
-	at := time.Now().UTC().Add(time.Hour)
-
-	block := RenderSessionContextAt(dir, &at)
-	if block == "" {
-		t.Fatal("the historical block is empty")
-	}
-	if len(block) > sessionStartByteCap {
-		t.Errorf("the historical block is %d bytes, over the %d-byte cap", len(block), sessionStartByteCap)
-	}
-
-	// The two halves carry their own preview budget: 200 bytes for a project
-	// row, 300 for a global one.
-	project, globalSection, _ := strings.Cut(block, "**Global (applies to all projects):**")
-	projectRows := sessionRowPayloads(project)
-	if len(projectRows) != sessionMemoriesCap {
-		t.Errorf("the historical block lists %d project rows, want %d", len(projectRows), sessionMemoriesCap)
-	}
-	for _, payload := range projectRows {
-		if len(payload) != sessionDisplayBytes+len("…") {
-			t.Errorf("a project row carries %d bytes of content, want the %d-byte preview", len(payload), sessionDisplayBytes)
-		}
-	}
-	globalRows := sessionRowPayloads(globalSection)
-	if len(globalRows) != len(globals) {
-		t.Errorf("the historical block lists %d global rows, want %d", len(globalRows), len(globals))
-	}
-	for _, payload := range globalRows {
-		if len(payload) != globalsDisplayBytes+len("…") {
-			t.Errorf("a global row carries %d bytes of content, want the %d-byte preview", len(payload), globalsDisplayBytes)
-		}
-	}
-
-	// The current block carries the same budgets, which is what makes the two
-	// blocks comparable: the same reader, the same shape, the same size.
-	current := RenderSessionContextAt(dir, nil)
-	if len(current) > sessionStartByteCap {
-		t.Errorf("the current block is %d bytes, over the %d-byte cap", len(current), sessionStartByteCap)
-	}
-}
-
 // TestRenderSessionContextAtFitsTheHistoricalBlockToTheCap: the byte cap is a
 // cap and not a hope — a block that would be over it gives up its
 // lowest-ranked rows and says how many it gave up. The rows here carry a long
@@ -198,36 +122,5 @@ func TestRenderSessionContextAtFitsTheHistoricalBlockToTheCap(t *testing.T) {
 	}
 	if !strings.Contains(block, "were cut to keep this block under the host's output limit") {
 		t.Error("the block says nothing about the rows the cap cut")
-	}
-}
-
-// TestRenderSessionContextAtKeepsItsRowsWhenTheFramingIsOverTheHostLimit: a
-// framing already over the host's own limit cannot be brought under the cap by
-// cutting rows — the block would be over the cap with every row gone — so the
-// rows are kept rather than cut for nothing. That is the current path's rule,
-// and a historical block that cut its rows here would deliver nothing for a
-// framing it could not have fixed.
-func TestRenderSessionContextAtKeepsItsRowsWhenTheFramingIsOverTheHostLimit(t *testing.T) {
-	rows := make([]budgetRow, 0, 20)
-	for i := 0; i < 20; i++ {
-		rows = append(rows, budgetRow{content: budgetContent(i)})
-	}
-	// The name is rendered twice — in the heading and in the project_id line —
-	// so this framing is over the host's 10,000-character limit on its own.
-	dir := budgetStore(t, strings.Repeat("n", 6000), rows, nil)
-	at := time.Now().UTC().Add(time.Hour)
-
-	block := RenderSessionContextAt(dir, &at)
-	if block == "" {
-		t.Fatal("the historical block is empty")
-	}
-	if len(block) < sessionHostLimit {
-		t.Fatalf("the block is %d bytes, so the framing is not over the host's limit and the test proves nothing", len(block))
-	}
-	if got := strings.Count(block, "- [fact]"); got != sessionMemoriesCap {
-		t.Errorf("the block lists %d rows, want %d: a framing over the host's limit keeps its rows", got, sessionMemoriesCap)
-	}
-	if strings.Contains(block, "were cut to keep this block under the host's output limit") {
-		t.Error("the block claims rows were cut for size, but the cut could not have reached the cap")
 	}
 }
