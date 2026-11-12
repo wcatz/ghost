@@ -7,38 +7,21 @@ import (
 	"strings"
 )
 
-// armTally is one arm's numbers over the runs of one storyline: the counts the
-// issue's success numbers are quoted in, and each session's block size.
 type armTally struct {
-	arm    string
-	runs   int // runs that completed
-	errors int // runs that ended in an error, excluded from every count below
-	// noReport counts completed runs whose report file could not be written: they
-	// stay in every count below, and the table says their report is missing.
-	noReport int
-	// carried counts runs in which EVERY answer-carries line passed.
-	carried int
-	// avoidFailed counts runs in which any answer-avoids line failed: the stale,
-	// expired or mistaken claim was used unmarked. For correction-replay that is
-	// "the mistake was repeated".
-	avoidFailed int
-	hasAvoids   bool
-	// hasCarries is false when no answer-carries line was graded at all — a
-	// -fake-harness run, whose answers are not graded — so the column says n/a
-	// rather than reading as a run that carried nothing.
-	hasCarries bool
-	// judged and judgeYes are the advisory paraphrase column.
+	arm              string
+	runs             int // runs that completed
+	errors           int // runs that ended in an error, excluded from every count below
+	noReport         int
+	carried          int
+	avoidFailed      int
+	hasAvoids        bool
+	hasCarries       bool
 	judged, judgeYes int
-	// judgeUnread counts runs whose judge gave no readable verdict or failed; they
-	// are outside the judged denominator.
-	judgeUnread int
-	// delivered counts runs in which every delivery line passed (Ghost arm).
-	delivered int
-	// blocks[run][session] is the size in bytes of the block the session was handed.
-	blocks [][]int
+	judgeUnread      int
+	delivered        int
+	blocks           [][]int
 }
 
-// tally reads one arm's completed runs. It is a pure function of the results.
 func tally(arm string, results []*Result, errored, noReport int) armTally {
 	t := armTally{arm: arm, runs: len(results), errors: errored, noReport: noReport}
 	for _, res := range results {
@@ -71,8 +54,6 @@ func tally(arm string, results []*Result, errored, noReport int) armTally {
 		if deliveryFail == 0 {
 			t.delivered++
 		}
-		// The judge column counts readable verdicts only; a reply that was neither
-		// yes nor no, or a call that failed, is shown as its own count.
 		for _, c := range res.Checks {
 			switch {
 			case c.Name == "judge:unreadable" || c.Name == "judge:error":
@@ -93,8 +74,6 @@ func tally(arm string, results []*Result, errored, noReport int) armTally {
 	return t
 }
 
-// isDeliveryCheck is the block-reading lines: the ones whose verdict is about
-// what Ghost handed the session rather than what the agent said.
 func isDeliveryCheck(name string) bool {
 	for _, p := range []string{"injection-present:", "carry-forward:", "stale-original:", "expired-withheld:"} {
 		if strings.HasPrefix(name, p) {
@@ -104,8 +83,6 @@ func isDeliveryCheck(name string) bool {
 	return false
 }
 
-// blockSizes is each session's block size across the runs: one number when every
-// run agreed, a min-max range when they did not.
 func (t armTally) blockSizes() string {
 	if len(t.blocks) == 0 {
 		return "-"
@@ -129,9 +106,6 @@ func (t armTally) blockSizes() string {
 
 func (t armTally) ratio(n int) string { return fmt.Sprintf("%d/%d", n, t.runs) }
 
-// formatSummary prints both arms side by side per storyline, with the block size
-// of each session. The figures are counts of runs, quoted against the targets in
-// docs/benchmarks.md and gated by nothing.
 func formatSummary(cells []cell, runs int) string {
 	var b strings.Builder
 	seen := map[string]bool{}
@@ -204,8 +178,6 @@ func formatSummary(cells []cell, runs int) string {
 	return b.String()
 }
 
-// writeSummary writes the side-by-side tables, naming the storylines and the
-// model so a pasted table carries what produced it.
 func writeSummary(dir string, stories []Storyline, model, summary string) (string, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", fmt.Errorf("create results dir: %w", err)

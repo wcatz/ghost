@@ -6,26 +6,6 @@ import (
 	"strings"
 )
 
-// notesBlock renders the flat-notes arm's session block: every record saved so
-// far, oldest first, as a plain markdown notes file — the shape of a host's
-// built-in file memory (a project notes file plus a user-level one), which is
-// the baseline Ghost has to beat rather than an empty block.
-//
-// The baseline is deliberately generous, so a Ghost win means something:
-//
-//   - every record is present, in save order, with nothing filtered — a notes
-//     file keeps an expired or replaced line until someone edits it out;
-//   - a record's validity window and scope are written beside it in the words a
-//     person keeping notes would use, because a stale-fact arc whose content
-//     never says it is old would otherwise be lost by construction rather than
-//     by the notes;
-//   - a global record goes under the user-level heading, because a user-level
-//     notes file is loaded in every project.
-//
-// What it leaves out is exactly Ghost's own work: ids, categories, importance,
-// replacement marks, and any filtering, ranking or budget. Each note is wrapped
-// in « and » so the stage prompt's framing sentence holds for this arm too, and
-// an empty store renders as an empty block, as the without-Ghost arm does.
 func notesBlock(saved []Record) string {
 	var project, global []string
 	for _, rec := range saved {
@@ -56,9 +36,6 @@ func notesBlock(saved []Record) string {
 	return b.String()
 }
 
-// notesAnnotations writes a record's validity window and scope the way a
-// person would beside a note: "(valid until 2025-01-31)", "(applies to
-// environment=staging)". Scope keys are sorted so the block is deterministic.
 func notesAnnotations(rec Record) string {
 	var out []string
 	if rec.ValidUntil != "" {

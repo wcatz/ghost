@@ -1,33 +1,7 @@
 package main
 
-// The default-install arcs. Each one changes what is true about a project in a
-// shape the truth-change arcs in truth.go do not cover, and all but the last
-// run no lifecycle between sessions: automatic lifecycle phases are off by
-// default, so the session after each change is graded on what the save path and
-// the read side alone left behind. The arc's own lifecycle still runs after the
-// last session, so the final block and the end-state searches show what a
-// supersede pass would have changed; the stage searches are the default-install
-// reading.
-//
-// The shapes:
-//
-//   - retired-dependency: a claim retired with no replacement. The retirement
-//     note names only what is gone, so it holds no value the original lacks.
-//   - reverted-change: A, then B, then back to A. The revert note restates A's
-//     values, so it can look like a second wording of A.
-//   - prose-only-change: a toolchain swap told in plain lowercase words, the
-//     save path's documented known limit, graded for its user-visible cost.
-//   - recategorised-replacement: the replacement is saved as a decision where
-//     the original was a fact.
-//   - repeated-tuning: one setting changed three times after it was first set;
-//     only the newest of four notes is current.
-//   - superseded-convention: a replaced convention, graded on the default
-//     install's block and again after a lifecycle pass, which can link the
-//     pair but never retire a convention.
-
 // RetiredDependency is the retirement arc: the mail provider is removed in
 // session 2 and nothing replaces it. Session 3 must not be told the provider
-// is current, and a search in the old wording must lead to the removal.
 func RetiredDependency() Storyline {
 	return Storyline{
 		Key:     "retired-dependency",
@@ -66,7 +40,6 @@ func RetiredDependency() Storyline {
 				Carries: []AnswerCheck{{Name: "old-provider", Any: []string{"SendGrid"}}},
 				Records: []Record{
 					{
-						// The retirement names only what is gone: no new value.
 						Key:      "mail-removed",
 						Category: "dependency",
 						Content:  "SendGrid was removed from parcel-notify: internal/mail is deleted, nothing reads SENDGRID_API_KEY, and order emails are no longer sent at all.",
@@ -84,8 +57,6 @@ func RetiredDependency() Storyline {
 				Avoids:  []AnswerCheck{{Name: "retired-client", Any: []string{"sendgrid-go"}}},
 				Probes: []Probe{
 					{
-						// The old wording is what a reader with an old stack trace or
-						// an old ticket searches for.
 						Name:  "mail-provider",
 						Query: "order emails SendGrid client",
 						Want:  "mail-removed",
@@ -108,8 +79,6 @@ func RetiredDependency() Storyline {
 
 // RevertedChange is the revert arc: the job backend moves from river to asynq
 // in session 2 and back to river in session 3. Session 4 must be told river is
-// current, and must not be told asynq is. The revert note restates the
-// original's values, which is the natural way to write "back to A".
 func RevertedChange() Storyline {
 	return Storyline{
 		Key:     "reverted-change",
@@ -165,7 +134,6 @@ func RevertedChange() Storyline {
 				Carries: []AnswerCheck{{Name: "second-backend", Any: []string{"JOB_BACKEND=asynq"}}},
 				Records: []Record{
 					{
-						// "Back to A": the original's values, restated.
 						Key:      "jobs-reverted",
 						Category: "decision",
 						Content:  "Background jobs are back on river: the asynq move was reverted after it lost retries, and cmd/worker starts with JOB_BACKEND=river again.",
@@ -189,7 +157,6 @@ func RevertedChange() Storyline {
 						Over:  []string{"jobs-asynq"},
 					},
 					{
-						// What a reader working from the asynq rollout searches for.
 						Name:  "asynq-queues",
 						Query: "asynq queues jobs-redis-01",
 						Want:  "jobs-reverted",
@@ -218,10 +185,6 @@ func RevertedChange() Storyline {
 
 // ProseOnlyChange is the plain-word arc: the lint toolchain is swapped in
 // session 2, and both notes say so in plain lowercase words with no version,
-// path, identifier or backticked span. The save path's value guard and the
-// read side's replacement guess both read value tokens only, so neither can see
-// this change: it is the documented known limit (a plain lowercase word outside
-// backticks), graded here for what it costs the session after the change.
 func ProseOnlyChange() Storyline {
 	return Storyline{
 		Key:     "prose-only-change",
@@ -293,9 +256,6 @@ func ProseOnlyChange() Storyline {
 				Over:  []string{"lint-eslint"},
 			},
 		},
-		// The session-3 lines are the documented known limit (a plain lowercase
-		// word outside backticks is never a value token). The final block, after the
-		// arc's lifecycle, is graded on the supersedes edge's own marker and passes.
 		KnownFailing: map[string]string{
 			"distinct-save:lint-biome": "known limit: a change told in plain lowercase words has no value token, so the save path folds the replacement into the claim it replaces and strengthens it",
 			"stale-original:session-3": "known limit: the read side's replacement guess reads value tokens only, so the strengthened old convention is the first line of the block, unmarked",
@@ -306,8 +266,6 @@ func ProseOnlyChange() Storyline {
 
 // RecategorisedReplacement is the category arc: the cache is a fact in session
 // 1 and its replacement is recorded as a decision in session 2, which is how an
-// agent records a change the team chose. The pair is the same claim with a
-// different value, in two categories.
 func RecategorisedReplacement() Storyline {
 	return Storyline{
 		Key:     "recategorised-replacement",
@@ -385,8 +343,6 @@ func RecategorisedReplacement() Storyline {
 
 // RepeatedTuning is the many-updates arc: one rate limit is set in session 1
 // and changed in sessions 2, 3 and 4, each note naming the setting and the file
-// it lives in. Session 5 must be told the newest value as current, and each
-// older value must be absent or marked behind the note that replaced it.
 func RepeatedTuning() Storyline {
 	return Storyline{
 		Key:     "repeated-tuning",
@@ -498,12 +454,6 @@ func RepeatedTuning() Storyline {
 
 // SupersededConvention is the standing-category arc, and the one arc here that
 // runs a lifecycle between sessions: a team convention is replaced in session
-// 2, session 3 is graded on the default install's store, and the lifecycle
-// runs after session 3, as a host's Stop hook would on a project whose
-// lifecycle is enabled. Session 4 is graded on the same claims after that
-// pass. A convention or a preference is never resolved (resolve's standing-
-// category guardrail), so the pass can link the pair but never retire the old
-// note, and the arc grades what the block says about it before and after.
 func SupersededConvention() Storyline {
 	return Storyline{
 		Key:     "superseded-convention",
@@ -557,7 +507,6 @@ func SupersededConvention() Storyline {
 				Expect:  []string{"release-calver"},
 				Carries: []AnswerCheck{{Name: "current-tag", Any: []string{"YYYY.MM.N"}}},
 				Avoids:  []AnswerCheck{{Name: "old-tag", Any: []string{"vMAJOR.MINOR.PATCH"}}},
-				// Before the lifecycle, only the lexical guess relates the pair.
 				Probes: []Probe{{
 					Name:   "tag-form",
 					Query:  "release tag form make release",
@@ -565,7 +514,6 @@ func SupersededConvention() Storyline {
 					Over:   []string{"release-semver"},
 					Marked: []string{"release-semver"},
 				}},
-				// The project's lifecycle runs once this session ends.
 				Lifecycle: true,
 			},
 			{
@@ -575,8 +523,6 @@ func SupersededConvention() Storyline {
 				Expect:  []string{"release-calver"},
 				Carries: []AnswerCheck{{Name: "current-tag", Any: []string{"YYYY.MM.N"}}},
 				Avoids:  []AnswerCheck{{Name: "old-tag", Any: []string{"vMAJOR.MINOR.PATCH"}}},
-				// After it, a live supersedes edge has switched the guess off for
-				// the pair, and the search must still say the old tag is replaced.
 				Probes: []Probe{{
 					Name:   "tag-form-linked",
 					Query:  "release tag form make release",

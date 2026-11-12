@@ -1,26 +1,6 @@
 // Command evalstoryline runs one multi-session storyline against a
 // scratch-isolated Ghost and grades whether the arc held together (issue #339,
 // design section 2 of docs/superpowers/specs/2026-07-27-ghost-eval-suite-design.md).
-//
-// A storyline is a chain of headless harness sessions that share ONE scratch data
-// dir. Session N+1 is told its own stage script and nothing else: whatever it
-// knows about session N arrived through Ghost's own session-start injection
-// (the `ghost context` block the opencode plugin hands a session), because that
-// is the property the module measures. Its records are seeded AFTER its session
-// has answered, so a stage cannot be handed its own answer.
-//
-// Usage:
-//
-//	go run ./eval/storyline [-storyline reversed-decision|a,b|all] [-repo .] [-keep]
-//	    [-without-ghost] [-flat-notes] [-runs 1] [-judge] [-model opencode/big-pickle]
-//	    [-ollama http://localhost:11434]
-//	    [-drain-timeout 3m] [-auth-file path/to/auth.json]
-//	    [-results-dir eval/storyline/results] [-fake-harness]
-//
-// LOCAL-ONLY. There is no CI wiring (issue #338 is not done), because every
-// session is a real model call and the stages are nondeterministic. The
-// isolation, the harness and the credential handling are eval/cycle's
-// mechanisms, not new ones; see docs/benchmarks.md.
 package main
 
 import (
@@ -32,54 +12,20 @@ import (
 
 // Record is one memory a stage's agent wrote. Everything about it that is
 // harness-only (Key, Mark, SupersededBy) never reaches a model: Key is the
-// grading identity, Mark is the substring the grader looks for in an injected
-// block, and SupersededBy is the same annotation eval/cycle's corpus uses, so
-// both suites read the same way.
 type Record struct {
-	Key      string
-	Category string
-	Content  string
-	Tags     []string
-	// Mark is a distinctive substring of Content, quoted verbatim in the block.
-	// It is required rather than derived because a grader that matched on a
-	// prefix of the content would grade the first line of a memory.
-	Mark string
-	// SupersededBy names the Key of the LATER record that replaces this one. A
-	// reversal is the whole point of the shipped storyline, and an edge that
-	// pointed the wrong way would pass a direction-blind grade.
+	Key          string
+	Category     string
+	Content      string
+	Tags         []string
+	Mark         string
 	SupersededBy string
-	// Global saves the record through ghost_save_global, into the cross-project
-	// bucket every project's session start reads. It is how a fact learned in one
-	// repository reaches a session in another: the sessions run with no tools, so
-	// ghost_search_all is not reachable and the global bucket in the injection is
-	// the only cross-project path they have. A global record needs a project
-	// record beside it (Validate) because the project is what binds the work dir
-	// and what the embedding drain waits on.
-	Global bool
-	// ValidUntil is the record's valid_until, an RFC 3339 stamp or a date, passed
-	// to the save tool as written. A record whose window has already closed is one
-	// the session start must withhold, and the grade checks that it did and that
-	// no answer used it.
-	ValidUntil string
-	// Scope is the record's scope, passed to the save tool as written: where the
-	// claim applies, e.g. {"environment": "staging"}. A scoped record is the one
-	// a session working somewhere else must not be handed as applying to it.
-	Scope map[string]string
-	// Pin saves the record pinned, guaranteeing it a slot on every passive
-	// surface ahead of ranking. A pin that outnumbers the bucket is the
-	// efficiency defect the pins-over-bucket arc measures.
-	Pin bool
+	Global       bool
+	ValidUntil   string
+	Scope        map[string]string
+	Pin          bool
 }
 
-// Probe is one search a reader of the project would run once the arc is over,
-// graded on the rows ghost_memory_search returns rather than on its verdict
 // line. Want is the record the search must lead to, Over the records that may
-// be returned but must rank BELOW Want (the claim Want replaced), and Absent the
-// records the search must not return at all (a record scoped elsewhere when the
-// probe carries a scope). Marked is the records whose row, when the search
-// returns it together with Want, must carry the replaced marker at its field
-// (the lexical guess's or the recorded relation's): the claim Want replaced,
-// read by an agent that searched before acting.
 type Probe struct {
 	Name   string
 	Query  string
@@ -92,103 +38,52 @@ type Probe struct {
 
 // Lure is a pair a fallible classifier would call a supersession although both
 // claims still hold — two values of one setting in two environments. The fake
-// harness's oracle answers SUPERSEDES for it, so the lure-refused check measures
-// whether Ghost's own guards keep the pair away from the classifier, not whether
-// a model resisted it.
 type Lure struct {
 	Older, Newer string
 }
 
 // AnswerCheck is one deterministic reading of a session's ANSWER. Any is a list
 // of alternative spellings, matched case-insensitively as substrings for Carries
-// and as whole tokens for Avoids; Name is what the report keys on.
 type AnswerCheck struct {
-	Name string
-	Any  []string
-	// Needs is for an Avoids check: when the answer mentions an Any spelling at all
-	// (rejected or not) it must also carry one of these, or the check fails.
+	Name  string
+	Any   []string
 	Needs []string
 }
 
 // Stage is one simulated session: the script the session is given, the records
 // its agent wrote once it had answered, and the keys whose Mark that session
-// must have been INJECTED with (see Storyline.Validate on why they must come
-// from an earlier stage).
 type Stage struct {
-	Script  string
-	Records []Record
-	// Expect is the DELIVERY property: the keys whose Mark the session's block
-	// must carry. It says nothing about what the agent did with the block.
-	Expect []string
-	// Carries is the ANSWER property, and the primary grade: each check passes
-	// when the agent's answer contains one of its spellings. Every spelling must
-	// come from an earlier record and must not appear in this stage's own script
-	// (Validate), which is what makes a pass mean the answer was remembered
-	// rather than read out of the prompt.
-	Carries []AnswerCheck
-	// Avoids lists claims the answer must not USE: a superseded or expired fact,
-	// or the mistake a correction was about. A spelling counts as used when it
-	// appears in a sentence with nothing marking it as old or wrong (see
-	// answerAvoids), so "use X, not Y" is not a use of Y.
-	Avoids []AnswerCheck
-	// SessionScope is the scope this session works in: the block is rendered
-	// with GHOST_INJECTION_SESSION_SCOPE set to it, which is how a host tells
-	// Ghost's session start that it is, say, a production session.
+	Script       string
+	Records      []Record
+	Expect       []string
+	Carries      []AnswerCheck
+	Avoids       []AnswerCheck
 	SessionScope map[string]string
-	// Withheld lists records whose Mark this session's block must NOT carry, for
-	// a reason other than a supersession — a record scoped to an environment the
-	// session is not working in.
-	Withheld []string
-	// Lifecycle runs the arc stages (restamp, embedding drain, supersede,
-	// resolve) after this stage's records are saved and before the next block
-	// is rendered — the order a host's Stop hook gives a project whose lifecycle
-	// is enabled. Without it the arc stages run once, after the last session, so
-	// a session after a truth change is graded on a store no lifecycle has read.
-	Lifecycle bool
-	// Probes are searches run at this session's start, after its block is
-	// rendered and before its records exist: what the session would get if it
-	// searched before doing anything else. Every key must be an earlier stage's.
-	Probes []Probe
+	Withheld     []string
+	Lifecycle    bool
+	Probes       []Probe
 }
 
 // Storyline is a whole arc. Project is the Ghost project the run works in;
 // Opening is what the project already held before the first session, seeded
-// first so the block has real competition in it.
 type Storyline struct {
-	Key     string
-	Title   string
-	Project string
-	Opening []Record
-	Stages  []Stage
-	// Judge is the yes/no question the opt-in judge asks about the final session's
-	// answer, as a format string taking the expected record's mark and content.
-	// Empty means defaultJudgeQuestion.
-	Judge string
-	// FinalScope is the scope the final block is rendered under, as
-	// Stage.SessionScope is for a session's block.
-	FinalScope map[string]string
-	// Probes are the searches graded against the end state.
-	Probes []Probe
-	// Lures are the pairs the fake classifier is told to get wrong.
-	Lures []Lure
-	// KnownFailing names the checks this storyline is known to fail on main,
-	// each with the one-line reason a report prints beside it. A listed check
-	// that fails is reported as known and does not decide the run; a listed check
-	// that passes is reported as an unexpected pass, so a fix shows up as a line
-	// to delete rather than as silence.
+	Key          string
+	Title        string
+	Project      string
+	Opening      []Record
+	Stages       []Stage
+	Judge        string
+	FinalScope   map[string]string
+	Probes       []Probe
+	Lures        []Lure
 	KnownFailing map[string]string
 }
 
-// validCategories mirrors memory's own CHECK constraint, so a typo'd category
-// fails at the flag boundary rather than as a rejected INSERT in the middle of a
-// run that has already spent model calls.
 var validCategories = map[string]bool{
 	"architecture": true, "decision": true, "pattern": true, "convention": true,
 	"gotcha": true, "dependency": true, "preference": true, "fact": true,
 }
 
-// stageOf is the index of the stage a record belongs to; an opening record
-// answers -1, which is earlier than every session.
 func (s Storyline) stageOf(key string) (int, bool) {
 	for _, r := range s.Opening {
 		if r.Key == key {
@@ -207,8 +102,6 @@ func (s Storyline) stageOf(key string) (int, bool) {
 
 // Order is every record in the order a real project accumulated them: the
 // opening notes, then each stage's. The chronology restamp walks it, and it is
-// what makes a supersedes direction a fact about the storyline rather than about
-// how fast the saves happened to land.
 func (s Storyline) Order() []Record {
 	out := make([]Record, 0, len(s.Opening))
 	out = append(out, s.Opening...)
@@ -231,8 +124,6 @@ func (s Storyline) RecordByKey(key string) (Record, bool) {
 
 // Validate rejects a storyline whose grade could not mean what it says, before
 // any model call: a missing mark grades nothing, a duplicated key grades one
-// record twice, and an expectation a session could only satisfy by reading its
-// own stage's writes would turn the carry-forward check into a tautology.
 func (s Storyline) Validate() error {
 	if strings.TrimSpace(s.Key) == "" {
 		return fmt.Errorf("storyline key is required")
@@ -245,8 +136,6 @@ func (s Storyline) Validate() error {
 	}
 	seen := map[string]bool{}
 	for i, r := range s.Order() {
-		// The position is in the message because a duplicate or an unmarked record
-		// in a six-record storyline is otherwise found by counting lines.
 		if err := validateRecord(r, seen); err != nil {
 			return fmt.Errorf("storyline %s: record %d: %w", s.Key, i+1, err)
 		}
@@ -290,10 +179,6 @@ func (s Storyline) Validate() error {
 	return nil
 }
 
-// validateScope refuses the shapes the project-scoped machinery cannot grade.
-// A project record must exist (the bind and the embedding drain read the
-// project), and a global record cannot take part in a reversal because the
-// supersede stage and the graded state both read the project's rows only.
 func (s Storyline) validateScope() error {
 	project := false
 	for _, r := range s.Order() {
@@ -323,9 +208,6 @@ func (s Storyline) validateScope() error {
 	return nil
 }
 
-// parseValidUntil reads a valid_until the way the save tool does: an RFC 3339
-// stamp or a whole date. A bare date is the END of that day in the store, so it
-// is returned as the last second of it.
 func parseValidUntil(v string) (time.Time, error) {
 	if t, err := time.Parse(time.RFC3339, v); err == nil {
 		return t, nil
@@ -336,11 +218,6 @@ func parseValidUntil(v string) (time.Time, error) {
 	return time.Time{}, fmt.Errorf("valid_until %q is neither RFC 3339 nor a date", v)
 }
 
-// validateAnswerChecks is the anti-leak rule for the answer grade. A Carries
-// spelling that the stage's own script contains would be graded as remembered
-// when the prompt handed it over, and one that no earlier record contains could
-// only be matched by luck. Avoids spellings are not leak-checked: a script may
-// name the thing it asks the agent to avoid.
 func (s Storyline) validateAnswerChecks(i int, st Stage) error {
 	earlier := strings.Builder{}
 	for _, r := range s.Opening {
@@ -382,15 +259,6 @@ func (s Storyline) validateAnswerChecks(i int, st Stage) error {
 	return nil
 }
 
-// validateTruthChecks refuses the shapes of the truth-change checks that would
-// grade the storyline's wording instead of Ghost:
-//
-//   - A record whose Mark is checked for ABSENCE (a superseded record, a
-//     withheld one) must not have that Mark inside any other record's content.
-//     A rename or an upgrade note naturally restates the old name or pin, and a
-//     stale-original check matching it would fail on the current record.
-//   - Every key a probe, a lure or a Withheld list names must be a record here.
-//   - A known-failing entry must say why, so a report line is never bare.
 func (s Storyline) validateTruthChecks() error {
 	absent := map[string]bool{}
 	for _, r := range s.Order() {
@@ -480,9 +348,6 @@ func (s Storyline) validateTruthChecks() error {
 	return nil
 }
 
-// allProbes is every probe in the storyline, the stages' and the end state's,
-// with each stage probe's name qualified by its session so the names are
-// unique across the storyline.
 func (s Storyline) allProbes() []Probe {
 	var out []Probe
 	for i, st := range s.Stages {
@@ -494,9 +359,6 @@ func (s Storyline) allProbes() []Probe {
 	return append(out, s.Probes...)
 }
 
-// validScope refuses an empty key or value, which the save tool and the
-// session-scope setting both refuse too; refusing it here keeps the refusal at
-// the flag boundary instead of in the middle of a run.
 func validScope(scope map[string]string) error {
 	for k, v := range scope {
 		if strings.TrimSpace(k) == "" || strings.TrimSpace(v) == "" {
@@ -523,19 +385,6 @@ func validateRecord(r Record, seen map[string]bool) error {
 	return nil
 }
 
-// storylines is the registry of shipped storylines: the reversed decision, and
-// the three arcs the usefulness measurement needs (a correction that must not
-// be repeated, a fact learned in one repository and needed in another, and a
-// fact whose validity window has closed), and the four truth-change arcs in
-// truth.go (a rename, a regressed fix, a version upgrade and a scoped setting),
-// and the six default-install arcs in default_install.go (a retired dependency,
-// a reverted change, a plain-word change, a replacement in another category,
-// repeated tuning of one setting and a superseded convention), and the three
-// efficiency arcs in efficiency_arcs.go (pins over the bucket, a duplicate never
-// merged, a dated global status) for #1831, #1834 and #1832.
-// The service-migration, on-call and
-// config-clutter candidates from the design are follow-ups, and each is a
-// Storyline literal here rather than a new mechanism.
 func storylines() []Storyline {
 	return []Storyline{
 		ReversedDecision(), CorrectionReplay(), OpsFact(), StaleFact(),
@@ -564,10 +413,6 @@ func StorylineByKey(key string) (Storyline, error) {
 
 // ReversedDecision is candidate (d) from the design: a long-lived project whose
 // early architectural choice is later contradicted. Session 1 records the
-// choice, session 2 records its reversal, and session 3 has to act on the
-// reversal from a cold start — which is the only place the module's question
-// ("does injection carry forward what matters") can be answered about something
-// that actually matters.
 func ReversedDecision() Storyline {
 	return Storyline{
 		Key:     "reversed-decision",
@@ -597,13 +442,11 @@ func ReversedDecision() Storyline {
 					"- what breaks if the request path blocks on it.",
 				Records: []Record{
 					{
-						Key:      "session-store-redis",
-						Category: "decision",
-						Content:  "Per-session state lives in Redis: the bootstrap sets SESSION_STORE=redis and every session key carries a 3600s TTL.",
-						Tags:     []string{"northwind-api", "session"},
-						Mark:     "SESSION_STORE=redis",
-						// The arc: this claim is what session 3 must NOT be told is
-						// current, and the edge is what supersede has to find.
+						Key:          "session-store-redis",
+						Category:     "decision",
+						Content:      "Per-session state lives in Redis: the bootstrap sets SESSION_STORE=redis and every session key carries a 3600s TTL.",
+						Tags:         []string{"northwind-api", "session"},
+						Mark:         "SESSION_STORE=redis",
 						SupersededBy: "session-store-postgres",
 					},
 					{
@@ -637,8 +480,6 @@ func ReversedDecision() Storyline {
 						Mark:     "$1,840",
 					},
 				},
-				// Session 2 knows the original only if session 1's record was
-				// carried forward into its block.
 				Expect: []string{"session-store-redis"},
 			},
 			{
@@ -647,19 +488,10 @@ func ReversedDecision() Storyline {
 					"- which store per-session state goes in,\n" +
 					"- the exact environment variable the bootstrap must set, and\n" +
 					"- what a reader still working from the old choice would get wrong.",
-				// The cold-start session the whole storyline exists for: it has to
-				// find the reversal in its block, and it has to find it unmarked
-				// as the current answer.
-				Expect: []string{"session-store-postgres"},
-				// The answer grade. Nothing in this stage's script names a store or a
-				// variable value; both come from the block or from nowhere.
+				Expect:  []string{"session-store-postgres"},
 				Carries: []AnswerCheck{{Name: "current-store", Any: []string{"SESSION_STORE=postgres"}}},
 				Avoids:  []AnswerCheck{{Name: "superseded-store", Any: []string{"SESSION_STORE=redis"}}},
 			},
 		},
-		// This arc runs its lifecycle after the last session only, which is the
-		// default install's shape (automatic lifecycle phases are off), so
-		// session 3 is graded on what the save path and the read side alone left
-		// behind: the reversal first, the original marked as maybe replaced.
 	}
 }

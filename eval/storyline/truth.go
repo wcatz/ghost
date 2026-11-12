@@ -1,26 +1,7 @@
 package main
 
-// The truth-change arcs. Each one changes what is true about the project partway
-// through, and grades whether the sessions after the change — and a reader's
-// search — are told the new truth rather than the old one.
-//
-// Three of them run the lifecycle after the stage that records the change
-// (Stage.Lifecycle), the order a host's Stop hook gives a project whose
-// lifecycle is enabled, so a stale line in a later block is a finding about a
-// store the lifecycle has already read, not about the runner's ordering.
-// version-upgrade deliberately does not: automatic lifecycle phases are off by
-// default, so it grades the session after the change on the store a default
-// install hands it, where only the save path has run.
-//
-// Each arc is written so its absence checks cannot be failed by its own
-// wording: a rename or an upgrade note restates the old name or pin, so the
-// superseded record's Mark is a phrase only that record contains (Validate
-// refuses one that is not).
-
 // RenamedEndpoint is the rename arc: an endpoint and its handler are renamed in
 // session 2, the new note naming the old path as gone. Session 3 must be told
-// the new name and not the old one, and a search for the OLD name must lead to
-// the new record rather than to the one it replaced.
 func RenamedEndpoint() Storyline {
 	return Storyline{
 		Key:     "renamed-endpoint",
@@ -79,8 +60,6 @@ func RenamedEndpoint() Storyline {
 		},
 		Probes: []Probe{
 			{
-				// The old name is what a reader with an old link, an old log line or
-				// an old ticket searches for.
 				Name:  "old-name",
 				Query: "ingest endpoint ingestHandler",
 				Want:  "events-endpoint",
@@ -93,9 +72,6 @@ func RenamedEndpoint() Storyline {
 
 // RegressedFix is the regression arc: a crash recorded in session 1 is fixed in
 // session 2, holds through session 3, and comes back in session 4. While the fix
-// holds the crash note is stale; once it regresses the fix note is, and session
-// 5 — the first one after the regression — must be told the crash is back and
-// must not be told the fix still holds.
 func RegressedFix() Storyline {
 	return Storyline{
 		Key:     "regressed-fix",
@@ -188,13 +164,6 @@ func RegressedFix() Storyline {
 
 // VersionUpgrade is the dependency arc: the database driver is upgraded a major
 // version in session 2. The two notes are near-identical sentences about one
-// pin, which is exactly the shape a near-duplicate check is built to fold, so
-// the arc also grades that the upgrade was stored as a replacement rather than
-// as a second wording of the old pin.
-//
-// It runs with the lifecycle OFF between sessions — the default — so session 3
-// is graded on what the save path alone left behind: its block, and the search
-// it would run before touching the driver code.
 func VersionUpgrade() Storyline {
 	return Storyline{
 		Key:     "version-upgrade",
@@ -239,7 +208,6 @@ func VersionUpgrade() Storyline {
 						Mark:     "v5.6.0",
 					},
 				},
-				// No Lifecycle: see the doc comment.
 			},
 			{
 				Script: "Third session on quill-ledger. You are adding a new repository type and need the driver import and the pool constructor.\n\n" +
@@ -257,8 +225,6 @@ func VersionUpgrade() Storyline {
 						Over:  []string{"pgx-pin"},
 					},
 					{
-						// The old spelling is what a reader with an old build log or an
-						// old import line searches for.
 						Name:  "old-constructor",
 						Query: "pgxpool.Connect pgx v4",
 						Want:  "pgx-upgrade",
@@ -287,12 +253,6 @@ func VersionUpgrade() Storyline {
 
 // ScopedSetting is the scope arc: one setting has a different value in staging
 // and in production, and the two notes say so only through their scope — their
-// prose names no environment, which is how an agent writing from inside one
-// environment naturally phrases it. A production session must not be handed the
-// staging value, a staging session must not be handed the production one, and
-// the two values are both true, so nothing may let one supersede the other (the
-// pair is a Lure: the fake classifier calls it a supersession, and only Ghost's
-// own scope guard can refuse it).
 func ScopedSetting() Storyline {
 	staging := map[string]string{"environment": "staging"}
 	production := map[string]string{"environment": "production"}

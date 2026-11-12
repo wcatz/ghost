@@ -1,25 +1,6 @@
 // Command fakeharness is the deterministic stand-in for the CLI harnesses a
 // storyline run would otherwise spawn (eval/storyline -fake-harness). It never
 // contacts a model or a network.
-//
-// It follows the contract the e2e suite's fake harness follows (e2e/harness_test.go):
-// `--version` answers 2.0.15, so the opencode adapter takes its V2 argv; the
-// operation is recognised from the request's own contract text ("learned_context"
-// for reflect, "closed-by:" for resolve, "NEWER" for supersede); every diagnostic
-// goes to stderr; and the opencode answer is delivered as one JSONL text event.
-//
-// What differs is the supersede verdict. The e2e fake answers one fixed verdict
-// per kind; this one answers from an ORACLE — oracle.json beside the binary,
-// written by the runner from the storyline's own SupersededBy and Lure
-// annotations — so the classifier is right by construction about every pair the
-// storyline describes. A failing storyline check is then a failure of Ghost's own
-// pipeline (save, candidate generation, edges, resolve, assembly, search) rather
-// than a model's judgement. Every other pair is NEITHER, and every resolve item
-// is KEEP, which is the conservative answer of both rubrics.
-//
-// Only the opencode name answers. The storyline runner routes both arc phases
-// with --source opencode, so a call that reaches the claude, codex or goose name
-// is a routing defect, and it fails loudly rather than answering.
 package main
 
 import (
@@ -34,7 +15,6 @@ import (
 
 // OraclePair is one pair the fake classifier calls SUPERSEDES: the OLDER note
 // carries OlderMark and the NEWER note carries NewerMark. Replaced is the
-// retired claim the rubric's replaced: field must name.
 type OraclePair struct {
 	OlderMark string `json:"older_mark"`
 	NewerMark string `json:"newer_mark"`
@@ -102,9 +82,6 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// classify reads the operation off the request's contract text, in the e2e
-// fake's order: the reflect field first, then resolve's verdict field, then the
-// supersede pair.
 func classify(text string) string {
 	switch {
 	case strings.Contains(text, "learned_context"):
@@ -119,9 +96,6 @@ func classify(text string) string {
 
 var itemNumber = regexp.MustCompile(`(?m)^([0-9]+)\.$`)
 
-// numbered answers every item of a batched request ("1." on a line of its own
-// opens an item) as "N: VERDICT", and a single-item request with the bare
-// verdict. The item text handed to verdict is everything up to the next number.
 func numbered(text string, verdict func(item string) string) string {
 	locs := itemNumber.FindAllStringSubmatchIndex(text, -1)
 	if len(locs) == 0 {
@@ -139,9 +113,6 @@ func numbered(text string, verdict func(item string) string) string {
 	return strings.Join(lines, "\n")
 }
 
-// supersedeVerdict judges one OLDER/NEWER item against the oracle. The pair is
-// read from the LAST "OLDER " and "NEWER " lines of the item, because a
-// single-item request carries the rubric's own prose before the pair.
 func supersedeVerdict(oracle []OraclePair, item string) string {
 	older, newer := lastLine(item, "OLDER "), lastLine(item, "NEWER ")
 	if older == "" || newer == "" {
@@ -177,9 +148,6 @@ func loadOracle(dir string) ([]OraclePair, error) {
 	return out, nil
 }
 
-// ownDir is the directory the binary lives in: the oracle and the call logs sit
-// beside it, which is how the runner and the fake share them without an
-// environment variable the harness allowlist would drop.
 func ownDir() string {
 	exe, err := os.Executable()
 	if err != nil {

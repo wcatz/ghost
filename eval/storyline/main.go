@@ -12,9 +12,6 @@ import (
 	"time"
 )
 
-// config is the whole of a storyline run's inputs. Every one of them has a
-// default that needs nothing but the checkout, so the local command in
-// docs/benchmarks.md is the one a reader can paste.
 type config struct {
 	storyline  string
 	repoDir    string
@@ -56,8 +53,6 @@ func main() {
 	}
 }
 
-// storyline keys: "all" is every shipped storyline, otherwise a comma-separated
-// list. A key the registry does not have is named rather than defaulted.
 func selectStorylines(spec string) ([]Storyline, error) {
 	if strings.TrimSpace(spec) == "all" {
 		return storylines(), nil
@@ -73,17 +68,13 @@ func selectStorylines(spec string) ([]Storyline, error) {
 	return out, nil
 }
 
-// cell is one run of one arm of one storyline: its result, or the error that
-// ended it, and the report written for it.
 type cell struct {
-	story  Storyline
-	arm    string
-	run    int
-	res    *Result
-	err    error // the run's own error; nil means res holds a graded result
-	report string
-	// reportErr is a failure to write the run's report, kept apart from err so a
-	// completed, graded run is never counted as one that did not run.
+	story     Storyline
+	arm       string
+	run       int
+	res       *Result
+	err       error // the run's own error; nil means res holds a graded result
+	report    string
 	reportErr error
 }
 
@@ -92,9 +83,6 @@ func run(cfg config) error {
 	if err != nil {
 		return err
 	}
-	// Validated before anything is built, spawned or spent: a storyline whose
-	// grade could not mean what it says should fail at the flag boundary, not
-	// after three model sessions.
 	for _, story := range stories {
 		if err := story.Validate(); err != nil {
 			return err
@@ -110,9 +98,6 @@ func run(cfg config) error {
 		return fmt.Errorf("-runs must be at least 1, got %d", cfg.runs)
 	}
 
-	// SIGINT/SIGTERM cancels the run, so an interrupted run stops at the next
-	// call boundary rather than leaving a ghost subprocess behind in the scratch
-	// tree.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -120,22 +105,12 @@ func run(cfg config) error {
 	if err != nil {
 		return fmt.Errorf("resolve -repo: %w", err)
 	}
-	// The scratch trees live inside the checkout's own gitignored .sandbox/ so a
-	// run cannot write into a developer's real data dir even by accident, and so
-	// -keep hands back trees that are obviously run artifacts rather than ones
-	// that have to be guessed at.
 	sandboxRoot := filepath.Join(repoDir, ".sandbox")
 	if err := os.MkdirAll(sandboxRoot, 0o700); err != nil {
 		return fmt.Errorf("create %s: %w", sandboxRoot, err)
 	}
-	// Resolved once, here, before anything is built or spawned: the sessions, the
-	// arc's phases and the report all have to name ONE model, and leaving the
-	// choice to a fallback would let an inherited GHOST_OPENCODE_MODEL decide the
-	// sessions alone (see resolveModel).
 	model := resolveModel(cfg.model)
 
-	// The binary is built once for the whole invocation, from the checkout under
-	// test: every run and both arms drive the same build.
 	buildDir, err := os.MkdirTemp(sandboxRoot, "storyline-build-*")
 	if err != nil {
 		return fmt.Errorf("create build dir: %w", err)
@@ -165,8 +140,6 @@ func run(cfg config) error {
 	}
 	var cells []cell
 	for _, story := range stories {
-		// Runs are the outer loop and the arms the inner one, so a run's two arms
-		// are taken back to back on the same model and the same build.
 		for n := 1; n <= cfg.runs; n++ {
 			for _, arm := range arms {
 				c := cell{story: story, arm: arm, run: n}
@@ -174,9 +147,6 @@ func run(cfg config) error {
 				if c.err != nil {
 					fmt.Printf("%s %s run %d: ERROR: %v\n", story.Key, arm, n, c.err)
 				} else {
-					// A report that could not be written is its own failure: the run
-					// finished and was graded, so its result stays in every tally and
-					// in the exit code, and err stays the RUN's error alone.
 					c.report, c.reportErr = writeCellReport(cfg.resultsDir, story, arm, n, c.res, model)
 					printCell(c)
 				}
@@ -199,10 +169,6 @@ func run(cfg config) error {
 		fmt.Printf("scratch kept under: %s\n", sandboxRoot)
 	}
 
-	// The exit code is the Ghost arm's: its gating checks failing is a finding.
-	// The without-Ghost and flat-notes arms are baselines, so a miss there is the measurement
-	// and does not decide the exit code; an error in it still does, because a
-	// control that did not run measures nothing.
 	failed := exitFailures(cells)
 	if len(failed) > 0 {
 		return fmt.Errorf("%d run(s) failed: %s", len(failed), strings.Join(failed, "; "))
@@ -210,10 +176,6 @@ func run(cfg config) error {
 	return nil
 }
 
-// runCell is one run of one arm in its own scratch tree: its own data dir, its
-// own work dir, its own ghost mcp process. Both arms get the same sandbox, the
-// same environment and the same model; they differ in Run.WithoutGhost and
-// Run.FlatNotes alone.
 func runCell(ctx context.Context, cfg config, sandboxRoot, bin, fakeBin, model string, story Storyline, arm string, n int) (*Result, error) {
 	scratch, err := os.MkdirTemp(sandboxRoot, fmt.Sprintf("storyline-%s-%s-%d-*", story.Key, arm, n))
 	if err != nil {
@@ -239,11 +201,6 @@ func runCell(ctx context.Context, cfg config, sandboxRoot, bin, fakeBin, model s
 		fmt.Printf("fake harness: %s (oracle: %d pair(s))\n", dir, len(oraclePairs(story)))
 	}
 
-	// The session-start block resolves a project from a DIRECTORY, and the
-	// directory it resolves is the one the storyline's project is bound to. The
-	// checkout therefore lives inside the scratch tree, named for the project, so
-	// nothing a run resolves can reach the developer's own store or the repo it
-	// was launched from.
 	workDir := filepath.Join(dirs["work"], story.Project)
 	if err := os.MkdirAll(workDir, 0o700); err != nil {
 		return nil, fmt.Errorf("create work dir: %w", err)
@@ -256,10 +213,6 @@ func runCell(ctx context.Context, cfg config, sandboxRoot, bin, fakeBin, model s
 	if err := ghost.start(ctx); err != nil {
 		return nil, err
 	}
-	// The embedding worker lives INSIDE the ghost mcp process, so the session has
-	// to survive until the drain completes or nothing will ever embed. Settle
-	// closes it; a run that dies before then, and the without-Ghost arm that never
-	// settles, are runs with an orphaned child, so the close is armed here too.
 	defer ghost.abort()
 
 	var judge Agent
@@ -286,7 +239,6 @@ func runCell(ctx context.Context, cfg config, sandboxRoot, bin, fakeBin, model s
 	return r.Execute(ctx)
 }
 
-// printCell prints one run's checks, so a single run reads the way it always did.
 func printCell(c cell) {
 	for _, ch := range c.res.Checks {
 		fmt.Printf("%s %s — %s\n", ch.verdict(), ch.Name, oneLine(ch.Detail))
@@ -298,16 +250,10 @@ func printCell(c cell) {
 	fmt.Printf("report written: %s\n", c.report)
 }
 
-// writeCellReport writes one run's report, named for its arm and number so no
-// run overwrites another.
 func writeCellReport(dir string, story Storyline, arm string, n int, res *Result, model string) (string, error) {
 	return writeReportAs(dir, fmt.Sprintf("%s-%s-run%d.md", story.Key, arm, n), res, model)
 }
 
-// exitFailures is what decides the exit code: the Ghost arm's gating failures,
-// every errored run in either arm (a control that did not run measures
-// nothing), and every report that could not be written. A control-arm run that
-// ran and missed is the measurement and never counts.
 func exitFailures(cells []cell) []string {
 	var failed []string
 	for _, c := range cells {
