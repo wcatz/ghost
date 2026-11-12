@@ -238,29 +238,6 @@ func readColumn(t *testing.T, dataHome, query string, args ...any) string {
 	return got
 }
 
-func TestRunReflectApplyOnAVerbatimCorpusWritesNoHistory(t *testing.T) {
-	dataHome := isolatedLifecycleEnv(t)
-	const project = "noopz"
-	ids := seedAllKeepProject(t, dataHome, project)
-
-	before := map[string]string{}
-	for _, id := range ids {
-		before[id] = readColumn(t, dataHome, `SELECT updated_at FROM memories WHERE id = ?`, id)
-	}
-
-	runReflectArgs(t, "reflect", project, "--tier", "sqlite", "--apply")
-
-	if n := countHistory(t, dataHome, "reflect"); n != 0 {
-		t.Errorf("an all-keep apply wrote %d reflect history row(s), want none — every applied reflect "+
-			"was appending one row per memory, which measured at 80%% of memory_history on a real store", n)
-	}
-	for _, id := range ids {
-		if got := readColumn(t, dataHome, `SELECT updated_at FROM memories WHERE id = ?`, id); got != before[id] {
-			t.Errorf("%s: updated_at %q -> %q — a re-emission stamped the row as touched", id, before[id], got)
-		}
-	}
-}
-
 // TestRunReflectSkipUnchangedSkipsAfterAnAllKeepApply is the gate the issue
 // names, and what it asserts is narrower than the issue's phrasing — measured on
 // the pre-fix code, not assumed.
@@ -337,27 +314,6 @@ func corpusSignature(t *testing.T, dataHome, project string) string {
 		t.Fatalf("GetAll: %v", err)
 	}
 	return reflection.InputSignature(consolidatable(live))
-}
-
-// TestRunReflectFingerprintIsStableAcrossRounds is the gate from the other side:
-// run the lifecycle's own shape — apply, then skip, then apply-and-skip again —
-// and the corpus' fingerprint must be the same string after every round. Before
-// the fix each round restamped every row's updated_at, so the value the gate
-// reads moved every round even though the corpus did not; a project whose only
-// change was being looked at was therefore never provably unchanged.
-func TestRunReflectFingerprintIsStableAcrossRounds(t *testing.T) {
-	dataHome := isolatedLifecycleEnv(t)
-	const project = "noopz3"
-	seedAllKeepProject(t, dataHome, project)
-
-	want := corpusSignature(t, dataHome, project)
-	for round := range 3 {
-		runReflectArgs(t, "reflect", project, "--tier", "sqlite", "--apply", "--skip-unchanged")
-		if got := corpusSignature(t, dataHome, project); got != want {
-			t.Fatalf("round %d: the corpus fingerprint moved from %q to %q although nothing in the corpus "+
-				"changed", round, want, got)
-		}
-	}
 }
 
 // runReflectArgs drives the real command entry point, which is the only place

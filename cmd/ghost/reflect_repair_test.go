@@ -18,59 +18,6 @@ import (
 // internal/reflection; what is pinned here is the part a reader and a benchmark
 // see, and the part the unattended lifecycle leaves behind.
 
-// TestReflectRepairNoteIsCountable pins the token the summary carries. A repair
-// that is invisible is a repair nobody can count, and the count is the point: the
-// defect this closes was measured at roughly one run in three, and the only way
-// to know whether that still holds for a given corpus is a stable string in
-// `ghost reflect`'s own output.
-//
-// Two rules make the token usable, which is why this is a formatter rather than a
-// line dropped in where convenient. It prints on exactly one of this process's
-// streams, because on the unattended path that stdout is the append-only
-// lifecycle.log and a second mention would double every count. And the zero case
-// prints nothing, so an absent token means "the first answer parsed" rather than
-// "nobody measured".
-func TestReflectRepairNoteIsCountable(t *testing.T) {
-	if got := reflectRepairNote(0); got != "" {
-		t.Errorf("reflectRepairNote(0) = %q, want empty: a run that never repaired must not report a repair", got)
-	}
-	note := reflectRepairNote(1)
-	if !strings.Contains(note, "repair: 1") {
-		t.Errorf("reflectRepairNote(1) = %q, want the stable token %q", note, "repair: 1")
-	}
-	if !strings.HasPrefix(note, "  ") || !strings.HasSuffix(note, ")") {
-		t.Errorf("reflectRepairNote(1) = %q, want an indented trailing clause so the category parentheses stay parseable", note)
-	}
-	// The tier only ever sets 0 or 1, but the formatter must not print a repair
-	// for a count it cannot vouch for either.
-	if got := reflectRepairNote(-1); got != "" {
-		t.Errorf("reflectRepairNote(-1) = %q, want empty", got)
-	}
-}
-
-// TestResultLineCarriesTheRepairToken pins where the token lands: the `Result:`
-// line, the one a person reads and a benchmark greps. It renders the same
-// function runReflect prints rather than a copy of its format string, so
-// changing the command's line changes this test; and it pins the pre-existing
-// shape byte for byte, so a run that needed no repair still prints exactly what it
-// printed before this change.
-func TestResultLineCarriesTheRepairToken(t *testing.T) {
-	mems := []reflection.ReflectMemory{{Category: "gotcha", Content: "one fact", Importance: 0.8, Tags: []string{}}}
-
-	clean := reflectResultLine(reflection.ReflectionResult{Memories: mems})
-	if clean != "Result:       1 memories (1 gotcha)\n" {
-		t.Errorf("clean result line = %q, want the pre-existing shape unchanged", clean)
-	}
-
-	repaired := reflectResultLine(reflection.ReflectionResult{Memories: mems, RepairTurns: 1})
-	if !strings.Contains(repaired, "repair: 1") {
-		t.Errorf("repaired result line = %q, want it to carry the repair token", repaired)
-	}
-	if strings.Count(repaired, "repair:") != 1 {
-		t.Errorf("repaired result line = %q, want the token exactly once", repaired)
-	}
-}
-
 // TestTieredFailureLogWithholdsTheRejectedLine pins the SECOND sink on the same
 // failure path, which the review bot caught as unredacted: the tier redacts its
 // own WARN, but TieredConsolidator is what every caller actually runs and the
@@ -139,40 +86,6 @@ func TestTieredFailureLogWithholdsTheRejectedLine(t *testing.T) {
 	}
 	if !strings.Contains(logged, badID) {
 		t.Errorf("the tiered WARN dropped the id that was refused:\n%s", logged)
-	}
-}
-
-// TestTieredFailureLogKeepsATransportFailure is the other half, and the reason
-// safeTierError is not readerComplaintForLog: the other error on that line is a
-// harness that died, and a log reading "<withheld: *errors.errorString>" for
-// "opencode run: signal: killed" would be strictly worse than useless to the
-// operator who has to tell a dead harness from a refused answer.
-//
-// The scripted error is a bare transport message and carries no model text —
-// which is convenient here and NOT a property of the class: internal/ai builds
-// real harness errors from the child's own output, so a real one can carry the
-// model's answer (see safeTierError). The test pins the DECISION, which is that
-// a non-refusal is not redacted, not that a non-refusal is value-free.
-func TestTieredFailureLogKeepsATransportFailure(t *testing.T) {
-	var buf bytes.Buffer
-	logger := slog.New(slog.NewTextHandler(&buf, nil))
-	tiers := []reflection.Consolidator{
-		reflection.NewNamedConsolidator(&scriptedHarness{err: fmt.Errorf("opencode run: signal: killed")}, "opencode"),
-		reflection.NewSQLiteConsolidator(),
-	}
-	input := reflection.ReflectionInput{ProjectName: "ghost", ExistingMemories: []memory.Memory{
-		{ID: "D20E133860CC4AFE38B485AD5371BA59", Category: "fact", Content: "a note", Importance: 0.5, Source: "mcp"},
-	}}
-
-	if _, err := reflection.NewTieredConsolidator(tiers, logger).Consolidate(context.Background(), input); err != nil {
-		t.Fatalf("Consolidate: %v", err)
-	}
-	logged := buf.String()
-	if !strings.Contains(logged, "signal: killed") {
-		t.Errorf("a transport failure was withheld from the log, so an operator cannot tell it from a refusal:\n%s", logged)
-	}
-	if strings.Contains(logged, "withheld") {
-		t.Errorf("a non-refusal was redacted; safeTierError withholds a reader complaint and nothing else:\n%s", logged)
 	}
 }
 

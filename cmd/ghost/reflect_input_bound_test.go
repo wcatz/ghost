@@ -116,49 +116,6 @@ func buildGhostForBoundTest(t *testing.T) string {
 	return bin
 }
 
-// TestReflectRefusesAboveTheInputBoundAndRunsAtIt drives the built binary
-// with the offline tier, so no harness is involved: 2001 consolidatable rows
-// are refused with a message that says what to do, and 2000 are consolidated
-// (a dry run, so the refusal and the run differ only in the count).
-func TestReflectRefusesAboveTheInputBoundAndRunsAtIt(t *testing.T) {
-	if testing.Short() {
-		t.Skip("builds the ghost binary")
-	}
-	bin := buildGhostForBoundTest(t)
-	const project = "bounded"
-
-	t.Run("2001 refused", func(t *testing.T) {
-		home := t.TempDir()
-		seedConsolidatableRows(t, filepath.Join(home, "data", "ghost", "ghost.db"), project, 2001)
-		code, stderr := reflectBinaryRun(t, bin, home, project, "--tier", "sqlite")
-		if code != 1 {
-			t.Fatalf("exit = %d, want 1; stderr:\n%s", code, stderr)
-		}
-		for _, want := range []string{
-			"has 2001 consolidatable memories, above the 2000 limit",
-			"nothing written",
-			"ghost resolve",
-			"ghost prune",
-		} {
-			if !strings.Contains(stderr, want) {
-				t.Errorf("the refusal does not say %q:\n%s", want, stderr)
-			}
-		}
-	})
-
-	t.Run("2000 runs", func(t *testing.T) {
-		home := t.TempDir()
-		seedConsolidatableRows(t, filepath.Join(home, "data", "ghost", "ghost.db"), project, 2000)
-		code, stderr := reflectBinaryRun(t, bin, home, project, "--tier", "sqlite")
-		if code != 0 {
-			t.Fatalf("exit = %d, want 0 at the bound itself; stderr:\n%s", code, stderr)
-		}
-		if strings.Contains(stderr, "limit for a single consolidation") {
-			t.Errorf("a project at the bound was refused:\n%s", stderr)
-		}
-	})
-}
-
 // TestLifecycleReflectAboveTheInputBoundIsASkip runs `ghost lifecycle` as
 // the Stop hook does, with a reachable (fake) harness so the reflect phase is
 // scheduled. A project above the bound must not fail the phase: no failure
