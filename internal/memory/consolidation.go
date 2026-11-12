@@ -7,8 +7,6 @@ import (
 
 // IsConsolidatable reports whether m may be rewritten by reflect.
 // It is the Go mirror of replaceableRowSQL: a row the replace may delete,
-// reuse or merge into. Every caller that decides "will reflect see this?"
-// uses this predicate, so the filter lives in one place.
 func IsConsolidatable(m Memory) bool {
 	if m.Pinned {
 		return false
@@ -30,9 +28,6 @@ func IsFrozen(m Memory) bool { return !IsConsolidatable(m) }
 
 // ReflectionExclusionStats counts, per project, how many live rows
 // reflect cannot touch and why. Total is COUNT(*) for the project;
-// Frozen is the distinct rows matching any freeze reason; Consolidatable
-// = Total - Frozen. The per-reason counts are independent and may overlap
-// (a pinned manual row counts in both), so they can sum past Frozen.
 type ReflectionExclusionStats struct {
 	Total          int
 	Frozen         int
@@ -51,9 +46,6 @@ func (s *Store) ReflectionExclusionStats(ctx context.Context, projectID string) 
 	defer s.mu.RUnlock()
 
 	var st ReflectionExclusionStats
-	// One statement so the counts describe one snapshot. Frozen is derived
-	// as total - consolidatable so the two always sum to total even when
-	// retention is NULL (older rows).
 	const q = `
 		SELECT
 			COUNT(*),
