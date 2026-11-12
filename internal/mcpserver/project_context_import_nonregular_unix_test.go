@@ -12,10 +12,6 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// TestProjectContextNamesANonRegularImportEntryAsSkipped: a symlink named *.md
-// in the Claude memory directory is refused unopened by the first-contact
-// import, and the answer names it under its own group. It is not worded as a
-// failed write a later run retries, because no retry can make a link a file.
 func TestProjectContextNamesANonRegularImportEntryAsSkipped(t *testing.T) {
 	srv, _, memDir := importNotifyServer(t)
 	plantClaudeMemory(t, memDir, "clean-note.md", "A plain project note with nothing sensitive in it.")

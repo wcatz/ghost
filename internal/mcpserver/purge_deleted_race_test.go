@@ -13,11 +13,6 @@ import (
 	"github.com/wcatz/ghost/internal/memory"
 )
 
-// restoreAfterHistoryReadStore stands in for a second process that, between the
-// already-deleted purge branch's ownership read (MemoryHistory) and its write,
-// reinstates the memory (`ghost reflect --restore`) and, optionally, promotes it
-// to _global. It embeds *memory.Store so the handler still finds the history
-// capability and takes the branch a real store takes.
 type restoreAfterHistoryReadStore struct {
 	*memory.Store
 	armed   atomic.Bool
@@ -40,9 +35,6 @@ func (s *restoreAfterHistoryReadStore) MemoryHistory(ctx context.Context, id str
 
 const purgeRaceText = "the staging api token lives in vault path ops/stg"
 
-// newPurgeDeletedRaceSession saves a memory and lets a reflection consume it, so
-// the id has no live row, a tombstone in abc123 and a snapshot a restore can
-// bring it back from.
 func newPurgeDeletedRaceSession(t *testing.T, promote bool) (*memory.Store, *restoreAfterHistoryReadStore, *mcp.ClientSession, string) {
 	t.Helper()
 	ctx := context.Background()
@@ -62,12 +54,6 @@ func newPurgeDeletedRaceSession(t *testing.T, promote bool) (*memory.Store, *res
 	return store, w, connectedClient(t, New(w, logger, "test")), id
 }
 
-// TestMemoryDeletePurgeOfADeletedMemoryRefusesARowThatCameBack: the
-// already-deleted purge decides "still deleted" and "still this project's"
-// inside its own transaction. A memory restored between the handler's history
-// read and the purge is live again, and one then promoted to _global is no
-// longer the project's: either way the call is refused, nothing is erased, and
-// the answer never claims the memory was already deleted.
 func TestMemoryDeletePurgeOfADeletedMemoryRefusesARowThatCameBack(t *testing.T) {
 	cases := []struct {
 		name        string

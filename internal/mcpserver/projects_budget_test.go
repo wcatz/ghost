@@ -1,9 +1,5 @@
 package mcpserver
 
-// #1541: ghost_list_projects and ghost_health grew with the number of projects
-// and had no bound or cut notice. Both now fit the response budget the other
-// read tools share, cutting whole project rows from the end of the listing.
-
 import (
 	"context"
 	"fmt"
@@ -17,16 +13,12 @@ import (
 	"github.com/wcatz/ghost/internal/memory"
 )
 
-// manyProjectsServer is a server over a store holding n path-shaped projects,
-// the shape that made both answers large.
 func manyProjectsServer(t *testing.T, n int) *Server {
 	t.Helper()
 	store, _ := testStoreWithPath(t)
 	return projectsServerOver(t, store, n)
 }
 
-// projectsServerOver seeds n projects into a store the caller may already have
-// written to, and serves it.
 func projectsServerOver(t *testing.T, store *memory.Store, n int) *Server {
 	t.Helper()
 	for i := range n {
@@ -41,7 +33,6 @@ func projectsServerOver(t *testing.T, store *memory.Store, n int) *Server {
 
 var projectsCutNotice = regexp.MustCompile(`\((\d+) rows were cut from the end of this answer to stay within the (\d+)-byte response budget`)
 
-// projectsCutCount reads the number of rows the notice says were cut, or fails.
 func projectsCutCount(t *testing.T, text string) int {
 	t.Helper()
 	m := projectsCutNotice.FindStringSubmatch(text)
@@ -72,8 +63,6 @@ func TestListProjectsIsBoundedWithACutNotice(t *testing.T) {
 	if !strings.Contains(text, "No argument pages this list") {
 		t.Errorf("notice does not say how to reach the rest:\n%s", text[len(text)-400:])
 	}
-	// Only the tail is cut: the rows kept are the first rows of the uncut
-	// order, and the first project is among them.
 	if !strings.HasPrefix(text, "## Ghost Projects\n\n- **") {
 		t.Errorf("heading or first row changed:\n%.200s", text)
 	}
@@ -116,8 +105,6 @@ func TestHealthIsBoundedAndKeepsStoreWideLines(t *testing.T) {
 	if shown+cut != 301 {
 		t.Errorf("shown %d + cut %d = %d, want 301 projects", shown, cut, shown+cut)
 	}
-	// The store-wide lines are never cut, and the total still covers every
-	// project, the cut ones included.
 	for _, want := range []string{
 		"**Projects:** 301\n",
 		"**Total memories:** 0\n",
@@ -157,7 +144,6 @@ func TestHealthFewProjectsHasNoNotice(t *testing.T) {
 	if got := strings.Count(text, "\n- **"); got != 3 {
 		t.Errorf("shows %d project rows, want 3:\n%s", got, text)
 	}
-	// Order of sections is what it was: count line, rows, then the total.
 	i, j, k := strings.Index(text, "**Projects:**"), strings.Index(text, "\n- **"), strings.Index(text, "**Total memories:**")
 	if i >= j || j >= k {
 		t.Errorf("sections out of order: %d %d %d", i, j, k)

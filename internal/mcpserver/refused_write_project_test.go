@@ -11,13 +11,6 @@ import (
 	"github.com/wcatz/ghost/internal/memory"
 )
 
-// A refused save or decision writes NOTHING: no memory, no project row, and no
-// checkout binding. Every argument the store can refuse is judged before the
-// handler opens the project, so the refusal cannot leave an empty project
-// behind that the next session start in this checkout would name.
-
-// refusalToken is a GitHub-token-shaped value: `ghp_` plus 36 characters, the
-// shape the token guard refuses in every field it covers.
 const refusalToken = "ghp_abcdefghijklmnopqrstuvwxyz0123456789"
 
 type refusedWriteCase struct {
@@ -44,9 +37,6 @@ func baseRefusedArgs(tool, projectID string) map[string]any {
 	return args
 }
 
-// refusedWriteCases is every argument refusal that used to come AFTER the
-// project was opened: the scope checks, the source_ref checks and the token
-// guard on the stored text, for each tool that opens a project.
 func refusedWriteCases(projectID string) []refusedWriteCase {
 	with := func(tool string, set map[string]any) map[string]any {
 		args := baseRefusedArgs(tool, projectID)
@@ -82,7 +72,6 @@ func refusedWriteCases(projectID string) []refusedWriteCase {
 	}
 }
 
-// targetOf is the project row a case would have opened.
 func targetOf(c refusedWriteCase, projectID string) string {
 	if c.tool == "ghost_save_global" {
 		return memory.GlobalProjectID
@@ -90,9 +79,6 @@ func targetOf(c refusedWriteCase, projectID string) string {
 	return projectID
 }
 
-// TestRefusedWriteOpensNoProjectAndBindsNoCheckout is the regression: each
-// refusal shape, made from a fresh git checkout with a name the store has never
-// seen, is an error result and leaves no project row and no checkout binding.
 func TestRefusedWriteOpensNoProjectAndBindsNoCheckout(t *testing.T) {
 	const typo = "chekout-typo"
 	for _, c := range refusedWriteCases(typo) {
@@ -116,9 +102,6 @@ func TestRefusedWriteOpensNoProjectAndBindsNoCheckout(t *testing.T) {
 	}
 }
 
-// TestRefusedTypoDoesNotCaptureTheCheckout is the user-visible story: a refused
-// save under a misspelled name, then the corrected save. The corrected name must
-// be the one bound to the checkout, and the misspelling must not exist.
 func TestRefusedTypoDoesNotCaptureTheCheckout(t *testing.T) {
 	for _, tool := range []string{"ghost_memory_save", "ghost_decision_record"} {
 		t.Run(tool, func(t *testing.T) {
@@ -153,11 +136,6 @@ func TestRefusedTypoDoesNotCaptureTheCheckout(t *testing.T) {
 	}
 }
 
-// TestRefusedWriteLeavesAnExistingProjectUntouched is the control on the other
-// side: a checkout already bound to a project keeps that binding, and the
-// project's row and memory count are byte-for-byte what they were, whether the
-// refused call names a new project, the existing one by name, or the existing
-// one by its checkout path.
 func TestRefusedWriteLeavesAnExistingProjectUntouched(t *testing.T) {
 	ctx := context.Background()
 	for _, address := range []string{"new-name", "real", "path"} {
@@ -214,9 +192,6 @@ func TestRefusedWriteLeavesAnExistingProjectUntouched(t *testing.T) {
 	}
 }
 
-// TestAcceptedWriteStillOpensAndBinds is the success control: the same three
-// tools, with nothing refusable in their arguments, still open the project and
-// bind the checkout exactly as before.
 func TestAcceptedWriteStillOpensAndBinds(t *testing.T) {
 	for _, tool := range []string{"ghost_memory_save", "ghost_decision_record"} {
 		t.Run(tool, func(t *testing.T) {

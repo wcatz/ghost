@@ -14,10 +14,6 @@ import (
 	"github.com/wcatz/ghost/internal/repo"
 )
 
-// repoDir creates a directory that git reports as an origin remote. The
-// repository content is irrelevant — detection reads `git config
-// remote.origin.url`, and two directories configured with the same origin are
-// two checkouts of one repository as far as identity is concerned.
 func repoDir(t *testing.T, name, origin string) string {
 	t.Helper()
 	if _, err := exec.LookPath("git"); err != nil {
@@ -40,15 +36,7 @@ func repoDir(t *testing.T, name, origin string) string {
 	return dir
 }
 
-// TestSaveAcrossCheckoutsOfOneRepositoryIsOneProject is the end-to-end proof
-// that repository identity is reachable from the product's normal write path.
-//
-// Schema alone would not be: a column nothing populates and a resolution step
-// nothing reaches are inert. This drives two real MCP saves from two different
-// absolute paths that share one origin remote, and asserts the second save
-// lands in the first project rather than opening a second one.
 func TestSaveAcrossCheckoutsOfOneRepositoryIsOneProject(t *testing.T) {
-	// main() wires this for the real binary; tests build stores directly.
 	memory.SetDetectRemote(repo.DetectRemote)
 	t.Cleanup(func() { memory.SetDetectRemote(nil) })
 	const origin = "https://github.com/wcatz/ghost.git"
@@ -57,10 +45,7 @@ func TestSaveAcrossCheckoutsOfOneRepositoryIsOneProject(t *testing.T) {
 
 	_, session := newCapSession(t)
 
-	// The two contents are worded to be lexically distinct: the save path links
 	// a restatement as a `duplicate` edge at save time and #926 collapses such
-	// a pair in query mode, which would hide one of these two saves from the
-	// search below and take this test's evidence of one shared project with it.
 	for i, args := range []map[string]any{
 		{"project_id": checkoutA, "content": "saved from checkout on the feature branch", "category": "fact"},
 		{"project_id": checkoutB, "content": "saved from checkout after moving to main", "category": "fact"},
@@ -71,9 +56,6 @@ func TestSaveAcrossCheckoutsOfOneRepositoryIsOneProject(t *testing.T) {
 		}
 	}
 
-	// Everything must be reachable from the FIRST checkout: if the two paths
-	// had become separate projects, the memory saved from the second would be
-	// invisible here, and the agent would be working from half the context.
 	out := resultText(callTool(t, session, "ghost_memory_search", map[string]any{
 		"project_id": checkoutA,
 		"query":      "saved from checkout",
@@ -85,7 +67,6 @@ func TestSaveAcrossCheckoutsOfOneRepositoryIsOneProject(t *testing.T) {
 		}
 	}
 
-	// And the reverse direction, so a merge that only works one way is caught.
 	back := resultText(callTool(t, session, "ghost_memory_search", map[string]any{
 		"project_id": checkoutB,
 		"query":      "saved from checkout",
@@ -98,10 +79,6 @@ func TestSaveAcrossCheckoutsOfOneRepositoryIsOneProject(t *testing.T) {
 	}
 }
 
-// TestConcurrentFirstPathSavesShareOneRepositoryProject uses separate SQLite
-// handles to model independent Ghost processes. The first save for a
-// repository has no remote owner to merge into, so resolve-and-create must be
-// one write transaction; a per-Store mutex plus autocommit is not enough.
 func TestConcurrentFirstPathSavesShareOneRepositoryProject(t *testing.T) {
 	const handles = 8
 	dbPath := filepath.Join(t.TempDir(), "concurrent-project.sqlite")
@@ -165,10 +142,6 @@ func TestConcurrentFirstPathSavesShareOneRepositoryProject(t *testing.T) {
 	}
 }
 
-// TestPathSaveDoesNotBindAmbiguousRepositoryName proves ordinary basename
-// resolution cannot bypass the unique-name rule on the write path. Two
-// projects named ghost make a LIMIT 1 basename hit arbitrary; the path-shaped
-// save must create its own project instead of binding either candidate.
 func TestPathSaveDoesNotBindAmbiguousRepositoryName(t *testing.T) {
 	memory.SetDetectRemote(repo.DetectRemote)
 	t.Cleanup(func() { memory.SetDetectRemote(nil) })
@@ -191,9 +164,6 @@ func TestPathSaveDoesNotBindAmbiguousRepositoryName(t *testing.T) {
 	if res.IsError {
 		t.Fatalf("save failed: %s", resultText(res))
 	}
-	// The save still creates its own project, and the result now says the two
-	// same-named projects were the reason: otherwise this is the same result
-	// text as a first save in a directory that happens to be new.
 	if out := resultText(res); !strings.Contains(out, "first") || !strings.Contains(out, "second") {
 		t.Errorf("ambiguous-name save does not name the projects it could not choose between:\n%s", out)
 	}
@@ -219,14 +189,7 @@ func TestPathSaveDoesNotBindAmbiguousRepositoryName(t *testing.T) {
 	}
 }
 
-// TestPathSaveJoinsExistingNamedProjectAcrossCheckoutNames covers the common
-// lifecycle that repository identity missed: a project is created under its
-// plain name, and only later does an agent save by absolute checkout path.
-// The checkout directories deliberately do not share the project name, so
-// basename resolution cannot accidentally make this pass. The detected
-// repository identity is what must join the existing project.
 func TestPathSaveJoinsExistingNamedProjectAcrossCheckoutNames(t *testing.T) {
-	// main() wires this for the real binary; tests build stores directly.
 	memory.SetDetectRemote(repo.DetectRemote)
 	t.Cleanup(func() { memory.SetDetectRemote(nil) })
 
@@ -235,10 +198,7 @@ func TestPathSaveJoinsExistingNamedProjectAcrossCheckoutNames(t *testing.T) {
 	checkoutB := repoDir(t, "checkout-b", origin)
 	srv, session := newCapSession(t)
 
-	// The three contents are worded to be lexically distinct: the save path
 	// links a restatement as a `duplicate` edge at save time and #926 collapses
-	// such a pair in query mode, which would hide one of these saves from the
-	// search below and take its evidence of one shared project with it.
 	saves := []struct {
 		projectID string
 		content   string
@@ -262,8 +222,6 @@ func TestPathSaveJoinsExistingNamedProjectAcrossCheckoutNames(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListProjects: %v", err)
 	}
-	// newCapSession starts with test-project. The three saves above must add
-	// only the existing ghost project, not one or more path-named duplicates.
 	if len(projects) != 2 {
 		var names []string
 		for _, project := range projects {
@@ -289,13 +247,8 @@ func TestPathSaveJoinsExistingNamedProjectAcrossCheckoutNames(t *testing.T) {
 	}
 }
 
-// TestRelativeCheckoutSaveBindsExistingNamedProject pins the same contract for
 // a path-shaped relative checkout. PR #565 deliberately treats both '/' and
-// '\\' as path evidence rather than relying on filepath.IsAbs, which is false
-// for relative and Windows root-relative paths. Save-side repository detection
-// must use the same boundary or those saves silently create path projects.
 func TestRelativeCheckoutSaveBindsExistingNamedProject(t *testing.T) {
-	// main() wires this for the real binary; tests build stores directly.
 	var detectedRelative string
 	memory.SetDetectRemote(func(path string) string {
 		remote := repo.DetectRemote(path)
@@ -322,10 +275,7 @@ func TestRelativeCheckoutSaveBindsExistingNamedProject(t *testing.T) {
 	srv, session := newCapSession(t)
 	ctx := context.Background()
 
-	// The two contents are worded to be lexically distinct: the save path links
 	// a restatement as a `duplicate` edge at save time and #926 collapses such a
-	// pair in query mode, which would hide one of these saves from the search
-	// below and take its evidence of one shared project with it.
 	for i, save := range []struct {
 		projectID string
 		content   string
@@ -371,13 +321,7 @@ func TestRelativeCheckoutSaveBindsExistingNamedProject(t *testing.T) {
 	}
 }
 
-// TestPathSaveRejectsProjectWithDifferentRemote proves the conflict guard
-// survives the full write path. The save originates below the project's
-// recorded checkout, so ordinary longest-prefix resolution identifies the
-// parent before repository binding. A contradictory remote must fail before
-// any memory is written.
 func TestPathSaveRejectsProjectWithDifferentRemote(t *testing.T) {
-	// main() wires this for the real binary; tests build stores directly.
 	memory.SetDetectRemote(repo.DetectRemote)
 	t.Cleanup(func() { memory.SetDetectRemote(nil) })
 
@@ -421,14 +365,7 @@ func TestPathSaveRejectsProjectWithDifferentRemote(t *testing.T) {
 	}
 }
 
-// TestPathSaveRecordsRepositoryForLaterCheckout closes the ordering gap: the
-// checkout being saved from has the same basename as the project, so the old
-// pre-resolution returns its id before repository detection runs. A different
-// checkout of the same repository must nevertheless be able to read that save
-// immediately; otherwise identity was not recorded and a later path save is
-// still required to repair it.
 func TestPathSaveRecordsRepositoryForLaterCheckout(t *testing.T) {
-	// main() wires this for the real binary; tests build stores directly.
 	memory.SetDetectRemote(repo.DetectRemote)
 	t.Cleanup(func() { memory.SetDetectRemote(nil) })
 
@@ -466,10 +403,6 @@ func TestPathSaveRecordsRepositoryForLaterCheckout(t *testing.T) {
 	}
 }
 
-// TestSaveWithNamedProjectDoesNotSpawnGit guards the cost of the feature: a
-// caller that names a project ("ghost", "platform-ops") gives no path to
-// inspect, so detection must not run at all. Without this, every ordinary
-// save would pay for a git process.
 func TestSaveWithNamedProjectDoesNotSpawnGit(t *testing.T) {
 	var mcpDetections, storeDetections int
 	detectRemoteForSave = func(string) string {
@@ -505,13 +438,6 @@ func TestSaveWithNamedProjectDoesNotSpawnGit(t *testing.T) {
 	}
 }
 
-// TestSaveFromRelativePathJoinsTheKnownRepository is the writer-side half of
-// the same defect the store fixed twice: detection was gated on
-// filepath.IsAbs, which is false for a drive-relative Windows path and for
-// any relative path. A save from such a checkout of a repository Ghost
-// already knew therefore opened a SECOND project, while the reader — which
-// stopped using IsAbs — resolved that same path to the first. The gate is now
-// the shared memory.IsPathShaped predicate, so writer and reader agree.
 func TestSaveFromRelativePathJoinsTheKnownRepository(t *testing.T) {
 	memory.SetDetectRemote(repo.DetectRemote)
 	t.Cleanup(func() { memory.SetDetectRemote(nil) })
@@ -519,10 +445,6 @@ func TestSaveFromRelativePathJoinsTheKnownRepository(t *testing.T) {
 	checkoutA := repoDir(t, "checkout-a", origin)
 	checkoutB := repoDir(t, "checkout-b", origin)
 
-	// Spell the second checkout relative to the test binary's working
-	// directory, which is what makes filepath.IsAbs false while the value is
-	// still a real path on disk. Cross-volume temp dirs (Windows) cannot be
-	// expressed relatively, so there is nothing to prove in that case.
 	cwd, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("getwd: %v", err)
@@ -551,9 +473,6 @@ func TestSaveFromRelativePathJoinsTheKnownRepository(t *testing.T) {
 		t.Fatalf("relative save failed: %s", resultText(res))
 	}
 
-	// One repository is one project: the relative save must be reachable
-	// from the first checkout. If detection had been skipped, it would have
-	// opened a project of its own and be invisible here.
 	out := resultText(callTool(t, session, "ghost_memory_search", map[string]any{
 		"project_id": checkoutA,
 		"query":      "relative path",
@@ -563,8 +482,3 @@ func TestSaveFromRelativePathJoinsTheKnownRepository(t *testing.T) {
 		t.Errorf("save from relative path %q is not in the project the absolute checkout owns — detection was skipped and a second project was opened:\n%s", relB, out)
 	}
 }
-
-// TestSaveWithNamedProjectDoesNotSpawnGit guards the cost of the feature: a
-// caller that names a project ("ghost", "platform-ops") gives no path to
-// inspect, so detection must not run at all. Without this, every ordinary
-// save would pay for a git process.

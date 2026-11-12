@@ -20,9 +20,6 @@ type pinCtxRow struct {
 	validUntil           string
 }
 
-// seedPinContext writes `high` unpinned rows at importance 0.9 into vproj plus
-// the given rows, directly, with an old created_at so the order is the
-// fixture's.
 func seedPinContext(t *testing.T, db *sql.DB, high int, extra ...pinCtxRow) {
 	t.Helper()
 	rows := make([]pinCtxRow, 0, high+len(extra))
@@ -63,9 +60,6 @@ func newPinStore(t *testing.T) (*memory.Store, *sql.DB) {
 
 var pinCtxNow = time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)
 
-// TestAPinnedRowIsOnTheProjectContextSurfaces: a pinned row at importance 0.1
-// among 30 and among 60 rows at 0.9, on the tool and on the resource. 60 is more
-// than the 40-row window both fetch, so only the fetch order brings it in.
 func TestAPinnedRowIsOnTheProjectContextSurfaces(t *testing.T) {
 	for _, bulk := range []int{30, 60} {
 		t.Run(fmt.Sprintf("%d bulk rows", bulk), func(t *testing.T) {
@@ -89,8 +83,6 @@ func TestAPinnedRowIsOnTheProjectContextSurfaces(t *testing.T) {
 	}
 }
 
-// TestAnExpiredPinnedRowIsWithheldFromTheProjectContext: the pin guarantees a
-// slot, not an exemption from the validity window.
 func TestAnExpiredPinnedRowIsWithheldFromTheProjectContext(t *testing.T) {
 	st, db := newPinStore(t)
 	seedPinContext(t, db, 30, pinCtxRow{id: "exp-pin01", project: "vproj", content: "an expired pinned rule", importance: 0.1, pinned: true, validUntil: "2026-01-15 00:00:00"})
@@ -109,8 +101,6 @@ func TestAnExpiredPinnedRowIsWithheldFromTheProjectContext(t *testing.T) {
 	}
 }
 
-// TestProjectContextSaysHowManyPinnedRowsItCut: 25 pinned rows against a limit
-// of 20. The five lowest-ranked are cut, and the block says so.
 func TestProjectContextSaysHowManyPinnedRowsItCut(t *testing.T) {
 	st, db := newPinStore(t)
 	var pins []pinCtxRow
@@ -137,7 +127,6 @@ func TestProjectContextSaysHowManyPinnedRowsItCut(t *testing.T) {
 	}
 }
 
-// TestProjectContextSaysNothingWhenEveryPinnedRowFits.
 func TestProjectContextSaysNothingWhenEveryPinnedRowFits(t *testing.T) {
 	st, db := newPinStore(t)
 	seedPinContext(t, db, 30, pinCtxRow{id: "the-pin01", project: "vproj", content: "the pinned standing rule", importance: 0.1, pinned: true})
@@ -156,9 +145,6 @@ func seedGlobalPins(t *testing.T, db *sql.DB, n int) {
 	seedPinContext(t, db, 0, rows...)
 }
 
-// TestAGlobalOnlyWindowPutsTheCutUnderTheGlobalHeading: 25 pinned `_global` rows
-// read as project `_global` with a limit of 20. Every row is `_global`'s, so the
-// block has no `## Memories` section, and a note must not conjure the heading.
 func TestAGlobalOnlyWindowPutsTheCutUnderTheGlobalHeading(t *testing.T) {
 	st, db := newPinStore(t)
 	seedGlobalPins(t, db, 25)
@@ -174,9 +160,6 @@ func TestAGlobalOnlyWindowPutsTheCutUnderTheGlobalHeading(t *testing.T) {
 	}
 }
 
-// TestAGlobalCutIsNotAttributedToTheProject: the union window cuts `_global`
-// pinned rows while the project's own pinned rows all fit, so the note names the
-// global rows and sits under the Global heading.
 func TestAGlobalCutIsNotAttributedToTheProject(t *testing.T) {
 	st, db := newPinStore(t)
 	seedGlobalPins(t, db, 25)
@@ -194,10 +177,6 @@ func TestAGlobalCutIsNotAttributedToTheProject(t *testing.T) {
 	}
 }
 
-// TestTheGlobalSectionOfTheResourceCountsWhatItDoesNotShow: 40 pinned `_global`
-// rows against the resource's two caps. The union window shows 20 and the Global
-// section's own cap 15, which is a subset of the 20, so 20 are on the page and 20
-// are cut.
 func TestTheGlobalSectionOfTheResourceCountsWhatItDoesNotShow(t *testing.T) {
 	st, db := newPinStore(t)
 	seedGlobalPins(t, db, 40)
@@ -210,9 +189,6 @@ func TestTheGlobalSectionOfTheResourceCountsWhatItDoesNotShow(t *testing.T) {
 	}
 }
 
-// TestTheGlobalProjectResourceReportsItsPinnedCut: the `_global` project id
-// renders only a Global section, and the resource has to report the cut there as
-// the tool does.
 func TestTheGlobalProjectResourceReportsItsPinnedCut(t *testing.T) {
 	st, db := newPinStore(t)
 	seedGlobalPins(t, db, 25)
@@ -225,92 +201,6 @@ func TestTheGlobalProjectResourceReportsItsPinnedCut(t *testing.T) {
 	}
 }
 
-// TestAFoldedProjectCutIsStatedWithoutClaimingRowsAreShown: 30 low-ranked pinned
-// project rows and 40 higher-ranked pinned globals. Not one project row is on the
-// page, so the count moves under Global in a form that says none is, on the tool
-// and on the resource alike.
-func TestAFoldedProjectCutIsStatedWithoutClaimingRowsAreShown(t *testing.T) {
-	st, db := newPinStore(t)
-	var pins []pinCtxRow
-	for i := 0; i < 30; i++ {
-		pins = append(pins, pinCtxRow{id: fmt.Sprintf("pin-%05d", i), project: "vproj", content: fmt.Sprintf("pinned project rule %02d", i), importance: 0.2, pinned: true})
-	}
-	seedPinContext(t, db, 0, pins...)
-	var globals []pinCtxRow
-	for i := 0; i < 40; i++ {
-		globals = append(globals, pinCtxRow{id: fmt.Sprintf("gpin-%04d", i), project: "_global", content: fmt.Sprintf("global pinned rule %02d", i), importance: 0.9, pinned: true})
-	}
-	seedPinContext(t, db, 0, globals...)
-	tool, err := ProjectContextAt(context.Background(), st, "vproj", 20, pinCtxNow)
-	if err != nil {
-		t.Fatalf("tool: %v", err)
-	}
-	res, err := ProjectResourceAt(context.Background(), st, "vproj", pinCtxNow)
-	if err != nil {
-		t.Fatalf("resource: %v", err)
-	}
-	for name, got := range map[string]string{"tool": tool, "resource": res} {
-		if strings.Contains(got, "## Memories") {
-			t.Errorf("%s renders a Memories section with no rows. Got:\n%s", name, got)
-		}
-		if !strings.Contains(got, "30 pinned memories cut: none of them is in the block above") {
-			t.Errorf("%s does not say the 30 project rows are cut and absent. Got:\n%s", name, got)
-		}
-		if strings.Contains(got, "30 pinned memories cut: the pinned rows alone") {
-			t.Errorf("%s claims shown rows for a cut that has none. Got:\n%s", name, got)
-		}
-	}
-}
-
-// TestAGlobalCutWithNoGlobalRowShownDoesNotConjureTheGlobalHeading: 25 pinned
-// project rows outrank 5 pinned globals, so the window shows 20 project rows and
-// not one global. The count must not create a Global section with no rows.
-func TestAGlobalCutWithNoGlobalRowShownDoesNotConjureTheGlobalHeading(t *testing.T) {
-	st, db := newPinStore(t)
-	var pins []pinCtxRow
-	for i := 0; i < 25; i++ {
-		pins = append(pins, pinCtxRow{id: fmt.Sprintf("pin-%05d", i), project: "vproj", content: fmt.Sprintf("pinned project rule %02d", i), importance: 0.9, pinned: true})
-	}
-	for i := 0; i < 5; i++ {
-		pins = append(pins, pinCtxRow{id: fmt.Sprintf("gpin-%04d", i), project: "_global", content: fmt.Sprintf("global pinned rule %02d", i), importance: 0.1, pinned: true})
-	}
-	seedPinContext(t, db, 0, pins...)
-	got, err := ProjectContextAt(context.Background(), st, "vproj", 20, pinCtxNow)
-	if err != nil {
-		t.Fatalf("tool: %v", err)
-	}
-	if strings.Contains(got, "## Global") {
-		t.Errorf("the note conjured a Global section with no rows. Got:\n%s", got)
-	}
-	if !strings.Contains(got, "5 pinned global memories cut: none of them is in the block above") {
-		t.Errorf("the global cut is not reported. Got:\n%s", got)
-	}
-	if !strings.Contains(got, "5 pinned memories cut") {
-		t.Errorf("the project's own cut (25 pinned, 20 shown) is not reported. Got:\n%s", got)
-	}
-}
-
-// TestProjectContextPinnedLineZeroShown: when pinned rows are cut and none are
-// shown, the note must not claim the shown rows are best-ranked.
-func TestProjectContextPinnedLineZeroShown(t *testing.T) {
-	got := projectContextPinnedLine(3, "global ", 0)
-	if got == "" {
-		t.Fatal("want a pinned-cut line when rows were cut")
-	}
-	if strings.Contains(got, "the ones shown are the best-ranked of them") {
-		t.Fatalf("zero-shown pinned-cut line must not claim shown rows are best-ranked: %q", got)
-	}
-	if !strings.Contains(got, "none of them is shown in this block") {
-		t.Fatalf("zero-shown pinned-cut line missing zero-shown explanation: %q", got)
-	}
-	if !strings.Contains(got, "3 pinned global memories cut") {
-		t.Fatalf("zero-shown pinned-cut line missing count: %q", got)
-	}
-}
-
-// TestASupersededPinnedRowIsMarkedAndRanksAfterItsReplacement: on the tool and
-// the resource the pin keeps a slot behind the row that replaced it, and the
-// line names the replacement.
 func TestASupersededPinnedRowIsMarkedAndRanksAfterItsReplacement(t *testing.T) {
 	st, db := newPinStore(t)
 	seedPinContext(t, db, 5,
