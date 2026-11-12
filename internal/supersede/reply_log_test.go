@@ -10,25 +10,14 @@ import (
 	"github.com/wcatz/ghost/internal/memory"
 )
 
-// The classifier's reply reaches the phase's stderr, which a detached lifecycle
-// run appends to lifecycle.log — the same reason ClassifyBatch renders the ids
-// on these lines through memory.RefusalArg. These tests pin that the reply on
-// the same lines, and in errUnparseableVerdict, is bounded and token-guarded.
-
-// replyLogToken is a GitHub-token-shaped value. Assembled rather than written
-// out, because GitHub push protection matches the format anywhere in a diff.
-// replyLogFragment is part of its body, so a partial leak fails too.
 var (
 	replyLogToken    = "ghp_" + strings.Repeat("a1B2c3D4e5F6", 3) + "AbCd"
 	replyLogFragment = "a1B2c3D4e5F6"
 )
 
-// replyLogBound is the most any one logged value may hold: the rendered reply
-// (at most ArgEchoMaxBytes, quoted) plus room for its placeholder and the
 // error's own prefix.
 const replyLogBound = 2*memory.ArgEchoMaxBytes + 64
 
-// assertReplyLogClean checks every value of every record: no fragment of the
 // token, and nothing over the bound.
 func assertReplyLogClean(t *testing.T, log *capturedLog) {
 	t.Helper()
@@ -150,8 +139,6 @@ func TestClassifierLogsTheReplyBoundedAndGuarded(t *testing.T) {
 	}
 }
 
-// TestUnparseableVerdictErrorCarriesARenderedReply: the error is what every
-// caller logs, so the reply is rendered where the error is built rather than at
 // each print. It still matches the sentinel.
 func TestUnparseableVerdictErrorCarriesARenderedReply(t *testing.T) {
 	big := strings.Repeat("x", 100_000)
