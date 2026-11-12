@@ -2,13 +2,7 @@ package main
 
 // PinsOverBucket is the store-efficiency arc for #1831: across sessions the owner
 // pins more rules than the project's session-start bucket holds (more than
-// sessionMemoriesCap, plus one long pin). The final session must be told about
-// the overflow in the pin result or the health output. The graded clause is that
-// the owner was told, not that every pin appears.
 func PinsOverBucket() Storyline {
-	// 16 distinct pinned rules plus one long pinned rule = 17 pinned memories,
-	// the bucket holds 15. The final session's block should tell the owner that
-	// pinned rows were cut.
 	pins := make([]Record, 0, 17)
 	for i := 1; i <= 16; i++ {
 		key := pinsKey(i)
@@ -23,8 +17,6 @@ func PinsOverBucket() Storyline {
 			Pin:      true,
 		})
 	}
-	// Long pin: content well over the per-item preview budget (200 bytes for
-	// project memories) so it also stresses the byte-fit path.
 	longMark := "LONG-PIN-RULE-EXTRA-LARGE-FOR-ATLAS"
 	longContent := "Rule " + longMark + ": " + longString(480) + " keep this long invariant pinned for atlas-ledger."
 	pins = append(pins, Record{
@@ -36,7 +28,6 @@ func PinsOverBucket() Storyline {
 		Pin:      true,
 	})
 
-	// Split pins across three pinning sessions, then a final reading session.
 	return Storyline{
 		Key:     "pins-over-bucket",
 		Title:   "Pinning more rules than the session-start bucket holds must be reported",
@@ -65,9 +56,6 @@ func PinsOverBucket() Storyline {
 			},
 			{
 				Script: "Fourth session on atlas-ledger. You are writing the runbook for a new engineer.\n\nAnswer in at most two sentences, using only what this session's context already holds:\n- how many pinned rules the ledger has and which ones are shown.",
-				// No Expect: the graded clause is that the owner was told about the
-				// overflow, not that every pin appears. The final block should
-				// contain the pinned-cut notice.
 			},
 		},
 		KnownFailing: map[string]string{
@@ -92,7 +80,6 @@ func twoDigits(i int) string {
 }
 
 func itoa(i int) string {
-	// small helper without importing strconv in this file's init
 	if i == 0 {
 		return "0"
 	}
@@ -105,7 +92,6 @@ func itoa(i int) string {
 }
 
 func longString(n int) string {
-	// deterministic long filler, no secrets, no randomness
 	s := ""
 	for len(s) < n {
 		s += "ABCD-1234-"
@@ -115,8 +101,6 @@ func longString(n int) string {
 
 // DuplicateNeverMerged is the store-efficiency arc for #1834: two sessions save
 // the same rule in near-identical words. After the lifecycle phases run (fake
-// harness), the store must hold one live row for the rule, and the session block
-// shows it once.
 func DuplicateNeverMerged() Storyline {
 	return Storyline{
 		Key:     "duplicate-never-merged",
@@ -170,9 +154,6 @@ func DuplicateNeverMerged() Storyline {
 
 // DatedGlobalStatus is the store-efficiency arc for #1832: a session saves a
 // dated rollout status line with ghost_save_global. A later session in a
-// different project must not carry that line in its session block once its
-// valid_until passes. The save result carries the advisory when no valid_until
-// was given.
 func DatedGlobalStatus() Storyline {
 	return Storyline{
 		Key:     "dated-global-status",
@@ -212,15 +193,11 @@ func DatedGlobalStatus() Storyline {
 						Tags:     []string{"relay-ops", "rollout"},
 						Mark:     "Relay v2.3.2 is live in prod",
 						Global:   true,
-						// No ValidUntil: the save should advise that a dated
-						// status belongs with a valid_until.
 					},
 				},
 			},
 			{
 				Script: "Third session on relay-ops, now checking from a different checkout that should not see the expired global.\n\nAnswer in at most two sentences, using only what this session's context already holds:\n- what relay-ops is.",
-				// The final block is the one a different project's session would
-				// be handed: the expired global must not be there.
 			},
 		},
 		KnownFailing: map[string]string{

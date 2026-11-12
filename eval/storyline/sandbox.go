@@ -11,9 +11,6 @@ import (
 	"strings"
 )
 
-// makeScratchLayout creates every directory a run writes inside ONE root it owns,
-// and returns them by name. --keep hands back that tree; the default cleanup
-// removes exactly what the run made, because nothing outside it is ever written.
 func makeScratchLayout(root string) (map[string]string, error) {
 	dirs := make(map[string]string, 4)
 	for _, name := range []string{"data", "config", "home", "work"} {
@@ -26,28 +23,11 @@ func makeScratchLayout(root string) (map[string]string, error) {
 	return dirs, nil
 }
 
-// scratchEnv builds the environment every ghost process in a run inherits.
-//
-// This is eval/cycle's isolation, unchanged in substance: the data dir, the
-// config dir and HOME all point inside the run's own scratch tree, an inherited
-// override of any of them is DROPPED rather than shadowed (os/exec passes the
-// environment through in order and duplicate keys resolve inconsistently across
-// readers), and ANTHROPIC_API_KEY is stripped so a direct Anthropic credential
-// cannot bypass the harness path. OPENCODE_API_KEY is deliberately kept: it is
-// the credential the sandboxed opencode child authenticates with, which is how
-// eval/cycle's LLM stages work, and Ghost passes it only to that backend.
-//
-// model is the run's own -model, and it goes in the environment rather than on
-// a flag because the arc's classification phases are separate processes that read
-// GHOST_OPENCODE_MODEL (internal/ai's allowlist carries it). An inherited pin is
-// dropped, so the arc is graded by the model the report names and a stale export
-// in the developer's shell cannot quietly become a sixth participant.
 func scratchEnv(scratch, model string) []string {
 	drop := map[string]bool{
 		"XDG_DATA_HOME": true, "XDG_CONFIG_HOME": true, "HOME": true,
 		"ANTHROPIC_API_KEY": true, "USERPROFILE": true,
-		"GHOST_OPENCODE_MODEL": true,
-		// Re-added below with the developer's real data dir listed.
+		"GHOST_OPENCODE_MODEL":      true,
 		"GHOST_DEV_FORBID_DATA_DIR": true,
 	}
 	env := make([]string, 0, len(os.Environ())+4)
@@ -62,10 +42,6 @@ func scratchEnv(scratch, model string) []string {
 		"XDG_DATA_HOME="+filepath.Join(scratch, "data"),
 		"XDG_CONFIG_HOME="+filepath.Join(scratch, "config"),
 		"HOME="+filepath.Join(scratch, "home"),
-		// A development build refuses to resolve any data dir listed here, so a
-		// resolve that escaped the scratch tree and landed on the developer's own
-		// store fails instead of writing to it. The list is taken from the
-		// ORIGINAL environment, before HOME and XDG_DATA_HOME were replaced.
 		"GHOST_DEV_FORBID_DATA_DIR="+forbiddenDataDirs(os.Getenv),
 	)
 	if strings.TrimSpace(model) != "" {
@@ -74,10 +50,6 @@ func scratchEnv(scratch, model string) []string {
 	return env
 }
 
-// forbiddenDataDirs is the GHOST_DEV_FORBID_DATA_DIR value a run's children get:
-// whatever the caller already forbids, plus the data directory the CALLER's own
-// environment resolves (XDG_DATA_HOME, else $HOME/.local/share, then "ghost"),
-// deduplicated and joined with the OS path-list separator.
 func forbiddenDataDirs(getenv func(string) string) string {
 	var dirs []string
 	seen := map[string]bool{}
@@ -98,12 +70,6 @@ func forbiddenDataDirs(getenv func(string) string) string {
 	return strings.Join(dirs, string(os.PathListSeparator))
 }
 
-// seedOpencodeAuth copies an opencode credential into the run's own data dir, so
-// the sandboxed opencode child finds it under the XDG_DATA_HOME it was given
-// (internal/ai's own copy step looks there first) instead of under the
-// developer's home. An empty path is a no-op: a local run that already exports
-// OPENCODE_API_KEY needs nothing copied. This is eval/cycle's mechanism, flag
-// name included.
 func seedOpencodeAuth(scratch, authFile string) error {
 	if authFile == "" {
 		return nil
@@ -122,10 +88,6 @@ func seedOpencodeAuth(scratch, authFile string) error {
 	return nil
 }
 
-// buildGhost compiles the ghost binary the run drives, from the checkout under
-// test rather than from whatever happens to be on PATH. A run that graded an
-// installed binary would be measuring a different build than the branch it
-// belongs to.
 func buildGhost(ctx context.Context, repoDir, out string) error {
 	cmd := exec.CommandContext(ctx, "go", "build", "-o", out, "./cmd/ghost")
 	cmd.Dir = repoDir
@@ -137,9 +99,6 @@ func buildGhost(ctx context.Context, repoDir, out string) error {
 	return nil
 }
 
-// runGhost runs one ghost command in the run's environment, keeping stdout and
-// stderr apart: the arc stages' warnings (a guarded-drop audit, a classifier that
-// gave no verdict) are worth keeping in the report even on success.
 func runGhost(ctx context.Context, env []string, bin string, args ...string) (string, string, error) {
 	cmd := exec.CommandContext(ctx, bin, args...)
 	cmd.Env = env
@@ -152,8 +111,6 @@ func runGhost(ctx context.Context, env []string, bin string, args ...string) (st
 	return out.String(), errb.String(), nil
 }
 
-// buildFakeHarness compiles eval/storyline/fakeharness, the deterministic
-// stand-in for the harness CLIs, from the checkout under test.
 func buildFakeHarness(ctx context.Context, repoDir, out string) error {
 	cmd := exec.CommandContext(ctx, "go", "build", "-o", out, "./eval/storyline/fakeharness")
 	cmd.Dir = repoDir
@@ -165,13 +122,8 @@ func buildFakeHarness(ctx context.Context, repoDir, out string) error {
 	return nil
 }
 
-// fakeHarnessNames are the four harness CLIs Ghost can route to. All four are
-// installed, so a call that reaches the wrong one fails loudly in the fake
-// instead of finding a real binary further down PATH.
 var fakeHarnessNames = []string{"opencode", "claude", "codex", "goose"}
 
-// oraclePairs is the fake classifier's answer key, built from the storyline:
-// every annotated reversal, and every lure. Nothing else is a supersession.
 func oraclePairs(s Storyline) []map[string]string {
 	var out []map[string]string
 	for _, p := range reversals(s) {
@@ -184,10 +136,6 @@ func oraclePairs(s Storyline) []map[string]string {
 	return out
 }
 
-// installFakeHarness copies the fake into the run's own scratch tree under each
-// harness name, with the storyline's oracle beside it, and returns the
-// directory to put first on PATH. The fake logs every call there, so a kept
-// scratch tree shows exactly which phases reached it.
 func installFakeHarness(scratch, fakeBin string, s Storyline) (string, error) {
 	dir := filepath.Join(scratch, "fakebin")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -212,9 +160,6 @@ func installFakeHarness(scratch, fakeBin string, s Storyline) (string, error) {
 	return dir, nil
 }
 
-// prependPath puts dir first on the environment's PATH, replacing the entry
-// rather than adding a second one (duplicate keys resolve inconsistently
-// across readers, the reason scratchEnv drops before it adds).
 func prependPath(env []string, dir string) []string {
 	out := make([]string, 0, len(env)+1)
 	path := ""

@@ -1,22 +1,7 @@
 package main
 
-// The three arcs that let the runner measure usefulness rather than delivery
-// (issue #974). Each one has a block property (Expect) and an answer property
-// (Carries, Avoids), and each is written so the answer cannot be read out of the
-// script of the stage that is graded on it: Validate refuses a Carries spelling
-// that stage's own script contains, and refuses one no earlier record holds.
-
 // CorrectionReplay is the arc for the question "does a correction stick": the
 // user corrects the agent in session 1, and sessions 2 and 3 get the same task
-// with no correction in their text. The task has a natural wrong answer (the
-// conventional Idempotency-Key header) and a right one no model could guess (an
-// invented header name), so repeating the mistake is what an agent with no
-// memory does, and the right answer can only come from what session 1 left
-// behind.
-//
-// The answer cannot leak from the script because the correction exists only in
-// session 1's script. Sessions 2 and 3 ask the same question and name neither
-// header.
 func CorrectionReplay() Storyline {
 	const task = "Answer in at most three sentences, using only what you know about this project:\n" +
 		"- which HTTP header carries the idempotency key on a charge request."
@@ -68,15 +53,6 @@ func CorrectionReplay() Storyline {
 
 // OpsFact is the cross-project arc: a host and port learned in one repository
 // are needed in another. The runner holds one project, so the fact is saved
-// through ghost_save_global, the cross-project bucket every project's session
-// start reads, in the stage that learns it; the later sessions are the other
-// repository's. The sessions run with no tools, so ghost_search_all is not
-// reachable from them and the global bucket in the injection is the only
-// cross-project route this arc can measure.
-//
-// The answer cannot leak from the script because only session 1's script states
-// the address, and the address is an invented one a model could not guess;
-// sessions 2 and 3 ask for it without naming either half.
 func OpsFact() Storyline {
 	const task = "Answer in at most two sentences, using only what you know about this project:\n" +
 		"- the host and the port the queue client connects to."
@@ -130,13 +106,6 @@ func OpsFact() Storyline {
 
 // StaleFact is the expiry arc: a fact past its valid_until must not be used. The
 // opening holds the old endpoint with a window that closed in January 2025, so
-// it is expired on every date a run can happen on, and session 1 is told the
-// current endpoint and records it. The wording of the old record does not say it
-// is old: the validity filter alone has to withhold it from the block.
-//
-// The answer cannot leak from the script because only session 1's script names
-// the current endpoint, and the old one appears in no script at all; sessions 2
-// and 3 ask which URL to call.
 func StaleFact() Storyline {
 	const task = "Answer in at most two sentences, using only what you know about this project:\n" +
 		"- which base URL the client calls."

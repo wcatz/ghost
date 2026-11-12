@@ -5,24 +5,8 @@ import (
 	"unicode"
 )
 
-// This file is the shared hostile-input set for the boundaries where stored or
-// caller-supplied text leaves the store (#1652). The parse-surface corpus above
-// exists so a relaxation of the parse invariant fails every suite at once; this
-// set does the same job for the OUTWARD boundaries: rendering in assemble, MCP
-// tool results, log lines, the import path and the lifecycle marker files.
-//
-// The classes are the ones that have recurred as separate defects at a second
-// boundary after being fixed at the first: bidi and other format controls,
-// token-shaped strings, oversized fields, malformed stamps, and non-regular
-// files at marker paths. A boundary test picks the constructor for the class it
-// is about rather than spelling its own string, so a class that is extended
-// here is exercised everywhere the constructor is used.
-
 // FormatControls returns text carrying a control that must never be printed raw
 // on a line a human or an agent reads: bidi overrides and isolates, line and
-// paragraph separators, the C1 next-line control, and the C0 controls a terminal
-// acts on. They are data, so a renderer may escape them but may not drop or
-// reorder them silently.
 func FormatControls() []Payload {
 	return []Payload{
 		{Name: "bidi-lre", Text: "before\u202abinside\u202cafter"},
@@ -45,7 +29,6 @@ func FormatControls() []Payload {
 
 // LineSeparators returns characters that end a line without being a control
 // character. Renderers must fold or escape them, and a reader that only asks
-// unicode.IsControl will miss both.
 func LineSeparators() []Payload {
 	return []Payload{
 		{Name: "line-separator", Text: "before\u2028after"},
@@ -53,11 +36,7 @@ func LineSeparators() []Payload {
 	}
 }
 
-// ZeroWidth returns invisible format characters embedded mid-word. They are
-// category Cf like the bidi controls, but they neither reorder nor break a
 // line: they hide a spelling from a reader, so a rendered row that prints one
-// raw can say one word and read as another. Each value sits between two letters
-// of one ordinary word, which is where a hidden character is hardest to notice.
 func ZeroWidth() []Payload {
 	return []Payload{
 		{Name: "zero-width-space", Text: "gh\u200bost"},
@@ -70,8 +49,6 @@ func ZeroWidth() []Payload {
 
 // HasZeroWidth reports whether s carries one of the zero-width characters in
 // ZeroWidth. A boundary test uses it to tell the known gap from a regression:
-// while the character is still printed raw the case records the gap, and once a
-// renderer escapes it the same assertion passes without a change here.
 func HasZeroWidth(s string) bool {
 	for _, r := range s {
 		switch r {
@@ -84,13 +61,6 @@ func HasZeroWidth(s string) bool {
 
 // FormatRunes returns every Unicode FORMAT character (category Cf) — the class
 // a renderer must make visible and a write boundary must refuse.
-//
-// It is the whole category rather than the five characters ZeroWidth names,
-// because the rule is about the class: a Cf rune is an instruction to the
-// renderer rather than text a reader can see, and the bidirectional controls
-// the renderers escaped first are members of it. The sweep reads the Unicode
-// tables rather than a list of its own, so a character a later Unicode version
-// adds is covered without a change here.
 func FormatRunes() []rune {
 	var out []rune
 	for _, rng := range unicode.Cf.R16 {
@@ -108,7 +78,6 @@ func FormatRunes() []rune {
 
 // AllControls is FormatControls, LineSeparators and ZeroWidth, for the render
 // boundaries whose job is to keep every stored character legible and on one
-// physical line.
 func AllControls() []Payload {
 	out := FormatControls()
 	out = append(out, LineSeparators()...)
@@ -117,7 +86,6 @@ func AllControls() []Payload {
 
 // TokenShaped returns values the token guard recognises as a token. They are
 // inert at a boundary whose whole job is to render stored text: the value may be
-// shown through the guard's own placeholder, but never replayed raw.
 func TokenShaped() []Payload {
 	return []Payload{
 		{Name: "github-token", Text: "ghp_0123456789abcdefghijklmnopqrstuvwxyzAB"},
@@ -129,7 +97,6 @@ func TokenShaped() []Payload {
 
 // Oversized returns a field far past every write-time bound the store and the
 // tools apply, so a boundary that is supposed to bound what it prints, or to
-// withhold an oversized value instead of quoting it, is exercised.
 func Oversized() []Payload {
 	long := strings.Repeat("a", 4096) + "token"
 	return []Payload{
@@ -142,14 +109,12 @@ func Oversized() []Payload {
 
 // MarkerPathShapes names the entries that are not a regular marker file. The
 // marker path lives in the data directory, which every local process can write,
-// so each of these is reachable by planting an entry where a marker belongs.
 func MarkerPathShapes() []string {
 	return []string{"fifo", "symlink-to-fifo", "symlink-to-marker", "directory"}
 }
 
 // MalformedStamps returns validity-stamp values that no accepted layout reads.
 // The save tool refuses each of them rather than storing a claim nobody can
-// interpret, and the import path is expected to apply the same rules.
 func MalformedStamps() []Payload {
 	return []Payload{
 		{Name: "not-a-date", Text: "not-a-date"},
