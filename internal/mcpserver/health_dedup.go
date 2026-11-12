@@ -9,12 +9,8 @@ import (
 	"github.com/wcatz/ghost/internal/memory"
 )
 
-// maxHealthNearDuplicateProjects bounds how many projects' pair samples the
-// health report lists; the total counts every project.
 const maxHealthNearDuplicateProjects = 10
 
-// maxHealthNearDuplicatePairsPerProject bounds how many pairs per project are
-// sampled; the per-project total is still reported.
 const maxHealthNearDuplicatePairsPerProject = 5
 
 func (s *Server) writeNearDuplicateBlock(ctx context.Context, sb *strings.Builder, store *memory.Store, projects []memory.Project) {
@@ -32,7 +28,6 @@ func (s *Server) writeNearDuplicateBlock(ctx context.Context, sb *strings.Builde
 	for _, p := range projects {
 		pairs, capped, err := store.NearDuplicatePairsForProject(ctx, p.ID)
 		if err != nil {
-			// A failed read is reported rather than dropped; see health pattern.
 			fmt.Fprintf(sb, "**Near duplicates:** could not be read for project %s: %v\n", assemble.Label(p.Name), err)
 			return
 		}
@@ -47,14 +42,12 @@ func (s *Server) writeNearDuplicateBlock(ctx context.Context, sb *strings.Builde
 	}
 	if totalPairs == 0 {
 		sb.WriteString("**Near duplicates:** no live near-duplicate pairs\n")
-		// Let the _global consolidation block own the pointer when there is something to fold.
 		return
 	}
 	fmt.Fprintf(sb, "**Near duplicates:** %d live near-duplicate pair(s) across %d project(s) — these pairs read as duplicates and each loser costs a candidate slot before it is cut; `ghost reflect <project> --apply` merges them (grounded, drop-guarded)\n", totalPairs, len(stats))
 	if scanCapped {
 		sb.WriteString("  _near-duplicate scan capped at 2000 rows for at least one project; rows beyond the bound were not considered (scan capped/cut)\n")
 	}
-	// Do not add _global pointer here; the _global consolidation block owns it when there is something to fold.
 	shownProjects := 0
 	for _, st := range stats {
 		if shownProjects >= maxHealthNearDuplicateProjects {
@@ -62,7 +55,6 @@ func (s *Server) writeNearDuplicateBlock(ctx context.Context, sb *strings.Builde
 			break
 		}
 		shownProjects++
-		// Bound per-project sample.
 		sample := st.pairs
 		more := 0
 		if len(sample) > maxHealthNearDuplicatePairsPerProject {
