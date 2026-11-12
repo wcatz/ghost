@@ -789,10 +789,16 @@ func readOnlyDSN(dbPath string) string {
 
 // ErrInMemoryReadHandle means a read-only handle was asked for a private
 // in-memory database. ":memory:" is per-connection: a second connection opens
+// a second, empty database, so a read handle built on it would report an empty
+// store rather than the one the caller seeded. Callers holding only an
+// in-memory handle keep using it, and their snapshot reads run on it directly.
 var ErrInMemoryReadHandle = errors.New("read-only handle cannot open an in-memory database")
 
 // OpenReadDB opens an EXISTING database for reading only. It runs no DDL
 // and no migrations, and it refuses a path that does not exist rather than
+// creating one. It is the single read-only constructor: a Store that takes
+// snapshot reads is given one of these through NewStoreWithRead, and a CLI
+// diagnostic opens it directly.
 func OpenReadDB(dbPath string) (*sql.DB, error) {
 	if dbPath == ":memory:" {
 		return nil, ErrInMemoryReadHandle
@@ -813,6 +819,7 @@ func OpenReadDB(dbPath string) (*sql.DB, error) {
 
 // ErrNoDatabase means the database file does not exist yet. A read-only caller
 // distinguishes it from other open failures because the correct response is to
+// report nothing, not to retry or to create one.
 var ErrNoDatabase = errors.New("no Ghost database")
 
 // OpenDB opens or creates the SQLite database and runs migrations.

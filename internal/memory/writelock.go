@@ -13,6 +13,7 @@ import (
 )
 
 // WriteLockSample is one write transaction the store opened for itself,
+// measured at the two instants that decide whether a concurrent writer waits.
 type WriteLockSample struct {
 	Op      string
 	Wait    time.Duration
@@ -26,6 +27,7 @@ type writeLockHook struct{ fn func(WriteLockSample) }
 var writeLockObserver atomic.Pointer[writeLockHook]
 
 // SetWriteLockObserver installs a write-lock observer and returns a function
+// that restores the previous one. Passing nil removes the observer.
 func SetWriteLockObserver(fn func(WriteLockSample)) (restore func()) {
 	prev := writeLockObserver.Load()
 	if fn != nil {

@@ -5,7 +5,9 @@ import (
 	"unicode"
 )
 
-// statesDifferentValue reports whether two similar texts state different values of the same fact.
+// statesDifferentValue reports whether two similar texts state DIFFERENT values
+// of one fact, which makes the newer one a replacement rather than a second
+// wording, and so not something a save may fold.
 func statesDifferentValue(a, b string) bool {
 	va, vb := valueTokens(a), valueTokens(b)
 	return lacksValue(va, vb) && lacksValue(vb, va)

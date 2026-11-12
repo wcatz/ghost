@@ -50,7 +50,13 @@ func (e *ScopeKeyValueError) Error() string {
 	return fmt.Sprintf("%s must not be %s", e.Field, e.Reason)
 }
 
-// checkScope validates scope bounds, characters, and token/format rules in deterministic key order.
+// checkScope is the whole of what a scope is checked for before it reaches SQL:
+// the bounds, the character rules (blank, NUL, invalid UTF-8, control, line-break),
+// then the token guard over every key and every key=value pair. It is one
+// function because the writers that store a scope are several — Create and
+// CreateWithID (checkMemoryWrite), UpsertWithOptions and the portable importer
+// (CheckImportedMemory) — and two copies of a guard eventually disagree about
+// which half they apply.
 func checkScope(scope map[string]string) error {
 	if len(scope) == 0 {
 		return nil
@@ -117,7 +123,15 @@ func containsFormatRune(s string) bool {
 	return false
 }
 
-// validateScopeKeyValue checks a scope key or value for blank, invalid, or unsafe characters.
+// validateScopeKeyValue refuses a scope key or value that is blank, carries a NUL
+// byte, is not valid UTF-8, or contains a control character or a line separator
+// (U+2028, U+2029) or next line (U+0085). Invisible Unicode FORMAT characters
+// (category Cf) are refused separately, in checkScope, after the token guard.
+// The field is the caller's
+// name for the argument (e.g. "scope_key[0]" or "scope[environment]") so the
+// refusal is actionable without quoting the offending text. For value errors,
+// key is the original (unrendered) scope key so the export can screen it for
+// credentials.
 func validateScopeKeyValue(field, value, key string) error {
 	if strings.TrimFunc(value, func(r rune) bool {
 		return unicode.IsSpace(r) || IsFormatRune(r)

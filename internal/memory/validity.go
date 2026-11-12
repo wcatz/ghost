@@ -45,7 +45,10 @@ func ValidityState(validFrom, validUntil, verifiedAt *string, now time.Time) (st
 	}
 }
 
-// parseStoredStamp parses a stored validity stamp.
+// parseStoredStamp parses a stored stamp, reporting the instant only when a
+// layout could read it. It is ValidityState's own reader, factored out so a
+// caller that needs the readability question alone asks it the same way rather
+// than through a second parser — the same reason this file owns the state rule.
 func parseStoredStamp(s *string) (*time.Time, bool) {
 	if s == nil {
 		return nil, false

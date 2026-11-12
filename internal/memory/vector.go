@@ -32,6 +32,13 @@ func (s *Store) StoreEmbedding(ctx context.Context, memoryID string, vec []float
 }
 
 // StoreEmbeddingForContent is StoreEmbedding for a vector computed from a text
+// the caller read earlier: it stores the vector only if the memory's content,
+// read inside the same write transaction, is still that text, and reports
+// whether it did. An edit deletes the row's embedding; the vector of the text it
+// replaced must not be written back over that deletion, or the wrong vector
+// stays current and UnembeddedMemoryIDs never selects the row again (#1159). A
+// refused write (or a memory deleted meanwhile) stores nothing and returns
+// (false, nil), leaving the row pending for the next pass.
 func (s *Store) StoreEmbeddingForContent(ctx context.Context, memoryID string, vec []float32, model, content string) (bool, error) {
 	return s.storeEmbedding(ctx, memoryID, vec, model, &content)
 }
@@ -91,6 +98,19 @@ func (s *Store) DeleteEmbedding(ctx context.Context, memoryID string) error {
 }
 
 // EmbeddingCosines returns the cosine similarity between queryVec and the stored
+// embedding of each requested memory, keyed by memory ID. An ID is simply absent
+// from the result when there is no score to report for it: no stored vector, a
+// width that does not match queryVec, or a row whose recorded identity belongs to
+// another vector space (a model, dimension or task-prefix change — see
+// embedding.VectorIdentity). Inventing a zero for any of those would read as a
+// measured non-match rather than a missing one, and a cross-space cosine is not
+// even that: it is an arbitrary number, which is why usableVectorEntries skips
+// those rows for the vector legs and GetEmbedding returns nil for them. Foreign
+// rows are counted and logged here for the same reason — a reconfiguration is
+// exactly when the operator is watching the log — but only on the first lookup
+// to meet a given retired identity, through the shared warnForeignOnce gate, so
+// this once-per-query call cannot print the same pending re-embed once per
+// query.
 func (s *Store) EmbeddingCosines(ctx context.Context, ids []string, queryVec []float32) (map[string]float32, error) {
 	if len(ids) == 0 || len(queryVec) == 0 {
 		return nil, nil
@@ -161,6 +181,11 @@ func (s *Store) EmbeddingCosines(ctx context.Context, ids []string, queryVec []f
 }
 
 // UnembeddedMemoryIDs returns memory IDs that still need an embedding produced
+// by identity: rows with no vector at all, and rows whose vector was stamped
+// with a different identity — a model, dimension or task-prefix change (see
+// embedding.VectorIdentity for what an identity is). Both are re-embedded by
+// the worker, so a model change retires the old vectors instead of leaving
+// them to be compared with queries embedded in the new space.
 func (s *Store) UnembeddedMemoryIDs(ctx context.Context, projectID, identity string, limit int) ([]string, error) {
 	query := `
 		SELECT m.id
@@ -220,6 +245,10 @@ func (s *Store) SearchVector(ctx context.Context, projectID string, queryVec []f
 }
 
 // SearchVectorScoped is SearchVector with a scope constraint applied *before*
+// the limit. SearchVector truncates to its top `limit` candidates, so a caller
+// that filters scope afterwards can be handed only rows it may not use, and a
+// compatible row ranked just below the cut is never seen at all. Filtering first
+// is the whole point: the limit then counts eligible candidates.
 func (s *Store) SearchVectorScoped(ctx context.Context, projectID string, queryVec []float32, limit int, scope map[string]string) ([]ScoredMemory, error) {
 	rows, _, err := s.searchVectorLeg(ctx, projectID, queryVec, limit, scope)
 	if limit > 0 && len(rows) > limit {
@@ -290,6 +319,9 @@ type ScoredMemory struct {
 }
 
 // SearchParams parameterizes hybrid-search fusion. The zero value disables
+// every optional signal — use DefaultSearchParams for production behavior. The
+// bench harness (ghost bench --sweep) grid-searches these knobs against the graded
+// dataset; defaults should only change on the strength of those numbers.
 type SearchParams struct {
 	FTSWeight       float64 // RRF weight of the full-text leg
 	VecWeight       float64 // RRF weight of the vector leg
@@ -383,11 +415,22 @@ func parseCreatedAt(s string) time.Time {
 var datedFactRE = regexp.MustCompile(`\d{4}-\d{2}-\d{2}`)
 
 // ContentCarriesDate reports whether content carries a calendar date. It is the
+// one implementation of the heuristic both the decay factor and callers that need
+// the same answer share; the SQL ranking uses the equivalent GLOB on content.
 func ContentCarriesDate(content string) bool {
 	return datedFactRE.MatchString(content)
 }
 
 // DecayFactor is the time-decay multiplier for a memory of this category, this
+// tier, this pin state and this age in days. It mirrors DecayRankingSQL
+// (store.go) exactly — a pinned memory never decays (factor 1.0); preference
+// and convention never decay; a fact never decays unless its content carries a
+// calendar date, in which case it decays on the pattern/architecture curve;
+// pattern/architecture decay with tau 45 and a 0.3 floor; all other categories
+// (decision, gotcha, dependency, ...) decay with tau 30 and a 0.15 floor; and a
+// session-tier row carries the bounded tier decay on top of whichever of those
+// applies (see RetentionDecayFactor). The SQL-vs-Go parity test (store_test.go)
+// guards against drift between this and the SQL constant.
 func DecayFactor(category, content, retention string, pinned bool, ageDays float64) float64 {
 	return decayFactorDated(category, ContentCarriesDate(content), retention, pinned, ageDays)
 }
@@ -547,6 +590,8 @@ func selectHydratedWindow(hydrated []Memory, window HybridWindow, poolIDs []stri
 }
 
 // HybridWindow is the result of hybrid fusion and window selection: the memory
+// ids eligible to be returned, in ranked order, with the fused score each was
+// selected on.
 type HybridWindow struct {
 	IDs      []string
 	Scores   map[string]float64
@@ -624,6 +669,10 @@ func scopeEligiblePool(pool []*hybridCandidate, p SearchParams) []*hybridCandida
 }
 
 // FuseAndSelectWindow owns both halves of hybrid retrieval — fusing the
+// keyword and vector legs into one ranking, and deciding which memories form
+// the result window — in one place, because window selection is not separable
+// from fusion. Scope constraints are narrowed from the combined candidate pool
+// before the cut, so eligible rows can backfill candidates excluded by scope.
 func FuseAndSelectWindow(ftsResults []Memory, vecResults []ScoredMemory, limit int, p SearchParams) HybridWindow {
 	return selectWindow(scopeEligiblePool(fuseCandidatePool(ftsResults, vecResults, p), p), limit, p)
 }
@@ -709,11 +758,14 @@ func hybridWindowOf(cands []*hybridCandidate) HybridWindow {
 }
 
 // SearchHybrid combines FTS5 keyword search with vector similarity using
+// Reciprocal Rank Fusion (RRF). Falls back to FTS-only if queryVec is nil.
 func (s *Store) SearchHybrid(ctx context.Context, projectID, query string, queryVec []float32, limit int) ([]Memory, error) {
 	return s.SearchHybridScoped(ctx, projectID, query, queryVec, limit, nil)
 }
 
 // SearchHybridScoped is the production search entry point with a scope
+// constraint. It deliberately builds the parameters here rather than accepting
+// them from MCP so the configured vector similarity floor cannot be bypassed.
 func (s *Store) SearchHybridScoped(ctx context.Context, projectID, query string, queryVec []float32, limit int, scope map[string]string) ([]Memory, error) {
 	p := DefaultSearchParams()
 	p.MinSimilarity = s.vectorMinSimilarityFloor()
@@ -722,6 +774,8 @@ func (s *Store) SearchHybridScoped(ctx context.Context, projectID, query string,
 }
 
 // SearchHybridParams is SearchHybrid with explicit fusion parameters. It is
+// used by the benchmark harness and by SearchHybridScoped after the store has
+// assembled production parameters.
 func (s *Store) SearchHybridParams(ctx context.Context, projectID, query string, queryVec []float32, limit int, p SearchParams) ([]Memory, error) {
 	final, _, err := s.searchHybridLegs(ctx, projectID, query, queryVec, limit, p)
 	return final, err

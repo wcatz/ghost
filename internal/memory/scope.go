@@ -36,6 +36,10 @@ func parseScopeJSON(raw []byte) map[string]string {
 }
 
 // ParseScopeJSON turns a stored memories.scope column back into a map. It is
+// parseScope for a caller that already holds the column text — a reader with its
+// own read-only handle rather than a Store scan, such as the session-start
+// loaders — so the two reads cannot disagree about what an unreadable column
+// means. It stays nil, rather than failing, for a value it cannot decode.
 func ParseScopeJSON(raw []byte) map[string]string { return parseScopeJSON(raw) }
 
 // ScopeMatches reports whether a memory's scope satisfies a request.
@@ -49,6 +53,8 @@ func ScopeMatches(scope, want map[string]string) bool {
 }
 
 // ScopeEquals reports whether two scopes name exactly the same key/value
+// pairs. Used to decide whether a save actually changes scope, so an
+// unchanged scope does not rewrite the row or bump updated_at.
 func ScopeEquals(a, b map[string]string) bool {
 	if len(a) != len(b) {
 		return false
@@ -85,6 +91,10 @@ func scopeJSONExpr(scopeExpr string) string {
 }
 
 // ScopeMatchesSQL renders ScopeMatches as a SQL boolean expression: 1 exactly
+// when the row whose scope column is scopeExpr satisfies a request scope of want.
+// A caller appends it to a WHERE clause whose LIMIT chooses the candidate set,
+// because a check applied after that LIMIT would spend the fetch budget on rows
+// the request excludes and never reach an eligible one ranked below the cut.
 func ScopeMatchesSQL(scopeExpr string, want map[string]string) string {
 	if len(want) == 0 {
 		return "1"
