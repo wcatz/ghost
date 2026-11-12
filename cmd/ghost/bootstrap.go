@@ -28,7 +28,12 @@ func configOnLoadError(onBadConfig configHandling, err error) (*config.Config, b
 	return config.FallbackConfig(), false
 }
 
-// bootstrap loads config, opens the database, and returns the shared command wiring.
+// bootstrap loads config, opens the database, and returns the wiring every
+// command shares. logWriter/logLevel come from the caller: interactive CLI
+// commands log INFO to stderr, while the MCP server resolves a quiet default
+// (see mcpLogConfig) so stderr stays clean for MCP clients that surface it.
+// onBadConfig decides what a config file that does not parse does to this
+// command — see configHandling.
 func bootstrap(logWriter io.Writer, logLevel slog.Level, onBadConfig configHandling) (*config.Config, *slog.Logger, *memory.Store) {
 	logger := slog.New(slog.NewTextHandler(logWriter, &slog.HandlerOptions{Level: logLevel}))
 
@@ -79,7 +84,13 @@ func bootstrap(logWriter io.Writer, logLevel slog.Level, onBadConfig configHandl
 	return cfg, logger, store
 }
 
-// mcpLogConfig resolves the log writer and minimum level for ghost mcp.
+// mcpLogConfig resolves the log writer and minimum level for `ghost mcp`.
+// MCP protocol traffic occupies stdout, so stderr must stay clean: when the
+// server is spawned by a client (stderr not a terminal), routine INFO logs
+// are dropped and only WARN+ reaches stderr, unless GHOST_LOG_FILE redirects
+// the full stream to a file. Interactive runs (stderr is a terminal) keep
+// INFO on stderr. GHOST_DEBUG always restores Debug level. The returned
+// closeLog is non-nil when a file was opened and must be called on shutdown.
 func mcpLogConfig(stderrTerminal bool) (io.Writer, slog.Level, func()) {
 	level := slog.LevelInfo
 	writer := io.Writer(os.Stderr)
@@ -105,7 +116,8 @@ func mcpLogConfig(stderrTerminal bool) (io.Writer, slog.Level, func()) {
 	return writer, level, closeLog
 }
 
-// cliLogLevel returns the stderr log level for interactive CLI commands.
+// cliLogLevel is the stderr log level for interactive CLI commands: Info,
+// or Debug when GHOST_DEBUG is set.
 func cliLogLevel() slog.Level {
 	if os.Getenv("GHOST_DEBUG") != "" {
 		return slog.LevelDebug

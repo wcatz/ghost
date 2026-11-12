@@ -5,7 +5,9 @@ import (
 	"github.com/wcatz/ghost/internal/secret"
 )
 
-// displayStored renders stored content for a one-line listing, withholding credential values.
+// displayStored renders a stored memory for a one-line listing in a report: its
+// first line at the listing's width, and withheld whole when the content holds a
+// credential.
 func displayStored(content, category string, limit int) string {
 	if finding, ok := secret.Detect(content); ok {
 		return withheld(finding, category, content)
