@@ -14,12 +14,6 @@ import (
 // merge` and the id `ghost project bind` could not find. They name stored text,
 // so each name goes through assemble.Label — the renderer the neighbouring
 // knownProjectsSentence already uses — rather than being interpolated raw.
-//
-// The fixture is a name holding U+202E, the right-to-left override: the import
-// predicate accepts category Cf on purpose, so a store can hold this name, and
-// printed raw it reorders the rest of the line a terminal or log shows. Label
-// writes it as the literal escape, which is the only form that cannot reorder
-// anything.
 func TestKnownProjectRefusalsRenderNamesAsLabels(t *testing.T) {
 	const (
 		hostileName = "safe\u202Eevil"
@@ -81,9 +75,6 @@ func TestKnownProjectRefusalsRenderNamesAsLabels(t *testing.T) {
 			if !strings.Contains(msg, escapedName) {
 				t.Errorf("the refusal does not print the stored name as a label:\n%s", msg)
 			}
-			// An ordinary name is byte-identical, which is what a label is for:
-			// a renderer that withheld or quoted everything would keep the
-			// hostile name out and stop offering the names to type.
 			if !strings.Contains(msg, plainName) {
 				t.Errorf("the refusal does not leave an ordinary name as written:\n%s", msg)
 			}

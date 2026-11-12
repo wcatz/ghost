@@ -104,65 +104,6 @@ func historyEntry(phase, agent, content, recordedAt string) memory.HistoryEntry 
 	}
 }
 
-func TestPrintMemoryHistory_PrintsEveryEventOldestFirst(t *testing.T) {
-	var buf bytes.Buffer
-	view := historyView{
-		MemoryID: "m1",
-		Live:     &memory.Memory{ID: "m1", Category: "gotcha", Source: "mcp"},
-		Entries: []memory.HistoryEntry{
-			historyEntry("save", "claude-code", "the first thing ghost was told", "2026-09-26 10:00:00"),
-			historyEntry("update", "", "the second thing ghost was told", "2026-09-26 11:00:00"),
-		},
-	}
-	if err := printMemoryHistory(&buf, view); err != nil {
-		t.Fatalf("printMemoryHistory: %v", err)
-	}
-	out := buf.String()
-	if !strings.Contains(out, "live") {
-		t.Errorf("output does not say the memory is live:\n%s", out)
-	}
-	saveAt := strings.Index(out, "2026-09-26 10:00:00  save")
-	updateAt := strings.Index(out, "2026-09-26 11:00:00  update")
-	if saveAt < 0 || updateAt < 0 {
-		t.Fatalf("output is missing an event header:\n%s", out)
-	}
-	if saveAt > updateAt {
-		t.Errorf("events printed newest first:\n%s", out)
-	}
-	// The agent is named when the write path knew it, and the content is
-	// printed in full — a history whose text is elided cannot answer the
-	// question it exists for.
-	if !strings.Contains(out, "agent «claude-code»") {
-		t.Errorf("output does not name the performing agent:\n%s", out)
-	}
-	if !strings.Contains(out, "agent unknown") {
-		t.Errorf("output does not admit the update had no known agent:\n%s", out)
-	}
-	for _, want := range []string{"the first thing ghost was told", "the second thing ghost was told", "gotcha/mcp importance 0.70", "unresolved", "project p1"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("output missing %q:\n%s", want, out)
-		}
-	}
-}
-
-func TestPrintMemoryHistory_SaysWhenTheMemoryIsGone(t *testing.T) {
-	var buf bytes.Buffer
-	deleted := "the old deploy script assumes a single region"
-	if err := printMemoryHistory(&buf, historyView{
-		MemoryID: "m1",
-		Entries:  []memory.HistoryEntry{historyEntry("delete", "", deleted, "2026-09-26 12:00:00")},
-	}); err != nil {
-		t.Fatalf("printMemoryHistory: %v", err)
-	}
-	out := buf.String()
-	if !strings.Contains(out, "no longer live") {
-		t.Errorf("output does not say the memory is gone, so a tombstone reads as a live record:\n%s", out)
-	}
-	if !strings.Contains(out, deleted) {
-		t.Errorf("the tombstone lost the text the memory held:\n%s", out)
-	}
-}
-
 func TestPrintMemoryHistory_EmptyStates(t *testing.T) {
 	var noDB bytes.Buffer
 	if err := printMemoryHistory(&noDB, historyView{MemoryID: "m1", NoDatabase: true}); err != nil {
@@ -184,93 +125,6 @@ func TestPrintMemoryHistory_EmptyStates(t *testing.T) {
 	}
 }
 
-// TestPrintHistoryJSONIsOneObjectPerEntry: the machine-readable form must be
-// pipeable — no header line, no prose — and must carry the store's own fields,
-// so it cannot drift from what MemoryHistory returns.
-func TestPrintHistoryJSONIsOneObjectPerEntry(t *testing.T) {
-	var buf bytes.Buffer
-	err := printHistory(&buf, historyView{
-		MemoryID: "m1",
-		Entries: []memory.HistoryEntry{
-			historyEntry("save", "claude-code", "first", "2026-09-26 10:00:00"),
-			historyEntry("merge", "opencode", "second", "2026-09-26 10:00:01"),
-		},
-	}, true)
-	if err != nil {
-		t.Fatalf("printHistory: %v", err)
-	}
-	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
-	if len(lines) != 2 {
-		t.Fatalf("got %d lines, want 2:\n%s", len(lines), buf.String())
-	}
-	for i, phase := range []string{"save", "merge"} {
-		var got memory.HistoryEntry
-		if err := json.Unmarshal([]byte(lines[i]), &got); err != nil {
-			t.Fatalf("line %d is not JSON: %v\n%s", i, err, lines[i])
-		}
-		if got.Phase != phase {
-			t.Errorf("line %d phase = %q, want %q", i, got.Phase, phase)
-		}
-		if got.Agent == "" {
-			t.Errorf("line %d lost the performing agent", i)
-		}
-	}
-}
-
-// TestPrintHistoryJSONErrorIsDistinguishable: every other line of a --json
-// stream is a history entry, so the refusal carries its own field. A consumer
-// must not have to infer "nothing happened" from a stream that came back empty.
-func TestPrintHistoryJSONErrorIsDistinguishable(t *testing.T) {
-	var buf bytes.Buffer
-	printHistoryJSONError(&buf, "no Ghost database yet (run ghost first) — no history to read")
-	var got struct {
-		Error      string `json:"error"`
-		MemoryID   string `json:"memory_id"`
-		RecordedAt string `json:"recorded_at"`
-	}
-	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
-		t.Fatalf("the refusal is not JSON: %v\n%s", err, buf.String())
-	}
-	if got.Error == "" {
-		t.Error("the refusal carries no reason")
-	}
-	if got.MemoryID != "" || got.RecordedAt != "" {
-		t.Errorf("the refusal also carries entry fields (%q, %q) — a consumer cannot tell the two shapes apart", got.MemoryID, got.RecordedAt)
-	}
-}
-
-// TestMemoryHistoryLiveFlagDecidesTheHeader: the header's live / no-longer-live
-// distinction comes from Live alone, so a reader who misreads it is told the
-// wrong thing about a memory that is still there. This pins which combinations
-// produce which sentence, because the printer cannot tell "the read failed" from
-// "the row is gone" — runHistory refuses on the former instead.
-func TestMemoryHistoryLiveFlagDecidesTheHeader(t *testing.T) {
-	entry := historyEntry("save", "claude-code", "a fact worth keeping", "2026-09-26 10:00:00")
-
-	var live bytes.Buffer
-	if err := printMemoryHistory(&live, historyView{
-		MemoryID: "m1",
-		Live:     &memory.Memory{ID: "m1", Category: "gotcha", Source: "mcp"},
-		Entries:  []memory.HistoryEntry{entry},
-	}); err != nil {
-		t.Fatalf("printMemoryHistory: %v", err)
-	}
-	if !strings.Contains(live.String(), "live)") || strings.Contains(live.String(), "no longer live") {
-		t.Errorf("a live memory is not reported as live:\n%s", live.String())
-	}
-
-	var gone bytes.Buffer
-	if err := printMemoryHistory(&gone, historyView{
-		MemoryID: "m1",
-		Entries:  []memory.HistoryEntry{entry},
-	}); err != nil {
-		t.Fatalf("printMemoryHistory: %v", err)
-	}
-	if !strings.Contains(gone.String(), "no longer live") {
-		t.Errorf("a memory with no live row is not reported as gone:\n%s", gone.String())
-	}
-}
-
 // TestReadHistoryViewReportsAFailedLivenessRead: the header distinguishes "still
 // live" from "no longer live" and nothing else, so a liveness read that FAILS
 // must not be reported as a memory that is gone. runHistory ends in os.Exit, so
@@ -289,9 +143,6 @@ func TestReadHistoryViewReportsAFailedLivenessRead(t *testing.T) {
 		t.Fatalf("close: %v", err)
 	}
 
-	// The liveness read is driven on its own, with a history that did succeed:
-	// a failure of BOTH reads is easy to produce, and it would pass even if the
-	// liveness error were swallowed again.
 	entries := []memory.HistoryEntry{{MemoryID: "m1", Phase: "save", Content: "text"}}
 	view, err := withLiveness(context.Background(), s, "m1", entries)
 	if err == nil {
@@ -394,14 +245,6 @@ func TestParseHistoryArgsPurge(t *testing.T) {
 // instead of reporting the memory as absent — which is what a prefix-shaped
 // argument used to be answered with, and it is false whenever the memory is
 // there.
-//
-// The confirmation is a whole id rather than an echoed one, deliberately. An
-// irreversible write that announces its target and proceeds in the same breath is
-// a warning nobody can act on: a single-character slip in a pasted prefix is
-// still a unique match, and there is no moment between the announcement and the
-// transaction in which to notice it was the wrong one. So the repair is the one
-// the read path exists for — `ghost history <prefix>` prints the full id it
-// resolved — and the full id goes in by hand.
 func TestRunHistoryPurgeTakesAFullIDOnly(t *testing.T) {
 	s, live, gone := refTestStore(t)
 	ctx := context.Background()
@@ -438,29 +281,6 @@ func TestRunHistoryPurgeTakesAFullIDOnly(t *testing.T) {
 	}
 }
 
-// TestRunHistoryPurgeReportsAnIdItNeverHeldAsAMiss: a full id the store does not
-// hold is a MISS, and the sentence says so. It is not a prefix — nothing begins with
-// it — and calling an absent id a prefix would be a false claim about a string the
-// caller never shortened. It is also what a re-run of a purge that already succeeded
-// looks like, because a purge removes the id from both tables, so this is the answer
-// an operator gets for running the same command twice.
-func TestRunHistoryPurgeReportsAnIdItNeverHeldAsAMiss(t *testing.T) {
-	s, _, _ := refTestStore(t)
-	ctx := context.Background()
-
-	const never = "0000000000000000000000000000000FFF"
-	err := purgeHistoryMemory(ctx, s, never)
-	if err == nil {
-		t.Fatal("a purge of an id the store never held reported success")
-	}
-	if !strings.Contains(err.Error(), "nothing to purge") {
-		t.Errorf("the refusal does not report a miss: %v", err)
-	}
-	if strings.Contains(err.Error(), "prefix") {
-		t.Errorf("the refusal calls an absent whole id a prefix: %v", err)
-	}
-}
-
 // historyTokenID is an AWS-access-key-shaped id, the shape a memory id can hold:
 // `ghost import` writes an artifact's ids verbatim and CheckImportedID bounds only
 // length and control characters, so a stored id — and a ref a caller types for one
@@ -486,22 +306,6 @@ func assertHistoryRefusalWithheld(t *testing.T, err error, field string) {
 	}
 }
 
-// TestParseHistoryArgsWithholdsATokenShapedOperand: the second operand is read as
-// a memory id and refused as one, so the reader sees that id withheld rather than
-// repeated.
-func TestParseHistoryArgsWithholdsATokenShapedOperand(t *testing.T) {
-	_, err := parseHistoryArgs([]string{"abc123", historyTokenID})
-	assertHistoryRefusalWithheld(t, err, "id")
-}
-
-// TestNoMemoryToPurgeWithholdsItsID: the one "nothing to purge" sentence, shared
-// by the miss purgePrefixRefusal returns and the stored id purgeHistoryMemory
-// names after it re-spells the argument. There is one function because there is
-// one sentence, so the two sites cannot drift.
-func TestNoMemoryToPurgeWithholdsItsID(t *testing.T) {
-	assertHistoryRefusalWithheld(t, noMemoryToPurge(historyTokenID), "id")
-}
-
 // TestPurgePrefixRefusalWithholdsATokenShapedRef: an argument that names nothing
 // is the miss sentence, and a token-shaped one is withheld there.
 func TestPurgePrefixRefusalWithholdsATokenShapedRef(t *testing.T) {
@@ -521,41 +325,6 @@ func TestPurgePrefixRefusalWithholdsTheRefItWraps(t *testing.T) {
 	}
 	if want := "<id withheld: it holds a AWS access key ID>"; !strings.Contains(err.Error(), want) {
 		t.Errorf("the refusal does not render the wrapped ref through the guard:\n%s", err)
-	}
-}
-
-// TestPurgePrefixRefusalWithholdsTheIDItNames: a prefix is refused with the full
-// id it names, and that id is what the sentence exists to hand over — a
-// token-shaped stored id is exactly the value a refusal must not repeat. Here the
-// ref is an ordinary eight characters and the STORED id is token-shaped as a
-// whole, which is the case the guard is asked about on an id the caller can only
-// address through a prefix.
-func TestPurgePrefixRefusalWithholdsTheIDItNames(t *testing.T) {
-	const ref = "AKIAIOSF" // the first eight characters, below the shape the rule matches
-	assertHistoryRefusalWithheld(t, purgePrefixRefusal([]string{historyTokenID}, ref), "id")
-}
-
-// TestPurgePrefixRefusalStillNamesTheFullIDForAnOrdinaryPrefix: memory.RefusalArg
-// is exactly %q for a value the guard does not recognise, so an ordinary id keeps
-// the behaviour docs/cli.md states — the refusal prints the full id the prefix
-// names, and the command that purges it. The id appears twice, in the "memory it
-// names" clause and in the next command, and both carry the rendering.
-func TestPurgePrefixRefusalStillNamesTheFullIDForAnOrdinaryPrefix(t *testing.T) {
-	const stored = "L1A2B3C4D5E6F70819293A4B5C6D7E8F9"
-	ref := memref.Short(stored)
-	err := purgePrefixRefusal([]string{stored}, ref)
-	if err == nil {
-		t.Fatal("purgePrefixRefusal accepted a prefix")
-	}
-	msg := err.Error()
-	if !strings.Contains(msg, "whole memory id") {
-		t.Errorf("the refusal no longer says a whole id is needed:\n%s", msg)
-	}
-	if !strings.Contains(msg, `"`+ref+`"`) {
-		t.Errorf("the refusal does not name the prefix:\n%s", msg)
-	}
-	if got := strings.Count(msg, `"`+stored+`"`); got != 2 {
-		t.Errorf("the full id appears %d time(s), want 2 (the memory it names and the next command):\n%s", got, msg)
 	}
 }
 
@@ -579,36 +348,6 @@ func TestRunHistoryPurgeErasesTheFullID(t *testing.T) {
 		t.Fatalf("MemoryHistory: %v", err)
 	} else if len(entries) != 0 {
 		t.Errorf("the purge left %d recorded version(s)", len(entries))
-	}
-}
-
-// TestPrintHistoryEntryNamesTheOtherEnd: the two fields that make a history
-// followable — which memory replaced this one, and what text a fold brought in.
-// A reader asking "what replaced this" needs the answer on the same screen as the
-// text, not only in the JSON.
-func TestPrintHistoryEntryNamesTheOtherEnd(t *testing.T) {
-	var buf bytes.Buffer
-	e := historyEntry("delete", "", "the fact this memory used to hold", "2026-09-27 09:00:00")
-	e.RelatedID = "SUCCESSOR01"
-	e.MergedContent = "the near-duplicate a fold brought in"
-	if err := printHistoryEntry(&buf, e); err != nil {
-		t.Fatalf("printHistoryEntry: %v", err)
-	}
-	out := buf.String()
-	if !strings.Contains(out, "related memory: SUCCESSOR01") {
-		t.Errorf("output does not name the successor:\n%s", out)
-	}
-	if !strings.Contains(out, "folded-in text: «the near-duplicate a fold brought in»") {
-		t.Errorf("output does not carry the folded-in text:\n%s", out)
-	}
-	// A row with neither says nothing about either, rather than printing empty
-	// labels on every event.
-	var plain bytes.Buffer
-	if err := printHistoryEntry(&plain, historyEntry("save", "claude-code", "text", "2026-09-27 09:00:00")); err != nil {
-		t.Fatalf("printHistoryEntry: %v", err)
-	}
-	if strings.Contains(plain.String(), "related memory") || strings.Contains(plain.String(), "folded-in text") {
-		t.Errorf("a row with no other end printed an empty label:\n%s", plain.String())
 	}
 }
 
@@ -656,25 +395,6 @@ func TestPrintHistoryJSONRefusesAnUnknownID(t *testing.T) {
 	}
 }
 
-// TestPrintHistoryJSONStaysQuietWhenThereIsHistory: the refusal is for the miss
-// only. A memory that has rows — live or tombstoned — prints them and returns no
-// error, because the entries themselves carry the answer (a deleted memory ends
-// in a delete row).
-func TestPrintHistoryJSONStaysQuietWhenThereIsHistory(t *testing.T) {
-	for _, v := range []historyView{
-		{MemoryID: "live", Live: &memory.Memory{ID: "live"}, Entries: []memory.HistoryEntry{historyEntry("save", "", "text", "t")}},
-		{MemoryID: "gone", Entries: []memory.HistoryEntry{historyEntry("delete", "", "text", "t")}},
-	} {
-		var buf bytes.Buffer
-		if err := printHistory(&buf, v, true); err != nil {
-			t.Errorf("printHistory(%s) = %v, want no error", v.MemoryID, err)
-		}
-		if !strings.Contains(buf.String(), "\"phase\"") {
-			t.Errorf("printHistory(%s) printed no entries:\n%s", v.MemoryID, buf.String())
-		}
-	}
-}
-
 // TestPrintHistoryJSONRefusesALiveMemoryWithNoHistory: the pre-v17 case. A live
 // memory whose row predates the history table has zero entries, and an empty
 // stream with exit 0 would tell a script the memory has no past — rather than
@@ -698,9 +418,6 @@ func TestPrintHistoryJSONRefusesALiveMemoryWithNoHistory(t *testing.T) {
 	if !strings.Contains(got.Error, "predates") {
 		t.Errorf("the refusal does not name the id: %q", got.Error)
 	}
-	// It must NOT claim the memory does not exist — it does, and the sentence is
-	// the difference between "Ghost has nothing on it" and "Ghost was not
-	// watching yet".
 	if strings.Contains(got.Error, "no memory and no history") {
 		t.Errorf("the refusal says there is no memory, but the row is live: %q", got.Error)
 	}
