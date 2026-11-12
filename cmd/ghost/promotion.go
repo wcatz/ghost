@@ -14,15 +14,10 @@ import (
 	"github.com/wcatz/ghost/internal/secret"
 )
 
-// reflectionApplier is the single write boundary for `ghost reflect`. Keeping
-// project replacement, explicit global promotion, and failed-candidate
-// recovery behind one call makes their ordering testable and lets the store
-// commit them atomically.
 type reflectionApplier interface {
 	ApplyReflection(ctx context.Context, projectID string, projectMems, globalMems []memory.Memory, consolidatedSince string, promoteGlobals bool, fed []memory.CorpusRow) (preserved []string, promoted int, keptMems []memory.Memory, projectDropped, globalDropped memory.EmissionDrops, deleted int, appliedByCategory map[string]int, err error)
 }
 
-// reflectionApplied holds the result of applying reflection proposals.
 type reflectionApplied struct {
 	KeptProject       []reflection.ReflectMemory
 	KeptGlobal        []reflection.ReflectMemory
@@ -37,91 +32,12 @@ type reflectionApplied struct {
 	Applied           bool
 }
 
-// applyReflection converts reflection proposals to store rows and always
-// invokes the store apply boundary. Promotion is not nested under a
-// project-memory guard: a result containing only cross-project candidates is
-// precisely the case where an explicit promotion request must still run.
-//
-// This is also where a credential-shaped proposal is dropped, and the position
-// is the point. The write boundary is the only place every path passes through,
-// and it is reached AFTER the drop guard's audit: the audit asks which inputs the
-// output failed to account for, and executeOps emits every unclaimed input
-// verbatim, so a memory the tier carried forward is byte-identical to the output
-// that carried it. Dropping it earlier makes that input look unaccounted for,
-// and both outcomes are wrong — RetainGuardedDrops re-adds it verbatim and the
-// credential is written back (making the drop a no-op, after the audit has
-// already printed its content to stderr), or some other output happens to cover
-// 45% of its tokens and ReplaceNonManual deletes the stored row with no
-// --allow-drops, the one deletion path the drop guard exists to close. Here the
-// audit still accounts for it, so it is not re-added; and the emitted set no
-// longer does, so the replace DELETES any stored memory it was carrying forward.
-// Both halves are consequences of the same position, and neither is a surprise:
-// the row is the value.
-// `applied` is false when the round changed nothing, which is not the same as
-// a round that wrote no new rows. applied is keyed on what the store actually
-// WROTE or DELETED, never on its drop count: an all-dropped round — every
-// emission refused because its claimed row changed or was deleted while the
-// harness was answering (#1051) — can still remove the unclaimed candidates
-// beside those refused claims, and a replace that changed the corpus, snapshot
-// included, has to print "Applied", offer its restore hint, and record the
-// learned context like any other. The caller needs the difference: a round
-// that changes nothing must not print "Applied", must not offer a restore
-// hint, and above all must not record the skip fingerprint over an unchanged
-// corpus — because then --skip-unchanged skips the project forever, and a
-// stored row holding a credential is never revisited. Two paths reach
-// applied=false: nothing survived the credential filter, so the store is not
-// even called, and the store refused every emission it was handed with no row
-// deleted either.
-// `keptProject` and `keptGlobal` are the POST-drop proposal sets, because the
-// caller's "Applied: N memories consolidated" line counts them. Returning only a
-// count left it counting the pre-drop lists, so a partial drop — one good
-// proposal and one credential — reported 2 written when 1 was. `projectDropped`
-// and `globalDropped` come back from the store and close the same gap on the
-// OTHER drop path (the corpus guard): they are the emissions the store refused,
-// per half, BY REASON, so the summary can subtract only what each of its
-// components counts and can tell a round that wrote nothing from one that did.
-// The reason split is not decoration either: a drop whose claimed row still
-// stands has to keep the skip fingerprint unrecorded, and a merge dropped
-// because its decision links do not fit in a source_ref would be re-proposed on
-// every run if it did the same (#1228).
 func applyReflection(ctx context.Context, store reflectionApplier, projectID string, projectMems, globalMems []reflection.ReflectMemory, consolidatedSince string, promoteGlobals bool, replaced map[replacedKey][]string, fed []memory.CorpusRow) (reflectionApplied, error) {
-	// Filter FIRST, on the caller's two sets, and leave the fold to the store.
-	//
-	// The order is load-bearing and it was the other way round here first.
-	// Folding the cross-project candidates into projectMems and nilling
-	// globalMems BEFORE the drop means keptGlobal comes back as the empty slice
-	// the drop builds for a nil input — never the caller's cross-project set —
-	// and the two things the caller needs it for then silently die: the
-	// "(re-run with --promote-globals)" hint becomes unreachable, and the
-	// ", N cross-project candidates kept project-scoped" component disappears
-	// from the Applied line. Filtering first also drops a credential among the
-	// cross-project candidates before they can be promoted, which is the point.
-	//
-	// The fold itself is the store's job now, not this wrapper's: ApplyReflection
-	// folds the cross-project rows into the project replace when promotion is
-	// off, and it does so AFTER its own corpus guard has filtered them. A fold
-	// here would put those rows into the one list the store sees, so its two
-	// drop counts could no longer be attributed to the half that produced them,
-	// and the summary's project count and cross-project component subtract
-	// different halves. The store already folded the same way on every path that
-	// reached it, so this only changes who owns the slice juggling, not what is
-	// written.
 	keptProject, keptCrossProject, credDropped := dropCredentialProposals(projectMems, globalMems)
 	projectMems = keptProject
-	// Two different sets from here on, and conflating them is the failure the
-	// ordering above is guarding: what the STORE gets (both lists, folded inside
-	// ApplyReflection when promotion is off) and keptCrossProject, which is what
-	// the caller REPORTS. Nilling the returned set to fold it here would make the
-	// --promote-globals hint and the cross-project count unreachable, and a flag
-	// nobody is told about is a flag nobody uses.
 	projectRows := reflectMemoriesToMemory(projectID, projectMems, replaced)
 	globalRows := reflectMemoriesToMemory("_global", keptCrossProject, replaced)
 	if len(projectRows) == 0 && len(globalRows) == 0 {
-		// Nothing to write, so nothing is replaced: no deleteIds are computed and
-		// no stored row is touched. The dropped proposals are still reported
-		// above, and saying so here is the point — a removal claim printed before
-		// anyone knows whether a replace runs closes the incident in the
-		// operator's head while the value sits in the database.
 		return reflectionApplied{
 			KeptProject: keptProject,
 			KeptGlobal:  keptCrossProject,
@@ -134,34 +50,10 @@ func applyReflection(ctx context.Context, store reflectionApplier, projectID str
 			KeptGlobal:  keptCrossProject,
 		}, err
 	}
-	// Two things have to be true for a carried-forward row to be gone, and this
-	// note says only what holds. A proposal dropped for holding a credential is
-	// no longer in the emitted set, so the replace treats the stored memory it
-	// was carrying as unmatched and deletes it — but only if a project replace
-	// ran (len(projectMems) > 0 in the store), and only for a row the replace
-	// can reach. A manual, builtin, pinned or resolved row is excluded from its
-	// candidate query, and a fresh merge or rewrite carried nothing. So the note
-	// states the mechanism and where to look rather than a number of deletions:
-	// a count of dropped proposals is not a count of deleted rows, in either
-	// direction, and the only number available here is the first.
-	//
-	// --allow-drops does not gate the removal: that flag is the operator
-	// authorising what the MODEL chose to drop, and this is Ghost removing a row
-	// that is itself the value.
 	if credDropped > 0 && len(projectRows) > 0 {
 		fmt.Fprintln(os.Stderr,
 			"note: the project replace has just removed any stored memory the dropped proposal(s) were carrying forward, because it held a credential value. A manual, builtin, pinned or resolved row is not replaceable and would still be there: check the project")
 	}
-	// A successful transaction is not a successful round. When the store refused
-	// every emission it was handed AND removed no stored row — their claimed rows
-	// changed or were deleted while the harness was answering, and no unclaimed
-	// candidate sat beside them — nothing changed, so the round is reported and
-	// recorded exactly as if nothing had reached the store at all: no "Applied",
-	// no restore hint, and above all no skip fingerprint over a corpus the
-	// consolidator's answer never landed in. The store's own delete count, not
-	// the drop count, is what separates that from an all-dropped round that
-	// still changed the corpus: the latter took a snapshot the operator can
-	// restore, so it is a replace and must be reported as one.
 	applied := projectDropped.Total()+globalDropped.Total() != len(projectRows)+len(globalRows) || deleted != 0
 	return reflectionApplied{
 		KeptProject:       keptProject,
@@ -178,58 +70,6 @@ func applyReflection(ctx context.Context, store reflectionApplier, projectID str
 	}, nil
 }
 
-// displayProposal renders a proposal or a guarded drop for the operator's own
-// eyes, substituting a description for the content whenever the content holds a
-// credential.
-//
-// Every print site in cmd/ghost that renders stored memory text IN A REPORT — the
-// lifecycle listings and `ghost history` — goes through this substitution:
-// displayProposal itself, displayClaim, displayStored, and the two history
-// printers. A guarantee made at the write boundary — the drop reports format, category, scope and length, never the
-// content — is not a guarantee about the command's report if the same command
-// prints the value somewhere else: the proposal listing and the drop-guard warning
-// both printed 120 truncated characters, and 120 is far more than a GitHub PAT or a
-// Docker Hub token needs. In the autonomous path that stdout is the append-only
-// lifecycle.log, so the value outlives the run. The exposure the store's refusal
-// exists to prevent, reached from the other direction.
-//
-// The class is REPORT, and saying so is load-bearing rather than pedantic:
-// `ghost context` and the SessionStart hook's digest (internal/mcpinit) print the
-// same stored rows — `quoteData` wraps them in «» and nothing else — and they are
-// outside this substitution on purpose. They are a data FEED rather than a report
-// a person reads: a memory withheld from the injected context is silently out of
-// every later session, which is a worse failure than printing one, and the same
-// text is already reachable through `ghost_memory_search`, whose contract is to
-// return what is stored. The control on that path is the write boundary plus a
-// store scan, the same answer the search tool has. docs/architecture.md records
-// this under the credential guard.
-//
-// The lifecycle listings were the sites left out, and the argument for them was
-// that the write-boundary guard already refuses their input. That argument is
-// about the databases this build writes, and it says nothing about a database
-// written before the guard existed: `rejectSecret` is not retroactive, a pre-guard
-// row can still hold a value, and `firstLine` at 70 characters is more than a
-// GitHub PAT needs. So `ghost resolve` (both listings), `resolve --mark` and
-// `supersede --withdraw` route through displayStored, which is this same
-// substitution over the first-line cut those lines already made.
-//
-// `ghost history` is the site where two layers are both correct, and neither
-// replaces the other. History content is redacted at WRITE time
-// (`ghost_history_content` in internal/memory), and that is the right layer for
-// it: it is the only one that also covers the reads Ghost performs itself — an
-// `as_of` search answers from a recorded version and feeds session injection — and
-// every future reader of that table, none of which would have to remember a print
-// site. But a filter installed today cannot reach the rows already on disk, and it
-// does not cover `merged_content` at all, which is a plain column holding the text
-// a FoldOnly fold dropped. The print site therefore carries the substitution as
-// well: `ghost history` renders whatever is stored, and on the store that most
-// needs purging that is a value a pre-guard build wrote. `ghost history purge` is
-// the redaction path for what is left on disk; withholding is what keeps the
-// command from printing it in the meantime.
-//
-// The substitution keeps the category and the byte length, so an operator can
-// still find the row and tell how much was withheld — a report that says only
-// "redacted" is indistinguishable from a report that lost the proposal.
 func displayProposal(content, category string, limit int) string {
 	if finding, ok := secret.Detect(content); ok {
 		return withheld(finding, category, content)
@@ -237,11 +77,6 @@ func displayProposal(content, category string, limit int) string {
 	return humanStoredText(content, limit)
 }
 
-// displayClaim renders text a result records without a category: a rewrite's
-// replacement, a disposal claim's witness, an identifier the grounding check
-// rejected. It substitutes for a credential for the same reason displayProposal
-// does — a replacement is derived from stored text, so it can carry a value a
-// pre-guard row held — and reports no category, because the result records none.
 func displayClaim(content string, limit int) string {
 	if finding, ok := secret.Detect(content); ok {
 		return withheld(finding, "", content)
@@ -249,12 +84,6 @@ func displayClaim(content string, limit int) string {
 	return humanStoredText(content, limit)
 }
 
-// withheld is the one rendering of a credential that a cmd/ghost print site
-// produces: the format, the category when the caller has one, and how many bytes
-// were kept. Every substitution above goes through it, so a second site cannot
-// invent a second marker, and the two shapes are the two facts available — a
-// caller with a category says so, and a caller without one (an edge's target, a
-// fold's discarded wording) does not print an empty field where one should be.
 func withheld(finding secret.Finding, category, content string) string {
 	if category == "" {
 		return fmt.Sprintf("<withheld: %s, bytes=%d>", finding.Label, len(content))
@@ -262,29 +91,6 @@ func withheld(finding secret.Finding, category, content string) string {
 	return fmt.Sprintf("<withheld: %s, category=%s, bytes=%d>", finding.Label, category, len(content))
 }
 
-// humanStoredText is the ONE renderer for stored text on a report line in
-// cmd/ghost, and it is where the line-safety of every such site is decided.
-//
-// A limit above zero takes the FIRST LINE of the text, capped at the limit, and
-// a limit of zero or less — what `ghost reflect --full` asks for — takes the
-// whole of it. A whole field carries the «...» delimiters and a preview does
-// not, and that is a property of the function rather than an omission: a reader
-// can be fooled by a whole line that is not delimited, while the `--json` printer
-// must never delimit at all because its consumer is a script and encoding/json
-// already escapes a newline.
-//
-// It is one function rather than a width half and a delimiting half because two
-// halves with two callers each is how the two drifted — `displayText` was the
-// width half, nothing called it once its two callers moved here, and a function
-// nothing calls is a second rule waiting to be the one that ships the bug.
-//
-// The first-line cut is `assemble.PreviewLine`, the ONE cut every other listing
-// already uses, and it is a cut at the first of EITHER byte: a byte cut does not
-// stop at a line break, so the first 120 bytes of a memory holding a newline
-// printed the line after it too — on the default `ghost reflect` report, where
-// the limit is 120 and not the `--full` zero. That is the shape #802 is about,
-// and it is why the cut lives here rather than at each call site: a display flag
-// spread across five sites is how three copies of one rule drifted.
 func humanStoredText(content string, limit int) string {
 	if limit <= 0 {
 		return assemble.Data(content)
@@ -292,29 +98,7 @@ func humanStoredText(content string, limit int) string {
 	return assemble.PreviewLine(content, limit)
 }
 
-// dropCredentialProposals removes the proposals whose content holds a
-// credential, from both lists.
-//
-// Every removal is reported, with its format, category, scope and length and
-// never its content, because a discard that leaves no trace is indistinguishable
-// from a proposal the model never emitted.
-//
-// The report also says the thing that is easy to get wrong about it: any STORED
-// memory the proposal was carrying forward goes with it. ReplaceNonManual
-// deletes every replaceable row the emitted set does not account for, and this
-// memory is now not accounted for, so an unattended `ghost reflect --apply`
-// removes the stored row. That is the correct outcome — the row IS the value,
-// and leaving it is the leak — but it is a deletion, so it is named as one
-// rather than described as a proposal that was merely not applied. It is a
-// Ghost-owned removal rather than a model decision, which is why it does not go
-// through --allow-drops: that flag is the operator authorising what the MODEL
-// chose to drop.
 func dropCredentialProposals(projectMems, globalMems []reflection.ReflectMemory) (keptProject, keptGlobal []reflection.ReflectMemory, dropped int) {
-	// A fresh slice, not in[:0]. The caller LISTS these and COUNTS them after
-	// this returns, and in-place filtering would leave it holding the pre-drop
-	// length over a backing array it can no longer read correctly — so the
-	// "Applied: N memories consolidated" line would count a proposal that was
-	// never written.
 	keep := func(in []reflection.ReflectMemory) (out []reflection.ReflectMemory, n int) {
 		out = make([]reflection.ReflectMemory, 0, len(in))
 		for _, m := range in {
@@ -335,63 +119,11 @@ func dropCredentialProposals(projectMems, globalMems []reflection.ReflectMemory)
 	return keptProject, keptGlobal, n + m
 }
 
-// replacedKey is the handle one entry of the replaced-ids join hangs on.
-//
-// The join has two kinds of handle, and they are not interchangeable. A merge
-// or rewrite survivor is keyed on the TEXT it produced, because text is the
-// only handle the operation list and the emitted list share for it. A
-// `superseded by` drop is keyed on the ID of the row it named, because that
-// row is the one the drop says replaces the dropped one — and the text would
-// pair the drop with any row that happens to carry the same words, which is a
-// claim about a row nothing said anything about.
-//
-// One map holds both kinds, so the two have to be told apart, and a struct key
-// is what tells them apart: a stored id and a memory's text are different
-// things, and a text is any bytes at all, so a memory whose content happened
-// to be an id would otherwise be read as that id's claim.
 type replacedKey struct {
 	text string
 	id   string
 }
 
-// reflectMemoriesToMemory converts proposals to store rows. replaced maps an
-// emitted memory's TEXT — or, for the successor a drop named, its ID — to the
-// input ids that emission stands in for, and is carried through as
-// Memory.ReplacesIDs so ReplaceNonManual can stamp the successor id on those
-// rows' delete history: a rewrite or a merge gives the row a new id, and
-// without the mapping a reader following one memory's history stops exactly
-// where the memory changed.
-//
-// Text is the join key because it is the only handle the operation list and the
-// emitted list share — the operations are resolved before the memories are, and
-// nothing pairs them by id. Two merge or rewrite survivors with identical text
-// are the same fact as far as consolidation is concerned, so they legitimately
-// share the mapping.
-//
-// An emission that restates an input row verbatim (RestatesID set) takes
-// NOTHING from that text join. It consumed nothing of a merge: it is that
-// row's keep, pass-through, grounding-refusal re-emit or drop-guard re-add,
-// and it can carry a merge's text only because the row it restates already
-// does. Joined by text it inherited the merge's sources, so the replace read
-// the row's own keep as a claim on rows the merge named: when the merge was
-// then refused (its decision links overflowed, its scopes disagreed), the keep
-// was dropped as a claim on a row that changed while consolidation ran, the
-// round reported a concurrent edit nobody made and withheld its skip
-// fingerprint.
-//
-// What a restatement DOES take is the ids of the rows a `superseded by` drop
-// said it replaces, and those are keyed on the successor's ID. A drop of A
-// against a kept B says B stands where A stood, so B claims A: A is deleted
-// into B rather than left as a row nothing accounted for, its delete history
-// names B, and a decision companion's link — the only thing a later supersede
-// finds the companion by — reaches B instead of dying with A. Without the
-// claim A was an unaccounted candidate: deleted with no successor named, the
-// link gone, and a later supersede of that decision retired nothing while the
-// row stating the reversed decision kept ranking.
-//
-// A MERGE of the successor with other facts already inherited the link,
-// because the merge's own ids named the dropped row. The keep is where the
-// link was lost: a keep names no ids of its own, so it inherited nothing.
 func reflectMemoriesToMemory(projectID string, mems []reflection.ReflectMemory, replaced map[replacedKey][]string) []memory.Memory {
 	if len(mems) == 0 {
 		return nil
@@ -417,29 +149,6 @@ func reflectMemoriesToMemory(projectID string, mems []reflection.ReflectMemory, 
 	return rows
 }
 
-// replacedIDsFor inverts the operation list into the shape
-// reflectMemoriesToMemory consumes: for every merge and every rewrite (and every
-// drop that named a witness), the ids it disposed of, keyed by the text that
-// replaced them; and for every drop that named a successor, the ids it disposed
-// of, keyed by that successor's id. A drop naming no witness contributes
-// nothing — an obsolete drop has no successor, and inventing one would put a
-// false pointer on a delete row.
-//
-// The drops that named a successor are keyed SEPARATELY, by the successor's id.
-// The text key alone cannot carry them: a successor the response KEPT restates
-// its row verbatim, and a restatement takes nothing from the text join (see
-// reflectMemoriesToMemory), so the dropped row was accounted for by nothing at
-// all — deleted as an unaccounted candidate, with no successor named and the
-// links it carried gone with it.
-//
-// The text key is the CLAMPED text, and that is load-bearing. clampReflectMemories runs
-// before this and rewrites every emission in place, so an emission over
-// memory.MaxContentLen reaches the store truncated while the operation list still
-// holds the original — keying on the original matched nothing, and the ids of
-// exactly the largest merges (the ones with the most sources to point at) were
-// silently dropped. Clamping the key with the same function the emission went
-// through puts both sides in the same space without mutating the result or
-// threading a second copy of the clamped emissions through.
 func replacedIDsFor(result *reflection.ReflectionResult) map[replacedKey][]string {
 	out := map[replacedKey][]string{}
 	if result == nil {
@@ -453,10 +162,6 @@ func replacedIDsFor(result *reflection.ReflectionResult) map[replacedKey][]strin
 		key, _ := memory.ClampContent(r.Text)
 		out[replacedKey{text: key}] = append(out[replacedKey{text: key}], r.ID)
 	}
-	// The successor of a supersession, keyed by the row the drop named. The
-	// parser upper-cases that id, and that is the spelling the store holds for
-	// every id Ghost mints, so the key meets the RestatesID of the row the
-	// successor restates.
 	for _, d := range result.Drops {
 		if d.Successor == "" {
 			continue
@@ -482,14 +187,6 @@ func reflectCategoryParts(counts map[string]int) string {
 	return strings.Join(parts, ", ")
 }
 
-// reflectResultLine renders the `Result:` line: what came back, broken down by
-// category, and the repair turn the LLM tier had to spend to get an answer at
-// all (see reflectRepairNote).
-//
-// It is a function taking the result rather than a Printf in runReflect because
-// runReflect exits the process, so the line is otherwise unreachable from a test
-// and a test that re-spelled the format string would pass with the command
-// changed — the same seam reasoning as gatedLLMTier.
 func reflectResultLine(result reflection.ReflectionResult) string {
 	counts := make(map[string]int, len(result.Memories))
 	for _, m := range result.Memories {
@@ -498,28 +195,6 @@ func reflectResultLine(result reflection.ReflectionResult) string {
 	return fmt.Sprintf("Result:       %d memories (%s)%s\n", len(result.Memories), reflectCategoryParts(counts), reflectRepairNote(result.RepairTurns))
 }
 
-// reflectRepairNote reports the run's repair turn on the `Result:` line: a run
-// whose first answer the strict ops reader rejected and which succeeded on the
-// re-read says so, and a run that needed no repair says nothing at all.
-//
-// One line of this process's own output carries it, and nothing else does, for a
-// counting reason. On the unattended path that stdout IS the append-only
-// lifecycle.log (the stop hook redirects it, see internal/mcpinit/stophook), so
-// printing the token a second time on the other stream would double every count
-// the token exists to produce. The `repair: %d` token is the stable grep for "the
-// first answer was malformed and the run survived it", and the denominator is the
-// `Result:` lines in the same log. A run that repaired and then failed outright is
-// not in that denominator — it never printed a summary — and its rejection is on
-// the WARN line the tier writes whether the run goes on to succeed or not. (A
-// grep over the phase-failure MARKER as well as the log sees the same line twice,
-// because the marker copies the last of the phase's output; grep the log.)
-//
-// The count is 0 or 1 because the tier allows one extra turn (opRepairTurns). It
-// is per run rather than per tier, so it can be 1 on a result the mechanical tier
-// produced — see ReflectionResult.RepairTurns — which is why the wording names
-// the re-read rather than the result. If the bound ever moves, the wording here
-// has to move with it rather than report one re-read for a number that is not
-// one.
 func reflectRepairNote(turns int) string {
 	if turns <= 0 {
 		return ""
@@ -527,15 +202,6 @@ func reflectRepairNote(turns int) string {
 	return fmt.Sprintf("  repair: %d (a rejected response was re-read)", turns)
 }
 
-// crossProjectKept is the number of cross-project candidates the round actually
-// left in the project: every candidate the caller handed over, minus the ones
-// the store refused. With promotion off a candidate can be refused by EITHER
-// guard pass — the global half's own pass, or the replace's second pass over the
-// folded list — and the store attributes both to the same drop count precisely
-// so this one subtraction covers them. Callers that print per-candidate
-// follow-ups must count with this too: a round that refused every candidate has
-// nothing to promote, and saying otherwise contradicts the applied total
-// printed next to it.
 func crossProjectKept(globalMems []reflection.ReflectMemory, globalDropped int) int {
 	if kept := len(globalMems) - globalDropped; kept > 0 {
 		return kept
@@ -543,14 +209,6 @@ func crossProjectKept(globalMems []reflection.ReflectMemory, globalDropped int) 
 	return 0
 }
 
-// appliedSummary describes the rows that actually landed in the project. The
-// caller passes the store's per-category applied counts — what the replace
-// wrote, plus any kept-back global candidate written into the project — so the
-// total and the category breakdown come from the SAME map: an emission the
-// corpus guard refused is counted in neither, and the parts always sum to the
-// total. Counting the caller's emitted slices instead was the bug here: they
-// still hold the dropped emissions, so a partial-refusal round printed "(1
-// fact)" beside "0 memories consolidated".
 func appliedSummary(appliedByCategory map[string]int, globalMems []reflection.ReflectMemory, promoted, globalDropped int, promoteGlobals bool) string {
 	total := 0
 	for _, n := range appliedByCategory {
@@ -569,33 +227,16 @@ func appliedSummary(appliedByCategory map[string]int, globalMems []reflection.Re
 	return summary + fmt.Sprintf(", %d cross-project candidates kept project-scoped", crossProjectKept(globalMems, globalDropped))
 }
 
-// writeAppliedReport prints the Applied block of a round that wrote something
-// and returns the summary for the learned-context record. wrote is false when
-// the round wrote nothing (the caller's !applied branch already said why).
-//
-// A round that wrote something counts as applied, and that includes a
-// candidate that could not be promoted and was written back into the project:
-// it is a row the project now holds. Keying this on the project-memory count
-// alone dropped the summary for a promotion-only round.
-//
-// deleted is the store's count of rows the replace removed. It is stated on
-// the Applied line only when non-zero, because a round whose every emission
-// was refused by the concurrent-edit guard still deletes the rows nothing
-// claimed, and "0 memories consolidated" alone would hide that.
 func writeAppliedReport(w io.Writer, applied, promoteGlobals bool, appliedByCategory map[string]int,
 	keptProject, keptGlobal []reflection.ReflectMemory, keptMems []memory.Memory,
 	projectForSummary []reflection.ReflectMemory, promoted, droppedGlobal, deleted int) (summary string, wrote bool) {
 	if !applied || (promoted == 0 && len(keptMems) == 0 && len(keptProject) == 0 && len(keptGlobal) == 0) {
 		return "", false
 	}
-	// With promotion off every cross-project refusal counts as the global
-	// half's, so one subtraction covers both guard passes.
 	summaryGlobalDropped := 0
 	if !promoteGlobals {
 		summaryGlobalDropped = droppedGlobal
 	}
-	// The REAL promoted count, so a partial promotion does not print "3
-	// promoted to global" one line after "Promoted 1/3".
 	summary = appliedSummary(appliedByCategory, keptGlobal, promoted, summaryGlobalDropped, promoteGlobals)
 	line := summary
 	if deleted > 0 {
@@ -620,10 +261,6 @@ func restoreHint(promoted int) string {
 	return "(use --restore to undo)"
 }
 
-// recoveryWarning is kept separate from the apply transaction so its count is
-// never printed as zero successful recoveries. ApplyReflection rolls back on
-// a failed recovery, but this formatter still fails safe if a future caller
-// ever supplies a partial result.
 func recoveryWarning(kept, total int) string {
 	if kept <= 0 {
 		return fmt.Sprintf("error: none of the %d unpromoted global memories could be returned to the project either — use --restore or re-run", total)

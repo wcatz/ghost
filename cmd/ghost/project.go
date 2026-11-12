@@ -16,17 +16,6 @@ import (
 	"github.com/wcatz/ghost/internal/repo"
 )
 
-// resolveProjectOrExit resolves projectName to a project ID via store, printing
-// an error (with known-project names when available) and exiting the process
-// on failure or when no matching project is found.
-//
-// The two refusals below name the operand `project`, which is what every usage
-// string in this file calls it (`ghost reflect <project>`, `ghost project bind
-// <project-id>`, `ghost prune [--project <name-or-id>]`) — NOT `project_id`,
-// which is the MCP tools' name for the same value. The label is the only part of
-// a withheld placeholder that reaches the reader, so it has to be the name the
-// reader actually typed: a refusal that said `project_id` here would send someone
-// looking for an argument this CLI does not have (#839).
 func resolveProjectOrExit(ctx context.Context, store *memory.Store, projectName string) string {
 	projectID, _, err := store.ResolveProject(ctx, projectName)
 	if err != nil {
@@ -45,11 +34,6 @@ func resolveProjectOrExit(ctx context.Context, store *memory.Store, projectName 
 	return projectID
 }
 
-// knownProjectsSentence is the list of names a refusal offers, each rendered as a
-// label and joined. It is a function because resolveProjectOrExit ends in
-// os.Exit, so the sentence is not reachable from a test — and the names are
-// stored text, so the one place that renders them has to be the place that is
-// tested.
 func knownProjectsSentence(names []string) string {
 	labeled := make([]string, 0, len(names))
 	for _, n := range names {
@@ -58,18 +42,10 @@ func knownProjectsSentence(names []string) string {
 	return strings.Join(labeled, ", ")
 }
 
-// confirmProjectDeleteName reports whether typed (a raw scanned line, not
-// yet trimmed) matches expected exactly once surrounding whitespace is
-// stripped. Pulled out of runProjectDelete as its own pure function so the
-// actual confirmation decision is unit-testable without stdin/os.Exit
-// plumbing.
 func confirmProjectDeleteName(typed, expected string) bool {
 	return strings.TrimSpace(typed) == expected
 }
 
-// printDeleteSummary writes a DeleteProjectSummary to out in the fixed-width
-// format shared by both the dry-run preview and the post-apply report. It
-// returns the first write error encountered, if any.
 func printDeleteSummary(out io.Writer, summary memory.DeleteProjectSummary, verb string) error {
 	if _, err := fmt.Fprintf(out, "%s %s (%s):\n", verb, assemble.Label(summary.ProjectName), assemble.Token(summary.ProjectID)); err != nil {
 		return err
@@ -92,29 +68,15 @@ func printDeleteSummary(out io.Writer, summary memory.DeleteProjectSummary, verb
 	if _, err := fmt.Fprintf(out, "  audit_log:    %d\n", summary.AuditLog); err != nil {
 		return err
 	}
-	// In the struct's own order. The audit trail's rows for this project
-	// (#646): DeleteProject removes them, and a summary that omitted a table its
-	// own command deletes would under-report what the user is about to lose.
 	if _, err := fmt.Fprintf(out, "  retrievals:   %d\n", summary.RetrievalRecords); err != nil {
 		return err
 	}
-	// And #648 slice 2's flags, last in the struct's own order for the same
-	// reason: an agent's objection to a memory this command is about to remove is
-	// part of what it takes away, and a line here is the only place the user is
-	// told so before they type the confirmation.
 	if _, err := fmt.Fprintf(out, "  flags:        %d\n", summary.MemoryFlags); err != nil {
 		return err
 	}
 	return nil
 }
 
-// runProjectDeleteCore implements the confirmation-gated delete against an
-// already-open store: prints the dry-run summary, stops there unless apply
-// is set, and otherwise requires re-typing the project's name (read from in)
-// before calling store.DeleteProject with apply=true. Pulled out of
-// runProjectDelete — which owns CLI arg parsing, bootstrap(), and os.Exit —
-// so the confirmation gate is unit-testable against a real store with
-// injected stdin, without exercising process-exit paths.
 func runProjectDeleteCore(ctx context.Context, store *memory.Store, out io.Writer, in io.Reader, projectName string, apply bool) error {
 	summary, err := store.DeleteProject(ctx, projectName, false)
 	if err != nil {
@@ -140,10 +102,6 @@ func runProjectDeleteCore(ctx context.Context, store *memory.Store, out io.Write
 		return errors.New("confirmation did not match project name — nothing deleted")
 	}
 
-	// Reuse the ID resolved by the preview above rather than re-resolving
-	// projectName: the confirmation prompt waits on a human, and re-resolving
-	// a mutable name/path in that window could silently hit a different
-	// project if it was renamed or recreated in the meantime.
 	summary, err = store.DeleteProject(ctx, summary.ProjectID, true)
 	if err != nil {
 		return err
@@ -154,16 +112,11 @@ func runProjectDeleteCore(ctx context.Context, store *memory.Store, out io.Write
 	return nil
 }
 
-// projectUsage is the help for `ghost project` with no recognised
-// subcommand. It goes to stderr for that usage error (the dispatch's, exit 2)
-// and to stdout for -h/--help (see handleHelp) — one text for both.
 const projectUsage = `Usage: ghost project delete <name-or-id> [--apply]
        ghost project merge <old-name-or-id> <new-name-or-id>
        ghost project bind <project-id> <checkout-directory>
 `
 
-// projectDeleteUsage is the help for `ghost project delete`: stderr for the
-// missing-project usage error, stdout for -h/--help.
 const projectDeleteUsage = `Usage: ghost project delete <name-or-id> [flags]
 
 Flags:
@@ -174,23 +127,6 @@ decisions, learned context, reflection snapshots, and cost/audit history.
 Irreversible. Refuses to delete _global.
 `
 
-// parseProjectDeleteArgs splits `ghost project delete <name-or-id> [--apply]`.
-// It exists so the argv contract is unit-testable: the command irreversible
-// enough to need a typed confirmation was reading os.Args inline, which meant
-// its duplicate check could not be asked about anything but the happy path.
-//
-// projectSeen counts OCCURRENCES rather than testing the name for emptiness.
-// A `projectName != ""` test cannot see `ghost project delete "" beta`: it
-// reads the empty first operand as no operand at all, so the second one became
-// the scope of a delete whose command line named the scope twice — and this is
-// the command that erases a project and everything under it. An empty operand is
-// refused too, and it stops the parse where it is: with no name in the command
-// line there is no scope to be a duplicate of, so the empty value is what the
-// reader needs to be told about.
-//
-// showUsage reports the missing-project case rather than an error, because that
-// is what this command has always answered with: `ghost project delete` alone
-// prints projectDeleteUsage.
 func parseProjectDeleteArgs(args []string) (projectName string, apply, showUsage bool, err error) {
 	projectSeen := false
 	for _, a := range args {
@@ -216,11 +152,6 @@ func parseProjectDeleteArgs(args []string) (projectName string, apply, showUsage
 	return projectName, apply, false, nil
 }
 
-// runProjectDelete implements `ghost project delete <name-or-id> [--apply]`.
-// Always prints the dry-run summary first. Without --apply it stops there.
-// With --apply, it re-prints the summary and requires re-typing the
-// project's name at a prompt before anything is actually deleted — this is
-// irreversible and there is no undo, so the flag alone is not enough.
 func runProjectDelete() {
 	projectName, apply, showUsage, err := parseProjectDeleteArgs(os.Args[3:])
 	if err != nil {
@@ -242,11 +173,6 @@ func runProjectDelete() {
 	}
 }
 
-// runProjectMergeCore implements the merge behind `ghost project merge`.
-// Both arguments resolve through ResolveProject (id, name, path-prefix, or
-// basename); merging reassigns every child record to the surviving project —
-// preserving memory IDs, links, and pin state — and deletes the old project
-// row. Non-destructive to records, so no confirmation gate (unlike delete).
 func runProjectMergeCore(ctx context.Context, store *memory.Store, out io.Writer, oldArg, newArg string) error {
 	oldID, oldName := resolveForMerge(ctx, store, oldArg)
 	newID, newName := resolveForMerge(ctx, store, newArg)
@@ -287,14 +213,6 @@ func knownProjectNames(ctx context.Context, store *memory.Store) []string {
 	return names
 }
 
-// resolveProjectBindID checks the project argument of `ghost project bind`
-// names an existing project id, or reports the known names and fails. It is
-// the exact-id lookup rather than ResolveProject on purpose: bind is the
-// command a user runs *because* a project does not resolve from its directory,
-// so the name and path steps of the full resolver are the ones least likely to
-// produce the project they meant, and a name that matches two projects would be
-// a coin flip. A miss therefore names the argument as wrong instead of
-// silently binding whichever project looked closest.
 func resolveProjectBindID(ctx context.Context, store *memory.Store, projectID string) (string, error) {
 	if _, ok, err := store.ResolveExactProjectID(ctx, projectID); err != nil {
 		return "", err
@@ -308,21 +226,6 @@ func resolveProjectBindID(ctx context.Context, store *memory.Store, projectID st
 	return projectID, nil
 }
 
-// runProjectBindCore implements `ghost project bind <project> <path>` against
-// an already-open store and prints what changed. detectRemote is injected
-// because it is the only step that has to ask git, and the command's tests
-// must not spawn a process: the CLI passes repo.DetectRemote, the same detector
-// main wires into the store for resolution.
-//
-// The path is resolved here rather than in the store because this package is
-// the one allowed to look at the filesystem. It is made absolute and cleaned,
-// and must be an existing directory — binding a path that does not exist would
-// record a location no session can ever stand in, which is the state the
-// command exists to leave. Everything after that (the recorded-path rules, the
-// claim checks, the write) belongs to the store, which owns them.
-//
-// Pulled out of runProjectBind — which owns arg parsing, bootstrap() and
-// os.Exit — so the refusals are testable without process-exit paths.
 func runProjectBindCore(ctx context.Context, store *memory.Store, out io.Writer, projectID, path string, detectRemote func(string) string) error {
 	if strings.TrimSpace(path) == "" {
 		return errors.New("no path given — usage: ghost project bind <project-id> <checkout-directory>")
@@ -348,9 +251,6 @@ func runProjectBindCore(ctx context.Context, store *memory.Store, out io.Writer,
 	if !info.IsDir() {
 		return fmt.Errorf("not a directory: %s", abs)
 	}
-	// The filesystem root, and only the root, survives Abs+Stat: it is
-	// absolute and it exists, and it is exactly the path that would claim
-	// every directory on the machine.
 	if !memory.StoredPathIsUsable(abs) {
 		return fmt.Errorf("refusing to bind %s: it contains every directory, so sessions anywhere would resolve to this project", abs)
 	}
@@ -362,29 +262,6 @@ func runProjectBindCore(ctx context.Context, store *memory.Store, out io.Writer,
 
 	binding, err := store.BindProjectPath(ctx, id, abs, remote)
 	if err != nil {
-		// The one refusal that does not name what it refused, named here — the
-		// same division of labour `mcpserver.ensureProjectFor` uses for the
-		// project shape, and for the same reason. The predicate's sentence is also
-		// `ghost export`'s, where the caller's text is noise and a hazard, so it
-		// carries no path; a person who typed the directory needs to know which
-		// one was refused, and `assemble.Label` — the renderer `printBinding`
-		// already prints every path through — neutralises the characters the
-		// refusal is about: a line break, a control character and a guillemet
-		// become escapes, and a backtick keeps a backslash in front of it rather
-		// than being replaced, which is Label's own documented form.
-		//
-		// The credential refusal is EXCLUDED, and the exclusion is the whole
-		// subtlety: `assemble.Label` renders a value for a line, it does not
-		// withhold a secret, so appending the path beside
-		// `refusing to store credential-shaped content in path: GitHub personal
-		// access token` would put the token straight back into the one answer
-		// that says Ghost never stores credential values. That refusal already
-		// names the field, so it is handed back untouched — exactly what
-		// `ensureProjectFor` does with the same guard, and for the same reason.
-		//
-		// Only these two refusals are named. The others already carry the path, or
-		// the other project that caused them, and appending a second copy to those
-		// would read as a mistake.
 		if errors.Is(err, memory.ErrBindPathUnprintable) && !errors.Is(err, memory.ErrSecretContent) {
 			return fmt.Errorf("%w — path %s", err, assemble.Label(abs))
 		}
@@ -393,17 +270,8 @@ func runProjectBindCore(ctx context.Context, store *memory.Store, out io.Writer,
 	return printBinding(out, binding)
 }
 
-// printBinding reports the outcome in one of two shapes: the fields that moved
-// for a real bind, and a single line saying so when the command was a re-run,
-// so a user who cannot remember whether they already ran it learns that from
-// the output instead of having to look.
 func printBinding(out io.Writer, binding memory.ProjectBinding) error {
 	label := projectLabel(binding.Name, binding.ProjectID)
-	// The path is a LABEL rather than a token: it is normally full of spaces and
-	// slashes, and it is what a reader passes to `ghost project bind`. It is
-	// still stored text — a portable artifact carries one verbatim — so it goes
-	// through the same renderer as the name, which keeps ordinary paths
-	// byte-identical and neutralises only what could end the line.
 	path := assemble.Label(binding.Path)
 	if !binding.Changed() {
 		_, err := fmt.Fprintf(out, "already bound: %s → %s\n", label, path)
@@ -422,35 +290,6 @@ func printBinding(out io.Writer, binding memory.ProjectBinding) error {
 			return err
 		}
 	}
-	// A project that had no absolute path is one `ghost mcp init` skipped: the
-	// Claude installer writes a memory redirect per absolute checkout, and skips
-	// the rest. Recording one makes `ghost mcp status` count it, so status goes
-	// red on the redirect check until init runs again.
-	//
-	// The sentence names its audience rather than asking the host about it,
-	// because bind cannot know how the user runs Claude Code and the two modes
-	// differ: the ghost Claude Code plugin manages the integration itself, so
-	// `mcp init` returns early writing nothing and `mcp status` returns before
-	// the redirect check. The other three clients have no redirect at all. Only
-	// the standalone, init-managed wiring has this step.
-	//
-	// It also does not promise more than init does. writeRedirects branches on
-	// the file's CONTENT, not on who wrote it: it leaves alone anything that is
-	// not an unedited old-format Ghost redirect, and rewrites a redirect only
-	// when it matches an old generated template exactly — so a hand-written file
-	// carrying both markers is left alone. Status counts a skipped
-	// project as not redirected and prints the same line either way, so without
-	// this clause the advice would leave the check red with nothing to act on.
-	// The wording is the code's own test rather than a claim about provenance,
-	// which the installer has no way to know.
-	// Any newly recorded directory has no redirect yet — writeRedirects only
-	// runs over absolute paths, and it skips a file that is not its own stale
-	// redirect. Status counts the redirect under the path NOW recorded, so a
-	// re-point to a moved checkout goes red exactly like a first bind: the one
-	// on disk is under the old directory and EncodeProjectPath is a pure string
-	// transform of the current path. That is why the guard is PathChanged
-	// rather than "had no absolute path": both cases leave status reporting a
-	// finished repair as broken.
 	if binding.PathChanged {
 		if _, err := fmt.Fprintln(out, "  next: on the standalone Claude Code integration (not the ghost plugin), run\n"+
 			"        `ghost mcp init` to write this checkout's memory redirect\n"+
@@ -462,16 +301,6 @@ func printBinding(out io.Writer, binding memory.ProjectBinding) error {
 	return nil
 }
 
-// projectLabel names a project for a human, preferring "name (id)" so the id
-// the command needs stays visible even when the name is what the user knows.
-//
-// Both halves are stored text and both are rendered: the name through
-// assemble.Label, because a name is a label and is normally full of spaces, and
-// the id through assemble.Token, because an id is a key. A project created over
-// MCP records the caller's `project_id` argument as its name as well as its id,
-// so a save carrying a newline creates a project whose name AND id are one — and
-// this label is printed on the delete summary, the bind report and the unbound
-// notice alike.
 func projectLabel(name, id string) string {
 	if name == "" || name == id {
 		return assemble.Token(id)
@@ -479,19 +308,7 @@ func projectLabel(name, id string) string {
 	return fmt.Sprintf("%s (%s)", assemble.Label(name), assemble.Token(id))
 }
 
-// openDiagnosticStore opens the Ghost database for a command that only
-// reports on it, or returns nil when there is nothing to report. It never
-// creates the file: a diagnostic that bootstraps the store it is diagnosing
-// makes its own "no database" line untrue on the next run. Every failure — a
-// missing database, an unreadable one, a data dir that cannot be resolved —
-// is nil rather than an error, because the caller has nothing to add to a
-// report another check already produced.
 func openDiagnosticStore() *memory.Store {
-	// DataDirPath, not DataDir: the latter creates the directory, and this
-	// helper's whole contract is that it leaves nothing behind. mcpinit's
-	// non-creating paths use the same choice. A GHOST_DEV_FORBID_DATA_DIR refusal
-	// arrives from this same call (#721) and becomes a nil store, which is this
-	// function's own answer to every failure it has: nothing to report.
 	dataDir, err := config.DataDirPath()
 	if err != nil {
 		return nil
@@ -500,15 +317,9 @@ func openDiagnosticStore() *memory.Store {
 	if err != nil {
 		return nil
 	}
-	// A nil logger is honoured as silence; this store never writes, so it has
-	// nothing to report about itself.
 	return memory.NewStore(db, nil)
 }
 
-// writeUnboundProjectNotice reports the projects a session directory can never
-// resolve, each with the command that fixes it. It is called by `ghost mcp
-// status` and prints nothing when there is nothing to fix, so a healthy install
-// gains no new output.
 func writeUnboundProjectNotice(ctx context.Context, out io.Writer, store *memory.Store) error {
 	unbound, err := store.ListUnboundProjects(ctx)
 	if err != nil {
@@ -526,25 +337,9 @@ func writeUnboundProjectNotice(ctx context.Context, out io.Writer, store *memory
 			return err
 		}
 	}
-	// The limit is stated rather than papered over. This notice tests the
-	// recorded path's SHAPE, so a project bound to a checkout that has since
-	// been moved or deleted is not listed — it needs the same command with the
-	// new path, and detecting it would mean a stat whose transient failure
-	// (an unmounted volume, a permission error) would invite an overwrite of a
-	// path that was correct a moment ago.
 	if _, err := fmt.Fprintln(out, "  A recorded path that no longer exists is not detected here — re-bind it with the new path."); err != nil {
 		return err
 	}
-	// The repair is two commands on the standalone Claude Code integration, and
-	// only the first is the bind: its installer writes a per-checkout memory
-	// redirect and skips projects with no absolute path — this exact set — so
-	// without it status reports the repair as half-done. The plugin manages its
-	// own wiring and the other three clients have no redirect, so the line names
-	// the only installation this step applies to instead of implying it applies
-	// to whoever is reading. The MEMORY.md clause is here for the same reason as
-	// in printBinding, in the same terms: init skips a file that does not look
-	// like a Ghost redirect and rewrites one that does but is stale, deciding
-	// by content alone, and status cannot tell that from any other failure.
 	_, err = fmt.Fprintln(out, "  On the standalone Claude Code integration (not the ghost plugin), re-run\n"+
 		"  `ghost mcp init` afterwards to write each new checkout's memory redirect\n"+
 		"  (init overwrites only a MEMORY.md it recognises as its own stale\n"+
@@ -552,9 +347,6 @@ func writeUnboundProjectNotice(ctx context.Context, out io.Writer, store *memory
 	return err
 }
 
-// projectBindUsage is the help for `ghost project bind`. It goes to stdout for
-// -h/--help, which a user reaches for precisely because they do not remember
-// the syntax, and to stderr alongside an error otherwise.
 const projectBindUsage = `Usage: ghost project bind <project-id> <checkout-directory>
 
 Gives a project a recorded checkout, so a session in that directory resolves it.
@@ -570,9 +362,6 @@ remote, a path resolution could never match, and a repository another project
 already claims. Safe to re-run.
 `
 
-// parseProjectBindArgs splits `ghost project bind`'s arguments. Help wins over
-// everything else, so "ghost project bind -h" answers the question rather than
-// complaining about the missing project.
 func parseProjectBindArgs(args []string) (projectID, path string, showHelp bool, err error) {
 	var positional []string
 	for _, a := range args {
@@ -591,20 +380,9 @@ func parseProjectBindArgs(args []string) (projectID, path string, showHelp bool,
 	return positional[0], positional[1], false, nil
 }
 
-// runProjectBind implements `ghost project bind <project-id> <checkout>`.
 func runProjectBind() {
 	project, path, showHelp, err := parseProjectBindArgs(os.Args[3:])
 	if showHelp {
-		// Reported rather than discarded: `-h` is a user who asked a question,
-		// and help text that silently failed to print is indistinguishable from
-		// a command that took no arguments.
-		//
-		// Unreachable through the CLI since handleHelp became the one gate
-		// (#630): runCLI answers `project bind … -h|--help` before dispatch
-		// gets here, and `project bind` has no value flag for the scan to
-		// skip. Kept because parseProjectBindArgs still returns the flag and
-		// both printers emit the same projectBindUsage const, so there is no
-		// second text to drift.
 		if _, err := fmt.Fprint(os.Stdout, projectBindUsage); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: cannot print usage: %v\n", err)
 		}
@@ -615,30 +393,18 @@ func runProjectBind() {
 		os.Exit(1)
 	}
 
-	// failOnConfig, like every other CLI subcommand: the user asked for this
-	// command by name, and running it against half the intended configuration is
-	// worse than an error that names the file.
 	_, _, store := bootstrap(os.Stderr, cliLogLevel(), failOnConfig)
 	defer store.Close() //nolint:errcheck
 
-	// repo.DetectRemote is the same detector main injects into the store, so
-	// the remote recorded here is the remote resolution will later compare
-	// against — two spellings of one repository, not two identities. It is
-	// asked about the path as typed, which is the same repository: git
-	// resolves the symlinks on the way in, and the store records the physical
-	// path either way.
 	if err := runProjectBindCore(context.Background(), store, os.Stdout, project, path, repo.DetectRemote); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-// projectMergeUsage is the help for `ghost project merge`: stderr for the
-// wrong-argument usage error, stdout for -h/--help.
 const projectMergeUsage = `Usage: ghost project merge <old-name-or-id> <new-name-or-id>
 `
 
-// runProjectMerge implements `ghost project merge <old> <new>`.
 func runProjectMerge() {
 	args := os.Args[3:]
 	var positional []string
