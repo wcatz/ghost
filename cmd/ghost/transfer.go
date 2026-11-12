@@ -19,10 +19,6 @@ import (
 	"github.com/wcatz/ghost/internal/portable"
 )
 
-// backupUsage, exportUsage and importUsage are the per-command help texts. Each
-// goes to stdout for -h/--help — a user who asks is not making an error — and
-// to stderr alongside an argument error, so a mistyped flag is answered with the
-// syntax that would have worked.
 const (
 	backupUsage = `Usage: ghost backup [--out <path>]
        ghost backup verify <file>
@@ -167,8 +163,6 @@ refused outright.
 `
 )
 
-// backupOptions, exportOptions and importOptions are the parsed arguments of
-// the three commands.
 type (
 	backupOptions struct {
 		Out string
@@ -178,47 +172,14 @@ type (
 		Out     string
 	}
 	importOptions struct {
-		File  string
-		Apply bool
-		// TrustProvenance keeps each memory's own source, pin state and retention
-		// tier instead of downgrading them. See
-		// memory.ImportOptions.TrustProvenance; the short version is that an artifact
-		// is a file that arrived from somewhere, and on its own authority it does
-		// not get to plant rows that read as your own words or as Ghost's shipped
-		// rules, nor a tier that puts a row beyond every lifecycle pass.
+		File            string
+		Apply           bool
 		TrustProvenance bool
 	}
 )
 
-// parseBackupArgs parses `ghost backup`. An unknown flag is an error rather
-// than being ignored, because the one flag that matters here is --out: a
-// misspelled --ou would otherwise write the default file and leave the user
-// believing it went where they asked.
-//
-// An explicit empty --out is refused for the same reason, and it is more than a
-// spelling nit: `ghost backup --out="$DEST"` with DEST unset reaches the parser
-// as `--out=`, and reading it as "no flag given" wrote the snapshot into the
-// data directory under the timestamped default name and exited 0, so a script
-// that then looked in $DEST did not find the backup it believed it took. Both
-// spellings are refused, as --project is in export, and the default is the flag
-// left off. (VACUUM INTO's O_EXCL means nothing is destroyed either way; the
-// artifact simply lands where the caller did not name.)
-//
-// A REPEATED --out is refused, by occurrence count and before the empty check,
-// naming both values as `ghost context` does for --cwd: nothing is overwritten
-// (VACUUM INTO's O_EXCL refuses an existing path), but `ghost backup --out
-// intended.db --out actual.db` used to snapshot into actual.db, report it, and
-// exit 0 — on the commands people write into a && chain, where the flag
-// arrives from an argument list the operator did not type this time.
 func parseBackupArgs(args []string) (backupOptions, error) {
 	var opts backupOptions
-	// outSeen counts OCCURRENCES of --out rather than testing opts.Out for
-	// emptiness, because that test cannot see `--out A --out=`: the second value
-	// is empty, so a value test reads the first as unset and keeps it, answering
-	// a command line that named two destinations with one. The duplicate is asked
-	// FIRST, as it is in every scope parser here, and both values reach the
-	// sentence through memory.RefusalArg so a credential-shaped path is withheld
-	// rather than printed (#839).
 	outSeen := false
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
@@ -255,10 +216,6 @@ func parseBackupArgs(args []string) (backupOptions, error) {
 	return opts, nil
 }
 
-// parseBackupVerifyArgs parses `ghost backup verify <file>`. Exactly one file:
-// two paths in one run would produce one verdict for a question that has two
-// answers, and a flag is a flag this command has no meaning for — it reads one
-// file, and the only way to change which file is to name a different one.
 func parseBackupVerifyArgs(args []string) (string, error) {
 	var positional []string
 	for _, arg := range args {
@@ -273,40 +230,9 @@ func parseBackupVerifyArgs(args []string) (string, error) {
 	return positional[0], nil
 }
 
-// parseExportArgs parses `ghost export`. Both --flag value and --flag=value are
-// accepted, matching the obsidian command's spelling.
-//
-// --out names a DESTINATION, and a second one is a refusal rather than an
-// override: `ghost export --out intended.jsonl --out actual.jsonl` wrote the
-// artifact to actual.jsonl, reported it and exited 0, and an export is a file
-// handed to someone else — a destination the reader did not intend is a copy
-// under the wrong name, not a preference between two spellings of one. An
-// explicit EMPTY --out is refused too: `--out=` is a script with an unset
-// variable, and reading it as "no flag given" wrote the artifact to the
-// timestamped default path instead of the destination the command line appeared
-// to name. Both refusals name the flag, and the default is the flag left off.
-//
-// --project is the opposite case and refuses a second value, because it is a SCOPE:
-// runExportCore reads an empty projectFilter as every project, so a second --project
-// is two answers to which corpus this artifact holds, and an empty one is the
-// unset-variable spelling that answered "all of it" while the command line looked
-// scoped.
 func parseExportArgs(args []string) (exportOptions, error) {
 	var opts exportOptions
-	// projectSeen counts OCCURRENCES rather than testing the value for emptiness,
-	// because that test cannot see `--project ghost --project=`: it reads the empty
-	// second value as the first being unset, and lets a command line that named the
-	// scope twice export the first scope it happened to spell out. The duplicate is
-	// asked FIRST, as it is in every other parser that takes a scope: a named value
-	// followed by any second value is named as the duplicate it is, and two empty
-	// values stop at the first one, because with no first value there is no scope in
-	// the command line to be a duplicate of.
 	projectSeen := false
-	// outSeen counts OCCURRENCES of --out for the same reason, and for the harm
-	// the paragraph above states: an artifact that lands at a name the command
-	// line named twice. The duplicate is asked before the empty value, so
-	// `--out A --out=` is "given twice" and not "requires a value", and both
-	// values reach the sentence through memory.RefusalArg (#839).
 	outSeen := false
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
@@ -366,10 +292,6 @@ func parseExportArgs(args []string) (exportOptions, error) {
 	return opts, nil
 }
 
-// parseImportArgs parses `ghost import <file> [--apply]`. Exactly one file is
-// accepted: importing two artifacts in one run would interleave their records
-// and produce a store that is the union of both, which is not something either
-// file asked for.
 func parseImportArgs(args []string) (importOptions, error) {
 	var opts importOptions
 	var positional []string
@@ -392,15 +314,8 @@ func parseImportArgs(args []string) (importOptions, error) {
 	return opts, nil
 }
 
-// transferTimeLayout is the UTC timestamp a default backup or export name
-// carries. The same layout as the memory package's backup name, so one
-// convention covers every timestamped file in the data directory.
 const transferTimeLayout = "20060102T150405Z"
 
-// backupDefaultPath resolves where a backup goes. An explicit --out is used
-// verbatim; otherwise the file lands beside the live database with a UTC
-// timestamp, so a series of backups sorts by age and none can be mistaken for
-// the database itself.
 func backupDefaultPath(dbPath, out string, at time.Time) (string, error) {
 	if out != "" {
 		return out, nil
@@ -411,8 +326,6 @@ func backupDefaultPath(dbPath, out string, at time.Time) (string, error) {
 	return memory.BackupFileName(dbPath, at.UTC()), nil
 }
 
-// exportDefaultPath resolves where an artifact goes. "-" means standard output,
-// which is left for the caller to open.
 func exportDefaultPath(dataDir, out string, at time.Time) (string, error) {
 	switch {
 	case out == "-":
@@ -426,22 +339,6 @@ func exportDefaultPath(dataDir, out string, at time.Time) (string, error) {
 	}
 }
 
-// runBackup implements `ghost backup [--out <path>]`.
-//
-// The store is reached through bootstrap(), so this is a read-WRITE open: it
-// runs migrations and seeds the builtin rows, and it is refused outright for a
-// store from a newer Ghost. An earlier version of this comment said "nothing on
-// the source is written", which was false and load-bearing — it made `ghost
-// backup` sound like the read-only way to get a copy, and a user acting on that
-// would have been migrated by a command that read as a read. (VACUUM INTO itself
-// writes only the destination, so the vacuum is not the reason; the open is.)
-//
-// Read-write is kept deliberately. A store behind the current schema is exactly
-// the store a user most wants a restorable copy of, and a read-only open would
-// refuse it — the same version gate export has. So a migration is what this
-// command does on such a store, and it is a migration they need before export
-// works at all. It is safe to run against a live MCP server, which is the point
-// of using the online path rather than copying the files.
 func runBackup() {
 	opts, err := parseBackupArgs(os.Args[2:])
 	if err != nil {
@@ -455,9 +352,6 @@ func runBackup() {
 		os.Exit(1)
 	}
 	dbPath := filepath.Join(dataDir, "ghost.db")
-	// Stat first: a backup that created the database it was asked to back up
-	// would report a snapshot of an empty store, which reads as "you have no
-	// memories" rather than "there is no database".
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
 		fmt.Fprintf(os.Stderr, "error: no database at %s — start a session, or run ghost mcp init, first\n", dbPath)
 		os.Exit(1)
@@ -481,11 +375,6 @@ func runBackup() {
 	}
 }
 
-// runBackupCore takes the snapshot and reports it. Split out of runBackup so the
-// whole command is testable against a temp-dir store, without the argument
-// parsing, the config load or the process exit that surround it — and without
-// re-executing the test binary, which is the one thing a cmd/ghost test must
-// never do.
 func runBackupCore(ctx context.Context, store *memory.Store, out io.Writer, dest string) error {
 	res, err := store.Backup(ctx, dest)
 	if err != nil {
@@ -494,13 +383,6 @@ func runBackupCore(ctx context.Context, store *memory.Store, out io.Writer, dest
 	return printBackupReport(out, res)
 }
 
-// printBackupReport names the file and every count a restore would be checked
-// against. The counts are per table rather than a single total, because "the
-// file is there" is not the question — "does it hold what my store held" is.
-//
-// The manifest is named too. It is a second file the user did not ask for, and
-// this report is the only place they learn it exists: a backup whose description
-// is in a file nobody was told about is a backup nobody will check.
 func printBackupReport(out io.Writer, res memory.BackupResult) error {
 	if _, err := fmt.Fprintf(out, "backed up %s (%d bytes)\n", res.Path, res.Bytes); err != nil {
 		return err
@@ -528,14 +410,6 @@ func printBackupReport(out io.Writer, res memory.BackupResult) error {
 	return nil
 }
 
-// runBackupVerify implements `ghost backup verify <file>`.
-//
-// Unlike every other command here it opens no store: bootstrap() migrates the
-// database in the data directory and seeds its builtin rows, and the moment a
-// user reaches for this command is the moment they are least sure what state
-// their own store is in. Nothing here reads anything but the file it was given
-// and the manifest beside it, so the check is equally safe against a copy on
-// another machine and against a copy of a store this binary has never seen.
 func runBackupVerify(args []string) {
 	path, err := parseBackupVerifyArgs(args)
 	if err != nil {
@@ -548,16 +422,6 @@ func runBackupVerify(args []string) {
 	}
 }
 
-// runBackupVerifyCore checks one file and prints every check. Split out of
-// runBackupVerify for the same reason runBackupCore is split out of runBackup:
-// the whole command, minus the argument parsing and the process exit.
-//
-// The report is printed even when the run fails, hard errors included — the
-// checks that did run are the diagnosis, and a file that is not a database at
-// all still produces a report worth reading. A failed check is an error return
-// as well as a line of output, because the exit code is what a script branches
-// on: a verify that printed "failed" and exited 0 would be read as a pass by
-// every caller that is not parsing the text.
 func runBackupVerifyCore(ctx context.Context, out io.Writer, path string) error {
 	rep, err := memory.VerifyBackup(ctx, path)
 	if perr := printVerifyReport(out, rep, err); perr != nil && err == nil {
@@ -572,34 +436,6 @@ func runBackupVerifyCore(ctx context.Context, out io.Writer, path string) error 
 	return nil
 }
 
-// printVerifyReport states the file, what it holds, and every check with its
-// verdict. The error is a parameter rather than something printVerifyReport
-// infers, because a run that failed has established nothing: printing it as
-// though it had would put a verdict word on a report with no checks in it.
-//
-// The verdict is a column of its own rather than folded into the detail,
-// because the difference between ok, failed and skipped is the whole report. A
-// check that did not run says nothing about the file, and a reader who cannot
-// see that difference has been handed a reassurance they did not earn — which is
-// the exact failure this command exists to prevent, one level up.
-//
-// Three verdicts, and the middle one is the point of having three:
-//
-//	verified  every check ran and passed
-//	checked   nothing failed, but something did not run — which is what a
-//	          pre-migration copy, taken with no manifest, is
-//	refusing  a check failed, or the file could not be checked at all
-//
-// "verified" is reserved for the first. It is the strongest word the command
-// can print, and a file whose hash was never checked has not earned it: the side
-// car is the part a user forgets to copy, so a manifest-less file is the single
-// most likely thing to arrive here, and it must not be answered as though the
-// same thing had been established as for a file with a manifest.
-//
-// Nothing here is printed unless it was measured. The size is gated on
-// BytesRead and the row counts on CountsRead, because the zero value of a size is
-// a 0-byte file and the zero value of a row count is an empty database — neither
-// can stand for "not measured", and a run that reached neither says so.
 func printVerifyReport(out io.Writer, rep memory.VerifyReport, runErr error) error {
 	skipped := 0
 	for _, c := range rep.Checks {
@@ -618,15 +454,9 @@ func printVerifyReport(out io.Writer, rep memory.VerifyReport, runErr error) err
 	}
 
 	headline := rep.Path
-	// Each clause is gated on the flag for what it states, never on the value:
-	// the zero value of a size is a 0-byte file and the zero value of a row count
-	// is an empty database, so neither can stand for "not measured".
 	if rep.BytesRead {
 		headline += fmt.Sprintf(": %d bytes", rep.Bytes)
 	}
-	// One arm, not three: the counts are printed only where they were read, and
-	// the condition is written once so there is no second path through this
-	// switch that could print a count the report does not have.
 	switch {
 	case runErr != nil || !rep.CountsRead:
 		headline += ", not checked"
@@ -641,12 +471,6 @@ func printVerifyReport(out io.Writer, rep memory.VerifyReport, runErr error) err
 			return err
 		}
 	}
-	// The footer distinguishes the two ways a sidecar can be unusable, because
-	// they are opposites and "no manifest" is wrong for one of them: a missing
-	// sidecar is expected and merely limits what was checked, while one that is
-	// there and unreadable is damage, and telling that reader to go look for a
-	// file sitting right beside the snapshot is the "treating it as absent" this
-	// command is built not to do.
 	switch {
 	case rep.ManifestPresent && !rep.HasManifest:
 		if _, err := fmt.Fprintf(out, "  the manifest at %s is present but could not be read: %v\n",
@@ -654,8 +478,6 @@ func printVerifyReport(out io.Writer, rep memory.VerifyReport, runErr error) err
 			return err
 		}
 	case !rep.ManifestPresent:
-		// Once, at the bottom: the table above already says it in two rows, and
-		// saying it a third time in prose would bury the line being looked for.
 		if _, err := fmt.Fprintf(out, "  (no manifest at %s, so the hash and the recorded counts were not checked)\n",
 			rep.ManifestPath); err != nil {
 			return err
@@ -664,13 +486,6 @@ func printVerifyReport(out io.Writer, rep memory.VerifyReport, runErr error) err
 	return nil
 }
 
-// runExport implements `ghost export [--project <name>] [--out <file.jsonl>]`.
-//
-// The store is opened read-only: an export is a read, and running it against a
-// live MCP server must not be able to change anything. The summary goes to
-// stdout for a file destination and to stderr when the artifact itself is
-// stdout, so `ghost export --out - | jq` gets clean JSON with the summary out of
-// the pipe's way.
 func runExport() {
 	opts, err := parseExportArgs(os.Args[2:])
 	if err != nil {
@@ -706,17 +521,6 @@ func runExport() {
 	}
 }
 
-// exportPublish moves the finished temporary artifact to its final name and
-// removes the temporary name. It is a variable so a test can make the last step
-// fail, which is the one a killed process cannot be made to do on demand.
-//
-// os.Link, not os.Rename, because a rename silently replaces whatever appeared
-// at dest since the check in runExportCore, and the contract is that an existing
-// file is never overwritten. A filesystem without hard links (FAT, some network
-// mounts) falls back to claiming dest with O_EXCL and copying the temporary file
-// in, which refuses an existing file just as the link does. That fallback is not
-// atomic: a kill mid-copy can leave a partial file at dest, so it is the degraded
-// path, and on any error it removes the file it created.
 var exportPublish = func(tmp, dest string) error {
 	if err := exportLink(tmp, dest); err == nil {
 		_ = os.Remove(tmp)
@@ -727,12 +531,8 @@ var exportPublish = func(tmp, dest string) error {
 	return exportPublishByCopy(tmp, dest)
 }
 
-// exportLink is the hard-link step of exportPublish, a variable so a test can
-// make it fail the way a link-less filesystem does.
 var exportLink = os.Link
 
-// exportPublishByCopy claims dest exclusively, copies the finished temporary
-// file into it, syncs, and removes the temporary file.
 func exportPublishByCopy(tmp, dest string) error {
 	src, err := os.Open(tmp)
 	if err != nil {
@@ -761,15 +561,6 @@ func exportPublishByCopy(tmp, dest string) error {
 	return nil
 }
 
-// runExportCore writes the artifact and reports what it wrote. On a file
-// destination the artifact is written to a 0600 temporary file beside it and
-// published under its name only once complete and synced, so a failure part-way
-// leaves nothing at the destination name.
-//
-// summary is where the run states what it did, and warn is where it names the
-// records it could not write. They are separate writers because the artifact may
-// BE stdout (`ghost export -`), and a warning that lands inside a JSONL stream
-// corrupts it for the reader that is piping it straight into an import.
 func runExportCore(ctx context.Context, store *memory.Store, summary, warn io.Writer, dest, projectFilter string) error {
 	if dest == "-" {
 		stats, err := portable.Export(ctx, store, os.Stdout, projectFilter)
@@ -781,23 +572,11 @@ func runExportCore(ctx context.Context, store *memory.Store, summary, warn io.Wr
 		}
 		return reportSkippedRecords(warn, stats.Skipped)
 	}
-	// An existing destination is refused for the same reason a backup refuses
-	// one: overwriting it would destroy the copy someone may be holding. The
-	// message says so, because "file exists" on its own reads as an obstacle
-	// rather than as the decision this is. Lstat, so a dangling symlink counts.
 	if _, err := os.Lstat(dest); err == nil {
 		return fmt.Errorf("refusing to overwrite an existing file: %s", dest)
 	} else if !os.IsNotExist(err) {
 		return fmt.Errorf("check %s: %w", dest, err)
 	}
-	// The artifact is written under a temporary name in the destination
-	// directory and only published under the requested name once it is complete
-	// and synced. A kill or a failure part-way therefore leaves nothing at the
-	// name the user asked for: an artifact carries no trailer, so a file cut on a
-	// record boundary would import cleanly and look whole. The temp name is a
-	// fixed prefix, never derived from the destination name, so a destination at
-	// NAME_MAX still works. os.CreateTemp creates
-	// the file 0600, the width the database has, before any record is written.
 	f, err := os.CreateTemp(filepath.Dir(dest), ".ghost-export-*.tmp")
 	if err != nil {
 		return fmt.Errorf("create %s: %w", dest, err)
@@ -809,7 +588,6 @@ func runExportCore(ctx context.Context, store *memory.Store, summary, warn io.Wr
 			exportErr = fmt.Errorf("sync %s: %w", dest, err)
 		}
 	}
-	// Close before publishing, so a write error the close surfaces is not lost.
 	if err := f.Close(); err != nil && exportErr == nil {
 		exportErr = fmt.Errorf("close %s: %w", dest, err)
 	}
@@ -817,114 +595,34 @@ func runExportCore(ctx context.Context, store *memory.Store, summary, warn io.Wr
 		exportErr = exportPublish(tmp, dest)
 	}
 	if exportErr != nil {
-		// A partial artifact is worse than none, and so is a stray temp file.
-		// Removing it leaves the failure as the only record of the run.
 		if rmErr := os.Remove(tmp); rmErr != nil && !os.IsNotExist(rmErr) {
 			return fmt.Errorf("%w (and the temporary file %s could not be removed: %v)", exportErr, tmp, rmErr)
 		}
 		return exportErr
 	}
-	// From here the artifact is COMPLETE and importable, so the file is KEPT even
-	// when records were left out of it. That is the whole difference from the
-	// branch above: this artifact imports cleanly, it is just not the whole
-	// store, and deleting it would destroy a working backup over a warning about
-	// the rows it does not contain.
 	if err := printExportSummary(summary, dest, stats); err != nil {
 		return err
 	}
 	return reportSkippedRecords(warn, stats.Skipped)
 }
 
-// repairableKinds are the record kinds Ghost can delete SELECTIVELY, which is not
-// every kind it exports. A project goes through `ghost project delete`; a memory
-// through the `ghost_memory_delete` tool. A task and a decision have no such
-// surface — no CLI subcommand, no MCP tool, and no DELETE against either table in
-// internal/memory.
-//
-// "Selectively" is the whole distinction, and an earlier version of this comment
-// got it wrong in both directions. `tasks.project_id` and `decisions.project_id`
-// are both `REFERENCES projects(id) ON DELETE CASCADE` (schema.go), and
-// Store.DeleteProject counts both, so `ghost project delete` DOES remove a task or
-// a decision row — just never alone. The report therefore says "by itself" and
-// names the blunt repair, because "cannot be removed through Ghost at all" would
-// stop an operator looking for a repair that is one command away.
-//
-// And there is no top-level `ghost delete`: `case "delete"` sits inside
-// `case "project":` in dispatchCommand, so the only spelling is
-// `ghost project delete`. Naming a bare `delete` would send someone to a
-// top-level usageError and exit 2.
 var repairableKinds = map[string]bool{
 	portable.TypeProject: true,
 	portable.TypeMemory:  true,
 }
 
-// validityAdvice is the repair for a memory left out for its validity window or
-// its confidence. ghost_memory_update takes all four fields and replaces a value
-// in place, keeping the id, links and history; it cannot remove a stamp, so
-// clearing one is the delete-and-re-save the sentence names second.
-//
-// A memory repaired in place may be named again on the next export if its
-// evidence records include a stale copy of the same claim. The evidence record
-// is not updated by ghost_memory_update, so re-export will refuse the row a
-// second time — the supported route is the same delete-and-save-again the
-// evidence advice names, with its stated cost.
 const validityAdvice = "  A memory left out for its valid_from, valid_until, verified_at or confidence keeps its id and can be repaired in place: replace the value with ghost_memory_update (an RFC 3339 instant or a date, a window that ends after it starts, a confidence from 0 to 1), then re-export. The tool can replace a stamp but not remove one, so to clear a stamp, delete the row with ghost_memory_delete and re-save it without it. A repaired row may be named again if its evidence records hold a stale copy of the same claim — the evidence row is not updated by ghost_memory_update, so the supported route is the same delete-and-save-again the evidence advice names, with its stated cost."
 
-// evidenceAdvice is the repair for a memory left out because one of its EVIDENCE
-// records carries a stamp no accepted form reads or a rating outside 0 to 1.
-//
-// It is a sentence of its own rather than another clause of validityAdvice,
-// because the repair is not the same one: ghost_memory_update takes the four
-// fields of a memory's own claim and no tool edits an evidence row at all, so
-// naming that tool here would send the operator to a call that rejects the
-// edit. The row's id is fine, but deleting the memory with ghost_memory_delete
-// and re-saving it loses its links, its history and its evidence. The advice
-// names the delete-and-re-save so the operator can decide whether the repair
-// is worth the cost.
 const evidenceAdvice = "  A memory left out because one of its evidence records carries a stamp no accepted form reads or a rating outside 0 to 1 keeps its id, but no tool edits an evidence record: they are appended by a save, an import and a reflect. The repair is to delete the row with ghost_memory_delete and re-save it, which loses its links, history and evidence, and then re-export."
 
-// linkAdvice is the repair for an EDGE of the memory graph left out of the
-// artifact.
-//
-// It is a sentence of its own because an edge is neither re-keyable nor
-// deletable through Ghost: there is no command that edits an edge, and the only
-// command that removes one withdraws the CLAIM rather than repairing the row.
-// The claim itself is not wrong — the edge is live, and the demotion it causes
-// still applies in this store — so the sentence says that first: what was left
-// out is the TRAVEL of the edge, not the edge.
-//
-// The field that stopped it is named on the `!` line above, and correcting it
-// is an edit of the database, which is the same answer the token-field advice
-// gives for the fields no tool writes.
 const linkAdvice = "  An edge left out is a claim this store still holds: the artifact does not carry it, so the claim does not travel with this export, and the demotion it causes stays here. The field that stopped it is named above, and no tool edits an edge — `ghost supersede <project> --withdraw <source> <target> --apply` (or the ghost_link_withdraw tool) withdraws a claim you do not want, and correcting the field itself is an edit of the database."
 
-// reportSkippedRecords names every record an export left out and returns an error
-// when there was one, so the command exits non-zero and a backup script notices.
-//
-// The error mirrors the importer's: import counts its rejections and returns an
-// error AFTER printing the per-record report, and this does the same for the rows
-// it could not write. A count of what was written is not a count of what exists,
-// and a partial export reported as a success is the failure mode worth spending
-// an exit code on.
 func reportSkippedRecords(out io.Writer, skipped []portable.SkippedRecord) error {
 	if len(skipped) == 0 {
 		return nil
 	}
 	var hasRepairable, hasUnrepairable, hasSecret, hasScope, hasScopeChar, hasOrphan, hasValidity, hasEvidence, hasLink bool
 	for _, sk := range skipped {
-		// The id through assemble.Token, the same renderer the import report uses
-		// for the id it names: an id carrying a newline would forge a line on the
-		// very report that exists to name it (#791). Such an id is exactly what
-		// gets here, so this is not a precaution.
-		//
-		// The reason beside it is the importer's own message, and for a credential
-		// refusal it names the FIELD and nothing else — so this line is safe to
-		// print for the same reason the import report's is. The value itself is in
-		// no SkippedRecord field and never reaches this writer.
-		// An edge of the graph is identified by both ends and its relation, not
-		// only by the memory that makes the claim: two refused edges from the
-		// same source are otherwise indistinguishable on the report. The import
-		// side names them through linkDetail, and this side does the same.
 		label := assemble.Token(sk.ID)
 		if sk.Type == portable.TypeLink && sk.Detail != "" {
 			label = sk.Detail + " (" + assemble.Token(sk.ID) + ")"
@@ -932,43 +630,22 @@ func reportSkippedRecords(out io.Writer, skipped []portable.SkippedRecord) error
 		if _, err := fmt.Fprintf(out, "  ! left out: %s %s — %s\n", sk.Type, label, sk.Reason); err != nil {
 			return err
 		}
-		// An orphan is in neither bucket: its own bytes were never judged and its
-		// id is fine, so re-keying or deleting it repairs nothing — the project is
-		// what was refused, and the child comes back when the project does.
 		if sk.Orphan {
 			hasOrphan = true
 			continue
 		}
-		// A validity or confidence refusal is in neither bucket either: the id is
-		// fine and ghost_memory_update repairs the row in place, so the re-key and
-		// delete advice would send the operator to the one repair that loses the
-		// row's links and history.
 		if sk.Validity {
 			hasValidity = true
 			continue
 		}
-		// An evidence refusal is in neither bucket either, for the same reason and
-		// a second one: the id is fine, and no tool edits an evidence row, so the
-		// re-key advice would send the operator to an edit that cannot be made and
-		// the delete advice would not say why the row is in the artifact's way.
 		if sk.Evidence {
 			hasEvidence = true
 			continue
 		}
-		// An EDGE is in a bucket of its own, and it must not fall into the
-		// "unrepairable" one: that sentence names a command per KIND, and it
-		// looks up the kinds it names — a link in that bucket would leave the
-		// list empty and the sentence would print nothing at all, or name a
-		// kind it has no sentence for. An edge is not re-keyable and not
-		// deletable either, so it gets its own advice below.
 		if sk.Type == portable.TypeLink {
 			hasLink = true
 			continue
 		}
-		// A batch can hold both kinds, so the advice is collected rather than
-		// decided from the first row: naming a project command for a task is the
-		// mistake this exists to stop, and deciding from row one would do exactly
-		// that to every task after a project.
 		if repairableKinds[sk.Type] {
 			hasRepairable = true
 		} else {
@@ -984,36 +661,7 @@ func reportSkippedRecords(out io.Writer, skipped []portable.SkippedRecord) error
 			hasScopeChar = true
 		}
 	}
-	// The credential advice is printed FIRST and separately, because it is not an
-	// alternative to the re-key advice below but a different thing entirely, and
-	// an operator who read the re-key sentence first would conclude that a
-	// credential-shaped row has to be DELETED to get rid of the value. It has not:
-	// the row is fine apart from the one field, the field is the value, and
-	// replacing the value with a pointer to where it lives is both the documented
-	// policy and the fix that keeps the memory.
-	//
-	// The command is named per KIND, and the field lists inside it are DERIVED from
-	// the tools' own argument structs (mcpserver.EditableFieldList) rather than
-	// written here. The first version of this sentence transcribed them, and it was
-	// wrong in four places: it promised `ghost_memory_update` could edit a memory's
-	// agent and session_id (neither is an argument — the tool writes them from the
-	// EDITING SESSION's provenance, and deliberately does not let a caller name
-	// their own author) and that `ghost_task_update` could edit a task's title and
-	// notes (it takes status, priority and description; a task's title is written at
-	// insert and its notes only by ghost_task_complete). A user who followed it got
-	// a rejected call, which is worse than no advice at all — the harm the delete
-	// sentence below is careful to avoid by naming only commands that exist.
-	//
-	// A transcribe-and-hope list is the same mistake as a second refusal predicate,
-	// and it drifted for the same reason. Deriving it means a field added to a tool
-	// is a field this sentence names, and one removed stops being named.
 	if hasSecret {
-		// The paragraph, in three moves and no more: the refusal is by design, the
-		// value is not printed, the fix is to point at where the value lives, and
-		// the re-export is the LAST step rather than an afterthought — a corrected
-		// row is still refused by the next export until the artifact is written
-		// again, so an operator who edits the field and stops has changed nothing a
-		// restore will read.
 		if _, err := fmt.Fprintln(out, "  A credential-shaped field is refused on import BY DESIGN and the value is never stored — this report names the field, never the value. Replace the value with WHERE it lives and how to read it, never the value itself, then re-export: a corrected row is still refused until the artifact is written again."); err != nil {
 			return err
 		}
@@ -1046,41 +694,17 @@ func reportSkippedRecords(out io.Writer, skipped []portable.SkippedRecord) error
 			return err
 		}
 	}
-	// Both advice sentences below are per-BATCH and each names only the kinds it
-	// applies to, so a mixed batch gets both: an operator with a skipped project
-	// still needs the command even when the same artifact also skipped a task.
-	//
-	// The repair is KIND-AWARE, because a command that cannot delete the row is
-	// worse than no command at all: the operator is told what to type, types it,
-	// and gets "project not found" or a no-op. Only a project and a memory can be
-	// deleted SELECTIVELY — `ghost project delete <project>` (there is no
-	// top-level `ghost delete`) and the `ghost_memory_delete` tool. A task and a
-	// decision cannot, and for those two the sentence says so while naming the
-	// blunt repair that does work.
 	if hasRepairable {
-		// "an id this build accepts" was the whole sentence when a shape refusal was
-		// the only possible reason, and it is now too narrow: a project refused for
-		// an empty name, or a memory refused for credential-shaped content, is not
-		// fixed by re-saving it under a different id. So the sentence names the
-		// reason the report already gave and points at the other one, which is the
-		// edit the field needs.
 		phrase := "delete the row and re-save it under an id this build accepts"
 		if hasSecret {
 			phrase = "delete the row and re-save it (for a credential-shaped field, editing the field is usually what you want instead — see above)"
 		}
 		if hasScope && !hasSecret {
-			// A scope over its bound is not fixed by a different id either. No tool
-			// edits a stored scope, so the repair is the delete-and-save the sentence
-			// already names, with the scope kept inside the bounds this time.
 			phrase = fmt.Sprintf("delete the row and re-save it with a shorter scope (at most %d keys, each key at most %d bytes and each value at most %d bytes)", memory.MaxScopeKeys, memory.MaxScopeKeyLen, memory.MaxScopeValueLen)
 		}
 		if hasScope && hasScopeChar && !hasSecret {
 			phrase = fmt.Sprintf("delete the row and re-save it with a shorter scope (at most %d keys, each key at most %d bytes and each value at most %d bytes) containing no blank, NUL, control, FORMAT or line-separator characters", memory.MaxScopeKeys, memory.MaxScopeKeyLen, memory.MaxScopeValueLen)
 		} else if hasScopeChar && !hasSecret {
-			// A scope with invalid characters is not fixed by a different id either.
-			// No tool edits a stored scope, so the repair is the delete-and-save the
-			// sentence already names, with the scope cleaned of blank, NUL, control,
-			// invisible FORMAT characters and line-separator characters.
 			phrase = "delete the row and re-save it with a scope containing no blank, NUL, control, FORMAT or line-separator characters"
 		}
 		if _, err := fmt.Fprintf(out, "  To include it, %s: `ghost project delete <project>` drops that project and every row under it, and a memory goes through the ghost_memory_delete tool.\n", phrase); err != nil {
@@ -1112,11 +736,6 @@ func reportSkippedRecords(out io.Writer, skipped []portable.SkippedRecord) error
 			return err
 		}
 	}
-	// "because this build cannot import them" was accurate while a shape refusal was
-	// the only possible reason and is too narrow now: the exporter applies the
-	// importer's own predicates (#813), so a record is left out for exactly the
-	// reasons `ghost import` would give — which is the whole point, and is what
-	// the sentence has to say rather than implying a Ghost quirk.
 	why := "because `ghost import` would refuse them"
 	if hasSecret {
 		why = "because `ghost import` refuses them — the credential guard by design"
@@ -1124,95 +743,29 @@ func reportSkippedRecords(out io.Writer, skipped []portable.SkippedRecord) error
 	return fmt.Errorf("%s left out of this artifact, %s — they are named above, and the artifact is complete for every other record", countLabel(len(skipped)), why)
 }
 
-// secretFieldFixers is the field-to-tool mapping the credential advice is built
-// from, and it is keyed by the FIELD rather than by the record kind — because a
-// field is what the `!` line above named, so it is what the operator is holding.
-//
-// The keys are the column names `memory.CheckImported*` reports, which is what
-// `portable.SkippedRecord.Reason` carries, so the advice and the refusal name the
-// same thing. Every VALUE is checked against the tool's real arguments by
-// TestEveryCredentialFieldIsEditableByTheToolTheAdviceNames — the test that exists
-// because the first version of this map was a transcription and was wrong in four
-// places.
-//
-// It is deliberately short: only the fields that are BOTH credential-guarded and
-// tool-editable. A field in neither list is a bug, which
-// TestTheCredentialAdviceCoversEveryGuardedField is what catches.
 var secretFieldFixers = map[string]string{
 	"content":     "ghost_memory_update",
 	"tags":        "ghost_memory_update",
 	"source_ref":  "ghost_memory_update",
 	"description": "ghost_task_update",
-	// notes is writable, but only by ghost_task_complete — which also marks the
-	// task done, so secretRepairAdvice names it with that consequence rather than
-	// as a neutral edit.
-	"notes": "ghost_task_complete",
+	"notes":       "ghost_task_complete",
 }
 
-// secretUnfixableRoutes is what to do about a credential-guarded field that no
-// TOOL can write, and it is a table of sentences rather than one clause naming the
-// columns.
-//
-// One clause was the first version and it was wrong in two ways, both found by
-// review. It said those columns are "written only by a save, a create or a restore",
-// which is false for a memory's agent and session_id — the update DOES write both,
-// from the editing session's identity — and for a project's path, which
-// `ghost project bind` writes. And it said the only route was a direct database
-// edit, which sends an operator to hand-edit SQLite while a shipped command would
-// have done it: for a project's path, `ghost project bind` is the route, and the
-// alternative it would have offered instead — `ghost project delete` — CASCADES
-// away every memory in that project. An operator following the wrong advice here
-// loses data, which is worse than the wrong field list the previous commit removed.
-//
-// So each group gets its own sentence with its own true route, and each says why
-// there is no tool, because "no tool" with no reason reads as a defect.
 var secretUnfixableRoutes = []string{
-	// A memory's agent and session_id. The UPDATE writes both, from the editing
-	// session's provenance (provenanceFor) — a caller cannot name their own
-	// author, which is the design. So the tool does write the column and still
-	// cannot clear a credential from a pre-#656 row: the edit would replace the
-	// value with the editing session's own token.
 	"a memory's agent and session_id — the memory update overwrites both with the EDITING SESSION's identity, because a caller must not be able to name its own author, so it cannot clear a value a pre-#656 row already holds; edit the row's agent and session_id in the database directly",
 
-	// A memory's EVIDENCE fields. No tool writes a memory_provenance row at all —
-	// they are appended by a save, an import and a reflect, and nothing edits one.
-	// The one surface that reaches them is `ghost history purge`, which DELETES
-	// them, and that is a redaction of the whole memory's history rather than an
-	// edit of a field, so it is named as what it is.
 	"a memory's evidence agent, session_id and source_ref — no tool writes an evidence row; they are appended by a save, an import and a reflect, and the only surface that reaches one is `ghost history purge <memory-id>`, which erases the memory's whole recorded history rather than editing a field",
 
-	// A memory's scope keys and values (reported as scope_key and scope). Written
-	// at save and by no update: ghost_memory_update takes no scope.
 	"a memory's scope keys and values (scope_key and scope) — written when the memory is saved; `ghost_memory_update` takes no scope, so the only routes are to delete the memory with ghost_memory_delete and save it again with a clean scope, or to edit the row's scope in the database directly",
 
-	// A task's title. Written at insert and by no update.
 	"a task's title — written when the task is created; `ghost_task_update` takes status, priority and description only, so the only route is the database directly",
 
-	// A decision's fields. No decision update tool exists.
-	//
-	// `tags` is here rather than in the map above for a reason the map's own keys
-	// cannot express: `secretFieldFixers` is keyed by field because a field is what
-	// the `!` line named, and `tags` is editable on a MEMORY row and not on a
-	// decision one. So this sentence names the field and names the tool that does
-	// not reach it — otherwise a reader holding a decision whose tag was refused
-	// reads the `ghost_memory_update` line, runs it against a decisions row, and
-	// gets a rejected call. That is the same harm as the delete sentence naming a
-	// command that cannot run, one level up: a route that exists for a different
-	// record.
 	"a decision's title, decision, rationale, tags and alternatives — there is no decision update tool of any kind, and `ghost_memory_update` edits a MEMORY's tags rather than a decision's, so the only route is the database directly",
 
-	// A project's name and path — and the two are NOT the same case, which is
-	// why they are two clauses. `ghost project bind` writes path (and
-	// repo_remote), so a credential in a path has a shipped command. Its name is
-	// NOT written by anything: a project is created, bound, merged or deleted.
 	"a project's path — `ghost project bind <project-id> <checkout-directory>` rewrites it, and note that `ghost project delete` is NOT the fix here: it cascades away every memory in the project",
 	"a project's name — nothing rewrites it; a project is created, bound, merged or deleted, never renamed, so the only route is the database directly",
 }
 
-// editableBy reports whether a tool really takes a field, read from the tool's own
-// argument struct rather than from the mapping beside it. It is the check that makes
-// secretFieldFixers safe to keep, and it is why the sentence is built from the
-// derived answer instead of from the map's own key.
 func editableBy(tool, field string) bool {
 	for _, f := range mcpserver.EditableFields(tool) {
 		if f == field {
@@ -1222,36 +775,17 @@ func editableBy(tool, field string) bool {
 	return false
 }
 
-// printSecretFixes writes the credential paragraph's two halves as a LEAD-IN and
-// then one line per group, rather than as a single sentence.
-//
-// The one-sentence version was tried and is unreadable: six groups each with a
-// reason and a route came to roughly 1,500 characters on one line, and a reader
-// hunting for their own field cannot find it in that. One line per group is the
-// form a person can scan, and it is the form every other advice paragraph in this
-// function already takes.
 func printSecretFixes(out io.Writer) error {
 	byTool := map[string][]string{}
 	var drifted []string
 	for field, tool := range secretFieldFixers {
 		if !editableBy(tool, field) {
-			// The mapping has drifted from the tool it names, which is the failure
-			// the review found. Better to report the field as unwritable than to
-			// name a tool that will reject the call, and
-			// TestEveryCredentialFieldIsEditableByTheToolTheAdviceNames fails on
-			// this too — but the report must still be true if a test is ever not
-			// run.
 			drifted = append(drifted, field)
 			continue
 		}
 		byTool[tool] = append(byTool[tool], field)
 	}
 
-	// Grouped BY TOOL, one line each. The first version said "`content` through
-	// `ghost_memory_update` edits category, confidence, content, …" once per field,
-	// which is nine repetitions of the same clause and a reader cannot tell which
-	// repetition applies to the field they are holding. A tool takes several of the
-	// fields, so one line per tool says it once.
 	tools := make([]string, 0, len(byTool))
 	for tool := range byTool {
 		tools = append(tools, tool)
@@ -1259,18 +793,9 @@ func printSecretFixes(out io.Writer) error {
 	sort.Strings(tools)
 	for _, tool := range tools {
 		line := fmt.Sprintf("  · %s edits %s", mcpserver.EditableFieldList(tool), fieldListInToolOrder(tool, byTool[tool]))
-		// ghost_task_complete is not a neutral edit: it marks the task done. Saying
-		// "notes" without that would send someone to close a task to clear a token
-		// out of it.
 		if tool == "ghost_task_complete" {
 			line += " — which also marks the task done"
 		}
-		// `tags` is the one field on any of these lines whose fix depends on the
-		// RECORD KIND (#835). It is a memory column this tool edits, and a decision
-		// has no update tool of any kind — so naming it bare here reads as covering
-		// both, and a reader holding a decision row runs this call and gets a
-		// rejection. The decision's own sentence is below, in the unwritable list;
-		// this says so rather than leaving the reader to find it.
 		if tool == "ghost_memory_update" && slices.Contains(byTool[tool], "tags") {
 			line += " — on a memory row; a decision's tags have no tool (see below)"
 		}
@@ -1293,7 +818,6 @@ func printSecretFixes(out io.Writer) error {
 	return nil
 }
 
-// mapPlural is "1 field" or "N fields", for the drifted sentence above.
 func mapPlural(n int) string {
 	if n == 1 {
 		return "1 field"
@@ -1301,9 +825,6 @@ func mapPlural(n int) string {
 	return fmt.Sprintf("%d fields", n)
 }
 
-// fieldListInToolOrder renders the subset of a tool's fields that this report is
-// about, in the tool's own order so the reader meets them as the tool's schema
-// states them.
 func fieldListInToolOrder(tool string, fields []string) string {
 	want := make(map[string]bool, len(fields))
 	for _, f := range fields {
@@ -1318,10 +839,6 @@ func fieldListInToolOrder(tool string, fields []string) string {
 	return mcpserver.HumanFieldList(kept)
 }
 
-// printExportSummary states where the artifact is and what it holds, and says in
-// the SAME line when it does not hold everything — because a headline that counts
-// only what was written reads as a count of the store, which is the claim a
-// backup script is about to act on.
 func printExportSummary(out io.Writer, path string, stats portable.Stats) error {
 	headline := fmt.Sprintf("exported %s to %s",
 		pluralRecords(stats.Projects, stats.Memories, stats.Links, stats.Tasks, stats.Decisions), path)
@@ -1331,10 +848,6 @@ func printExportSummary(out io.Writer, path string, stats portable.Stats) error 
 	if _, err := fmt.Fprintln(out, headline); err != nil {
 		return err
 	}
-	// The edges that did not travel get their own line, because they are lost
-	// and nothing else in the report would say so: the demotion an edge causes
-	// goes with it, and a reader of the artifact would not know the store held
-	// a claim the file no longer carries.
 	if stats.LinksLeftOut > 0 {
 		if _, err := fmt.Fprintf(out, "  %s left out: an endpoint of the edge is not a memory this artifact carries, so the edge did not travel\n",
 			pluralCount(stats.LinksLeftOut, "link", "links")); err != nil {
@@ -1344,69 +857,21 @@ func printExportSummary(out io.Writer, path string, stats portable.Stats) error 
 	return nil
 }
 
-// printImportReport states what an import did, or — for a dry run — what it
-// would do. The headline leads with the count because that is what a reader
-// printRecordLine reports one record's outcome, and is what makes a dry run
-// reviewable: the reader sees each memory's content prefix, not just a count.
 func printRecordLine(out io.Writer, r portable.RecordResult) error {
 	detail := r.Detail
-	// The id through assemble.Token, once, for every line it reaches. A record's
-	// id is a key this line prints with no quoting of its own, so an id carrying a
-	// newline forges a report line here — the same class as the rendered memory
-	// line, on a surface a store written before the import shape check existed
-	// can still reach (#791). A well-formed id is written bare, so the report is
-	// byte-identical for every ordinary artifact.
-	//
-	// It is the SAME id printed by portable's labelOrID, and both render it
-	// through the one function rather than each choosing a spelling, because a
-	// report whose headline and whose per-record lines disagree about how an id
-	// looks is worse than either choice.
 	id := assemble.Token(r.ID)
-	// A credential refusal prints the id and nothing else. portable's
-	// safeDetail already reduces the detail to the id for any record whose text
-	// holds one — see the note there — and this is the second line for a
-	// RecordResult that reached this function with a detail set by something
-	// other than that helper. The format still reaches the reader through
-	// report.Errors, which is the part needed to fix the artifact.
 	var refused *memory.SecretContentError
 	if errors.As(r.Error, &refused) {
 		detail = id
 	}
-	// Only a memory has provenance to speak of. A project or a task line that
-	// said "provenance kept as exported" would be a sentence about a field the
-	// record does not have — so the two provenance arms are gated on the type
-	// rather than on the action alone.
-	//
-	// The downgrade note and the cut note are built INDEPENDENTLY rather than as
-	// cases of one switch: a record can be both, and the common restore path —
-	// no --trust-provenance, so every memory is downgraded — is exactly the one
-	// whose over-long bodies used to be shortened with no note at all, because
-	// the downgrade case won the switch and the cut case never ran (#1275). The
-	// order is fixed: the downgrade clause first, then the cut.
 	isCreate := r.Action == portable.ActionCreate
 	isMemory := r.Type == portable.TypeMemory
 	if isCreate && isMemory && r.Downgraded {
-		// The provenance rewrite is the one thing about the record that is not
-		// visible afterwards: the stored source is the downgraded one, so the
-		// artifact's own value is gone from the store entirely. It is said here
-		// or not at all. The tier rides the same rewrite for the same reason —
-		// a keep-forever tier a file planted is one no pass can take back — so
-		// the line names both.
 		detail = strings.TrimSpace(detail) + " (provenance downgraded to " + memory.DowngradedSource + ", unpinned, retention " + memory.RetentionProject + ")"
 	}
 	if isCreate && len(r.Clamped) > 0 {
-		// A clamp is the other thing a reader cannot see in the file afterwards,
-		// because the stored text is the cut version — and for a title, or for
-		// the alternatives past the twentieth, the row carries no marker at all,
-		// so the report is the only place the loss can be said (#1232). It names
-		// the fields, never their text: a clamp report is read by whoever holds
-		// the artifact, and the cut field may be the one carrying a value that
-		// must not be echoed back.
 		detail = strings.TrimSpace(detail) + " …(truncated at the cap: " + strings.Join(r.Clamped, ", ") + ")"
 	}
-	// "Kept as exported" is stated only when neither rewrite happened: a
-	// downgrade or a cut has just said what became of the artifact's own value,
-	// and claiming it was kept beside either would contradict it.
 	if isCreate && isMemory && !r.Downgraded && len(r.Clamped) == 0 {
 		detail = strings.TrimSpace(detail) + " (provenance kept as exported)"
 	}
@@ -1414,29 +879,12 @@ func printRecordLine(out io.Writer, r portable.RecordResult) error {
 	case detail == "":
 		detail = id
 	default:
-		// Quoted on BOTH arms, not only when there is an id. The old switch
-		// reached `%q` only through `case r.ID != ""`, so a RecordResult with no
-		// id and a non-empty detail fell through both arms and reached Fprintf
-		// with no quoting at all — and `detail` holds a memory's content, which
-		// may hold a carriage return, which a terminal reads as "return to
-		// column 0 and overwrite". A created memory always has an id, so this
-		// was not reachable from `ghost import`; the switch had no reason to
-		// depend on that, though, and a record type added later need not (#791).
-		//
-		// `%q` is also what neutralises a CR reaching here from a store written
-		// before the preview cut at one — defence in depth, not the reason for
-		// the arm.
 		if r.ID != "" {
 			detail = fmt.Sprintf("%q (%s)", detail, id)
 		} else {
 			detail = strconv.Quote(detail)
 		}
 	}
-	// A dropped pointer is the one thing about this record the artifact says
-	// and the store will not: the row lands without it. The line names the
-	// pointer and why it could not be kept — its target was rejected, is in
-	// neither the artifact nor this store, or the pointer is part of a cycle.
-	// The id goes through assemble.Token for the reason the record's own id does.
 	if r.DroppedRef != "" {
 		field := "blocked_by"
 		if r.Type == portable.TypeDecision {
@@ -1455,9 +903,6 @@ func printRecordLine(out io.Writer, r portable.RecordResult) error {
 	return err
 }
 
-// printImportReport states what an import did, or — for a dry run — what it
-// would do. The headline leads with the count because that is what a reader
-// scans for; the per-record lines came before it and the rejected ones follow.
 func printImportReport(out io.Writer, path string, report portable.ImportReport, opts portable.ImportOptions) error {
 	created := report.Created["project"] + report.Created["memory"] +
 		report.Created["link"] + report.Created["task"] + report.Created["decision"]
@@ -1466,9 +911,6 @@ func printImportReport(out io.Writer, path string, report portable.ImportReport,
 	summary := pluralRecords(report.Created["project"], report.Created["memory"],
 		report.Created["link"], report.Created["task"], report.Created["decision"])
 
-	// A run that created nothing says so, rather than "imported no records" —
-	// which reads as a failure and is in fact the correct answer to a re-run of
-	// an artifact the store already holds in full.
 	var headline string
 	switch {
 	case created == 0:
@@ -1486,9 +928,6 @@ func printImportReport(out io.Writer, path string, report portable.ImportReport,
 			return err
 		}
 	}
-	// The provenance policy is stated in the summary and not only on the record
-	// lines: it decides what every memory in the file becomes, so a reader who
-	// skips the per-record output still has to learn it.
 	if report.Created["memory"] > 0 {
 		note := "provenance and retention downgraded to " + memory.DowngradedSource + ", unpinned and " + memory.RetentionProject + " — pass --trust-provenance to keep the artifact's own"
 		if opts.TrustProvenance {
@@ -1515,28 +954,6 @@ func printImportReport(out io.Writer, path string, report portable.ImportReport,
 	return nil
 }
 
-// runImport implements `ghost import <file.jsonl> [--apply] [--trust-provenance]`.
-//
-// The artifact is opened and judged first, and only a file this build can read
-// as a whole reaches the store. bootstrap creates the config file, migrates the
-// database and seeds the builtin rows, so opening the store before reading the
-// file made a refused artifact leave a migrated store behind. A whole-file
-// refusal now leaves the data directory untouched; a damaged line still reaches
-// the report, because that is a per-record problem rather than a refusal of the
-// file.
-//
-// The store is opened read-write only when the run will write. A dry run opens
-// read-only, so it cannot migrate a database whose schema is behind or seed the
-// builtin rows — see openImportStore for why that is not a detail. An import
-// that writes goes through the same store methods a session uses, including the
-// content cap and the category, source and importance validation: an artifact
-// from another machine is another way to reach the memories table, and it must
-// not be a way around its rules.
-//
-// A rejected record makes the command exit non-zero even though the rest of the
-// file was applied. A partial import reported as a success is the failure mode
-// worth spending an exit code on: the user has to learn that one record did not
-// land.
 func runImport() {
 	opts, err := parseImportArgs(os.Args[2:])
 	if err != nil {
@@ -1557,11 +974,6 @@ func runImport() {
 	}
 }
 
-// openImportRun opens the artifact and the store for an import run, in that
-// order. The artifact is read and judged as a whole before the store exists, so
-// a refusal leaves no config file and no database behind. The parsed artifact
-// carries the bytes the run then applies, which is what lets a pipe or a FIFO be
-// imported at all: neither can be rewound and read a second time.
 func openImportRun(path string, apply bool) (*portable.Artifact, *memory.Store, error) {
 	a, err := openImportArtifact(path)
 	if err != nil {
@@ -1574,9 +986,6 @@ func openImportRun(path string, apply bool) (*portable.Artifact, *memory.Store, 
 	return a, store, nil
 }
 
-// openImportArtifact opens an artifact and reads it once, refusing a file this
-// build cannot read as a whole. The parsed artifact is handed back for the run
-// to apply, so the source is never read twice.
 func openImportArtifact(path string) (*portable.Artifact, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -1589,17 +998,10 @@ func openImportArtifact(path string) (*portable.Artifact, error) {
 	return portable.Parse(f)
 }
 
-// importOptionsFrom converts the parsed flags into the run's options. The two
-// booleans are the whole of it, and the conversion is named rather than
-// inlined so runImport and a test build the same thing.
 func importOptionsFrom(opts importOptions) portable.ImportOptions {
 	return portable.ImportOptions{Apply: opts.Apply, TrustProvenance: opts.TrustProvenance}
 }
 
-// runImportCore imports one artifact and prints the per-record outcome and the
-// summary. Split out of runImport so the whole path is testable against a
-// temp-dir store, without argument parsing, the config load or a process exit —
-// and without re-executing the test binary.
 func runImportCore(ctx context.Context, store *memory.Store, path string, opts portable.ImportOptions, out io.Writer) error {
 	a, err := openImportArtifact(path)
 	if err != nil {
@@ -1608,20 +1010,11 @@ func runImportCore(ctx context.Context, store *memory.Store, path string, opts p
 	return runImportReader(ctx, store, path, a, opts, out)
 }
 
-// runImportReader imports one already-parsed artifact and prints the per-record
-// outcome and the summary.
 func runImportReader(ctx context.Context, store *memory.Store, path string, a *portable.Artifact, opts portable.ImportOptions, out io.Writer) error {
 	report, err := a.Import(ctx, store, opts, func(r portable.RecordResult) {
-		// A per-record write failure is reported inline and not propagated: the
-		// summary and the exit code carry the outcome, and a report that stopped
-		// at the first such failure would hide the records that did land.
 		_ = printRecordLine(out, r)
 	})
 	if err != nil {
-		// The file itself was refused — no header, an unreadable schema version.
-		// Nothing was applied, so there is no run to summarise, and a summary here
-		// would read as "an import happened and found nothing", which is a
-		// different and wrong statement.
 		return err
 	}
 	if err := printImportReport(out, path, report, opts); err != nil {
@@ -1633,10 +1026,6 @@ func runImportReader(ctx context.Context, store *memory.Store, path string, a *p
 	return nil
 }
 
-// pluralRecords renders "N projects, M memories, …" for the counts that are
-// non-zero, in a fixed order, with a noun that agrees with its count. The order
-// is the artifact's own: projects, then memories, then links, then tasks, then
-// decisions.
 func pluralRecords(projects, memories, links, tasks, decisions int) string {
 	parts := []string{
 		pluralCount(projects, "project", "projects"),
@@ -1657,7 +1046,6 @@ func pluralRecords(projects, memories, links, tasks, decisions int) string {
 	return strings.Join(kept, ", ")
 }
 
-// countLabel is "N records" / "1 record".
 func countLabel(n int) string {
 	if n == 1 {
 		return "1 record"
@@ -1665,8 +1053,6 @@ func countLabel(n int) string {
 	return fmt.Sprintf("%d records", n)
 }
 
-// pluralCount renders "N noun", with the plural form used for every count but
-// one, and the empty string for a count of zero so a caller can drop the clause.
 func pluralCount(n int, singular, plural string) string {
 	if n == 0 {
 		return ""

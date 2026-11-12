@@ -11,22 +11,11 @@ import (
 	"github.com/wcatz/ghost/internal/config"
 )
 
-// usageCleanupSessions is the usage line shown for the command group and for
-// any argument the parser rejects.
 const usageCleanupSessions = "ghost opencode cleanup-sessions [--grace <duration>] [--limit <n>] [--apply]"
 
-// opencodeUsage is usageCleanupSessions as a complete usage block: the prefix
-// and the trailing newline live here because both readers need them — the
-// dispatch prints this text verbatim on stderr for a missing or unrecognised
-// subcommand, and handleHelp prints it on stdout for -h/--help (#630). Derived
-// from the one line, so the two can never disagree.
 const opencodeUsage = "Usage: " + usageCleanupSessions + "\n"
 
-// parseCleanupSessionsArgs parses `ghost opencode cleanup-sessions` flags.
-// Only --apply, --grace and --limit are recognized, and anything else is an
-// error rather than being ignored: a silently misparsed flag here could turn
-// a report into a deletion (or hide one), the same rule
-// parseCleanScratchArgs applies to clean-scratch.
+// parseCleanupSessionsArgs parses flags for `ghost opencode cleanup-sessions`.
 func parseCleanupSessionsArgs(args []string) (ai.OpenCodeCleanupOptions, error) {
 	opts := ai.OpenCodeCleanupOptions{Grace: time.Hour}
 	for i := 0; i < len(args); i++ {
@@ -88,12 +77,7 @@ func setCleanupLimit(opts *ai.OpenCodeCleanupOptions, value string) error {
 	return nil
 }
 
-// runOpenCodeCleanupSessions implements `ghost opencode cleanup-sessions`: a
-// one-shot removal of the pre-#568 backlog of lifecycle sessions titled
-// exactly "[ghost]". Report-only by default; only --apply deletes, and a
-// failed delete is reported (with a non-zero exit) after the rest have been
-// attempted. The binary comes from cli.opencode_binary so the command talks to
-// the same OpenCode installation the lifecycle runs use, falling back to PATH.
+// runOpenCodeCleanupSessions runs `ghost opencode cleanup-sessions`.
 func runOpenCodeCleanupSessions(args []string) {
 	opts, err := parseCleanupSessionsArgs(args)
 	if err != nil {

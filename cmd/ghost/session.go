@@ -12,9 +12,6 @@ import (
 	"github.com/wcatz/ghost/internal/memory"
 )
 
-// contextUsage is the help for `ghost context`: stdout for -h/--help (see
-// handleHelp), so a help request never runs the SessionStart side effects the
-// context block mirrors (Obsidian sync, session-count bump).
 const contextUsage = `Usage: ghost context [--cwd <dir>] [--as-of <RFC3339>] [--source <host>]
 
 Prints the passive session-start context block for a directory. This is what
@@ -50,22 +47,6 @@ instead and says they are the current row's.
 No session is counted — a past reading is a diagnostic, not a session start.
 `
 
-// contextAsOf reads the --as-of instant out of a `ghost context` argument list.
-// The second result is false when the flag was absent, which is a current read
-// and not an error; an unreadable value IS an error, and it is reported here
-// rather than ignored because the alternative is answering a question about a
-// past instant with the present.
-//
-// A flag with no value after it is an error too, and the distinction is the whole
-// point of parsing it here: a dropped --as-of is indistinguishable from a current
-// read, so `ghost context --as-of` would render a LIVE session-start block — the
-// Obsidian mirror and the session-count bump included — for a request that asked
-// about the past. The count is the visible damage; the silent substitution is the
-// real one.
-//
-// It is a function so the parser can be tested without running the command:
-// runContext turns a bad value into exit 1, and a test that drove the command
-// itself would have to be able to read that code back.
 func contextAsOf(args []string) (*time.Time, error) {
 	raw := ""
 	seen := false
@@ -73,11 +54,6 @@ func contextAsOf(args []string) (*time.Time, error) {
 		switch {
 		case args[i] == "--as-of":
 			seen = true
-			// The value is the next token whatever it looks like. Taking it
-			// unconditionally and letting time.Parse reject it is deliberate: a
-			// guard that only accepts a token which does not look like a flag
-			// would have to guess, and an instant that fails to parse is a better
-			// answer than a flag silently consumed.
 			if i+1 >= len(args) {
 				return nil, errors.New("--as-of requires an RFC 3339 instant (e.g. 2026-09-20T09:00:00Z)")
 			}
@@ -99,26 +75,6 @@ func contextAsOf(args []string) (*time.Time, error) {
 	return &utc, nil
 }
 
-// parseContextBlockArgs reads the arguments of `ghost context`: the session-start
-// block. It takes --cwd and --as-of and nothing else.
-//
-// A strict parser: this mode is a session start, so a render counts a session for
-// the directory's project and starts the Obsidian mirror. The parser used to
-// read --cwd and --as-of and drop every other token, so `ghost context
-// --project other` printed the block for the directory's project, counted a
-// session there and exited 0 — a different question answered, with side
-// effects, and no word that the argument was ignored (#1195). Everything here
-// is decided before runContext renders anything.
-//
-// An EMPTY --cwd value is accepted and means the process's own directory, which
-// is what it has always meant. The opencode adapter spawns `ghost context
-// --cwd <dir>` with whatever directory it was handed and ignores stderr, so
-// refusing an empty one would turn a session start into a session with no
-// context and no visible error. A --cwd with no token after it at all is
-// refused: that is a truncated command line, not a directory.
-//
-// The --as-of instant itself is parsed by contextAsOf, which this calls once the
-// shape of the command line is known to be good.
 func parseContextBlockArgs(args []string) (string, *time.Time, error) {
 	cwd := ""
 	var seenCwd, seenAsOf, seenSource bool
@@ -143,10 +99,6 @@ func parseContextBlockArgs(args []string) (string, *time.Time, error) {
 			seenCwd = true
 			cwd = value
 		case arg == "--as-of" || strings.HasPrefix(arg, "--as-of="):
-			// The value is contextAsOf's to judge, including a missing one; this
-			// clause only skips over it so the scan does not read the instant as
-			// a stray positional, and refuses a second occurrence, which
-			// contextAsOf would otherwise resolve silently to the last one.
 			if seenAsOf {
 				return "", nil, errors.New("--as-of was given twice: a block is read at one instant")
 			}
@@ -155,8 +107,6 @@ func parseContextBlockArgs(args []string) (string, *time.Time, error) {
 				i++
 			}
 		case arg == "--source" || strings.HasPrefix(arg, "--source="):
-			// Judged by contextSource, like --as-of by contextAsOf; this clause
-			// skips the value and refuses a second occurrence.
 			if seenSource {
 				return "", nil, errors.New("--source was given twice: a block is for one host")
 			}
@@ -177,29 +127,6 @@ func parseContextBlockArgs(args []string) (string, *time.Time, error) {
 	return cwd, asOf, nil
 }
 
-// runContext prints the passive session-start context block for a directory,
-// backing opencode's plugin-injected instructions. It mirrors the SessionStart
-// hook's startup side effects (Obsidian sync when configured, session-count
-// bump) so opencode's injected context stays at parity with claude/codex.
-// `ghost context` is the opencode-appropriate alternative to the SessionStart
-// hook, which opencode cannot consume (no stdout-injection surface). See
-// RenderSessionContext.
-//
-// --as-of turns it into a historical read, and that path runs none of the side
-// effects above: they exist because this command backs a session start, and a
-// request about the past is not one. The instant is parsed by contextAsOf so an
-// unreadable value is refused at the boundary, with the argument in the message
-// and exit 1, rather than rendering the present under a request that asked for a
-// past instant. Exit 1 and not 2: 2 is the dispatch's code for a command line it
-// cannot route (#1090), and the dispatch already routed this one — what rejected
-// the value is this command's own parser.
-//
-// The exit code is RETURNED rather than passed to os.Exit, so the dispatch can
-// hand it back to runCLI and a test can read it; that is what makes #1090's
-// contract assertable.
-// contextSource reads --source: the host the block is for, so the block can
-// leave out rows that host already loaded from its own instruction files. Empty
-// when the flag is absent, which leaves the block unchanged.
 func contextSource(args []string) (hostevent.Source, error) {
 	raw, seen := "", false
 	for i := 0; i < len(args); i++ {
@@ -244,9 +171,6 @@ func runContext() int {
 	return 0
 }
 
-// hookUsage is the help for `ghost hook`: stdout for -h/--help (see
-// handleHelp) — before the fail-open path below, which answers an
-// unrecognized invocation rather than a question.
 const hookUsage = `Usage: ghost hook <event> --source <host>
 
 Lifecycle hook for MCP clients: events session-start, stop, session-end,
@@ -257,22 +181,7 @@ adapter, not by hand. A missing or unknown source fails open with one
 diagnostic line and exit status 0 — re-run ghost mcp init to repair wiring.
 `
 
-// runHook dispatches host lifecycle events per the contract-v1 spec:
-//
-//	ghost hook <event> --source <host>
-//
-// The contract has no legacy mode: without --source nothing can be routed, so
-// the invocation fails open (one stderr line, exit 0) with a pointer to
-// `ghost mcp init`, which migrates pre-contract wiring idempotently. Every
-// event — including unrecognized ones — goes through RunHostEvent so
-// validation and its fail-open diagnostics live in exactly one place.
 func runHook() {
-	// `ghost hook` with no event word used to exit silently here, before any
-	// validation ran, so a hook line that lost its event word left no
-	// diagnostic in the host's hook log. Fall through to the same missing-source
-	// path every other sourceless invocation takes: one fail-open line on
-	// stderr, exit 0. `ghost hook -h`/`--help` is answered earlier by
-	// handleHelp and never reaches this point.
 	event := ""
 	var source string
 	if len(os.Args) >= 3 {
