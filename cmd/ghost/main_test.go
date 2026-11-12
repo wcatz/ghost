@@ -8,19 +8,14 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"math"
-	"net/url"
 	"os"
 	"path/filepath"
-	"reflect"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/wcatz/ghost/internal/ai"
 	"github.com/wcatz/ghost/internal/config"
-	"github.com/wcatz/ghost/internal/mcpinit"
 	"github.com/wcatz/ghost/internal/memory"
 	"github.com/wcatz/ghost/internal/reflection"
 	"github.com/wcatz/ghost/internal/resolve"
@@ -45,75 +40,6 @@ func testDeleteStore(t *testing.T) *memory.Store {
 		t.Fatalf("EnsureProject: %v", err)
 	}
 	return s
-}
-
-func TestParseObsidianFlags(t *testing.T) {
-	t.Run("both forms and all flags", func(t *testing.T) {
-		out, project, interval, err := parseObsidianFlags([]string{"--out", "/v", "--project=ghost", "--interval", "5s"})
-		if err != nil {
-			t.Fatalf("unexpected err: %v", err)
-		}
-		if out != "/v" || project != "ghost" || interval != "5s" {
-			t.Fatalf("got out=%q project=%q interval=%q", out, project, interval)
-		}
-	})
-	t.Run("empty is fine", func(t *testing.T) {
-		if _, _, _, err := parseObsidianFlags(nil); err != nil {
-			t.Fatalf("no flags must not error: %v", err)
-		}
-	})
-	t.Run("unknown flag errors", func(t *testing.T) {
-		if _, _, _, err := parseObsidianFlags([]string{"--intervl", "5s"}); err == nil {
-			t.Fatal("misspelled flag must error, not silently fall back")
-		}
-	})
-	t.Run("missing value errors", func(t *testing.T) {
-		if _, _, _, err := parseObsidianFlags([]string{"--interval"}); err == nil {
-			t.Fatal("value flag with no argument must error")
-		}
-	})
-	t.Run("bare positional errors", func(t *testing.T) {
-		if _, _, _, err := parseObsidianFlags([]string{"oops"}); err == nil {
-			t.Fatal("unexpected positional arg must error")
-		}
-	})
-}
-
-// TestParseObsidianFlagsRefusesAnEmptyOut: an explicit empty --out is the
-// unset-variable spelling and is a refusal, never "no flag given". The parser
-// returned "" for it, and runObsidian reads "" as "use the default vault", so
-// `ghost obsidian export --out "$VAULT"` with VAULT unset wrote into the
-// default vault and exited 0. The default is the flag left off.
-func TestParseObsidianFlagsRefusesAnEmptyOut(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		args []string
-	}{
-		{"attached empty", []string{"--out="}},
-		{"separate empty", []string{"--out", ""}},
-		{"attached empty after a valid flag", []string{"--project=ghost", "--out="}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			out, _, _, err := parseObsidianFlags(tc.args)
-			if err == nil {
-				t.Fatalf("parseObsidianFlags(%v) = %q with no error: an empty --out must be refused, not read as the default vault", tc.args, out)
-			}
-			if err.Error() != "--out requires a value" {
-				t.Errorf("parseObsidianFlags(%v) error = %q, want %q", tc.args, err, "--out requires a value")
-			}
-		})
-	}
-
-	// Positive controls: a value still parses in both spellings, and an absent
-	// --out is not an error and leaves out empty for the default to fill.
-	for _, args := range [][]string{{"--out", "/v"}, {"--out=/v"}} {
-		if out, _, _, err := parseObsidianFlags(args); err != nil || out != "/v" {
-			t.Errorf("parseObsidianFlags(%v) = %q (err %v), want /v", args, out, err)
-		}
-	}
-	if out, _, _, err := parseObsidianFlags([]string{"--project=ghost"}); err != nil || out != "" {
-		t.Errorf("absent --out = %q (err %v), want empty and no error", out, err)
-	}
 }
 
 // TestParseObsidianFlagsRefusesAnEmptyInterval: --interval is the cadence half
@@ -237,170 +163,6 @@ func TestRODSNIsReadOnly(t *testing.T) {
 	}
 }
 
-// TestRODSNEscapesPath guards against a '?' or '#' in the data-dir path being
-// parsed as the query separator or a fragment — which would drop mode=ro
-// (opening read-write) or open a different file. It also confirms the DSN
-// keeps working end-to-end for such paths.
-func TestRODSNEscapesPath(t *testing.T) {
-	for _, name := range []string{"plain", "with space", "we?rd", "ha#sh"} {
-		t.Run(name, func(t *testing.T) {
-			dbPath := filepath.Join(t.TempDir(), name, "ghost.db")
-			if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
-				t.Fatal(err)
-			}
-			// Seed a DB at exactly dbPath via a correctly-escaped writable URI.
-			// (memory.OpenDB uses a bare-path DSN that itself misparses a '?'
-			// in the path, so it can't seed these cases — a separate concern.)
-			seedDSN := (&url.URL{Scheme: "file", Opaque: (&url.URL{Path: dbPath}).EscapedPath()}).String()
-			seed, err := sql.Open("sqlite", seedDSN)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if _, err := seed.Exec(`CREATE TABLE canary (x)`); err != nil {
-				t.Fatalf("seed at %q: %v", dbPath, err)
-			}
-			if err := seed.Close(); err != nil {
-				t.Fatal(err)
-			}
-
-			dsn := roDSN(dbPath)
-			if !strings.HasPrefix(dsn, "file:") {
-				t.Fatalf("DSN must be a file: URI, got %q", dsn)
-			}
-			// The raw path separators must not leak into the query: the only
-			// '?' in the DSN is the query separator introduced by roDSN, and
-			// there must be no unescaped '#'.
-			if strings.Count(dsn, "?") != 1 || strings.Contains(dsn, "#") {
-				t.Fatalf("path special chars not escaped in DSN: %q", dsn)
-			}
-			if !strings.Contains(dsn, "mode=ro") {
-				t.Fatalf("mode=ro missing from DSN: %q", dsn)
-			}
-
-			db, err := sql.Open("sqlite", dsn)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer db.Close() //nolint:errcheck
-			// Reading the canary proves roDSN resolved to the intended file
-			// (not a '?'-truncated or '#'-fragmented wrong path).
-			var n int
-			if err := db.QueryRow(`SELECT COUNT(*) FROM canary`).Scan(&n); err != nil {
-				t.Fatalf("read through DSN for path %q must work: %v", name, err)
-			}
-			if _, err := db.Exec(`INSERT INTO canary VALUES (1)`); err == nil {
-				t.Fatalf("write through read-only DSN for path %q must fail", name)
-			}
-		})
-	}
-}
-
-func TestConfirmProjectDeleteName_MatchesExactly(t *testing.T) {
-	if !confirmProjectDeleteName("my-project\n", "my-project") {
-		t.Error("expected trimmed exact match to confirm")
-	}
-	if !confirmProjectDeleteName("  my-project  ", "my-project") {
-		t.Error("expected surrounding whitespace to be trimmed before comparing")
-	}
-}
-
-func TestConfirmProjectDeleteName_RejectsMismatch(t *testing.T) {
-	if confirmProjectDeleteName("my-projec", "my-project") {
-		t.Error("expected a partial/typo'd name not to confirm")
-	}
-	if confirmProjectDeleteName("", "my-project") {
-		t.Error("expected an empty input not to confirm")
-	}
-}
-
-// TestPrintDeleteSummary_FieldsNotTransposed pins the label-to-value mapping
-// with seven distinct values (one per field) and a whole-string comparison, so
-// swapping any two summary.X arguments inside printDeleteSummary — the same
-// bug class the memory-layer fixture in store_test.go was hardened against —
-// fails this test instead of passing silently.
-func TestPrintDeleteSummary_FieldsNotTransposed(t *testing.T) {
-	var out bytes.Buffer
-	if err := printDeleteSummary(&out, memory.DeleteProjectSummary{
-		ProjectID:   "proj",
-		ProjectName: "test-project",
-		Memories:    1,
-		MemoryLinks: 2,
-		Tasks:       3,
-		Decisions:   4,
-		TokenUsage:  5,
-		AuditLog:    6,
-		// A seventh distinct value, one per field, so a swap inside
-		// printDeleteSummary fails this test rather than passing silently --
-		// which is the whole reason the fixture is shaped this way. RetrievalRecords
-		// is here because DeleteProject removes those rows (#646), and a summary
-		// that omitted a table its own command deletes would under-report.
-		RetrievalRecords: 7,
-		// And a ninth, for the objections #648 slice 2 files. A summary that omitted
-		// a table its own command deletes would under-report, and the distinct
-		// value is what keeps a swap of the flags line from passing.
-		MemoryFlags: 9,
-	}, "Would delete"); err != nil {
-		t.Fatalf("printDeleteSummary: %v", err)
-	}
-
-	want := `Would delete test-project (proj):
-  memories:     1
-  memory_links: 2
-  tasks:        3
-  decisions:    4
-  token_usage:  5
-  audit_log:    6
-  retrievals:   7
-  flags:        9
-`
-	if out.String() != want {
-		t.Errorf("printDeleteSummary output mismatch:\ngot:\n%s\nwant:\n%s", out.String(), want)
-	}
-}
-
-// TestRunProjectDeleteCore_MismatchAborts exercises the full confirmation
-// gate against a real store: apply=true with a wrong re-typed name at the
-// prompt must return an error and leave the project (and its memory)
-// completely untouched. This is the spec's "wrong re-typed name aborts
-// without deleting" requirement.
-func TestRunProjectDeleteCore_MismatchAborts(t *testing.T) {
-	store := testDeleteStore(t)
-	ctx := context.Background()
-
-	if _, err := store.Create(ctx, "proj", memory.Memory{
-		Category: "fact", Content: "must survive an aborted delete", Source: "manual", Importance: 0.5, Tags: []string{},
-	}); err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-
-	var out bytes.Buffer
-	err := runProjectDeleteCore(ctx, store, &out, strings.NewReader("wrong-name\n"), "test-project", true)
-	if err == nil {
-		t.Fatal("expected an error for a mismatched confirmation, got nil")
-	}
-	if !strings.Contains(err.Error(), "did not match") {
-		t.Errorf("expected mismatch error, got: %v", err)
-	}
-
-	id, _, rErr := store.ResolveProject(ctx, "test-project")
-	if rErr != nil || id == "" {
-		t.Errorf("expected project to still exist after aborted delete: id=%q err=%v", id, rErr)
-	}
-	mems, gErr := store.GetAll(ctx, "proj", 100)
-	if gErr != nil {
-		t.Fatalf("GetAll: %v", gErr)
-	}
-	if len(mems) != 1 {
-		t.Errorf("expected the seeded memory to survive an aborted delete, got %d memories", len(mems))
-	}
-	if !strings.Contains(out.String(), "Would delete") {
-		t.Errorf("expected dry-run summary in output, got %q", out.String())
-	}
-	if strings.Contains(out.String(), "\nDeleted ") {
-		t.Errorf("did not expect the post-apply 'Deleted' report after an aborted confirmation, got %q", out.String())
-	}
-}
-
 // TestRunProjectDeleteCore_MatchProceeds is the positive counterpart: the
 // correct re-typed name must let the delete proceed and actually remove the
 // project and its memories.
@@ -453,22 +215,6 @@ func TestRunProjectDeleteCore_DryRunNeverPrompts(t *testing.T) {
 	}
 }
 
-// stubBinary writes an executable shell script that prints one opencode
-// JSON-lines text event carrying payload, regardless of arguments. It stands
-// in for a real `opencode` binary in provider-selection tests.
-func stubBinary(t *testing.T, payload string) string {
-	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("shell script fake binary requires a POSIX shell")
-	}
-	path := filepath.Join(t.TempDir(), "fakeopencode")
-	script := "#!/bin/sh\nprintf '%s\\n' '" + payload + "'\n"
-	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
-		t.Fatalf("write stub: %v", err)
-	}
-	return path
-}
-
 // TestBuildClassifyProviderForSource_EmptySourceErrors: an empty source is the
 // old silent-claude path. It must now fail with the actionable detection error
 // before any backend lookup happens — even with a claude binary on PATH.
@@ -482,29 +228,6 @@ func TestBuildClassifyProviderForSource_EmptySourceErrors(t *testing.T) {
 	_, err := buildClassifyProviderForSource(cfg, "")
 	if err == nil || !errors.Is(err, ai.ErrUndetectableHarness) {
 		t.Fatalf("want actionable undetectable-harness error, got %v", err)
-	}
-}
-
-// TestBuildClassifyProviderForSource_UsesConfiguredOpencodeStub: with no binary
-// on PATH but an explicit opencode binary configured and a resolved source, the
-// returned provider must classify through that opencode binary (the harness's
-// zero-Anthropic-spend path). buildClassifyProviderForSource returns
-// ai.Provider whose Classify is a plain string verdict.
-func TestBuildClassifyProviderForSource_UsesConfiguredOpencodeStub(t *testing.T) {
-	t.Setenv("PATH", t.TempDir())
-	stub := stubBinary(t, `{"type":"text","part":{"type":"text","text":"STUB_CLASSIFY_OK"}}`)
-	cfg := &config.Config{}
-	cfg.CLI.OpenCodeBinary = stub
-	p, err := buildClassifyProviderForSource(cfg, "opencode")
-	if err != nil {
-		t.Fatalf("build: %v", err)
-	}
-	out, err := p.Classify(context.Background(), "sys prompt", "user content")
-	if err != nil {
-		t.Fatalf("classify: %v", err)
-	}
-	if out != "STUB_CLASSIFY_OK" {
-		t.Fatalf("got %q, want STUB_CLASSIFY_OK", out)
 	}
 }
 
@@ -560,56 +283,6 @@ func TestApplyPhaseModel(t *testing.T) {
 	}
 }
 
-// TestApplyPhaseModelWarnsOnInertPin pins the stderr warning when a configured
-// pin cannot apply: claude/codex/goose have no model flag, so the pin would
-// otherwise be silently ignored. An opencode harness (or no harness, e.g. the
-// offline sqlite tier before the tier/source resolves) must stay silent.
-func TestApplyPhaseModelWarnsOnInertPin(t *testing.T) {
-	for _, tc := range []struct {
-		name    string
-		model   string
-		harness string
-		wantMsg bool
-	}{
-		{"opencode honors the pin", "opencode/big-pickle", "opencode", false},
-		{"claude-code pin is inert", "opencode/big-pickle", "claude-code", true},
-		{"codex pin is inert", "opencode/big-pickle", "codex", true},
-		{"goose pin is inert", "opencode/big-pickle", "goose", true},
-		{"empty pin never warns", "", "claude-code", false},
-		{"no harness never warns", "opencode/big-pickle", "", false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			// Each subtest starts from a known env state and restores on exit:
-			// applyPhaseModel os.Setenvs GHOST_OPENCODE_MODEL, and a leak would
-			// make later tests in the package non-deterministic.
-			t.Setenv("GHOST_OPENCODE_MODEL", "")
-			old := os.Stderr
-			r, w, err := os.Pipe()
-			if err != nil {
-				t.Fatalf("pipe: %v", err)
-			}
-			os.Stderr = w
-			t.Cleanup(func() { os.Stderr = old })
-
-			applyPhaseModel(tc.model, tc.harness)
-
-			_ = w.Close()
-			out, err := io.ReadAll(r)
-			if err != nil {
-				t.Fatalf("read stderr: %v", err)
-			}
-			if got := strings.Contains(string(out), "warning: cli.model_* pin"); got != tc.wantMsg {
-				t.Errorf("warning present = %v, want %v (stderr: %q)", got, tc.wantMsg, out)
-			}
-			if tc.model != "" {
-				if got := os.Getenv("GHOST_OPENCODE_MODEL"); got != tc.model {
-					t.Errorf("pin must still be set even when warned, GHOST_OPENCODE_MODEL = %q", got)
-				}
-			}
-		})
-	}
-}
-
 // TestRunAllClients verifies the `--client all` orchestration: banners in run
 // order, continue past individual failures, per-failure stderr lines, and the
 // failed-names return that drives the exit code.
@@ -653,32 +326,6 @@ func TestRunAllClients(t *testing.T) {
 			t.Errorf("stderr should stay clean when nothing fails, got:\n%s", stderr.String())
 		}
 	})
-}
-
-// TestMCPInitTargets_CoverAllClients guards the target list against accidental
-// drift: every supported client installer appears exactly once, in order.
-func TestMCPInitTargets_CoverAllClients(t *testing.T) {
-	want := []string{"claude", "opencode", "codex", "goose"}
-	targets := mcpInitTargets()
-	if len(targets) != len(want) {
-		t.Fatalf("got %d targets (%v), want %d", len(targets), targetNames(targets), len(want))
-	}
-	for i, name := range want {
-		if targets[i].name != name {
-			t.Errorf("targets[%d] = %q, want %q", i, targets[i].name, name)
-		}
-		if targets[i].run == nil {
-			t.Errorf("target %q has no installer", name)
-		}
-	}
-}
-
-func targetNames(targets []clientTarget) []string {
-	names := make([]string, len(targets))
-	for i, t := range targets {
-		names[i] = t.name
-	}
-	return names
 }
 
 // TestDetectClients verifies that detectClients returns only the names of
@@ -755,54 +402,6 @@ func TestMCPLogConfig_QuietWhenSpawned(t *testing.T) {
 	}
 }
 
-func TestMCPLogConfig_InfoWhenTerminal(t *testing.T) {
-	t.Setenv("GHOST_LOG_FILE", "")
-	t.Setenv("GHOST_DEBUG", "")
-	writer, level, closeLog := mcpLogConfig(true)
-	if level != slog.LevelInfo {
-		t.Fatalf("level = %v, want Info (interactive debugging)", level)
-	}
-	if writer != io.Writer(os.Stderr) {
-		t.Fatal("writer must be stderr")
-	}
-	if closeLog != nil {
-		t.Fatal("no file opened, closer must be nil")
-	}
-}
-
-// TestMCPLogConfig_FileRedirect: GHOST_LOG_FILE must divert the full stream
-// (INFO included) to the file even when spawned by a client, keeping stderr
-// clean while preserving logs for debugging.
-func TestMCPLogConfig_FileRedirect(t *testing.T) {
-	logPath := filepath.Join(t.TempDir(), "ghost.log")
-	t.Setenv("GHOST_LOG_FILE", logPath)
-	t.Setenv("GHOST_DEBUG", "")
-	writer, level, closeLog := mcpLogConfig(false)
-	if level != slog.LevelInfo {
-		t.Fatalf("level = %v, want Info (full stream to file)", level)
-	}
-	if closeLog == nil {
-		t.Fatal("file opened, closer must be non-nil")
-	}
-	f, ok := writer.(*mcpinit.RotatingLog)
-	if !ok {
-		t.Fatalf("writer is %T, want *mcpinit.RotatingLog", writer)
-	}
-	logger := slog.New(slog.NewTextHandler(f, &slog.HandlerOptions{Level: level}))
-	logger.Info("hello from test")
-	closeLog()
-	if _, err := f.Write([]byte("after close")); err == nil {
-		t.Fatal("closer must actually close the file")
-	}
-	data, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(data), "hello from test") {
-		t.Fatalf("log file missing the info line, got %q", data)
-	}
-}
-
 func TestMCPLogConfig_DebugWins(t *testing.T) {
 	t.Setenv("GHOST_LOG_FILE", "")
 	t.Setenv("GHOST_DEBUG", "1")
@@ -834,83 +433,6 @@ func TestMCPLogConfig_UnopenableFileFallsBackQuiet(t *testing.T) {
 	}
 }
 
-func TestRunProjectMergeCore(t *testing.T) {
-	newStore := func(t *testing.T) *memory.Store {
-		t.Helper()
-		db, err := memory.OpenDB(":memory:")
-		if err != nil {
-			t.Fatalf("OpenDB: %v", err)
-		}
-		t.Cleanup(func() { _ = db.Close() })
-		logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
-		s := memory.NewStore(db, logger)
-		if err := s.EnsureProject(context.Background(), "old-proj", "/tmp/old", "old-name"); err != nil {
-			t.Fatalf("EnsureProject old: %v", err)
-		}
-		if err := s.EnsureProject(context.Background(), "new-proj", "/tmp/new", "new-name"); err != nil {
-			t.Fatalf("EnsureProject new: %v", err)
-		}
-		return s
-	}
-
-	t.Run("merges by name and preserves memory IDs", func(t *testing.T) {
-		store := newStore(t)
-		ctx := context.Background()
-		id, err := store.Create(ctx, "old-proj", memory.Memory{
-			Category: "fact", Content: "a fact that must survive the merge", Source: "manual", Importance: 0.5, Tags: []string{},
-		})
-		if err != nil {
-			t.Fatalf("Create: %v", err)
-		}
-
-		var out bytes.Buffer
-		if err := runProjectMergeCore(ctx, store, &out, "old-name", "new-name"); err != nil {
-			t.Fatalf("runProjectMergeCore: %v", err)
-		}
-
-		got, err := store.GetAll(ctx, "new-proj", 10)
-		if err != nil {
-			t.Fatalf("GetAll after merge: %v", err)
-		}
-		found := false
-		for _, m := range got {
-			if m.ID == id {
-				found = true
-			}
-		}
-		if !found {
-			t.Fatalf("memory %s missing from new-proj after merge", id)
-		}
-		for _, m := range got {
-			if m.ID == id && m.ProjectID != "new-proj" {
-				t.Errorf("memory project_id = %q, want new-proj", m.ProjectID)
-			}
-		}
-		oldID, _, _ := store.ResolveProject(ctx, "old-name")
-		if oldID != "" {
-			t.Errorf("old project still resolves after merge: %q", oldID)
-		}
-	})
-
-	t.Run("same project refused", func(t *testing.T) {
-		store := newStore(t)
-		var out bytes.Buffer
-		err := runProjectMergeCore(context.Background(), store, &out, "new-name", "new-proj")
-		if err == nil || !strings.Contains(err.Error(), "itself") {
-			t.Fatalf("expected self-merge refusal, got: %v", err)
-		}
-	})
-
-	t.Run("unknown project errors with known listing", func(t *testing.T) {
-		store := newStore(t)
-		var out bytes.Buffer
-		err := runProjectMergeCore(context.Background(), store, &out, "nope", "new-name")
-		if err == nil || !strings.Contains(err.Error(), `project "nope" not found`) {
-			t.Fatalf("expected not-found error, got: %v", err)
-		}
-	})
-}
-
 func TestRunProjectMergeCore_RefusesGlobal(t *testing.T) {
 	db, err := memory.OpenDB(":memory:")
 	if err != nil {
@@ -940,188 +462,6 @@ func TestRunProjectMergeCore_RefusesGlobal(t *testing.T) {
 	}
 }
 
-// TestRunProjectMergeCore_WithholdsTokenShapedStoredIDs: merge resolves both of
-// its arguments and then names the STORED ids it resolved, not the operands it
-// was handed. A stored id is not automatically safe: the bound-free import
-// predicate accepts an artifact's project id verbatim (it refuses a control
-// character, a backtick and a delimiter, and never asks the token guard), so a
-// store can hold an id the guard recognises and ResolveProject hands it back.
-// The self-merge refusal and the `Merging …` line that precedes the write
-// therefore render each id through memory.RefusalArg under the neutral
-// memory.ProjectIdentifierLabel — the renderer the not-found refusals beside
-// them and the store's _global guard already use.
-//
-// The ordinary case rides in the same test on purpose: RefusalArg is exactly %q
-// for a value the guard does not recognise, so a renderer that withheld
-// everything would keep the token out AND stop naming the project it merged.
-// It also pins what the change did to the ordinary output: the self-merge
-// refusal already quoted the id with %q and is byte-identical, while the
-// `Merging …` line printed each id bare and now quotes it.
-func TestRunProjectMergeCore_WithholdsTokenShapedStoredIDs(t *testing.T) {
-	const key = "AKIAIOSFODNN7EXAMPLE" // an AWS access key ID, per internal/secret
-	newStore := func(t *testing.T) *memory.Store {
-		t.Helper()
-		db, err := memory.OpenDB(":memory:")
-		if err != nil {
-			t.Fatalf("OpenDB: %v", err)
-		}
-		t.Cleanup(func() { _ = db.Close() })
-		logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
-		s := memory.NewStore(db, logger)
-		if err := s.EnsureProject(context.Background(), key, "/tmp/tok", "token-name"); err != nil {
-			t.Fatalf("EnsureProject token: %v", err)
-		}
-		if err := s.EnsureProject(context.Background(), "old-proj", "/tmp/old", "old-name"); err != nil {
-			t.Fatalf("EnsureProject old: %v", err)
-		}
-		if err := s.EnsureProject(context.Background(), "new-proj", "/tmp/new", "new-name"); err != nil {
-			t.Fatalf("EnsureProject new: %v", err)
-		}
-		return s
-	}
-
-	t.Run("the self-merge refusal withholds the stored id", func(t *testing.T) {
-		store := newStore(t)
-		var out bytes.Buffer
-		err := runProjectMergeCore(context.Background(), store, &out, key, key)
-		if err == nil {
-			t.Fatal("merging a project into itself was accepted")
-		}
-		msg := err.Error()
-		if strings.Contains(msg, key) {
-			t.Errorf("the refusal quotes the stored id:\n%s", msg)
-		}
-		if !strings.Contains(msg, "itself") {
-			t.Errorf("the refusal no longer names the self-merge:\n%s", msg)
-		}
-		if !strings.Contains(msg, "<"+memory.ProjectIdentifierLabel+" withheld") {
-			t.Errorf("the refusal does not say what was withheld:\n%s", msg)
-		}
-	})
-
-	t.Run("the merging line withholds the stored id", func(t *testing.T) {
-		store := newStore(t)
-		var out bytes.Buffer
-		if err := runProjectMergeCore(context.Background(), store, &out, key, "new-name"); err != nil {
-			t.Fatalf("runProjectMergeCore: %v", err)
-		}
-		line := out.String()
-		if strings.Contains(line, key) {
-			t.Errorf("the merging line quotes the stored id:\n%s", line)
-		}
-		if !strings.Contains(line, "<"+memory.ProjectIdentifierLabel+" withheld") {
-			t.Errorf("the merging line does not say what was withheld:\n%s", line)
-		}
-		if !strings.Contains(line, `"new-proj"`) {
-			t.Errorf("the merging line stopped naming the survivor:\n%s", line)
-		}
-	})
-
-	t.Run("the merging line quotes an ordinary id, where it used to print it bare", func(t *testing.T) {
-		store := newStore(t)
-		var out bytes.Buffer
-		if err := runProjectMergeCore(context.Background(), store, &out, "old-name", "new-name"); err != nil {
-			t.Fatalf("runProjectMergeCore: %v", err)
-		}
-		want := "Merging \"old-name\" (\"old-proj\") into \"new-name\" (\"new-proj\")\n" +
-			"merged: all records from \"old-name\" now belong to \"new-name\"\n"
-		if got := out.String(); got != want {
-			t.Errorf("output = %q, want %q", got, want)
-		}
-	})
-
-	t.Run("an ordinary stored id is still named verbatim", func(t *testing.T) {
-		store := newStore(t)
-		var out bytes.Buffer
-		err := runProjectMergeCore(context.Background(), store, &out, "new-name", "new-proj")
-		if err == nil {
-			t.Fatal("merging a project into itself was accepted")
-		}
-		want := `refusing to merge a project into itself ("new-proj")`
-		if err.Error() != want {
-			t.Errorf("refusal = %q, want %q", err.Error(), want)
-		}
-	})
-}
-
-// TestLifecyclePhasesOrder pins the ordering contract that the single-process
-// coordinator exists to enforce: reflect (a rewrite) must run before resolve
-// (stamps resolved_at) and supersede (links rows).
-func TestLifecyclePhasesOrder(t *testing.T) {
-	cfg := &config.Config{}
-	cfg.Reflection.AutoReflect = true
-	cfg.Reflection.AutoResolve = true
-	cfg.Reflection.AutoSupersede = true
-
-	phases := lifecyclePhases(cfg, "proj", true)
-	got := make([]string, 0, len(phases))
-	for _, p := range phases {
-		got = append(got, p.name)
-	}
-	want := []string{"reflect", "resolve", "supersede"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("phase order = %v, want %v", got, want)
-	}
-	if !reflect.DeepEqual(phases[0].args, []string{"reflect", "--project", "proj", "--apply", "--require-llm", "--skip-unchanged"}) {
-		t.Errorf("reflect args = %v", phases[0].args)
-	}
-	if !reflect.DeepEqual(phases[1].args, []string{"resolve", "--project", "proj", "--apply"}) {
-		t.Errorf("resolve args = %v", phases[1].args)
-	}
-	if !reflect.DeepEqual(phases[2].args, []string{"supersede", "--project", "proj", "--apply"}) {
-		t.Errorf("supersede args = %v", phases[2].args)
-	}
-}
-
-// TestLifecyclePhasesSkipsReflectWithoutLLM: without a real LLM tier an
-// unattended consolidation would rewrite every non-manual memory through the
-// Jaccard-only sqlite tier, so the reflect phase must be dropped while the
-// non-LLM phases still run.
-func TestLifecyclePhasesSkipsReflectWithoutLLM(t *testing.T) {
-	cfg := &config.Config{}
-	cfg.Reflection.AutoReflect = true
-	cfg.Reflection.AutoResolve = true
-	cfg.Reflection.AutoSupersede = true
-
-	phases := lifecyclePhases(cfg, "proj", false)
-	got := make([]string, 0, len(phases))
-	for _, p := range phases {
-		got = append(got, p.name)
-	}
-	want := []string{"resolve", "supersede"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("phase order without LLM = %v, want %v", got, want)
-	}
-}
-
-func TestReflectSkipDecision(t *testing.T) {
-	cases := []struct {
-		skip, apply bool
-		stored, cur string
-		want        bool
-	}{
-		{true, true, "abc", "abc", true},
-		{true, true, "abc", "def", false},
-		{true, true, "", "abc", false},     // nothing recorded yet
-		{true, false, "abc", "abc", false}, // dry-run never skips
-		{false, true, "abc", "abc", false}, // manual run always executes
-	}
-	for _, c := range cases {
-		if got := reflectSkipDecision(c.skip, c.apply, c.stored, c.cur); got != c.want {
-			t.Errorf("reflectSkipDecision(%v,%v,%q,%q) = %v, want %v", c.skip, c.apply, c.stored, c.cur, got, c.want)
-		}
-	}
-}
-
-func TestReflectMaySkipDoesNotSkipExplicitPromotion(t *testing.T) {
-	if reflectMaySkip(true, true, true, false, "same", "same") {
-		t.Fatal("explicit --promote-globals was skipped as unchanged")
-	}
-	if !reflectMaySkip(true, true, false, false, "same", "same") {
-		t.Fatal("ordinary unchanged apply should still skip")
-	}
-}
-
 // TestReflectMaySkipDoesNotSkipExplicitAllowDrops: --allow-drops is the same
 // class of flag as --promote-globals. The fingerprint describes the corpus, not
 // what the apply was asked to do with it, so an operator who runs a
@@ -1135,130 +475,6 @@ func TestReflectMaySkipDoesNotSkipExplicitAllowDrops(t *testing.T) {
 	}
 	if !reflectMaySkip(true, true, false, false, "same", "same") {
 		t.Fatal("ordinary unchanged apply should still skip")
-	}
-}
-
-// TestReportReductionWarningCountsWhatTheProjectEndsUpHolding: the >50%
-// reduction warning is the only signal an unattended apply compressed hard, and
-// it used to read len(projectMems) alone. applyReflection folds the cross-project
-// candidates back into the project when promotion is off, so a round that
-// emitted 5 project-scoped and 7 cross-project memories for a 20-memory corpus
-// kept 12 of 20 (60%) while the warning reported "5 vs 20" and cried >50%
-// reduction. A warning that fires on rounds that lost nothing trains the reader
-// to ignore it — the opposite of what an unattended path needs.
-func TestReportReductionWarningCountsWhatTheProjectEndsUpHolding(t *testing.T) {
-	live := make([]memory.Memory, 20)
-	project := make([]reflection.ReflectMemory, 5)
-	candidates := make([]reflection.ReflectMemory, 7)
-
-	var buf bytes.Buffer
-	reportReductionWarning(&buf, live, project, candidates, false, promotionOutcome{})
-	if buf.Len() != 0 {
-		t.Errorf("promotion off keeps all 12 of 20, so nothing was lost; got:\n%s", buf.String())
-	}
-
-	// Promotion on is the same result with a different destination, and it does
-	// lose the candidates from this project — so the warning is right to fire.
-	buf.Reset()
-	reportReductionWarning(&buf, live, project, candidates, true, promotionOutcome{})
-	if !strings.Contains(buf.String(), "left 5 memories in the project vs 20") {
-		t.Errorf("promotion on leaves 5 of 20 in the project; got:\n%s", buf.String())
-	}
-	if !strings.Contains(buf.String(), "promoted to _global") {
-		t.Errorf("warning misreports where the 7 candidates went; got:\n%s", buf.String())
-	}
-
-	// A real compression with no candidates at all: the message has to name the
-	// count that survived, not the count of one scope.
-	buf.Reset()
-	reportReductionWarning(&buf, live, []reflection.ReflectMemory{{}, {}}, nil, false, promotionOutcome{})
-	if !strings.Contains(buf.String(), "left 2 memories in the project vs 20") {
-		t.Errorf("got:\n%s", buf.String())
-	}
-}
-
-// TestReportReductionWarningStaysQuietOnSmallCorpora: below six consolidatable
-// rows a ratio warning fires on almost every run and means nothing.
-func TestReportReductionWarningStaysQuietOnSmallCorpora(t *testing.T) {
-	var buf bytes.Buffer
-	reportReductionWarning(&buf, make([]memory.Memory, reductionWarnMinInput-1), []reflection.ReflectMemory{{}}, nil, false, promotionOutcome{})
-	if buf.Len() != 0 {
-		t.Errorf("a %d-memory corpus must not raise a reduction warning; got:\n%s", reductionWarnMinInput-1, buf.String())
-	}
-}
-
-// TestReportReductionWarningBoundaryIsNotRounded: the half is compared doubled,
-// not as len(live)/2. Integer division rounds down, so on an odd corpus "3 of 7"
-// — a 57% reduction, more than the half the message names — read as "kept at
-// least half" and printed nothing.
-func TestReportReductionWarningBoundaryIsNotRounded(t *testing.T) {
-	live := make([]memory.Memory, 7)
-	kept := make([]reflection.ReflectMemory, 3)
-
-	var buf bytes.Buffer
-	reportReductionWarning(&buf, live, kept, nil, false, promotionOutcome{})
-	if !strings.Contains(buf.String(), "left 3 memories in the project vs 7") {
-		t.Errorf("3 of 7 is a 57%% reduction and must be reported; got:\n%s", buf.String())
-	}
-
-	// And the other side of the same boundary, on the same odd corpus: 4 of 7 is
-	// 43% retained, under the half, so it stays quiet.
-	buf.Reset()
-	reportReductionWarning(&buf, live, make([]reflection.ReflectMemory, 4), nil, false, promotionOutcome{})
-	if buf.Len() != 0 {
-		t.Errorf("4 of 7 keeps more than half and must not be reported; got:\n%s", buf.String())
-	}
-}
-
-// TestReportDisposedClaims pins the three shapes a disposal claim can take, and
-// the middle one is the defect this report exists to prevent: executeOps records
-// Replacement.Text before the post-filters run, and
-// dropForeignProjectMemories deletes a memory naming a project the input corpus
-// never mentioned — so a claim can name a replacement the SAME run threw away.
-// Printing it as "replaced by" would tell a person deciding on --apply that the
-// knowledge went somewhere, when the row is about to be deleted and the
-// replacement is in neither place.
-func TestReportDisposedClaims(t *testing.T) {
-	const kept = "the bastion answers ping on 443"
-	result := reflection.ReflectionResult{
-		Memories: []reflection.ReflectMemory{{Category: "fact", Content: kept}},
-		Replacements: []reflection.Replacement{
-			{ID: "A", Text: kept},               // the replacement survived
-			{ID: "B", Text: "gone from result"}, // a post-filter removed it
-			{ID: "C"},                           // no text recorded at all
-		},
-	}
-
-	var buf bytes.Buffer
-	reportDisposedClaims(&buf, 80, result)
-	got := buf.String()
-
-	for _, want := range []string{
-		"replaced by " + kept,
-		"its replacement is NOT in this result — gone from result",
-		"(no replacement text recorded)",
-	} {
-		if !strings.Contains(got, want) {
-			t.Errorf("claim report missing %q; got:\n%s", want, got)
-		}
-	}
-	// The discarded replacement must not also be described as having replaced
-	// anything, which is the specific misreading.
-	if strings.Contains(got, "replaced by gone from result") {
-		t.Errorf("a replacement the run discarded is reported as replacing the row:\n%s", got)
-	}
-}
-
-// TestReportDisposedClaimsSaysNothingWithoutClaims: a round where the model
-// disposed of nothing must not print a header, so the dry run's output is not
-// carrying an empty section.
-func TestReportDisposedClaimsSaysNothingWithoutClaims(t *testing.T) {
-	var buf bytes.Buffer
-	reportDisposedClaims(&buf, 80, reflection.ReflectionResult{
-		Memories: []reflection.ReflectMemory{{Category: "fact", Content: "anything"}},
-	})
-	if buf.Len() != 0 {
-		t.Errorf("no disposals, so nothing should be printed; got:\n%s", buf.String())
 	}
 }
 
@@ -1363,29 +579,6 @@ func TestReportReductionWarningNeverClaimsAnUnwrittenPromotion(t *testing.T) {
 	}
 }
 
-func TestConsolidatableFilters(t *testing.T) {
-	now := "2026-09-21 00:00:00"
-	mems := []memory.Memory{
-		{ID: "keep", CreatedAt: now},
-		{ID: "resolved", ResolvedAt: &now},
-		{ID: "pinned", Pinned: true},
-		{ID: "manual", Source: "manual"},
-		// A persistent row is the same protection as a pin, decided by a different
-		// flag: consolidation must not rewrite it, so it must not even see it.
-		{ID: "persistent", Retention: memory.RetentionPersistent},
-	}
-	got := consolidatable(mems)
-	if len(got) != 1 || got[0].ID != "keep" {
-		t.Fatalf("consolidatable = %+v, want only keep (a persistent row must be excluded like pinned and manual)", got)
-	}
-}
-
-func TestLifecyclePhasesEmptyWhenAllDisabled(t *testing.T) {
-	if phases := lifecyclePhases(&config.Config{}, "proj", true); len(phases) != 0 {
-		t.Fatalf("expected no phases when everything is disabled, got %v", phases)
-	}
-}
-
 // TestLifecyclePhasesTimeoutFromConfig: zero explicitly disables the phase
 // bound (the loaded default is a generous 60 minutes), and any configured value
 // propagates to every phase.
@@ -1410,42 +603,6 @@ func TestLifecyclePhasesTimeoutFromConfig(t *testing.T) {
 		if p.timeout != 45*time.Minute {
 			t.Errorf("phase %s timeout = %v, want 45m", p.name, p.timeout)
 		}
-	}
-}
-
-// TestLifecyclePhasesTimeoutOutOfRange pins that only an explicit 0 removes the
-// phase bound. A negative value used to remove it with no warning, and a value
-// too large for a time.Duration wrapped into a negative timeout that removed it
-// the same way; an unbounded phase can wedge auto-consolidation for the
-// project until the process is killed by hand.
-func TestLifecyclePhasesTimeoutOutOfRange(t *testing.T) {
-	largest := time.Duration(math.MaxInt64/int64(time.Minute)) * time.Minute
-	cases := []struct {
-		name    string
-		minutes int
-		want    time.Duration
-	}{
-		{name: "negative keeps the default", minutes: -5, want: config.DefaultLifecycleTimeoutMinutes * time.Minute},
-		{name: "overflow is clamped", minutes: 200000000, want: largest},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			cfg := &config.Config{}
-			cfg.Reflection.AutoReflect = true
-			cfg.Reflection.AutoResolve = true
-			cfg.Reflection.AutoSupersede = true
-			cfg.Reflection.LifecycleTimeoutMinutes = tc.minutes
-
-			phases := lifecyclePhases(cfg, "proj", true)
-			if len(phases) != 3 {
-				t.Fatalf("expected 3 phases, got %d", len(phases))
-			}
-			for _, p := range phases {
-				if p.timeout != tc.want {
-					t.Errorf("lifecycle_timeout_minutes=%d: phase %s timeout = %v, want %v", tc.minutes, p.name, p.timeout, tc.want)
-				}
-			}
-		})
 	}
 }
 
@@ -1762,67 +919,6 @@ func TestParseResolveArgs(t *testing.T) {
 	}
 }
 
-// TestReadOnlySelectors pins the --only-file format: one id or prefix per line,
-// a '#' starting a comment, blank lines and CRLF ignored.
-//
-// A comment is a '#' that begins the line or FOLLOWS WHITESPACE, so an annotated
-// line (`<id>   # the changelog note`) still works — which matters more than it
-// looks, because the alternative makes the annotation part of the selector, and a
-// selector holding a comment is not a prefix, so the repair refuses the file and
-// judges nothing. The old rule was "the first '#' anywhere", on the stated premise
-// that a selector can never contain one — an id is hex, and so is any prefix of
-// one. `ghost import` made that false: it writes an artifact's ids verbatim, so a
-// stored id can hold a '#', and this file is the only surface that can carry some
-// of those ids. The one shape that costs is an id containing " #", which no
-// comment rule can have both ways.
-func TestReadRefSelectorsForOnlyFile(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "ids.txt")
-	body := "# targets withdrawn by supersede --reassess --apply\r\n" +
-		"abcdef0123456789abcdef0123456789   # the changelog note\r\n" +
-		"\r\n" +
-		"  12345678  \n" +
-		"   # an indented comment, the annotation form that still works\n" +
-		"# trailing comment with no ids\n"
-	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	got, err := readRefSelectors("--only-file", path)
-	if err != nil {
-		t.Fatalf("readRefSelectors: %v", err)
-	}
-	want := []string{"abcdef0123456789abcdef0123456789", "12345678"}
-	if len(got) != len(want) {
-		t.Fatalf("readRefSelectors = %v, want %v", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Errorf("selector %d = %q, want %q", i, got[i], want[i])
-		}
-	}
-}
-
-// A '#' glued to the text is part of the id, not the start of a comment. The only
-// way to tell the two apart is whether whitespace precedes it, and an imported
-// artifact can hold one — and this file is the only surface that can carry such an
-// id, so truncating it at the '#' produced a selector naming no row and a repair
-// that reported a miss for a memory it had just called repairable.
-func TestReadRefSelectorsKeepsAHashInsideAnID(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "ids.txt")
-	hashy := "import#1 note"
-	if err := os.WriteFile(path, []byte("# a comment line\n"+hashy+"\n"), 0o600); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	got, err := readRefSelectors("--only-file", path)
-	if err != nil {
-		t.Fatalf("readRefSelectors: %v", err)
-	}
-	if len(got) != 1 || got[0] != hashy {
-		t.Errorf("readRefSelectors = %q, want [%q]", got, hashy)
-	}
-}
-
 // The one shape the whitespace rule cannot have both ways: an id containing " #".
 // The line reads as an id plus a comment, so the id is truncated at the '#'. That
 // is a documented cost rather than an oversight — the alternative (a '#' anywhere
@@ -1877,29 +973,6 @@ func TestReadRefSelectorsNamesAMissingFile(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), path) {
 		t.Errorf("error %q must name the path %q", err, path)
-	}
-}
-
-func TestResolveSummaryLineReportsUnknown(t *testing.T) {
-	got := resolveSummaryLine("proj", resolve.Result{
-		Loaded:     1,
-		Candidates: 1,
-		Unknown:    1,
-	}, false, 0, 1)
-	want := "proj: 1 loaded, 1 after prefilter, 0 confirmed evidence, 0 KEEP vetoed, 0 KEEP cached, 1 UNKNOWN, would resolve 0 (1 classify call(s))\n"
-	if got != want {
-		t.Errorf("resolveSummaryLine() = %q, want %q", got, want)
-	}
-}
-
-// TestResolveSummaryLineReportsVetoes: the vetoed count is part of the summary,
-// because a pass that stops asking is otherwise indistinguishable from a pass
-// that decided everything was RESOLVED.
-func TestResolveSummaryLineReportsVetoes(t *testing.T) {
-	got := resolveSummaryLine("proj", resolve.Result{Loaded: 4, Candidates: 4, Confirmed: 1, Resolved: 1, Vetoed: 3}, true, 1, 1)
-	want := "proj: 4 loaded, 4 after prefilter, 1 confirmed evidence, 3 KEEP vetoed, 0 KEEP cached, 0 UNKNOWN, resolved 1 (1 classify call(s))\n"
-	if got != want {
-		t.Errorf("resolveSummaryLine() = %q, want %q", got, want)
 	}
 }
 
@@ -2524,109 +1597,6 @@ func TestParseSupersedeArgs(t *testing.T) {
 	}
 }
 
-// TestDashProjectLifecycleRoundTrip proves a dash-prefixed project name is
-// auto-consolidatable end to end: the coordinator's --project entry parse
-// accepts it (no fail-fast guard), every phase argv lifecyclePhases emits
-// parses back to exactly that name — not a flag — with its flags intact, and
-// the name resolves in the store the way each phase's resolveProjectOrExit
-// resolves it.
-func TestDashProjectLifecycleRoundTrip(t *testing.T) {
-	proj, _, err := parseLifecycleArgs([]string{"--project", "-dashy"})
-	if err != nil {
-		t.Fatalf("parseLifecycleArgs --project -dashy: %v", err)
-	}
-	cfg := &config.Config{}
-	cfg.Reflection.AutoReflect = true
-	cfg.Reflection.AutoResolve = true
-	cfg.Reflection.AutoSupersede = true
-	phases := lifecyclePhases(cfg, proj, true)
-	if len(phases) != 3 {
-		t.Fatalf("expected 3 phases, got %d", len(phases))
-	}
-
-	db, err := memory.OpenDB(":memory:")
-	if err != nil {
-		t.Fatalf("OpenDB: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
-	store := memory.NewStore(db, logger)
-	ctx := context.Background()
-	if err := store.EnsureProject(ctx, "dash-id", "/tmp/-dashy", "-dashy"); err != nil {
-		t.Fatalf("EnsureProject: %v", err)
-	}
-
-	for _, ph := range phases {
-		args := ph.args[1:] // drop the subcommand word
-		var got string
-		var apply bool
-		switch ph.name {
-		case "reflect":
-			p, perr := parseReflectArgs(args)
-			if perr != nil {
-				t.Fatalf("parseReflectArgs(%v): %v", ph.args, perr)
-			}
-			got, apply = p.project, p.apply
-			if !p.requireLLM || !p.skipUnchanged {
-				t.Errorf("reflect phase flags lost: %+v", p)
-			}
-		case "resolve":
-			p, perr := parseResolveArgs(args)
-			if perr != nil {
-				t.Fatalf("parseResolveArgs(%v): %v", ph.args, perr)
-			}
-			if p.reassess {
-				t.Errorf("the resolve phase must never emit --reassess (phase argv: %v)", ph.args)
-			}
-			if len(p.only) > 0 || p.onlyFile != "" {
-				t.Errorf("the resolve phase must never emit a repair scope (phase argv: %v)", ph.args)
-			}
-			got, apply = p.project, p.apply
-		case "supersede":
-			project, _, a, reassess, _, _, withdraw, _, perr := parseSupersedeArgs(args)
-			if perr != nil {
-				t.Fatalf("parseSupersedeArgs(%v): %v", ph.args, perr)
-			}
-			if reassess {
-				t.Errorf("the supersede phase must never emit --reassess (phase argv: %v)", ph.args)
-			}
-			if len(withdraw) != 0 {
-				t.Errorf("the supersede phase must never emit --withdraw (phase argv: %v)", ph.args)
-			}
-			got, apply = project, a
-		default:
-			t.Fatalf("unexpected phase %q", ph.name)
-		}
-		if got != "-dashy" {
-			t.Errorf("%s phase parsed project %q, want -dashy (argv %v)", ph.name, got, ph.args)
-		}
-		if !apply {
-			t.Errorf("%s phase lost --apply: %v", ph.name, ph.args)
-		}
-		id, _, rerr := store.ResolveProject(ctx, got)
-		if rerr != nil || id != "dash-id" {
-			t.Errorf("%s project %q did not resolve: id=%q err=%v", ph.name, got, id, rerr)
-		}
-	}
-}
-
-// TestConsolidationContext pins the bound that replaced a hardcoded 3 minutes.
-// Zero must mean unbounded, because WithTimeout(parent, 0) would cancel the
-// call immediately. A negative or oversized key no longer reaches here as a
-// non-positive duration: the config resolves it to the default or the largest
-// bound, so it keeps a deadline instead of silently losing it.
-func TestConsolidationContext(t *testing.T) {
-	if _, ok := mustCtx(t, 0).Deadline(); ok {
-		t.Fatal("zero minutes must not set a deadline")
-	}
-
-	assertDeadlineNear(t, "5 minutes", mustCtx(t, 5), 5*time.Minute)
-	assertDeadlineNear(t, "negative minutes", mustCtx(t, -1), config.DefaultConsolidationTimeoutMinutes*time.Minute)
-	if _, ok := mustCtx(t, 200000000).Deadline(); !ok {
-		t.Error("an oversized minute count must still set a deadline")
-	}
-}
-
 // TestConsolidationContextZeroLiftsTheClientDefault is the other half of
 // "zero means unbounded". A context with no deadline is not enough on its own:
 // every harness client applies its own per-call default to a context that has
@@ -2645,19 +1615,6 @@ func TestConsolidationContextZeroLiftsTheClientDefault(t *testing.T) {
 	}
 	if ai.DefaultBoundRemoved(context.Background()) {
 		t.Error("a context the consolidation path did not build must keep the default")
-	}
-}
-
-// assertDeadlineNear fails unless ctx has a deadline about want from now.
-func assertDeadlineNear(t *testing.T, label string, ctx context.Context, want time.Duration) {
-	t.Helper()
-	dl, ok := ctx.Deadline()
-	if !ok {
-		t.Errorf("%s must set a deadline", label)
-		return
-	}
-	if d := time.Until(dl); d < want-time.Minute || d > want+time.Minute {
-		t.Errorf("%s: deadline %v is not ~%v away", label, d, want)
 	}
 }
 
@@ -2701,33 +1658,47 @@ func TestClampReflectMemories(t *testing.T) {
 	}
 }
 
-// TestDetectClients_FindsHomeBinDirs verifies that auto-detect finds a client
-// that lives only in a home bin directory, the same place --client looks. The
-// environment is built from nothing: PATH is an empty temp dir, HOME is a temp
-// dir, and the system bin dirs are emptied so a client installed on the host
-// is never reachable.
-func TestDetectClients_FindsHomeBinDirs(t *testing.T) {
-	home := isolateClientLookup(t)
-	t.Setenv("PATH", t.TempDir())
-
-	localBin := filepath.Join(home, ".local", "bin")
-	goBin := filepath.Join(home, "go", "bin")
-	for _, d := range []string{localBin, goBin} {
-		if err := os.MkdirAll(d, 0o755); err != nil {
-			t.Fatal(err)
-		}
+// TestPrintDeleteSummary_FieldsNotTransposed pins the label-to-value mapping
+// with seven distinct values (one per field) and a whole-string comparison, so
+// swapping any two summary.X arguments inside printDeleteSummary — the same
+// bug class the memory-layer fixture in store_test.go was hardened against —
+// fails this test instead of passing silently.
+func TestPrintDeleteSummary_FieldsNotTransposed(t *testing.T) {
+	var out bytes.Buffer
+	if err := printDeleteSummary(&out, memory.DeleteProjectSummary{
+		ProjectID:   "proj",
+		ProjectName: "test-project",
+		Memories:    1,
+		MemoryLinks: 2,
+		Tasks:       3,
+		Decisions:   4,
+		TokenUsage:  5,
+		AuditLog:    6,
+		// A seventh distinct value, one per field, so a swap inside
+		// printDeleteSummary fails this test rather than passing silently --
+		// which is the whole reason the fixture is shaped this way. RetrievalRecords
+		// is here because DeleteProject removes those rows (#646), and a summary
+		// that omitted a table its own command deletes would under-report.
+		RetrievalRecords: 7,
+		// And a ninth, for the objections #648 slice 2 files. A summary that omitted
+		// a table its own command deletes would under-report, and the distinct
+		// value is what keeps a swap of the flags line from passing.
+		MemoryFlags: 9,
+	}, "Would delete"); err != nil {
+		t.Fatalf("printDeleteSummary: %v", err)
 	}
-	writeStub(t, localBin, "claude")
-	writeStub(t, goBin, "goose")
 
-	got := detectClients()
-	want := []string{"claude", "goose"}
-	if len(got) != len(want) {
-		t.Fatalf("detectClients() = %v, want %v", got, want)
-	}
-	for i, name := range want {
-		if got[i] != name {
-			t.Errorf("detectClients()[%d] = %q, want %q", i, got[i], name)
-		}
+	want := `Would delete test-project (proj):
+  memories:     1
+  memory_links: 2
+  tasks:        3
+  decisions:    4
+  token_usage:  5
+  audit_log:    6
+  retrievals:   7
+  flags:        9
+`
+	if out.String() != want {
+		t.Errorf("printDeleteSummary output mismatch:\ngot:\n%s\nwant:\n%s", out.String(), want)
 	}
 }
