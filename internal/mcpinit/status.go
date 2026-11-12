@@ -22,8 +22,6 @@ import (
 
 // Status checks the health of the Ghost ↔ Claude Code integration. The
 // returned healthy bool reflects whether every check passed; err is reserved
-// for actual failures (I/O, config parse) that prevented the checks from
-// running at all.
 func Status(w io.Writer) (bool, error) {
 	_, _ = fmt.Fprintf(w, "\nGhost ↔ Claude Code integration status:\n\n")
 
@@ -37,23 +35,17 @@ func Status(w io.Writer) (bool, error) {
 		}
 	}
 
-	// A plugin-managed integration does not go through `claude mcp get`: its
-	// MCP server, hooks, and permissions are declarative in the plugin, and its
-	// bundled binary lives in the plugin cache. Report that, rather than the
-	// standalone registration checks below, which would all read as failures.
 	if PluginInstalled() {
 		_, _ = fmt.Fprintln(w, "  ✓ integration managed by the ghost Claude Code plugin")
 		_, _ = fmt.Fprintln(w, "    registration, hooks, and permissions are declarative — update with `/plugin update` in Claude Code")
 		return true, nil
 	}
 
-	// 1. Ghost binary.
 	ghostBin := findGhostBinary()
 	check(ghostBin != "",
 		fmt.Sprintf("ghost binary: %s", ghostBin),
 		"ghost binary not found in PATH")
 
-	// 2. Claude CLI.
 	claudeBin := findBinary("claude")
 	check(claudeBin != "",
 		fmt.Sprintf("claude CLI: %s", claudeBin),
@@ -61,21 +53,15 @@ func Status(w io.Writer) (bool, error) {
 
 	reportConfigFile(w)
 
-	// 3. MCP server registration — judged on what it RUNS, not on whether a
-	// server named ghost exists: a registration left pointing at a moved,
-	// deleted or unrelated program leaves every session without ghost's tools
-	// while the report calls it registered.
 	if claudeBin != "" {
 		registered, why := claudeMCPEntryStatus(claudeBin, ghostBin)
 		check(registered, "MCP server registered", why)
 	}
 
-	// 4-6. Settings: permissions, hook, autoMemoryEnabled.
 	path, err := settingsPath()
 	if err == nil {
 		sf, err := loadSettings(path)
 		if err == nil {
-			// Permissions.
 			existing, _ := sf.getPermissions()
 			set := make(map[string]bool, len(existing))
 			for _, p := range existing {
@@ -91,21 +77,12 @@ func Status(w io.Writer) (bool, error) {
 				fmt.Sprintf("permissions: %d/%d", present, len(ghostPermissions)),
 				fmt.Sprintf("permissions: %d/%d (run ghost mcp init)", present, len(ghostPermissions)))
 
-			// Hook. Token-validated, not substring-matched: the command must
-			// invoke `hook <event>` with an exact --source claude-code token
-			// (either flag form). A pre-contract bare invocation fails open at
-			// fire time and a wrong-source or lookalike value would too — all
-			// must report as missing here so the fix is actionable via
-			// `ghost mcp init`.
 			hasHk := contractHookWired(sf, "SessionStart", "session-start", "claude-code", ghostBin)
 			check(hasHk, "SessionStart hook configured", "SessionStart hook missing or pre-contract (run ghost mcp init)")
 
 			hasStop := contractHookWired(sf, "Stop", "stop", "claude-code", ghostBin)
 			check(hasStop, "Stop hook configured", "Stop hook missing or pre-contract (run ghost mcp init)")
 
-			// The working-moment hooks are an addition, and a user who removed
-			// them on purpose is not unhealthy: reported, never counted against
-			// the overall verdict.
 			for _, c := range []struct{ event, token string }{{"UserPromptSubmit", "message-submit"}, {"PostToolUse", "edit"}} {
 				if contractHookWired(sf, c.event, c.token, "claude-code", ghostBin) {
 					_, _ = fmt.Fprintf(w, "  ✓ %s hook configured (working-moment context)\n", c.event)
@@ -114,7 +91,6 @@ func Status(w io.Writer) (bool, error) {
 				}
 			}
 
-			// autoMemoryEnabled must be false to prevent competing file-memory.
 			autoMemVal, autoMemSet := sf.getAutoMemoryEnabled()
 			autoMemOff := autoMemSet && !autoMemVal
 			check(autoMemOff,
@@ -126,9 +102,6 @@ func Status(w io.Writer) (bool, error) {
 		}
 	}
 
-	// 7. Project redirects plus the shared store health (database, Ollama,
-	// embedding, linking). checkStoreHealth returns the open store so the
-	// Claude-specific redirect check can reuse it.
 	store := checkStoreHealth(w, check)
 	if store != nil {
 		defer store.Close() //nolint:errcheck
@@ -164,37 +137,13 @@ func Status(w io.Writer) (bool, error) {
 	return healthy, nil
 }
 
-// claudeMCPEntryStatus judges the registration `claude mcp get ghost` reports
-// against the ghost binary this run resolved. The returned message explains
-// the failure for the status check's line.
-//
-// The registration is judged on WHAT IT RUNS, not on whether a server named
-// ghost exists. A registration that names another program — one that was moved
-// away, deleted, or was never ghost's at all — leaves every Claude Code
-// session without ghost's tools, and a report that called it registered sent
-// the operator looking for the problem elsewhere (#1710). So the command must
-// resolve to the ghost binary this run found, and the arguments must be the
-// contract's stdio invocation: `ghost mcp`.
-//
-// Those are the same two things the codex and opencode checks hold their own
-// registrations to (codexMCPCurrent, opencodeMCPEntryVerdict), so one rule
-// judges every client's registration.
-//
-// Every message names the repair as well as the drift, the way the codex and
-// opencode checks do: a line that says what is wrong and not what to run
-// about it leaves the reader to guess, and the repair here is one command —
-// `ghost mcp init --client claude` re-registers the server with this build's
-// binary.
 func claudeMCPEntryStatus(claudeBin, ghostBin string) (bool, string) {
 	out, err := exec.Command(claudeBin, "mcp", "get", "ghost").CombinedOutput()
 	if err != nil {
-		// The client exits non-zero when it holds no server by that name.
 		return false, "MCP server not registered"
 	}
 	present, current, why := claudeMCPVerdict(string(out), ghostBin)
 	if !present {
-		// Nothing that runs a program: no registration this build can read,
-		// which is the state the check has always called missing.
 		return false, "MCP server not registered"
 	}
 	if current {
@@ -203,41 +152,17 @@ func claudeMCPEntryStatus(claudeBin, ghostBin string) (bool, string) {
 	return false, why + " — " + claudeMCPRepair
 }
 
-// claudeMCPVerdict judges one `claude mcp get ghost` rendering.
-//
-// present reports that the rendering describes a registration named ghost at
-// all. current reports that this registration runs the ghost binary this run
-// resolved, with the contract's stdio invocation — the registration the
-// installer writes, so nothing has to change. why names the drift in the
-// status report's words, for the caller that reports it.
-//
-// BOTH the status check and the installer ask it the same question, so the two
-// cannot disagree about what "registered" means: a registration the status
-// report calls drift is a registration the installer repairs, and a
-// registration the installer leaves alone is one the status report calls
-// registered (#1710, #1711). The rule is one function, not one copy per
-// caller — the installer's own test was two substring searches over the whole
-// rendering, which read a foreign command as ghost's whenever the ghost path
-// appeared anywhere in it, and read the wrong arguments as ghost's whenever
-// the command was right.
 func claudeMCPVerdict(out, ghostBin string) (present, current bool, why string) {
-	// The same rendering the rollback reads back, through the same parser: one
-	// reader for the `claude mcp get` output.
 	reg, described := parseClaudeRegistration(out)
 	command, _ := reg.config["command"].(string)
 	if command == "" {
 		if !described {
 			return false, false, ""
 		}
-		// A registration that names a server but runs no command — an http one
-		// — is registered and wrong, the same drift as a command that runs
-		// another program.
 		return true, false, "MCP server registered, but it does not run the ghost binary"
 	}
 	resolved, rerr := exec.LookPath(command)
 	if rerr != nil {
-		// There is no program there to run: the binary was moved away, or the
-		// registration names a path that never held one.
 		return true, false, fmt.Sprintf("MCP server registered for a command that is not there (%s)", claudeMCPCommandLabel(command))
 	}
 	if !mcpCommandIsGhost(resolved, ghostBin) {
@@ -251,37 +176,12 @@ func claudeMCPVerdict(out, ghostBin string) (present, current bool, why string) 
 	return true, true, ""
 }
 
-// claudeMCPRepair is the repair every drift line names: the one command that
-// re-registers Claude Code's ghost server with this build's binary.
 const claudeMCPRepair = "run ghost mcp init --client claude"
 
-// claudeMCPCommandLabel renders the command a registration runs for the drift
-// line.
-//
-// The command is read from the client's own rendering, so it is text Ghost did
-// not author, and the line it lands on is a line of Ghost's own report: it
-// goes through the same renderer every other report uses for a value read from
-// outside (`memory.RefusalArg`), so a token-shaped value is withheld behind a
-// placeholder naming the format the guard found and a control character is
-// escaped. Quoting is what keeps a value carrying a line break from ending
-// the report line and putting a line of Ghost's own on the next one.
 func claudeMCPCommandLabel(command string) string {
 	return memory.RefusalArg("command", command)
 }
 
-// claudeMCPArgsLabel renders the arguments a registration carries for the
-// status line: each one as the client printed it, or "none" when it carries
-// none.
-//
-// Each argument is rendered on its own rather than the list as one span, for
-// two reasons. An argument is a place where a key really is passed, so the
-// token guard is asked of each one and a token-shaped one is withheld behind a
-// placeholder naming the format — while the arguments beside it are still
-// named, because a renderer that withheld the whole list would keep the token
-// out and leave the line unable to say what the registration runs. And each
-// argument is quoted on its own, so an argument carrying a line break cannot
-// end the report line: the line break is escaped, and the report keeps one
-// line per check.
 func claudeMCPArgsLabel(args []string) string {
 	if len(args) == 0 {
 		return "none"
@@ -293,17 +193,6 @@ func claudeMCPArgsLabel(args []string) string {
 	return strings.Join(parts, " ")
 }
 
-// mcpCommandIsGhost reports whether a resolved MCP command path is the ghost
-// binary this run resolved. Identity is the file itself, not its spelling, so
-// a symlink onto the resolved binary is the same registration rather than a
-// different one, and a binary that was moved away is nothing like it. When
-// ghost is not on PATH at all there is no reference to compare against, so the
-// command is accepted by name — the ghost-binary check has already failed that
-// run, and a registration the client can still spawn is not a second thing to
-// report against it.
-//
-// The rule is shared by every client's registration check, so "the ghost
-// binary" means one thing in all of them.
 func mcpCommandIsGhost(resolved, ghostBin string) bool {
 	if ghostBin == "" {
 		base := filepath.Base(resolved)
@@ -322,10 +211,6 @@ func mcpCommandIsGhost(resolved, ghostBin string) bool {
 
 // StatusOpencode checks the health of the Ghost ↔ opencode integration.
 // Unlike Status, it reports only opencode-relevant checks — the ghost binary,
-// the mcp.ghost entry in the opencode config, Ollama, and the client-agnostic
-// embedding/link stats. Claude-only checks (hooks, permissions, autoMemory,
-// redirects) are never reported here, so a clean opencode setup prints
-// "All checks passed." without the Claude CLI installed.
 func StatusOpencode(w io.Writer) (bool, error) {
 	_, _ = fmt.Fprintf(w, "\nGhost ↔ opencode integration status:\n\n")
 
@@ -339,7 +224,6 @@ func StatusOpencode(w io.Writer) (bool, error) {
 		}
 	}
 
-	// 1. Ghost binary.
 	ghostBin := findGhostBinary()
 	check(ghostBin != "",
 		fmt.Sprintf("ghost binary: %s", ghostBin),
@@ -347,12 +231,6 @@ func StatusOpencode(w io.Writer) (bool, error) {
 
 	reportConfigFile(w)
 
-	// 2. Lifecycle plugin — it both registers the ghost MCP server (config
-	// hook) and bridges idle events to the contract; without it opencode has
-	// neither tools nor reflection/resolve/supersede. Compared byte-for-byte
-	// against the source rendered with the resolved ghost binary path: a
-	// corrupted or hand-mangled file must not read healthy, and `ghost mcp
-	// init --client opencode` repairs any drift in place.
 	pluginPath, perr := opencodePluginPath()
 	pluginOK := false
 	if perr != nil {
@@ -366,35 +244,12 @@ func StatusOpencode(w io.Writer) (bool, error) {
 		check(false, "", "lifecycle plugin missing or outdated (run ghost mcp init --client opencode)")
 	}
 
-	// 3. MCP server registration — the mcp.ghost entry across the config
-	// layers opencode reads (the file in its config directory —
-	// $OPENCODE_CONFIG_DIR when set — then $OPENCODE_CONFIG, then inline
-	// $OPENCODE_CONFIG_CONTENT). Health weight follows check 2: the current
-	// plugin registers ghost at startup (config hook in V1,
-	// ctx.mcp.transform in V2) and overrides whatever the file says, so with
-	// the plugin in place a broken or absent entry is inert — reported as
-	// the fallback it is, never failed, or every documented plugin-only
-	// install (init writes no config file) would exit red on a working
-	// integration. When the plugin is missing the file is the only
-	// registration surface, and a missing, disabled or wrong-path entry
-	// fails the run with the edit that repairs it — validated against the
-	// resolved binary the way StatusCodex validates config.toml.
-	//
-	// A layer that could not be read or parsed is neither: the plugin's
-	// registration says nothing about an entry status could not judge, and
-	// opencode drops such a layer outright, so it fails the run under both
-	// gates and the footer points at the file rather than at the entry.
 	mcpOK, mcpFail, unjudgeable := opencodeMCPEntryStatus(ghostBin)
 	mcpFix := "" // footer line naming how to repair what failed above
 	switch {
 	case mcpOK:
 		check(true, "ghost MCP server registered in opencode config", "")
 	case unjudgeable != "":
-		// Nothing about the registration can be asserted, so the run is red
-		// under both gates — but the remediation depends on why. A config
-		// directory that cannot be resolved has no file to repair and the
-		// plugin check above already reports that root cause; only a layer
-		// that exists and cannot be read or parsed names a file.
 		if unjudgeable == opencodeMCPNoConfigDir {
 			check(false, "", mcpFail)
 			break
@@ -408,8 +263,6 @@ func StatusOpencode(w io.Writer) (bool, error) {
 		check(false, "", mcpFail)
 	}
 
-	// 4. Embedding & linking health — silent embed failures leave vector
-	// search and memory linking inactive.
 	store := checkStoreHealth(w, check)
 	if store != nil {
 		defer store.Close() //nolint:errcheck
@@ -419,9 +272,6 @@ func StatusOpencode(w io.Writer) (bool, error) {
 	if healthy {
 		_, _ = fmt.Fprintln(w, "All checks passed.")
 	} else {
-		// One remediation per failure, never two adjacent ones that
-		// contradict: "run ghost mcp init" is the wrong advice for a
-		// config repair, because init never writes that file.
 		if mcpFix != "" {
 			_, _ = fmt.Fprintln(w, mcpFix)
 		} else {
@@ -431,21 +281,6 @@ func StatusOpencode(w io.Writer) (bool, error) {
 	return healthy, nil
 }
 
-// contractHookWired reports whether any registered hook command for event
-// RUNS GHOST and invokes `hook <eventToken>` with an exact --source token equal
-// to wantSource. Both accepted flag forms count: "--source X" and "--source=X".
-// Token-based, not substring-based — a lookalike like "--source
-// claude-code-extra" is rejected by hostevent.Parse at runtime, so status must
-// never call it wired; conversely the equals form works and must not read as
-// missing. Ownership is the same executable rule the reconcile applies
-// (ghostHookTail), so a foreign command that merely ends in `hook <event>
-// --source claude-code` does not read as ghost's own, and a hand-edited wrapper
-// that does run ghost does — status and `ghost mcp init` agree on the same
-// file. Unparseable commands (exotic hand-edited quoting) conservatively don't
-// count, EXCEPT that a trailing token whose quoting never closes still leaves
-// the tokens before it usable — a ghost invocation at the front of such a
-// command is ghost's hook, and reporting it missing would send the operator to
-// a `ghost mcp init` that only adds a second copy beside it.
 func contractHookWired(sf *settingsFile, hookEvent, eventToken, wantSource, ghostBin string) bool {
 	cmds, err := sf.hookCommands(hookEvent)
 	if err != nil {
@@ -470,11 +305,6 @@ func contractHookWired(sf *settingsFile, hookEvent, eventToken, wantSource, ghos
 
 // ReportStaleIntegrations warns when existing client wiring predates the
 // running binary. Pre-contract Claude hooks fail open on every fire (no
-// context injection, no save-nudge, no lifecycle spawns), and a drifted
-// opencode lifecycle plugin means idle events never reach ghost at all —
-// neither failure is visible to the user, so `ghost upgrade` surfaces them
-// instead of silently disabling a working integration. Best-effort and
-// completely silent when everything is current; read-only.
 func ReportStaleIntegrations(w io.Writer) {
 	var hints []string
 
@@ -499,11 +329,6 @@ func ReportStaleIntegrations(w io.Writer) {
 		}
 	}
 
-	// opencode: the plugin is the whole integration (MCP registration via its
-	// config hook + stop-event bridge), so drift or absence anywhere under an
-	// existing opencode config dir warrants a hint. A missing plugin with no
-	// opencode dir at all means opencode isn't in use — leave it to
-	// `ghost mcp status --client opencode`.
 	if _, statErr := os.Stat(opencodeDirOrEmpty()); statErr == nil {
 		stale := true
 		if pluginPath, perr := opencodePluginPath(); perr == nil {
@@ -520,9 +345,6 @@ func ReportStaleIntegrations(w io.Writer) {
 		}
 	}
 
-	// codex: hooks are silently skipped until the user's one-time /hooks
-	// trust review, and a stale MCP entry fails invisibly — hint when a
-	// ~/.codex dir exists but wiring is missing or drifted.
 	if codexDir, err := codexHomeDir(); err == nil {
 		if _, statErr := os.Stat(codexDir); statErr == nil {
 			bin := findGhostBinary()
@@ -543,8 +365,6 @@ func ReportStaleIntegrations(w io.Writer) {
 		}
 	}
 
-	// goose: the plugin package under ~/.agents/plugins/ghost/ is the whole
-	// integration — hint on any drift when an .agents/plugins dir exists.
 	if pluginDir, err := goosePluginDir(); err == nil {
 		if _, statErr := os.Stat(filepath.Dir(filepath.Dir(pluginDir))); statErr == nil {
 			bin := findGhostBinary()
@@ -570,9 +390,6 @@ func ReportStaleIntegrations(w io.Writer) {
 	}
 }
 
-// opencodeDirOrEmpty returns the config directory opencode itself resolves
-// ($OPENCODE_CONFIG_DIR, else $XDG_CONFIG_HOME/opencode, else
-// ~/.config/opencode), or "" when it cannot be resolved.
 func opencodeDirOrEmpty() string {
 	dir, err := opencodeConfigDir()
 	if err != nil {
@@ -581,13 +398,6 @@ func opencodeDirOrEmpty() string {
 	return dir
 }
 
-// reportConfigFile prints the user config file's location, and any problem with
-// reading it. It never fails the health check — the config file is optional,
-// since compiled defaults work without one — so it deliberately doesn't take a
-// check closure; the `!` line it prints for a broken file is the pointer, not a
-// verdict. The rest of the status run continues on the environment plus the
-// compiled defaults (see checkStoreHealth), so a broken file costs the user no
-// other check.
 func reportConfigFile(w io.Writer) {
 	path, err := config.ConfigFilePath()
 	if err != nil {
@@ -604,21 +414,6 @@ func reportConfigFile(w io.Writer) {
 	}
 }
 
-// checkEmbeddingStats reports embedding coverage via the check closure. An
-// empty store is healthy — total == 0 passes with "(store empty)"; only a
-// non-empty store with no embedded memories means vector search and linking
-// are inactive. Partial coverage is reported as such rather than as a bare
-// fraction: with an identity configured, the gap is rows waiting to be
-// re-embedded after a model, dimension or task-prefix change, and they are
-// excluded from the vector leg until they are.
-//
-// That gap has two halves with different diagnoses — stale rows (a vector
-// exists, under a retired identity: the re-embed worker has the work queued)
-// and unembedded rows (no vector has ever existed: nothing has run, or
-// embedding was only just enabled) — so when any of the gap is stale it is
-// named. When nothing is stale the ordinary "(N awaiting re-embed)" line
-// stands: "0 stale" beside the ordinary first-embed gap would read as a
-// diagnosis that does not apply. Shared by Status and StatusOpencode.
 func checkEmbeddingStats(check func(ok bool, pass, fail string), embedded, stale, total int) {
 	if total == 0 {
 		check(true, "embeddings: 0 memories (store empty)", "")
@@ -636,63 +431,14 @@ func checkEmbeddingStats(check func(ok bool, pass, fail string), embedded, stale
 		fmt.Sprintf("embeddings: %d/%d memories — vector search and linking inactive%s", embedded, total, detail))
 }
 
-// checkStoreHealth runs the database, Ollama, embedding, and linking health
-// checks shared by Status and StatusOpencode. The Ollama reachability and
-// model checks run even when no database exists yet, so a fresh install still
-// reports embedding health. It returns the opened store (or nil) so callers
-// can run additional store-dependent checks; the caller must Close a non-nil
-// store.
-//
-// The store is opened READ-ONLY and the directory is resolved without creating
-// it, because a diagnostic must neither create nor migrate the store it is
-// reporting on (#1049): it reports a missing database rather than making one,
-// and a schema mismatch rather than upgrading past it.
-//
-// The config is read once, through LoadForHook, and a file that does not parse
-// must not cost the user these checks. reportConfigFile has already reported
-// the parse error, and gating on config.Load here would drop the Ollama,
-// embedding-coverage and link lines on exactly the run where a user needs them:
-// a broken config silently disabling vector search is the thing this command
-// exists to explain. On the fallback these checks still run and still
-// report the truth about the store in front of them. A stats read that fails
-// here — EmbeddingStats or LinkStats — is printed as a `!` line, the way
-// reportHistoryGrowth prints its own unreadable read: the store opened cleanly
-// and its schema matched, so a read that then fails is not something
-// `ghost mcp init` repairs, and failing the run would print a footer pointing
-// at the wrong repair. The line is still printed rather than dropped, because a
-// check that cannot run must not print nothing at all.
 func checkStoreHealth(w io.Writer, check func(ok bool, pass, fail string)) *memory.Store {
-	// 8. Embedding & linking health — silent embed failures leave vector
-	// search and memory linking inactive. Ollama checks run regardless of
-	// whether a database exists.
 	cfg := config.LoadForHook()
-	// reportOllamaDownDuration only fires when embedding is enabled AND
-	// checkOllama's live probe reached a CONCLUSIVE Unreachable — see that
-	// function's doc comment for why a stale marker must never be printed
-	// next to a currently-passing Ollama check, and why an Inconclusive probe
-	// (a missed deadline, which establishes nothing) must not be rendered as
-	// an ongoing outage either.
 	if reach := checkOllama(w, cfg, check); cfg.Embedding.Enabled && reach == embedding.Unreachable {
-		// A refused data dir must not have had a marker written into it before
-		// the report says so (#721), so this resolves the directory the same way
-		// the store open below does. DataDirPath, not DataDir: a status run
-		// must not create the directory it is reporting on, and DataDir would
-		// — DataDirPath applies the same guard without the mkdir, and
-		// reportOllamaDownDuration only reads the marker, so it has no need
-		// for the directory to exist. The `== nil` branch is the same skip.
 		if dataDir, ddErr := config.DataDirPath(); ddErr == nil {
 			reportOllamaDownDuration(w, dataDir)
 		}
 	}
 
-	// A GHOST_DEV_FORBID_DATA_DIR refusal arrives from here, before the
-	// read-only open below can read anything (#721). A status run that must
-	// not open the store has something to report — that, and why — so this is
-	// a failed check and not a silent nil: a run that exited non-zero having
-	// printed nothing would be a run that diagnosed nothing.
-	//
-	// DataDirPath, not DataDir: a status run must not create the store it is
-	// reporting on, and DataDir would.
 	dataDir, err := config.DataDirPath()
 	if err != nil {
 		check(false, "", fmt.Sprintf("database: %v", err))
@@ -704,24 +450,14 @@ func checkStoreHealth(w io.Writer, check func(ok bool, pass, fail string)) *memo
 			_, _ = fmt.Fprintln(w, "  - no Ghost database (run ghost first)")
 			return nil
 		}
-		// Permission, I/O, or other errors must fail the run rather than
-		// masquerading as a fresh install.
 		check(false, "", fmt.Sprintf("database: %v", err))
 		return nil
 	}
-	// OpenReadDB, not OpenDB: a diagnostic reports on the store and must never
-	// migrate it, or the run that says "All checks passed" would have upgraded
-	// the schema out from under a live server (#1049).
 	db, err := memory.OpenReadDB(dbPath)
 	if err != nil {
 		check(false, "", fmt.Sprintf("database: %v", err))
 		return nil
 	}
-	// OpenReadDB runs no migration, so a store whose schema is not exactly the
-	// one this build reads cannot be queried here: report the mismatch instead
-	// of selecting columns it does not have. A newer store is a failed check
-	// (OpenDB refuses it too); an older one is informational, like the absent
-	// database above, because the next ordinary open migrates it.
 	if version, verr := memory.DBUserVersion(db); verr != nil {
 		_ = db.Close()
 		check(false, "", fmt.Sprintf("database: %v", verr))
@@ -737,22 +473,8 @@ func checkStoreHealth(w io.Writer, check func(ok bool, pass, fail string)) *memo
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	store := memory.NewStore(db, logger)
-	// Same identity the MCP server embeds with, so the coverage line below
-	// counts vectors that can actually be searched. Without it, a store mid
-	// re-embed reports full coverage while the vector leg returns nothing —
-	// which is exactly the state an operator runs `ghost mcp status` to catch.
 	store.SetEmbeddingIdentity(embedding.VectorIdentity(cfg.Embedding.Model, cfg.Embedding.Dimensions))
 	if cfg.Embedding.Enabled {
-		// Both stats reads are checks that cannot run when they fail, and a
-		// check that cannot run must not print nothing at all: an `err == nil`
-		// guard with no other branch would drop the coverage line, and the
-		// coverage line's absence reads as a healthy store. They are PRINTED as
-		// `!` lines rather than failed, exactly as reportHistoryGrowth prints
-		// its own unreadable read — the store opened cleanly and its schema
-		// matched, so this is not wiring `ghost mcp init` repairs, and failing
-		// the run would print a footer pointing at the wrong repair. The error
-		// names the store's own reason (a missing table, an I/O failure), so it
-		// is reported verbatim.
 		ctx := context.Background()
 		embedded, stale, total, sErr := store.EmbeddingStats(ctx)
 		if sErr == nil {
@@ -775,13 +497,6 @@ func checkStoreHealth(w io.Writer, check func(ok bool, pass, fail string)) *memo
 	return store
 }
 
-// reportReflectionExclusions prints, per project, the share of live rows
-// reflect will never consolidate and why. Pinned, persistent, manual,
-// builtin and resolved rows are the frozen set; a project whose rows are
-// mostly frozen looks maintained while nothing can shrink it (#1849).
-// One line per project with memories, additive and never a health failure:
-// the store was opened cleanly and the read is a `!` line on failure, the
-// same rule reportHistoryGrowth follows.
 func reportReflectionExclusions(w io.Writer, store *memory.Store) {
 	ctx := context.Background()
 	projects, err := store.ListProjects(ctx)
@@ -806,17 +521,6 @@ func reportReflectionExclusions(w io.Writer, store *memory.Store) {
 	}
 }
 
-// reportReflectOverBound prints projects above the consolidation input bound
-// (#1848). A project above the bound is skipped by the unattended lifecycle
-// with no failure marker, so this is the one place it is surfaced on the CLI.
-// The bound and the count are the same predicate the lifecycle's
-// consolidationBound checks, and the manual remediation is the command that
-// does not skip. It is a `!` line for a store that has one and no line for a
-// store that has none, the same shape reportHistoryGrowth uses: the health
-// verdict is about wiring, and a project that grew past the bound is not wiring
-// that `ghost mcp init` repairs, so it never fails the run. A store that
-// opened cleanly and then cannot be read is reported in place, like the blocks
-// around it.
 func reportReflectOverBound(w io.Writer, store *memory.Store) {
 	ctx := context.Background()
 	projects, err := store.ListProjects(ctx)
@@ -850,45 +554,13 @@ func reportReflectOverBound(w io.Writer, store *memory.Store) {
 	}
 }
 
-// reportHistoryGrowth prints how fast memory_history is growing into its two
-// retention caps, and how much of that growth is version rows that restated the
-// version before them (#729).
-//
-// It is a `-` line plus one `!` line per finding, and it never takes the health
-// verdict, for two reasons. The first is the exit code: `ghost mcp status` exits
-// non-zero on an unhealthy integration, and this is not one — a store whose
-// history is full is working exactly as configured, and the operator's next
-// action is `ghost history compact`, not `ghost mcp init`. Failing the run would
-// also print a footer pointing at the wrong repair. The second is that the
-// verdict is about WIRING: whether the memory features are reachable at all. So
-// a full history is a `-` line carrying the numbers and a `!` line saying what to
-// do about them, which is the shape reportConfigFile already uses for a file it
-// cannot read.
-//
-// The numbers are the report's own fields and the sentences are the report's own
-// Detail strings, so this function formats rather than decides: the threshold, the
-// projection and the wording of every finding are decided in internal/memory and
-// shared with ghost_health, and the two surfaces cannot end up telling an
-// operator different things about one store.
-//
-// "deepest memory" on the summary line is the store's widest history, which is
-// not necessarily the memory a `!` line below is about: the per-memory cap is
-// reached per memory, and the finding names that memory and its own two counts.
-// The label is chosen so the line cannot be read as the subject of the warning.
 func reportHistoryGrowth(w io.Writer, store *memory.Store) {
 	res, err := store.HistoryGrowth(context.Background())
 	if err != nil {
-		// A store that opened cleanly and then cannot be read is a real problem,
-		// but it is not one `ghost mcp init` fixes, so it is reported rather than
-		// failed — the same call reportConfigFile makes about a config it cannot
-		// parse, and for the same reason: a check that cannot run must not print
-		// nothing at all.
 		_, _ = fmt.Fprintf(w, "  ! history growth: %v\n", err)
 		return
 	}
 	if res.TotalRows == 0 {
-		// A store with no history has no growth and no share, and a line of zeroes
-		// on every fresh install is noise a reader learns to skip.
 		_, _ = fmt.Fprintln(w, "  - history: no version rows recorded yet")
 		return
 	}
@@ -901,24 +573,6 @@ func reportHistoryGrowth(w io.Writer, store *memory.Store) {
 	}
 }
 
-// reportGlobalConsolidation prints how many _global rows are consolidatable and
-// how many near-duplicate clusters they form (#1846).
-//
-// _global has no checkout path so no unattended run ever reaches it, yet its
-// rows are injected into every session. This block surfaces that backlog as
-// consolidatable rows and clusters, and names the manual command that folds
-// them, so an operator reading either `ghost mcp status` or `ghost_health` is
-// told the same thing about one store. It is a `-` line when there is nothing
-// to fold and a `!` line when there is, and it never takes the health verdict:
-// a store with duplicates is working as configured and the repair is the fold
-// command, not `ghost mcp init`. A failed read is reported rather than dropped,
-// because an absent line reads as a healthy store.
-//
-// The _global line counts reflection-written rows only, matching the fold it
-// names. Live pairs among every consolidatable _global row — including rows
-// the fold cannot touch — are listed after it under Near duplicates by
-// reportGlobalNearDuplicates, so a backlog of agent-saved rows stays visible
-// here as it is in ghost_health.
 func reportGlobalConsolidation(w io.Writer, store *memory.Store) {
 	all, err := store.GetAll(context.Background(), memory.GlobalProjectID, -1)
 	if err != nil {
@@ -950,17 +604,8 @@ func reportGlobalConsolidation(w io.Writer, store *memory.Store) {
 	reportGlobalNearDuplicates(w, store)
 }
 
-// maxStatusGlobalNearDuplicatePairs bounds how many _global pairs the status
-// Near duplicates line samples; the total is still reported.
 const maxStatusGlobalNearDuplicatePairs = 5
 
-// reportGlobalNearDuplicates lists live near-duplicate pairs among every
-// consolidatable _global row, however it was written, under Near duplicates.
-// It reads the same predicate ghost_health reads, so the terminal and the
-// agent see the same pairs for one store. It is a `!` line when pairs exist
-// and no line when they do not, like the reflect and overdue lines beside
-// it, and it never takes the health verdict. A failed read is reported
-// rather than dropped.
 func reportGlobalNearDuplicates(w io.Writer, store *memory.Store) {
 	pairs, capped, err := store.NearDuplicatePairsForProject(context.Background(), memory.GlobalProjectID)
 	if err != nil {
@@ -991,11 +636,6 @@ func reportGlobalNearDuplicates(w io.Writer, store *memory.Store) {
 	}
 }
 
-// globalConsolidatable is the _global rows the fold may touch: the same
-// consolidatable filter the fold uses (not pinned, not resolved, not
-// persistent, not manual/builtin) and only what reflection wrote. It mirrors the
-// filter in cmd/ghost/maintenance.go and internal/mcpserver, so the diagnostic
-// and the folder cannot disagree about what a duplicate is.
 func globalConsolidatable(mems []memory.Memory) []memory.Memory {
 	out := make([]memory.Memory, 0, len(mems))
 	for _, m := range mems {
@@ -1010,12 +650,6 @@ func globalConsolidatable(mems []memory.Memory) []memory.Memory {
 	return out
 }
 
-// reportOverdueMaintenanceStatus lists projects that have consolidatable
-// memories and have not had lifecycle maintenance within the configured
-// interval, and projects whose id cannot key lifecycle bookkeeping and so
-// cannot be maintained unattended. It never fails the run — a read that
-// cannot be made is a missing diagnostic, not an unhealthy wiring — and it
-// is reported as a `!` line, the same shape reportHistoryGrowth uses.
 func reportOverdueMaintenanceStatus(w io.Writer, store *memory.Store, dataDir string) {
 	if store == nil || dataDir == "" {
 		return

@@ -12,34 +12,13 @@ import (
 	"github.com/wcatz/ghost/internal/config"
 )
 
-// ensureObsidianSyncRunning starts `ghost obsidian sync` as a detached
-// background process if one isn't already running, so the Obsidian vault
-// mirror stays current for the rest of the machine's uptime instead of only
-// reflecting whatever was in the DB the last time someone ran the command by
-// hand. Opt-in via obsidian.auto_sync (default false) — most users never run
-// Obsidian at all, and this must not create a vault directory or spawn a
-// process on their machines without asking. Best-effort and silent
-// otherwise: any failure here must never block or fail the session-start hook.
 func ensureObsidianSyncRunning() {
-	// os.Executable() below resolves to the running binary's own path. Under
-	// `go test` that's the compiled test binary, not `ghost` — spawning it
-	// with "obsidian sync" as args would just re-run the whole test suite,
-	// which calls back into this function, recursively. Refuse unconditionally.
 	if testing.Testing() {
 		return
 	}
-
-	// LoadForHook, not Load: this runs inside the session-start hook, so a
-	// broken config is reported rather than fatal.
 	if !config.LoadForHook().Obsidian.AutoSync {
 		return
 	}
-
-	// A GHOST_DEV_FORBID_DATA_DIR refusal stops the spawn, and not only because
-	// this function writes a pid file and a log into the data directory: the
-	// mirror it spawns opens the store, and `ghost obsidian export|sync` refuses
-	// a forbidden data directory (#721). Spawning one that cannot run would claim
-	// the pid, exit on the refusal and be respawned by the next session, forever.
 	dataDir, err := config.DataDir()
 	if err != nil {
 		return
@@ -48,14 +27,9 @@ func ensureObsidianSyncRunning() {
 	if isAlive(pidPath) {
 		return
 	}
-	// isAlive false is only a fast path: two hooks firing close together would
-	// both pass it and both spawn a vault-writing process. claimPidFile
-	// re-checks under an OS-level lock so exactly one wins, matching the
-	// resolve/supersede/reflect lifecycle spawns.
 	if claimed, err := claimPidFile(pidPath); err != nil || !claimed {
 		return
 	}
-
 	exe, err := os.Executable()
 	if err != nil {
 		slog.Warn("obsidian sync spawn: cannot locate the ghost binary", "error", err)
@@ -71,8 +45,6 @@ func ensureObsidianSyncRunning() {
 	cmd := exec.Command(exe, "obsidian", "sync")
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
-	// New session: survives this short-lived hook process exiting, and won't
-	// receive signals sent to Claude Code's process group.
 	detachProcess(cmd)
 	if err := cmd.Start(); err != nil {
 		slog.Warn("obsidian sync spawn: starting the detached process failed", "error", err)
@@ -83,19 +55,6 @@ func ensureObsidianSyncRunning() {
 	_ = cmd.Process.Release()
 }
 
-// isAlive reports whether pidPath names a PID file for a process that is
-// still running. It never treats a stale or missing PID file as an error —
-// the caller's only decision is "spawn a new one, or not". The file holds
-// either a bare PID (legacy format, liveness-only) or "pid:token" (see
-// processStartTime), in which case a live PID additionally has to still
-// carry that token to be reported alive — see isProcessAlive in
-// obsidiansync_unix.go / obsidiansync_windows.go.
-//
-// A path that is not a regular file is no PID file at all, and it is answered
-// without opening it: the read this used to do blocked on a FIFO planted
-// where the lifecycle claim belongs, which hung the stop hook, the session-end
-// hook and `ghost history compact`, and a character device was read without a
-// bound. See readPIDFile.
 func isAlive(pidPath string) bool {
 	data, ok := readPIDFile(pidPath)
 	if !ok {

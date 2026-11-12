@@ -13,10 +13,7 @@ import (
 	"github.com/wcatz/ghost/internal/reflection"
 )
 
-// OverdueProject is one project whose maintenance is overdue: it holds
-// consolidatable memories and its last lifecycle run is outside the cooldown
-// window (or it has never had one). A currently running lifecycle is not
-// overdue.
+// OverdueProject describes a project with overdue maintenance.
 type OverdueProject struct {
 	ID          string
 	Name        string
@@ -25,26 +22,10 @@ type OverdueProject struct {
 	HasLastRun  bool
 	Running     bool
 	MinInterval time.Duration
-	// UnsafeID marks a project whose id cannot be a filename component. Its
-	// lifecycle bookkeeping cannot be written and no run can be started for
-	// it, so it is reported separately from the overdue projects: the retry
-	// an overdue project is offered cannot help this one.
-	UnsafeID bool
+	UnsafeID    bool
 }
 
-// OverdueMaintenanceProjects returns the projects that have pending
-// consolidation work and whose last lifecycle run is overdue. Projects with
-// no consolidatable memories are never overdue, and neither is a project
-// whose lifecycle is currently running. A project whose id cannot be a
-// filename component cannot have lifecycle bookkeeping written for it at all,
-// so it is returned with UnsafeID set and without a last-run figure rather
-// than being dropped: dropping it hid the project from both diagnostics. A
-// non-positive minInterval means the cooldown is disabled (every project with
-// work and no live claim is due). clearsConsolidatableSet gates the listing:
-// it is true when reflect or resolve is enabled, the two phases that remove
-// rows from the consolidatable set this list counts. Supersede only links
-// rows, so a supersede-only configuration leaves the count where it was and
-// the retry it offers would be useless, so the result is nil.
+// OverdueMaintenanceProjects returns projects whose maintenance is overdue.
 func OverdueMaintenanceProjects(ctx context.Context, store *memory.Store, dataDir string, now time.Time, minInterval time.Duration, clearsConsolidatableSet bool) ([]OverdueProject, error) {
 	if store == nil {
 		return nil, nil
@@ -74,10 +55,6 @@ func OverdueMaintenanceProjects(ctx context.Context, store *memory.Store, dataDi
 			continue
 		}
 		if !safeProjectIDComponent(p.ID) {
-			// No filename can be keyed on this id, so the project has no
-			// claim or stamp to read and no run can be started for it. It is
-			// still work that will never be done, so it is named with the
-			// reason rather than dropped.
 			out = append(out, OverdueProject{
 				ID:          p.ID,
 				Name:        p.Name,
@@ -99,7 +76,6 @@ func OverdueMaintenanceProjects(ctx context.Context, store *memory.Store, dataDi
 			if !noCooldown {
 				skip, _ := lifecycleCooldownActive(dataDir, p.ID, minInterval, now)
 				if skip {
-					// Inside the cooldown window, not overdue.
 					continue
 				}
 			}
@@ -124,8 +100,6 @@ func OverdueMaintenanceProjects(ctx context.Context, store *memory.Store, dataDi
 	return out, nil
 }
 
-// splitMaintenanceProjects separates the projects that can be maintained
-// unattended from those whose id cannot key lifecycle bookkeeping.
 func splitMaintenanceProjects(projects []OverdueProject) (overdue, unsafe []OverdueProject) {
 	for _, p := range projects {
 		if p.UnsafeID {
@@ -137,9 +111,6 @@ func splitMaintenanceProjects(projects []OverdueProject) (overdue, unsafe []Over
 	return overdue, unsafe
 }
 
-// maintenanceProjectLabel renders a stored project name for a maintenance
-// diagnostic line: a token-shaped name is withheld behind the guard
-// placeholder, any other name is escaped by assemble.Label.
 func maintenanceProjectLabel(name string) string {
 	if placeholder, withheld := memory.TokenGuardPlaceholder("project", name); withheld {
 		return placeholder
@@ -147,9 +118,6 @@ func maintenanceProjectLabel(name string) string {
 	return assemble.Label(name)
 }
 
-// maintenanceProjectID renders a stored project id for a maintenance
-// diagnostic line: a token-shaped id is withheld behind the guard
-// placeholder, any other id is rendered by assemble.Token.
 func maintenanceProjectID(id string) string {
 	if placeholder, withheld := memory.TokenGuardPlaceholder("project", id); withheld {
 		return placeholder
@@ -157,8 +125,6 @@ func maintenanceProjectID(id string) string {
 	return assemble.Token(id)
 }
 
-// overdueDiagnosticLines renders the overdue section as markdown lines,
-// without a trailing newline. Empty when no project is overdue.
 func overdueDiagnosticLines(overdue []OverdueProject, now time.Time) []string {
 	if len(overdue) == 0 {
 		return nil
@@ -191,11 +157,6 @@ func overdueDiagnosticLines(overdue []OverdueProject, now time.Time) []string {
 	return lines
 }
 
-// unmaintainableDiagnosticLines renders the projects whose id is not a safe
-// filename component as their own markdown section, without a trailing
-// newline. They are not listed as overdue because the retry an overdue
-// project is offered cannot help them; what they need is an id a lifecycle
-// file can be keyed on.
 func unmaintainableDiagnosticLines(unsafe []OverdueProject) []string {
 	if len(unsafe) == 0 {
 		return nil
@@ -214,20 +175,13 @@ func unmaintainableDiagnosticLines(unsafe []OverdueProject) []string {
 	return lines
 }
 
-// FormatOverdueMaintenanceSections returns the overdue section and the
-// unmaintainable section separately, each ending in a newline and empty when
-// it has nothing to report. A caller that caps its output per section needs
-// the two apart: one combined line list lets a long overdue section push the
-// unmaintainable projects past the cap, which would make the two diagnostics
-// disagree about them.
+// FormatOverdueMaintenanceSections returns overdue and unmaintainable maintenance sections.
 func FormatOverdueMaintenanceSections(projects []OverdueProject, now time.Time) (overdue, unmaintainable string) {
 	overdueProjects, unsafeProjects := splitMaintenanceProjects(projects)
 	return joinDiagnosticLines(overdueDiagnosticLines(overdueProjects, now)),
 		joinDiagnosticLines(unmaintainableDiagnosticLines(unsafeProjects))
 }
 
-// joinDiagnosticLines renders one section as text ending in a newline, or ""
-// when the section has no lines.
 func joinDiagnosticLines(lines []string) string {
 	if len(lines) == 0 {
 		return ""
@@ -235,9 +189,7 @@ func joinDiagnosticLines(lines []string) string {
 	return strings.Join(lines, "\n") + "\n"
 }
 
-// FormatOverdueMaintenance returns the diagnostic text for overdue projects
-// and for projects that cannot be maintained unattended, and whether either
-// section is present. Empty when neither is.
+// FormatOverdueMaintenance returns diagnostic text for overdue and unmaintainable projects.
 func FormatOverdueMaintenance(projects []OverdueProject, now time.Time) (string, bool) {
 	overdue, unmaintainable := FormatOverdueMaintenanceSections(projects, now)
 	text := overdue + unmaintainable
@@ -247,17 +199,13 @@ func FormatOverdueMaintenance(projects []OverdueProject, now time.Time) (string,
 	return text, true
 }
 
-// ReportOverdueMaintenance writes the overdue and unmaintainable lines to w
-// when either is present. It is a helper for the CLI status path, which prints
-// `-`/`!` lines rather than the health markdown.
+// ReportOverdueMaintenance writes overdue and unmaintainable maintenance lines.
 func ReportOverdueMaintenance(w io.Writer, projects []OverdueProject, now time.Time) {
 	overdue, unsafe := splitMaintenanceProjects(projects)
 	reportMaintenanceSection(w, overdueDiagnosticLines(overdue, now), "**Maintenance overdue:** ", "  ! maintenance overdue: ")
 	reportMaintenanceSection(w, unmaintainableDiagnosticLines(unsafe), "**Cannot be maintained unattended:** ", "  ! cannot be maintained unattended: ")
 }
 
-// reportMaintenanceSection converts one markdown section into the status-style
-// lines. The heading becomes a `!` line and its bullets are indented under it.
 func reportMaintenanceSection(w io.Writer, lines []string, heading, statusLine string) {
 	for i, line := range lines {
 		if i == 0 {
@@ -266,7 +214,6 @@ func reportMaintenanceSection(w io.Writer, lines []string, heading, statusLine s
 			_, _ = fmt.Fprintf(w, "%s%s\n", statusLine, line)
 			continue
 		}
-		// Bullet lines already name the project and the count.
 		if strings.HasPrefix(line, "- ") {
 			_, _ = fmt.Fprintf(w, "    %s\n", line)
 			continue

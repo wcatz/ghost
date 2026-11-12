@@ -9,10 +9,6 @@ import (
 	"github.com/wcatz/ghost/internal/memory"
 )
 
-// resolveSessionProject resolves a session cwd to a project, falling back to
-// config routing.default_project for home-dir and filesystem-root sessions
-// (issue #391). Everything else — direct hits, other unmatched dirs, an unset
-// or unresolvable default — behaves exactly as a plain ResolveProject call.
 func resolveSessionProject(ctx context.Context, store *memory.Store, cwd string) (id, name string) {
 	id, name = resolve(ctx, store, cwd)
 	if id != "" {
@@ -22,7 +18,7 @@ func resolveSessionProject(ctx context.Context, store *memory.Store, cwd string)
 	if def == "" || !isHomeOrRoot(cwd) {
 		return "", ""
 	}
-	return resolve(ctx, store, def) // "" on miss: degrade to today's no-match behavior
+	return resolve(ctx, store, def)
 }
 
 func resolve(ctx context.Context, store *memory.Store, input string) (string, string) {
@@ -37,8 +33,6 @@ func defaultProjectForSessions() string {
 	return config.LoadForHook().Routing.DefaultProject
 }
 
-// isHomeOrRoot reports whether cwd is the user's home directory or the root of
-// its filesystem — the two cwds that mean "not really working in a project".
 func isHomeOrRoot(cwd string) bool {
 	if isFilesystemRoot(cwd) {
 		return true
@@ -50,8 +44,6 @@ func isHomeOrRoot(cwd string) bool {
 	if cwd == home {
 		return true
 	}
-	// The session cwd may reach home through a symlink or trailing form;
-	// compare resolved paths too.
 	evalCwd, err := filepath.EvalSymlinks(cwd)
 	if err != nil {
 		return false
@@ -63,10 +55,6 @@ func isHomeOrRoot(cwd string) bool {
 	return evalCwd == evalHome
 }
 
-// isFilesystemRoot reports whether cwd is the root of its volume: "/" on POSIX,
-// and a drive root ("C:\", "D:\") or a network share root ("\\server\share\")
-// on Windows. A Windows root can never equal the literal "/", so comparing
-// against only that left a root session unrouted there (#1299).
 func isFilesystemRoot(cwd string) bool {
 	root := filepath.VolumeName(cwd) + string(os.PathSeparator)
 	return filepath.Clean(cwd) == filepath.Clean(root)

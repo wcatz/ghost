@@ -24,14 +24,6 @@ import (
 )
 
 // RunHostEvent is the contract-v1 entrypoint for every host lifecycle event:
-//
-//	ghost hook <event> --source <host>
-//
-// It validates the contract envelope strictly (hostevent.Parse) and dispatches
-// per spec §2.2: session-start injects context, stop runs lifecycle spawns plus
-// the capability-gated save nudge, session-end runs the spawns only. Fail-open
-// is absolute: every validation, scan, or I/O failure logs one line to stderr,
-// writes nothing to stdout, and returns — callers exit 0 so the host proceeds.
 func RunHostEvent(eventArg, sourceArg string, stdin io.Reader, stdout io.Writer, stderr io.Writer) {
 	data, err := hostevent.ReadPayload(stdin)
 	if err != nil {
@@ -46,23 +38,14 @@ func RunHostEvent(eventArg, sourceArg string, stdin io.Reader, stdout io.Writer,
 
 	switch payload.Event() {
 	case hostevent.EventSessionStart:
-		// Output is capability-scoped (spec §2.1): hosts that cannot consume
-		// injected context get a silent, successful no-op — never output they
-		// would misread. Parse guarantees a known source.
 		if cap, _ := hostevent.CapabilityFor(payload.HostSource()); !cap.InjectContext {
 			return
 		}
-		// A plugin install owns its own wiring, so `ghost mcp init` never ran;
-		// finish the one-time operations a plugin manifest cannot express
-		// (auto-memory, memory import, redirects) before injecting context.
-		// stderr-only — stdout here is the injected context.
 		if RunningAsPlugin() {
 			finalizePlugin(stderr)
 		}
 		runSessionStart(payload.Raw, payload.HostSource(), stdout)
 	case hostevent.EventMessageSubmit, hostevent.EventEdit:
-		// Capability-scoped like session start: a host that does not add
-		// additionalContext beside a message or a tool result gets a silent no-op.
 		if cap, _ := hostevent.CapabilityFor(payload.HostSource()); !cap.WorkingMoment {
 			return
 		}
@@ -74,9 +57,6 @@ func RunHostEvent(eventArg, sourceArg string, stdin io.Reader, stdout io.Writer,
 	}
 }
 
-// logFailOpen writes the single fail-open diagnostic line the outcome table
-// promises. It never touches stdout and never returns an error upward: the
-// hook must allow the stop regardless.
 func logFailOpen(stderr io.Writer, stage string, err error) {
 	if stderr == nil {
 		return
@@ -84,19 +64,9 @@ func logFailOpen(stderr io.Writer, stage string, err error) {
 	_, _ = fmt.Fprintf(stderr, "ghost hook: fail-open (%s: %v)\n", stage, err)
 }
 
-// runStop executes the stop/session-end handler: it sweeps an adapter-made
-// transcript and spawns the opt-in lifecycle. It prints nothing; the stop
-// event's stop_hook_active flag still short-circuits a re-stop.
 func runStop(p hostevent.Payload, stdout io.Writer, stderr io.Writer, nudge bool) {
-	// Adapter-materialized transcripts are swept once this invocation ends —
-	// including on the guarded early-return below, so a leaked temp dir can't
-	// outlive us regardless of which path fires.
 	defer cleanupTransientTranscript(p)
 
-	// stop_hook_active means the host is re-stopping immediately after our
-	// reminder — spawning and nudging again would just loop. session-end
-	// ignores the flag: it fires once per real session end, so its lifecycle
-	// spawns always run (spec §2.2).
 	if nudge && p.StopHookActive {
 		return
 	}
@@ -105,31 +75,6 @@ func runStop(p hostevent.Payload, stdout io.Writer, stderr io.Writer, nudge bool
 	spawnLifecycleIfConfigured(p.CWD, source, stderr)
 }
 
-// cleanupTransientTranscript removes an adapter-materialized transcript once
-// ghost is done with it. The opencode plugin writes under a mkdtemp
-// `ghost-XXXXXX` directory in the OS temp dir; because the plugin's own cleanup
-// runs in its (possibly exiting) host process, a host that quits before the
-// detached hook finishes — or exits right after spawning — would otherwise
-// leak transcript dirs forever (`opencode run` does exactly this).
-//
-// The path comes from the payload, and the temp directory is shared with
-// every other process on the machine — including Ghost's own
-// harness scratch directories and other sessions' directories, all named
-// `ghost-…` — so the sweep removes only an entry it can tie to the layout the
-// plugin creates (see pluginSessionDir), and it removes it with two plain
-// removals rather than a recursive one: the file, then the directory, which a
-// non-empty directory refuses. Only the opencode formats are considered. No
-// adapter materialises a codex rollout — codex hands over the host's rollout
-// file under its own home — so a codex payload never sweeps anything. Every
-// failure leaves the entry in place; the sweep is best-effort and fail-open.
-//
-// The base is a SET rather than one path because the plugin's runtime and this
-// hook do not resolve the temp directory the same way — the plugin strips a
-// trailing separator Go keeps verbatim, and its fall-back order over TMPDIR,
-// TMP and TEMP differs from os.TempDir's on both POSIX and Windows — so a
-// comparison against os.TempDir() alone left the directory behind whenever the
-// two disagreed. insideAHostTempDir normalises both sides, so the sweep does
-// not depend on the two agreeing.
 func cleanupTransientTranscript(p hostevent.Payload) {
 	if p.Contract == nil || p.TranscriptPath == "" {
 		return
@@ -149,21 +94,11 @@ func cleanupTransientTranscript(p hostevent.Payload) {
 	_ = os.Remove(dir)
 }
 
-// opencodeSessionDirPrefix and opencodeTranscriptName are the names the
-// embedded plugin uses: `mkdtemp(join(tmpdir(), "ghost-"))` and
-// `join(dir, "messages.jsonl")`. TestSweepNamesMatchThePluginSource reads them
-// back out of the plugin source so the two cannot drift apart.
 const (
 	opencodeSessionDirPrefix = "ghost-"
 	opencodeTranscriptName   = "messages.jsonl"
 )
 
-// isPluginSessionDirName reports whether name is what the plugin's mkdtemp
-// returns: the prefix followed by exactly the six characters mkdtemp
-// substitutes for its XXXXXX template, each from [A-Za-z0-9] (glibc, BSD and
-// libuv's Windows implementation all draw from that set). It is what keeps
-// `ghost-<kind>-<digits>` and any other `ghost-…` name out: each carries a
-// separator or a length the template cannot produce.
 func isPluginSessionDirName(name string) bool {
 	rest, ok := strings.CutPrefix(name, opencodeSessionDirPrefix)
 	if !ok || len(rest) != 6 {
@@ -178,17 +113,6 @@ func isPluginSessionDirName(name string) bool {
 	return true
 }
 
-// pluginSessionDir returns the directory holding transcriptPath when that
-// directory is exactly what the plugin materialised, and false otherwise:
-//   - the file is named opencodeTranscriptName and sits directly in it;
-//   - its name has the plugin's mkdtemp shape;
-//   - it is directly inside a temp base the host could have used;
-//   - it is a real directory (Lstat, so a symlink is refused, never followed);
-//   - it is owned by the current user where the platform can say;
-//   - it holds that one file and nothing else, and the file is regular.
-//
-// Another live opencode session's directory has the same shape, owner and
-// parent, so this cannot tell it apart; the payload's path is what names it.
 func pluginSessionDir(transcriptPath string) (string, bool) {
 	if filepath.Base(transcriptPath) != opencodeTranscriptName {
 		return "", false
@@ -212,12 +136,6 @@ func pluginSessionDir(transcriptPath string) (string, bool) {
 	return dir, true
 }
 
-// hostTempDirCandidates lists every base a host runtime might have reported for
-// the temp directory it created a `ghost-*` session directory in. Go's
-// os.TempDir reads TMPDIR alone on POSIX and GetTempPath's TMP-then-TEMP on
-// Windows, while Node's os.tmpdir falls back TMPDIR then TMP then TEMP, so no
-// single variable is shared. os.TempDir() is always first because it is the
-// resolved default when none of the variables is set.
 func hostTempDirCandidates() []string {
 	candidates := []string{os.TempDir()}
 	for _, key := range []string{"TMPDIR", "TMP", "TEMP"} {
@@ -228,12 +146,6 @@ func hostTempDirCandidates() []string {
 	return candidates
 }
 
-// insideAHostTempDir reports whether dir is one of the temp bases a host
-// runtime could have created its `ghost-*` session directory in, comparing
-// normalised paths so a trailing separator cannot make two spellings of the
-// same directory disagree. Windows compares case-insensitively because its
-// filesystem does; the other platforms do not, so a differently-cased
-// directory there is a genuinely different one.
 func insideAHostTempDir(dir string) bool {
 	for _, base := range hostTempDirCandidates() {
 		if sameDir(dir, base) {
@@ -243,9 +155,6 @@ func insideAHostTempDir(dir string) bool {
 	return false
 }
 
-// sameDir reports whether two paths name the same directory. filepath.Clean
-// folds the trailing separator Go keeps verbatim from a variable and the host
-// runtime strips.
 func sameDir(a, b string) bool {
 	a, b = filepath.Clean(a), filepath.Clean(b)
 	if runtime.GOOS == "windows" {
@@ -254,22 +163,6 @@ func sameDir(a, b string) bool {
 	return a == b
 }
 
-// safeProjectIDComponent reports whether id can be embedded in a filename
-// inside the data dir. Project ids originate from callers — an MCP client can
-// send any project_id, and EnsureProject stores it verbatim — so the check
-// rejects what could reshape the path (empty, ".", "..", path separators) and
-// what a filename cannot hold (control characters, and on Windows the reserved
-// :*?"<>| set). Everything else is a legitimate id and must keep working:
-// rejecting spaces or non-ASCII names would silently switch off
-// auto-consolidation for an existing project, which is a worse failure than the
-// narrow path issue this guards.
-//
-// It also refuses an id too long for the names built from it. The store accepts
-// ids far past a filename's limit, and a lifecycle-<id>.pid.lock that cannot be
-// created leaves nothing for the lock, the cooldown stamp or the hook's spawn
-// guard to work with — the hook would start a child every turn that could not
-// record that it ran. The bound is in bytes, which is what the limit counts on
-// the filesystems Ghost runs on (see maxProjectIDComponentBytes).
 func safeProjectIDComponent(id string) bool {
 	if id == "" || id == "." || id == ".." {
 		return false
@@ -277,50 +170,24 @@ func safeProjectIDComponent(id string) bool {
 	if len(id) > maxProjectIDComponentBytes {
 		return false
 	}
-	// Control characters are unusable in a filename on Windows and have no
-	// legitimate place in an id anywhere, so reject them unconditionally
-	// (this covers NUL).
 	if strings.ContainsFunc(id, func(r rune) bool { return r < 0x20 }) {
 		return false
 	}
 	if strings.ContainsAny(id, `\/`) {
 		return false
 	}
-	// Windows additionally forbids these in a filename component.
 	if runtime.GOOS == "windows" && strings.ContainsAny(id, `:*?"<>|`) {
 		return false
 	}
 	return filepath.Base(id) == id
 }
 
-// fileNameMaxBytes is NAME_MAX, the longest single file name the common
-// filesystems accept (ext4, xfs, btrfs, APFS; NTFS counts 255 UTF-16 units,
-// which a byte bound never exceeds).
 const fileNameMaxBytes = 255
 
-// longestDerivedNameOverhead is what the longest file name built around a
-// project id adds to it: the start stamp's temp file,
-// "lifecycle-" + id + ".last.tmp" + os.CreateTemp's random suffix, which is a
-// uint32 in decimal and so at most 10 bytes. Every other derived name — the
-// ".pid", ".pid.lock" and ".pid.tmp" claim files, the ".last" stamp, the
-// working-moment marker — is shorter.
 const longestDerivedNameOverhead = len("lifecycle-") + len(".last.tmp") + 10
 
-// maxProjectIDComponentBytes is the longest id safeProjectIDComponent accepts.
 const maxProjectIDComponentBytes = fileNameMaxBytes - longestDerivedNameOverhead
 
-// spawnLifecycleIfConfigured starts `ghost lifecycle <project>` as a single
-// detached background process for the project matching cwd, if one isn't
-// already running for that project. That process runs the enabled phases in
-// order — reflect, then resolve, then supersede — so consolidation can never
-// rewrite rows while resolve or supersede is classifying them. Spawned as
-// three independent processes they raced, which surfaced as foreign-key aborts
-// and lost resolved_at stamps. One PID file now guards all three phases.
-//
-// Opt in per phase via reflection.auto_reflect / auto_resolve / auto_supersede
-// (all default false), and bound how often the chain may start with
-// lifecycle.min_interval (default 30m, 0 to disable). Every failure path returns
-// silently: this must never block or fail the stop hook.
 func spawnLifecycleIfConfigured(cwd, source string, stderr io.Writer) {
 	if cwd == "" {
 		return
@@ -329,32 +196,17 @@ func spawnLifecycleIfConfigured(cwd, source string, stderr io.Writer) {
 	if !cfg.Reflection.AutoReflect && !cfg.Reflection.AutoResolve && !cfg.Reflection.AutoSupersede {
 		return
 	}
-	// Consolidation is only worth an unattended write when a real LLM tier is
-	// available: without one, --tier auto would fall through to the Jaccard-only
-	// sqlite tier and rewrite every non-manual memory for no quality gain. When
-	// reflect is the only enabled phase, skip the whole spawn before the DB is
-	// even opened, so this stays a cheap read-only no-op. When resolve or
-	// supersede are also enabled they still run — the coordinator skips its own
-	// reflect phase in that case.
 	if cfg.Reflection.AutoReflect && !cfg.Reflection.AutoResolve && !cfg.Reflection.AutoSupersede {
 		if !ai.NewCLIProviderWithBinaries(cfg.CLI.ClaudeBinary, cfg.CLI.OpenCodeBinary, cfg.CLI.CodexBinary, cfg.CLI.GooseBinary).Available() {
 			sp := ai.NewSourceProviderForSource(source, cfg.CLI.ClaudeBinary, cfg.CLI.OpenCodeBinary, cfg.CLI.CodexBinary, cfg.CLI.GooseBinary)
 			if !sp.Available() {
 				slog.Warn("lifecycle: skipping — no CLI binary available", "source", source)
-				// This guard is exactly the historical silent death of
-				// auto-reflect (no process ever starts, so lifecycle.log
-				// never even appears). Record a failure marker when a store
-				// exists to attribute it to, so the next session-start can
-				// say so instead of the loss surfacing weeks later.
 				recordReflectSkipMarker(cwd, stderr)
 				return
 			}
 		}
 	}
 
-	// A GHOST_DEV_FORBID_DATA_DIR refusal stops the spawn here rather than in the
-	// child's own: the hook must not block, and a chain that read a forbidden
-	// store would do it in a process nobody is watching (#721).
 	dataDir, err := config.DataDir()
 	if err != nil {
 		return
@@ -374,42 +226,20 @@ func spawnLifecycleIfConfigured(cwd, source string, stderr io.Writer) {
 	if projectID == "" || projectName == "" {
 		return
 	}
-	// _global has no unattended fold, so a home-directory session routed to it
-	// through routing.default_project must not spawn a lifecycle run for it.
 	if projectID == memory.GlobalProjectID {
 		return
 	}
 
-	// The project id is interpolated into a filename inside dataDir, and ids
-	// are not constrained by the store: an MCP client may pass an arbitrary
-	// project_id, which EnsureProject then uses verbatim. A value containing
-	// path separators or ".." would move the pid file (and its .tmp sibling,
-	// and the liveness reads) outside the data directory, so refuse rather
-	// than build a path from it. Fail open: the hook must never block.
 	if !safeProjectIDComponent(projectID) {
 		slog.Warn("lifecycle spawn: refusing a project id that is not a safe filename component",
 			"project_id", memory.RefusalArg("project id", projectID))
-		// The warning above goes to the host's stderr, which the editor owns
-		// and nobody later reads. Without a failure marker this project was
-		// refused on every turn with no durable record at all, so the next
-		// session start could not tell that its consolidation never ran.
 		recordSpawnFailure(projectID, cfg, errors.New(UnsafeProjectIDError), stderr)
 		return
 	}
-	// Best-effort fast path: skip spawning when a lifecycle is visibly running.
-	// It is deliberately NOT a claim — the coordinator claims the file itself
-	// (AcquireLifecycleLock), because the hook cannot write the child's pid
-	// before Start and a claim written in between would make the child see a
-	// foreign pid and abort. Two hooks firing together may therefore both spawn;
-	// one child wins the claim and the other exits.
 	pidPath := filepath.Join(dataDir, "lifecycle-"+projectID+".pid")
 	if isAlive(pidPath) {
 		return
 	}
-	// Cooldown (#541): the hook fires after every turn, so without this a chatty
-	// session paid for a full chain per turn. Read here, after the already-running
-	// guard (which is the stronger, liveness-based one) and before the spawn log
-	// is opened; a skip leaves one line in lifecycle.log.
 	minInterval := cfg.Lifecycle.MinIntervalDuration()
 	if skip, since := lifecycleCooldownActive(dataDir, projectID, minInterval, time.Now()); skip {
 		logLifecycleCooldownSkip(dataDir, projectID, since, minInterval)
@@ -425,11 +255,6 @@ func spawnLifecycleIfConfigured(cwd, source string, stderr io.Writer) {
 		recordSpawnFailure(projectID, cfg, err, stderr)
 		return
 	}
-	// Bookkeeping guard (#1580): when the data directory refuses new entries,
-	// the pid claim, the cooldown stamp and the failure marker all fail — a
-	// run that starts anyway runs a full chain every turn with no cooldown and
-	// leaves no record of its outcome. Refuse the spawn and say so on the
-	// hook's stderr, a surface that does not depend on writing to the data dir.
 	if err := lifecycleBookkeepingWritable(dataDir); err != nil {
 		if stderr != nil {
 			_, _ = fmt.Fprintf(stderr, "ghost hook: lifecycle spawn skipped: cannot write lifecycle bookkeeping files (%s)\n", withoutPath(err))
@@ -447,10 +272,6 @@ func spawnLifecycleIfConfigured(cwd, source string, stderr io.Writer) {
 	}
 	defer logFile.Close() //nolint:errcheck
 
-	// Pass the project ID, not the name: the coordinator keys its own lifecycle
-	// claim on the same value, so the pid file the hook just claimed for this
-	// child is the one the child checks. The phase subcommands resolve an id
-	// as readily as a name (Store.ResolveProject tries id first).
 	cmd := exec.Command(exe, "lifecycle", "--project", projectID)
 	if source != "" {
 		cmd.Args = append(cmd.Args, "--source", source)
@@ -467,46 +288,16 @@ func spawnLifecycleIfConfigured(cwd, source string, stderr io.Writer) {
 	}
 }
 
-// startLifecycleChild starts the detached coordinator, and releases the handle.
-//
-// A var so a test can read the argv. The executable is os.Executable(), which
-// under `go test` is the test binary — a real Start would run this whole suite
-// again, in a child that would spawn its own children. Everything the tests
-// assert about the child (which project, which flags) is decided before this
-// call, so replacing it loses nothing but the exec.
 var startLifecycleChild = func(cmd *exec.Cmd) error {
 	detachProcess(cmd)
 	if err := cmd.Start(); err != nil {
 		return err
 	}
-	// Nobody waits on this child and the hook exits as soon as the turn ends, so
-	// holding the *os.Process would only leave a zombie entry behind until then.
 	_ = cmd.Process.Release()
 	return nil
 }
 
-// Lock scope for the two hook-side marker writes below: the per-project pid
-// lock (AcquireLifecycleLock) serializes only the CHILD's end-of-run
-// write/clear — these hook-side writes fire while no child holds it,
-// recordReflectSkipMarker before the isAlive(pidPath) fast path and
-// recordSpawnFailure when the child never started. A hook-side marker can
-// therefore be written and then cleared by a child that subsequently starts
-// and succeeds (or the reverse ordering). The benign worst case is at most
-// ONE missed alert cycle for that project — never a false alert, and
-// temp+rename keeps the marker file itself intact throughout.
-//
-// recordReflectSkipMarker writes the failure marker for the reflect-only
-// no-LLM guard above, where no lifecycle process ever starts. It runs only
-// when a store ALREADY exists (DataDirPath never creates, and a store-less
-// setup has nothing to consolidate — TestSpawnLifecycleIfConfigured_NoOpWithoutLLM
-// pins that no phantom data dir appears), and only when cwd resolves to a
-// project: an unattributable skip cannot be matched to a session later, so
-// recording it would only produce a stray alert. Best-effort throughout.
 func recordReflectSkipMarker(cwd string, stderr io.Writer) {
-	// DataDirPath, not DataDir: this reads the store to attribute a skip to a
-	// project, and a store that does not exist is the reason the directory is
-	// never created here. A GHOST_DEV_FORBID_DATA_DIR refusal is the same
-	// non-event (#721) — and, as with no store at all, nothing is recorded.
 	dataDir, err := config.DataDirPath()
 	if err != nil {
 		return
@@ -530,10 +321,6 @@ func recordReflectSkipMarker(cwd string, stderr io.Writer) {
 	}
 }
 
-// recordSpawnFailure writes the failure marker for a chain that FAILED TO
-// START after the project was resolved (binary not locatable, log not
-// openable, process not spawnable): no phase will run, so every enabled
-// phase is recorded as failed. Best-effort — a hook must never fail a stop.
 func recordSpawnFailure(projectID string, cfg *config.Config, cause error, stderr io.Writer) {
 	var phases []string
 	if cfg.Reflection.AutoReflect {
@@ -548,37 +335,12 @@ func recordSpawnFailure(projectID string, cfg *config.Config, cause error, stder
 	if len(phases) == 0 {
 		return
 	}
-	// Strip filesystem paths from the cause (fs.PathError, os.LinkError) so
-	// the durable marker and the session-start alert keep their no-paths
-	// contract. The hook's stderr line for the same failure already uses
-	// withoutPath; the marker must do the same. First unwrap with
-	// withoutPath to handle wrapped errors, then apply the string-level
-	// stripPaths to also catch any paths in the unwrapped text.
 	stripped := stripPaths(withoutPath(cause).Error())
 	if err := WriteLifecycleFailure(projectID, phases, stripped); err != nil && stderr != nil {
 		_, _ = fmt.Fprintf(stderr, "ghost hook: cannot record the lifecycle failure marker: %s\n", withoutPath(err))
 	}
 }
 
-// atomicWritePID writes pid (and, when haveToken is true, its creation-time
-// token in "pid:token" form — see processStartTime) into path via
-// write-temp-then-rename so a concurrent reader (e.g. another caller's
-// claimPidFile, which reads this file under its own lock) never observes a
-// truncated or partially-written file — os.WriteFile's
-// open+truncate+write is not atomic and this call site runs outside any
-// lock. When haveToken is false, the bare-PID legacy format is written,
-// same as before this token support existed.
-//
-// The staging file is a UNIQUE name beside the claim (os.CreateTemp, the
-// shape the failure marker and the start stamp publish theirs with) and it
-// is REMOVED when the publish fails. A fixed ".tmp" sibling left two things
-// behind: the staging file itself, which nothing sweeps — the data
-// directory keeps it for as long as the store exists — and a name anybody
-// could point somewhere else, because os.WriteFile follows a symlink: a
-// link planted at that name was written THROUGH, so the claim text landed
-// in a file the caller never named. os.CreateTemp opens with O_EXCL under
-// a name nobody can guess, so a link at it is refused rather than
-// followed, and the rename publishes a regular file over the claim path.
 func atomicWritePID(path string, pid int, token string, haveToken bool) error {
 	content := strconv.Itoa(pid)
 	if haveToken {
@@ -605,42 +367,11 @@ func atomicWritePID(path string, pid int, token string, haveToken bool) error {
 	return nil
 }
 
-// claimPidFile atomically claims pidPath for the current process. It takes
-// an OS-level exclusive lock (flock/LockFileEx) on a sibling ".lock" file
-// before checking liveness and writing the PID, so the whole
-// check-then-write sequence is serialized against every other caller on the
-// machine rather than just the final write. That serialization is the part
-// a plain os.OpenFile(O_EXCL) or os.Link claim can't provide on its own:
-// once a caller decides an existing claim is stale and moves to reclaim it,
-// nothing stops a second caller from reaching the same decision against the
-// same stale content and reclaiming it too. The lock is kernel-owned, so a
-// process that dies mid-claim releases it automatically — a crash here can
-// never deadlock a later caller.
-//
-// Returns (true, nil) when this process now holds the slot, (false, nil) when a
-// live process genuinely holds it, and (false, err) when the claim could not be
-// evaluated at all — the lock file cannot be opened or locked, or the pid cannot
-// be written. The last two are different answers and a caller must not merge
-// them: "held" means a run is in progress, and an I/O failure says nothing about
-// that. The error names the step and the operating system's reason but not the
-// path, because the path is built from a project id and a caller prints it.
 func claimPidFile(pidPath string) (bool, error) {
 	claimed, _, err := claimPidFileReclaim(pidPath)
 	return claimed, err
 }
 
-// claimPidFileReclaim is claimPidFile that also reports the previous claim it
-// took the slot from: the mtime of a no-longer-live claim, and the zero time
-// when there was none. A caller that records run outcomes needs the
-// difference — a dead claim is a run that was killed before it could say
-// anything, and the new owner is the one that can say it now — and it needs
-// the dead claim's OWN timestamp, because the claim file is replaced by this
-// process's own as part of taking the slot.
-//
-// A dead claim is reported only for a REGULAR file naming a parseable pid for
-// no live process. A missing path is a first claim and a non-regular or
-// unparseable one cannot be a claim at all — including one over the read
-// bound — and neither is a run that left anything unfinished.
 func claimPidFileReclaim(pidPath string) (claimed bool, reclaimedAt time.Time, err error) {
 	lockFile, err := os.OpenFile(pidPath+".lock", os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
@@ -653,11 +384,6 @@ func claimPidFileReclaim(pidPath string) (claimed bool, reclaimedAt time.Time, e
 	}
 	defer unlockFile(lockFile) //nolint:errcheck
 
-	// Open with the same flags as readPIDFile so the file judged is the
-	// file opened: a symlink is refused by O_NOFOLLOW and only a regular
-	// descriptor is considered a claim. The mtime and liveness both come
-	// from that opened descriptor.
-	// Fall through to the write path; a non-claim path is replaced.
 	if priorFile, err := os.OpenFile(pidPath, markerOpenFlags, 0); err == nil {
 		prior, statErr := priorFile.Stat()
 		if statErr == nil && prior.Mode().IsRegular() {
@@ -665,10 +391,6 @@ func claimPidFileReclaim(pidPath string) (claimed bool, reclaimedAt time.Time, e
 				_ = priorFile.Close()
 				return false, time.Time{}, nil
 			}
-			// Only a parseable pid can be a dead claim. An over-cap or
-			// malformed file is no claim, as isAlive already reads it,
-			// and leaves reclaimedAt zero so no unfinished-run marker
-			// is written for it.
 			if pidInFile(pidPath) != 0 {
 				reclaimedAt = prior.ModTime()
 			}
@@ -682,12 +404,6 @@ func claimPidFileReclaim(pidPath string) (claimed bool, reclaimedAt time.Time, e
 	return true, reclaimedAt, nil
 }
 
-// lifecycleBookkeepingWritable reports whether the data directory accepts new
-// entries — the prerequisite for every bookkeeping file the lifecycle writes
-// (the cooldown stamp, the pid claim, the failure marker). It is a writability
-// check, not a claim: it creates and immediately removes a temporary file, and
-// returns the underlying error on refusal. The caller surfaces that error on a
-// surface that does not depend on writing to the data directory.
 func lifecycleBookkeepingWritable(dataDir string) error {
 	f, err := os.CreateTemp(dataDir, ".ghost-lifecycle-writability-*")
 	if err != nil {
@@ -698,8 +414,6 @@ func lifecycleBookkeepingWritable(dataDir string) error {
 	return os.Remove(name)
 }
 
-// withoutPath strips the file name from an os path error, keeping the
-// operation's own reason: claim file names carry a project id.
 func withoutPath(err error) error {
 	var pe *fs.PathError
 	if errors.As(err, &pe) {
@@ -712,23 +426,9 @@ func withoutPath(err error) error {
 	return err
 }
 
-// pathTokenRegexp matches an absolute path token and its leading separator.
-// A token starts at line start or after [\s="',([;] and is either:
-//   - POSIX: / followed by chars not in [\s:"'(),;\[\]] then optionally more path chars,
-//     stopping before a ":" followed by space or end of line
-//   - Windows: [A-Za-z]:[\\/] followed by same char class
-//
-// The regexp captures the leading separator in group 1 and the path in group 2.
-// Group 3 captures optional trailing ": ".
 var pathTokenRegexp = regexp.MustCompile(`(^|[\s="',([;])((?:/[^\s"'(),;:\[\]](?:[^\s"'(),;:\[\]]|:[^\s])*|[A-Za-z]:[\\/][^\s"'(),;:\[\]](?:[^\s"'(),;:\[\]]|:[^\s])*))(:\s)?`)
 
-// stripPaths replaces every absolute path token in the text with "<path>",
-// preserving the leading separator. It also handles the "path with spaces"
-// case: if after a replaced token there is non-empty text without ": " before
-// the next ": ", that intermediate text is dropped too.
-// Lines without matches are returned byte-identical.
 func stripPaths(text string) string {
-	// First pass: replace all path tokens with "<path>"
 	result := pathTokenRegexp.ReplaceAllStringFunc(text, func(m string) string {
 		sub := pathTokenRegexp.FindStringSubmatch(m)
 		if sub == nil {
@@ -742,12 +442,8 @@ func stripPaths(text string) string {
 		return sep + "<path>" + trailing
 	})
 
-	// Second pass: handle "path with spaces" - drop REST between <path> and next ": "
-	// Only for the last <path> before a ": " on each line.
-	// Process line by line to preserve line structure exactly.
 	lines := strings.Split(result, "\n")
 	for i, line := range lines {
-		// Find all positions of "<path>" and ": "
 		pathPos := []int{}
 		for offset := 0; ; {
 			idx := strings.Index(line[offset:], "<path>")
@@ -767,14 +463,10 @@ func stripPaths(text string) string {
 			offset += idx + 2
 		}
 
-		// For each ": ", find the nearest <path> to its left
-		// If the text between them contains no other <path> and no ": ", drop it
-		// Process from right to left to handle positions correctly after modifications
 		type dropRange struct{ start, end int }
 		var toDrop []dropRange
 
 		for _, cs := range colonSpacePos {
-			// Find the rightmost <path> before this ": "
 			var lastPathIdx = -1
 			for _, pp := range pathPos {
 				if pp < cs {
@@ -784,7 +476,6 @@ func stripPaths(text string) string {
 			if lastPathIdx == -1 {
 				continue
 			}
-			// Check if there's another <path> between lastPathIdx and cs
 			hasOtherPath := false
 			for _, pp := range pathPos {
 				if pp > lastPathIdx && pp < cs {
@@ -802,7 +493,6 @@ func stripPaths(text string) string {
 			}
 		}
 
-		// Apply drops from right to left to preserve indices
 		for j := len(toDrop) - 1; j >= 0; j-- {
 			dr := toDrop[j]
 			line = line[:dr.start] + line[dr.end:]
