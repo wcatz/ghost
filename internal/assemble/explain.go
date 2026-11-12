@@ -7,27 +7,6 @@ import (
 	"github.com/wcatz/ghost/internal/memory"
 )
 
-// explainProjection is the ghost_memory_search explain payload, built from the
-// run that produced the answer: the same candidate set, the same stages, the
-// same budget, and the items the answer finally holds. It is a READING of the
-// run, not a second one — nothing here retrieves, ranks, filters or scores, and
-// every number it reports was either stamped by the stage that computed it
-// (memory.RankFact, Signals, Decision) or read off the memory itself.
-//
-// WHICH ROWS are in the payload is the candidate set's whole account of what the
-// ranking saw: the rows it returned (Rows, including the window's tail), the
-// pool candidates it did not return (Excluded: scope narrowing and the rows
-// beyond the tail), and the candidates the vector floor removed outright
-// (FloorDropped). WHICH are marked included is the final item list and nothing
-// else, so a row the validity stage, the category or retention filter, the item
-// budget or the response-fit pass withheld is excluded here with that reason,
-// and the included set equals the set the answer renders.
-//
-// EVERY STORED STRING goes through the renderers the formatted answer uses:
-// content through Data (over its 120-rune snippet), and ids, project names,
-// scope keys and values, tags-free enums and leg error text through Token or
-// Data. The payload is JSON, which escapes a newline and a quote, but it does
-// not escape « or », and an agent reads the string, not the bytes.
 func (p *pipeline) explainProjection(res Result) *memory.SearchExplain {
 	req := p.req
 	ex := &memory.SearchExplain{
@@ -44,15 +23,11 @@ func (p *pipeline) explainProjection(res Result) *memory.SearchExplain {
 		}
 	}
 
-	// Compare once: which ids the answer holds, and at what 1-based rank.
 	rank := make(map[string]int, len(res.Items))
 	for i, it := range res.Items {
 		rank[it.ID] = i + 1
 	}
 
-	// The universe of memories, deduplicated, in the order a reader should meet
-	// them: the answer first in its own order, then everything else the ranking
-	// examined in the order it examined it.
 	byID := map[string]memory.Memory{}
 	var order []string
 	seen := map[string]bool{}
@@ -75,9 +50,6 @@ func (p *pipeline) explainProjection(res Result) *memory.SearchExplain {
 	for _, c := range p.set.Rows {
 		add(c.Memory)
 	}
-	// The retriever's removed near-duplicate losers: not in Rows, but the stage 6
-	// trace holds each, so they are reported as candidates that were not included
-	// rather than absent.
 	for _, l := range p.set.DroppedLosers {
 		if _, ok := p.losers[l.ID]; ok {
 			add(l.Memory)
@@ -116,18 +88,11 @@ func (p *pipeline) explainProjection(res Result) *memory.SearchExplain {
 	ex.Rows, trunc = memory.BoundExplainRows(ex.Rows)
 	if trunc != nil {
 		ex.Truncation = trunc
-		// Ahead of the notes it joins, so the marker reads first: the field beside
-		// it is the part that cannot be dropped, and a note list is bounded from
-		// the end.
 		ex.Notes = append([]string{trunc.Reason}, ex.Notes...)
 	}
 	return ex
 }
 
-// explainRow assembles one candidate's row from the facts the run recorded. A
-// candidate with no recorded ranking fact (a retriever that does not record
-// them) reports the candidate's own leg ranks and base, and the sentinels for the
-// signals only the ranking could have stamped; explainNotes says so.
 func (p *pipeline) explainRow(m memory.Memory, rows map[string]memory.Candidate, scopeNames []string, scopeTotal int) memory.ExplainRow {
 	req := p.req
 	row := memory.ExplainRow{
@@ -138,11 +103,13 @@ func (p *pipeline) explainRow(m memory.Memory, rows map[string]memory.Candidate,
 		ScopeKeysCompared:      append([]string(nil), scopeNames...),
 		ScopeKeysComparedTotal: scopeTotal,
 		ProvenanceWeight:       memory.ExplainProvenanceOff,
-		// Sentinels a row carries until a recorded fact overwrites them.
-		FTSRank: -1, VectorRank: -1, VectorScore: -1,
-		StatusFactor: 1.0, ScopeMatched: true,
-		RowProject:   Token(m.ProjectID),
-		ProjectMatch: !BucketUnexpected(m.ProjectID, req.ProjectID) || p.mode == memory.AllProjects,
+		FTSRank:                -1,
+		VectorRank:             -1,
+		VectorScore:            -1,
+		StatusFactor:           1.0,
+		ScopeMatched:           true,
+		RowProject:             Token(m.ProjectID),
+		ProjectMatch:           !BucketUnexpected(m.ProjectID, req.ProjectID) || p.mode == memory.AllProjects,
 	}
 	if len(scopeNames) == 0 {
 		row.ScopeKeysCompared = nil
@@ -171,14 +138,6 @@ func (p *pipeline) explainRow(m memory.Memory, rows map[string]memory.Candidate,
 		row.SupersededBy = tokens(memory.ClampAttribution(f.SupersededBy))
 		row.NearDuplicateOf = tokens(memory.ClampAttribution(f.NearDuplicateOf))
 	}
-	// A removed near-duplicate loser that the ranking stamped reports the
-	// penalty and the counterpart EXACTLY as the removal used them: the penalty
-	// is the verdict that removed the row (1 for the pair it lost), not a rank
-	// the row still holds, and the number is never invented — a loser on a path
-	// that recorded no ranking fact for it keeps the zero the fact is born with
-	// and is identified by the pairing instead. That pairing comes from the
-	// trace's own record when the facts did not carry it, so near_duplicate_of
-	// is never empty on a row the retriever removed.
 	if older, ok := p.movedAhead[m.ID]; ok {
 		row.MovedAheadOf = Token(older)
 	}
@@ -187,15 +146,6 @@ func (p *pipeline) explainRow(m memory.Memory, rows map[string]memory.Candidate,
 	}
 	row.RetentionFactor = memory.RetentionDecayFactor(m.Retention, m.Pinned, row.AgeDays)
 
-	// The assembler's own verdicts, from its own stages: validity at the run's
-	// clock, the scope verdict the predicate stage reached, and the contributions
-	// stages 2 and 4 recorded. A row withheld before a stage never reached it and
-	// keeps the zero value, which is also what the stage would have recorded.
-	//
-	// provenance_weight stays the documented "off": stage 4 pins an inert 1.0 that
-	// no score is multiplied by, and publishing it as a weight would read as
-	// "provenance was weighed and found neutral" — the contract the tool
-	// description and the e2e suite hold is that no weight is applied.
 	row.ValidityState, _ = memory.ValidityState(m.ValidFrom, m.ValidUntil, m.VerifiedAt, req.Now)
 	row.Confidence = m.Confidence
 	if sig, ok := p.trace.Signals[m.ID]; ok {
@@ -225,10 +175,6 @@ func tokens(ids []string) []string {
 	return out
 }
 
-// explainReason says why a candidate is not in the answer, in the words of the
-// stage that decided it. A row the pipeline saw is explained by the verdict that
-// stage recorded (p.dropped); a row only the retriever saw is explained by the
-// ranking fact that left it out — the floor, scope narrowing, or the window.
 func (p *pipeline) explainReason(id string, row memory.ExplainRow, rows map[string]memory.Candidate) string {
 	if code, ok := p.dropped[id]; ok {
 		switch code {
@@ -249,60 +195,22 @@ func (p *pipeline) explainReason(id string, row memory.ExplainRow, rows map[stri
 			}
 			return fmt.Sprintf("withheld by the conflicts stage: the memory contradicts %s, the rows that stage kept", strings.Join(tokens(kept), ", "))
 		case reasonRelevanceCutoff:
-			// The query-mode relevance cutoff (#954): the answer stopped where
-			// relevance fell off, and this row's fused Base was below the
-			// configured share of the top match's Base. It names the rule and
-			// the share rather than only that a rule acted, because a caller
-			// diagnosing a short answer needs to know the answer was shortened
-			// by design and at what threshold. Unlike the diversity sentence above
-			// it is REACHABLE from a shipped run: the cutoff is a query rule and
-			// this payload is always a query.
 			return fmt.Sprintf("cut by the relevance cutoff: the answer stops where relevance falls off, and this "+
 				"memory's fused Base was below %s of the top match's Base", cutoffShareLabel(p.req.RelevanceCutoff))
 		case reasonLegConsensus:
-			// The query-mode leg-consensus gate (#1251): a row only one
-			// retrieval leg found is admitted only when that leg ranked it at
-			// or above the ceiling for its leg. It names the rule and the two
-			// ceilings so a caller can see why a one-leg match was withheld.
 			return fmt.Sprintf("withheld by the leg-consensus rule: only one retrieval leg found this memory, and it "+
 				"did not rank it first (ranks are 0-based, so a single-leg row is admitted only at vector rank "+
 				"<= %d or keyword rank <= %d)", maxSingleLegVectorRank, maxSingleLegFTSRank)
 		case reasonNothingClearedBar:
-			// The no-answer bar (#955): no row in the block was a close enough
-			// vector match, so the whole block was withheld. It names the rule and
-			// the bar so a caller diagnosing a missing answer knows it was a
-			// judgement made at a threshold it can change.
 			return fmt.Sprintf("withheld by the no-answer bar: the best vector match in the block scored below "+
 				"cosine %.3f (context.no_answer_cosine), so nothing here answers the query", p.req.NoAnswerCosine)
 		case "scope_contradiction":
 			return "excluded by scope: memory scope conflicts with the requested scope"
 		case reasonDiversityDeferred:
-			// A deferral, so the sentence says what the row hit and what moved it:
-			// its category had filled its share of the window, and the stage put
-			// the row behind the window so the next-ranked rows of other
-			// categories could take the slots. It states the RULE, not the count
-			// the answer ends up holding: when the other categories run out of
-			// rows the deferred ones come back, so a block can carry more of one
-			// category than the share, and a sentence claiming otherwise would
-			// contradict the block above it.
-			//
-			// UNREACHABLE from a shipped run today, and the reason is the stage's
-			// own scope: the share is a PASSIVE-read rule and `Request.Explain` is
-			// refused without a query, so every explain projection is a
-			// query-mode one. It is kept rather than deleted because the trace
-			// and the retrieval record carry the reason on a passive read, and a
-			// projection of one would reach for exactly this sentence — the
-			// generic fallback below would call the share a "rule" and name
-			// neither the category nor the cap.
 			d, ok := p.deferred[id]
 			if !ok {
 				return "deferred by the diversity stage: the memory's category had filled its share of the window"
 			}
-			// The window the share was half of, which on a sliced read is the
-			// row's OWN bucket cap and not the request's total: naming the total
-			// beside a per-bucket share would print a share that is not half of
-			// the window it names. `d.slots` is 0 only for a deferral built by
-			// hand, and then the request's total is the honest fallback.
 			slots := d.slots
 			if slots == 0 {
 				slots = p.admitCap()
@@ -323,26 +231,17 @@ func (p *pipeline) explainReason(id string, row memory.ExplainRow, rows map[stri
 	}
 	switch {
 	case row.FloorDropped && row.FTSRank < 0:
-		// A dual-leg row is never labelled this way: the floor removes only its
-		// vector contribution and the row stays a candidate on its keyword score.
 		return fmt.Sprintf("dropped by the vector similarity floor: cosine %.4f is below the minimum %.4f",
 			row.FloorScore, p.set.ExplainKnobs.VectorFloor)
 	case !row.ScopeMatched:
 		return "excluded by scope: memory scope conflicts with the requested scope"
 	}
 	if _, inRows := rows[id]; inRows {
-		// Returned by the retriever, kept by every stage, and still not in the
-		// answer: nothing recorded a verdict for it, which the payload says
-		// rather than inventing one.
 		return "not in the answer, and no stage recorded why"
 	}
 	return fmt.Sprintf("outside the result window: only the top %d candidates are retrieved", p.trace.Limit)
 }
 
-// separationKept is the kept rows a stage-5 separation recorded against the
-// withheld id, or nil if none. It is the counterpart explainReason names so a
-// reader meeting the withheld memory can find the side that survived — always
-// rows the withheld memory directly contradicts.
 func (p *pipeline) separationKept(withheld string) []string {
 	for _, sep := range p.separations {
 		if sep.withheld == withheld {
@@ -352,14 +251,8 @@ func (p *pipeline) separationKept(withheld string) []string {
 	return nil
 }
 
-// admitCap is the item count the answer was budgeted to, for the sentence that
-// names it: the total cap when there is one, else the sum of the slice caps.
 func (p *pipeline) admitCap() int { return itemBound(p.req) }
 
-// explainNotes is the payload's own account of how to read it. The static notes
-// qualify the axes the ranking does not score; the dynamic ones name what the
-// run actually did (the knobs it ran with, a leg that failed, the window it was
-// handed).
 func (p *pipeline) explainNotes(ex *memory.SearchExplain, factsKnown, statusDemoted, tierDecay bool) []string {
 	var notes []string
 	if !ex.VectorAvailable {
@@ -399,9 +292,6 @@ func (p *pipeline) explainNotes(ex *memory.SearchExplain, factsKnown, statusDemo
 	return append(notes, explainAxisNotes()...)
 }
 
-// explainAxisNotes disclose, once per payload, the axes the ranking does not
-// score and the fields that therefore carry a zero. They are notes rather than
-// per-row flags because the answer is the same for every row.
 func explainAxisNotes() []string {
 	return []string{
 		"validity_state is the row's own currency at the search clock and validity_penalty is 0 on every row: the assembler's validity stage withholds an expired or not-yet-valid row instead of ranking it lower, so such a row is excluded with its reason and no score carries a validity factor",
