@@ -11,7 +11,7 @@
 # required. Native Windows cannot exec the POSIX launcher, so it ships as two
 # separate per-architecture archives assembled by the sibling
 # scripts/assemble-plugin-windows.sh (see that script's header for why).
-# See docs/superpowers/specs/2026-08-20-ghost-claude-plugin-design.md.
+# See 2026-08-20-ghost-claude-plugin-design.md (archived design, in git history at 374ac54e7865).
 #
 # Usage: scripts/assemble-plugin.sh <version> <out-dir>
 #   <version>  release version without the leading "v" (e.g. 0.30.0)

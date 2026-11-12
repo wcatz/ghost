@@ -6,7 +6,7 @@
 # catalog always references one immutable asset set. Called by the release
 # workflow after the three plugin archives are attached and before the draft
 # is published; runnable by hand for local validation.
-# See docs/superpowers/specs/2026-08-20-ghost-claude-plugin-design.md.
+# See 2026-08-20-ghost-claude-plugin-design.md (archived design, in git history at 374ac54e7865).
 #
 # Why version-pinned + digest: releases/latest/download retargets on every
 # release (404 window while assets attach, undetectable --clobber swaps

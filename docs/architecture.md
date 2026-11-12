@@ -1898,7 +1898,7 @@ Axis interaction rules:
 > The stage list is now complete. The plan to converge the
 > surfaces landed under
 > [#581](https://github.com/wcatz/ghost/issues/581), staged in
-> [`2026-09-25-context-assembler-design.md`](superpowers/specs/2026-09-25-context-assembler-design.md).
+> `2026-09-25-context-assembler-design.md` (archived design, in git history at 374ac54e7865).
 
 What exists now:
 
@@ -2607,4 +2607,4 @@ Two properties of the fakes are load-bearing and easy to get wrong, so they are 
 
 ## Historical design records
 
-The `docs/superpowers/` tree contains archived specifications, plans, and reports. It explains how the architecture reached its current shape but is not the canonical source for current behavior. Start with this page, the source, and the current user documentation.
+The archived specifications, plans and reports that used to live under `docs/superpowers/` are in git history at 374ac54e7865. They explain how the architecture reached its current shape but are not the canonical source for current behavior. Start with this page, the source, and the current user documentation.

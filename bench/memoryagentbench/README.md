@@ -5,7 +5,7 @@ the `opencode` CLI rather than the Anthropic API) against MemoryAgentBench's
 `Conflict_Resolution`
 split ([HF: `ai-hyz/MemoryAgentBench`](https://huggingface.co/datasets/ai-hyz/MemoryAgentBench),
 ICLR 2026), and scores retrieval before/after supersede links exist. See
-[the design doc](../../docs/superpowers/specs/2026-08-20-memoryagentbench-supersede-benchmark-design.md)
+the design doc `2026-08-20-memoryagentbench-supersede-benchmark-design.md` (archived design, in git history at 374ac54e7865)
 for the full rationale.
 
 Single-hop (`fact_sh`) only — multi-hop (`fact_mh`) needs a query-decomposition
