@@ -8,7 +8,6 @@ import (
 	"testing"
 
 	"github.com/wcatz/ghost/internal/adversarial"
-	"github.com/wcatz/ghost/internal/audit"
 )
 
 // Adversarial fixtures for the host-event parsers (issue #585).
@@ -310,17 +309,6 @@ func TestNULBytesNeverReachTheFilesystem(t *testing.T) {
 	}
 	if _, err := os.Open(real); err != nil {
 		t.Fatalf("the truncated prefix should not have been disturbed: %v", err)
-	}
-
-	// And the audit scanner, which is what the path is handed to, takes a reader
-	// rather than a path, so a NUL in the value cannot become a filename there
-	// at all.
-	h, err := audit.NewHasher([]byte("adversarial-test-key"))
-	if err != nil {
-		t.Fatalf("NewHasher: %v", err)
-	}
-	if _, _, err := ScanAudit(FormatClaudeJSONL, strings.NewReader("{}\n"), h); err != nil {
-		t.Errorf("ScanAudit over an in-memory reader: %v", err)
 	}
 }
 

@@ -17,7 +17,7 @@ func TestSpawnLifecycleIfConfigured_RefusesGlobalThroughDefaultProject(t *testin
 	seedProject(t, dataHome, memory.GlobalProjectID, memory.GlobalProjectID, "global")
 
 	seen := captureLifecycleChild(t)
-	spawnLifecycleIfConfigured(home, "", nil, io.Discard)
+	spawnLifecycleIfConfigured(home, "", io.Discard)
 
 	if len(*seen) != 0 {
 		t.Errorf("lifecycle child was started for _global through routing.default_project: %v", *seen)
@@ -46,7 +46,7 @@ func TestSpawnLifecycleIfConfigured_SpawnsOrdinaryDefaultProjectFromHome(t *test
 	seedProject(t, dataHome, "infra", canonical, "infrastructure")
 
 	seen := captureLifecycleChild(t)
-	spawnLifecycleIfConfigured(home, "", nil, io.Discard)
+	spawnLifecycleIfConfigured(home, "", io.Discard)
 
 	if len(*seen) != 1 {
 		t.Fatalf("expected one lifecycle child for the ordinary default project, got %v", *seen)
@@ -72,7 +72,7 @@ func TestSpawnLifecycle_ReflectOnlySkipsGlobalThroughDefaultProject(t *testing.T
 	seedProject(t, dataHome, memory.GlobalProjectID, memory.GlobalProjectID, "global")
 
 	seen := captureLifecycleChild(t)
-	spawnLifecycleIfConfigured(home, "", nil, io.Discard)
+	spawnLifecycleIfConfigured(home, "", io.Discard)
 
 	if len(*seen) != 0 {
 		t.Errorf("lifecycle child was started for _global through routing.default_project: %v", *seen)

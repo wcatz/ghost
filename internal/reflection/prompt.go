@@ -18,7 +18,7 @@ type ReflectionInput struct {
 	ProjectName        string
 	OtherProjectNames  []string
 	AllowDrops         bool
-	Usefulness         map[string]memory.UsefulnessEvidence
+	Flags              map[string]memory.FlagEvidence
 	NearDuplicatePairs [][2]string
 }
 
@@ -73,7 +73,7 @@ type ReflectMemory struct {
 
 // BuildReflectionPrompt assembles the reflection prompt from project history.
 // Any change to fields rendered for ExistingMemories must be mirrored in InputSignature for the --skip-unchanged gate.
-// The access count is NOT mirrored; Usefulness is also NOT mirrored.
+// The access count is NOT mirrored; Flags is also NOT mirrored.
 func BuildReflectionPrompt(input ReflectionInput) string {
 	var sb strings.Builder
 
@@ -134,8 +134,11 @@ func BuildReflectionPrompt(input ReflectionInput) string {
 				line += fmt.Sprintf(", tags:[%s]", strings.Join(escaped, "|"))
 			}
 			line += fmt.Sprintf(") %s", quoteData(m.Content))
-			if audit := input.Usefulness[m.ID].Line(); audit != "" {
-				line += fmt.Sprintf(" [%s]", audit)
+			// Flags filed against this memory ride on its own line, rendered from a
+			// count (memory.FlagEvidence.Line) so no session text reaches the prompt.
+			// No flags renders nothing.
+			if flagLine := input.Flags[m.ID].Line(); flagLine != "" {
+				line += fmt.Sprintf(" [%s]", flagLine)
 			}
 			sb.WriteString(line + "\n")
 		}

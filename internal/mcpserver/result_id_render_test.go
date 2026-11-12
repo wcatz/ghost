@@ -2,27 +2,12 @@ package mcpserver
 
 import (
 	"context"
-	"errors"
-	"log/slog"
-	"os"
 	"strings"
 	"testing"
 
 	"github.com/wcatz/ghost/internal/assemble"
 	"github.com/wcatz/ghost/internal/memory"
 )
-
-// flagCountUnavailableStore records flags normally and fails only on the
-// read-back, so ghost_memory_flag reaches its "was flagged, but the count could
-// not be read back" sentence — the one answer on that tool which still has to
-// name the id the caller addressed.
-type flagCountUnavailableStore struct {
-	*memory.Store
-}
-
-func (s *flagCountUnavailableStore) UsefulnessByMemory(context.Context, string) (map[string]memory.UsefulnessEvidence, error) {
-	return nil, errors.New("counts are unavailable")
-}
 
 // TestToolResultsRenderAStoredMemoryIDThroughTheSafeToken is #1377 over the
 // tools whose answers name a stored memory id.
@@ -150,21 +135,4 @@ func TestToolResultsRenderAStoredMemoryIDThroughTheSafeToken(t *testing.T) {
 		}
 	})
 
-	t.Run("ghost_memory_flag read-back failure", func(t *testing.T) {
-		db, store, _ := newStoreWithDB(t)
-		id := hostileIDFor()
-		plantMemoryWithID(t, db, "abc123", id, "fact", note)
-
-		logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
-		srv := New(&flagCountUnavailableStore{Store: store}, logger, "test")
-		session := connectedClient(t, srv)
-		out := callToolErr(t, session, "ghost_memory_flag", map[string]any{
-			"project_id": "test-project", "memory_id": id, "kind": "stale",
-			"reason": "the deploy order changed",
-		})
-		if !strings.Contains(out, "was flagged") {
-			t.Fatalf("the flag did not reach the read-back failure: %.400q", out)
-		}
-		assertTheIDIsOnlyAToken(t, "ghost_memory_flag", out, id)
-	})
 }

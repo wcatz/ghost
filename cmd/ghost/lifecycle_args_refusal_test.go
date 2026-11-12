@@ -61,7 +61,7 @@ func TestLifecycleArgumentRefusalsDoNotEchoTheOperandRaw(t *testing.T) {
 		})
 	}
 	// An ordinary operand is still named.
-	if _, _, _, err := parseLifecycleArgs([]string{"alpha", "beta"}); err == nil || !strings.Contains(err.Error(), `"beta"`) {
+	if _, _, err := parseLifecycleArgs([]string{"alpha", "beta"}); err == nil || !strings.Contains(err.Error(), `"beta"`) {
 		t.Errorf("an ordinary extra argument was not named: %v", err)
 	}
 }

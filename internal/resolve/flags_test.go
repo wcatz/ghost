@@ -11,7 +11,9 @@ package resolve
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -22,6 +24,63 @@ import (
 // sends the harness is the failure, and asserting on a marker rather than on
 // "the reason field" is what makes the assertion a measurement.
 const flagReasonMarker = "ZZREASONNEVERLEAVESSTOREZZ"
+
+// errEvidenceUnavailable stands in for a store that cannot answer the read. Its
+// text is never asserted: what matters is that it is an error the pass survives.
+var errEvidenceUnavailable = errors.New("evidence unavailable")
+
+// sentVerbatim reports whether needle is one of the strings the pass sent the
+// classifier, byte for byte. The pass renders a note and its evidence line as
+// one string, so a substring search would pass on a line that merely contained
+// the text.
+func sentVerbatim(haystack []string, needle string) bool {
+	for _, s := range haystack {
+		if s == needle {
+			return true
+		}
+	}
+	return false
+}
+
+// resolveRealStore is a real store holding three resolve-eligible notes, because
+// the property under test is what the pass SENDS, and a fake store's usefulness
+// map would only prove the pass renders whatever it is handed.
+func resolveRealStore(t *testing.T) (*memory.Store, context.Context, []memory.Memory) {
+	t.Helper()
+	ctx := context.Background()
+	db, err := memory.OpenDB(filepath.Join(t.TempDir(), "resolve.db"))
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	s := memory.NewStore(db, nil)
+	const project = "usefulness"
+	if err := s.EnsureProject(ctx, project, "/tmp/usefulness", project); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	// Every note passes the keyword prefilter (so all three reach the classifier)
+	// and none is settled by the veto (which reads an imperative or an open
+	// marker — none of these carry one), because a note the pass never asks
+	// about is a note this slice cannot say anything about.
+	contents := []string{
+		"kill experiment: the graph bonus is gone, PR #210 landed it",
+		"postmortem concluded: the deploy failure was a stale hash",
+		"cost estimate from May: $148 per month projected",
+	}
+	var rows []memory.Memory
+	for _, content := range contents {
+		id, err := s.Create(ctx, project, memory.Memory{Category: "fact", Content: content, Importance: 0.5, Source: "mcp"})
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		stored, err := s.GetByIDs(ctx, []string{id})
+		if err != nil || len(stored) != 1 {
+			t.Fatalf("GetByIDs(%s): %v", id, err)
+		}
+		rows = append(rows, stored[0])
+	}
+	return s, ctx, rows
+}
 
 // TestTheFlagReasonNeverReachesTheClassifier: the property, over a REAL store.
 //
@@ -79,38 +138,14 @@ func TestKeepStampCarriesTheFlagOnlyWhenThereIsOne(t *testing.T) {
 	const content = "the retry budget is three attempts"
 	base := memory.ContentHash(content)
 
-	for _, tc := range []struct {
-		name string
-		ev   memory.UsefulnessEvidence
-	}{
-		// Deliberately NOT the zero-evidence case: that one produces the bare
-		// content hash and is asserted separately below, since a table entry
-		// expecting `hash:0:0:` and a check expecting `hash` cannot both hold.
-		{"a contradiction with no flag", memory.UsefulnessEvidence{
-			Contradicted: 2, LastAt: "2026-09-24 10:00:00",
-		}},
-		{"superseded with no flag", memory.UsefulnessEvidence{
-			SupersededInSession: 1, LastAt: "2026-09-24 10:00:00",
-		}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			got := KeepStamp(content, tc.ev)
-			// The pre-flag format, spelled out: hash:contradicted:superseded:LastAt.
-			want := fmt.Sprintf("%s:%d:%d:%s", base, tc.ev.Contradicted, tc.ev.SupersededInSession, tc.ev.LastAt)
-			if got != want {
-				t.Errorf("KeepStamp = %q, want the format this build wrote before flags existed (%q) — a "+
-					"stored cache entry has to keep matching", got, want)
-			}
-		})
-	}
 	// Zero evidence is the bare content hash, byte for byte: that is what makes
 	// every pre-#880 entry a valid hit.
-	if got := KeepStamp(content, memory.UsefulnessEvidence{}); got != base {
+	if got := KeepStamp(content, memory.FlagEvidence{}); got != base {
 		t.Errorf("KeepStamp with no evidence = %q, want the bare content hash %q", got, base)
 	}
 
-	flagged := memory.UsefulnessEvidence{Flagged: 1, LastAt: "2026-09-24 10:00:00"}
-	plain := memory.UsefulnessEvidence{Flagged: 0, LastAt: "2026-09-24 10:00:00"}
+	flagged := memory.FlagEvidence{Flagged: 1}
+	plain := memory.FlagEvidence{Flagged: 0}
 	flagStamp := KeepStamp(content, flagged)
 	if flagStamp == KeepStamp(content, plain) {
 		t.Errorf("a flag did not move the KEEP stamp (%q): a cached KEEP would stay a hit and the new flag "+
@@ -125,17 +160,10 @@ func TestKeepStampCarriesTheFlagOnlyWhenThereIsOne(t *testing.T) {
 		t.Errorf("KeepStamp is not deterministic: %q then %q", flagStamp, again)
 	}
 	// Two flags are a different fingerprint from one, so a second flag re-asks too.
-	two := memory.UsefulnessEvidence{Flagged: 2, LastAt: "2026-09-24 10:00:00"}
+	two := memory.FlagEvidence{Flagged: 2}
 	if KeepStamp(content, two) == flagStamp {
 		t.Errorf("one flag and two flags produce the same stamp %q, so the second flag would never be asked about",
 			flagStamp)
-	}
-	// And the counts stay distinct fields: a flag at contradicted=0 must not be
-	// confusable with a contradiction at flagged=0.
-	if KeepStamp(content, memory.UsefulnessEvidence{Flagged: 1}) ==
-		KeepStamp(content, memory.UsefulnessEvidence{Contradicted: 1}) {
-		t.Errorf("flagged=1 and contradicted=1 produce the same stamp: the fingerprint cannot tell the two " +
-			"evidence sources apart")
 	}
 }
 
@@ -146,8 +174,8 @@ func TestKeepStampCarriesTheFlagOnlyWhenThereIsOne(t *testing.T) {
 // then quiet.
 func TestAFlagReasksACachedKeepOnceAndThenGoesQuiet(t *testing.T) {
 	const content = "cost estimate from May: $148 per month projected"
-	evidence := map[string]memory.UsefulnessEvidence{
-		"M1": {Flagged: 1, LastAt: "2026-10-06 09:00:00"},
+	evidence := map[string]memory.FlagEvidence{
+		"M1": {Flagged: 1},
 	}
 	store := &fakeStore{
 		candidates: []memory.Memory{{ID: "M1", Content: content}},
@@ -194,5 +222,20 @@ func TestAFlagReasksACachedKeepOnceAndThenGoesQuiet(t *testing.T) {
 	if cls3.calls != 0 || res.Skipped != 1 {
 		t.Errorf("after the re-stamp the pass made %d classifier call(s) and skipped %d; want 0 and 1 — the "+
 			"stamp already covers this flag", cls3.calls, res.Skipped)
+	}
+}
+
+// TestKeepStampFormatIsStable: the fingerprint's spelling is a stored key, so it
+// is pinned rather than described. A build that wrote the flag count in a
+// different shape would leave every existing cache entry a miss and re-ask the
+// whole corpus once.
+func TestKeepStampFormatIsStable(t *testing.T) {
+	const content = "the retry budget is three attempts"
+	base := memory.ContentHash(content)
+	if got, want := KeepStamp(content, memory.FlagEvidence{Flagged: 1}), fmt.Sprintf("%s:1", base); got != want {
+		t.Errorf("KeepStamp(flagged) = %q, want %q", got, want)
+	}
+	if got, want := KeepStamp(content, memory.FlagEvidence{Flagged: 2}), fmt.Sprintf("%s:2", base); got != want {
+		t.Errorf("KeepStamp(two flags) = %q, want %q", got, want)
 	}
 }

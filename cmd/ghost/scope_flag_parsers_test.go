@@ -67,7 +67,7 @@ func resolveProject(args []string) (string, error) {
 }
 
 func lifecycleProject(args []string) (string, error) {
-	project, _, _, err := parseLifecycleArgs(args)
+	project, _, err := parseLifecycleArgs(args)
 	return project, err
 }
 

@@ -84,15 +84,15 @@ type fakeStore struct {
 	// does not have to restate its rows; scopeCompatibleSupersedes needs the
 	// source endpoint, which the candidate pools do not always contain.
 	known []memory.Memory
-	// usefulness is the #648 negative-evidence map the store would have read,
+	// usefulness is the flag-evidence map the store would have read,
 	// and usefulnessCalls counts the READS — the property under test is that a
 	// pass over N memories asks once, so a per-memory query cannot pass.
-	usefulness      map[string]memory.UsefulnessEvidence
+	usefulness      map[string]memory.FlagEvidence
 	usefulnessCalls int
 	usefulnessErr   error
 }
 
-func (s *fakeStore) UsefulnessByMemory(_ context.Context, _ string) (map[string]memory.UsefulnessEvidence, error) {
+func (s *fakeStore) FlagsByMemory(_ context.Context, _ string) (map[string]memory.FlagEvidence, error) {
 	s.usefulnessCalls++
 	if s.usefulnessErr != nil {
 		return nil, s.usefulnessErr

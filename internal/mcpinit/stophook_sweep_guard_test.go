@@ -125,16 +125,6 @@ func TestSweepLeavesEverythingTheHostDidNotMaterialise(t *testing.T) {
 		format string
 		plant  plant
 	}{
-		{"a pending audit sidecar file, codex", "codex", "codex-rollout", func(t *testing.T, base string) string {
-			p := filepath.Join(base, "ghost-audit-111111.signals")
-			writeFile(t, p, "ghost-audit v5\nid AAAA 1\n")
-			return filepath.Join(p, "rollout.jsonl")
-		}},
-		{"a pending audit sidecar file, opencode", "opencode", "opencode-messages", func(t *testing.T, base string) string {
-			p := filepath.Join(base, "ghost-audit-111111.signals")
-			writeFile(t, p, "ghost-audit v5\nid AAAA 1\n")
-			return filepath.Join(p, opencodeTranscriptName)
-		}},
 		{"another session's directory, codex", "codex", "codex-rollout", func(t *testing.T, base string) string {
 			d := filepath.Join(base, "ghost-otherSession")
 			if err := os.Mkdir(d, 0o700); err != nil {

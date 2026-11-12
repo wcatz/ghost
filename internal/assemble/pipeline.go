@@ -352,11 +352,9 @@ const maxRenderedConflictPairs = 5
 // memory no evidence names is not demoted for it, and a memory three agents
 // reported is not promoted.
 func runProvenance(p *pipeline) {
-	useByID := make(map[string]memory.UsefulnessEvidence, len(p.rows))
 	evByID := make(map[string]memory.EvidenceCounts, len(p.rows))
 	confByID := make(map[string]*float64, len(p.rows))
 	for _, c := range p.rows {
-		useByID[c.ID] = c.Usefulness
 		evByID[c.ID] = c.Evidence
 		confByID[c.ID] = c.Confidence
 	}
@@ -366,31 +364,7 @@ func runProvenance(p *pipeline) {
 		sig.ProvenanceWeight = provenanceWeight
 		sig.ProvenanceContribution = 0
 		sig.Evidence = evByID[id]
-		sig.Usefulness = useByID[id]
 		p.trace.Signals[id] = sig
-	}
-	// A memory the audit has contradicted repeatedly is demoted: it sinks
-	// behind the rows the audit has not contradicted, so a doubtful memory
-	// does not lead a block the way a clean one does. It is moved, not
-	// removed -- the row still answers when nothing cleaner matched. Only a
-	// repeated contradiction (two or more) demotes; a single one is evidence
-	// for the reader, not a reordering.
-	keptRows := make([]memory.Candidate, 0, len(p.rows))
-	demotedRows := make([]memory.Candidate, 0, len(p.rows))
-	keptItems := make([]Item, 0, len(p.items))
-	demotedItems := make([]Item, 0, len(p.items))
-	for i, c := range p.rows {
-		if c.Usefulness.Contradicted >= 2 {
-			demotedRows = append(demotedRows, c)
-			demotedItems = append(demotedItems, p.items[i])
-		} else {
-			keptRows = append(keptRows, c)
-			keptItems = append(keptItems, p.items[i])
-		}
-	}
-	if len(demotedRows) > 0 {
-		p.rows = append(keptRows, demotedRows...)
-		p.items = append(keptItems, demotedItems...)
 	}
 	p.trace.record(stageProvenance, len(p.rows), len(p.rows), nil,
 		"provenance weight is pinned at 1.0: no measured threshold justifies scoring confidence yet")

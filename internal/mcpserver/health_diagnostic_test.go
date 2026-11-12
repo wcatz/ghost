@@ -166,7 +166,6 @@ func TestHealthAnswersWhileAWriteIsInFlight(t *testing.T) {
 		"**Total memories:** 1",
 		"**Memory links:**",
 		"**History:**",
-		"**Retrieval audit**",
 	} {
 		if !strings.Contains(text.Text, want) {
 			t.Errorf("ghost_health does not report %q while a write is in flight:\n%s", want, text.Text)

@@ -98,11 +98,6 @@ func printDeleteSummary(out io.Writer, summary memory.DeleteProjectSummary, verb
 	if _, err := fmt.Fprintf(out, "  retrievals:   %d\n", summary.RetrievalRecords); err != nil {
 		return err
 	}
-	// And the verdicts derived from those calls, on the same footing — a verdict
-	// names a memory, so it is part of what deleting a project takes away.
-	if _, err := fmt.Fprintf(out, "  audits:       %d\n", summary.RetrievalAudits); err != nil {
-		return err
-	}
 	// And #648 slice 2's flags, last in the struct's own order for the same
 	// reason: an agent's objection to a memory this command is about to remove is
 	// part of what it takes away, and a line here is the only place the user is

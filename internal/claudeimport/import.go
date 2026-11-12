@@ -241,11 +241,10 @@ func ParseMemoryFile(path string) (content, category string, importance float32,
 // appears, which would wedge the import, and following a symlink would store
 // the bytes of a file outside the memory directory. The path is Lstat'ed, so
 // a link is refused rather than followed, and a non-regular path is never
-// opened — the stat-before-open rule mcpinit's openTranscript and
-// memory.ReadBackupManifest apply, with Lstat in place of Stat because a link
-// is refused here. memoryFileOpenFlags close the window between the Lstat and
-// the open, and the fstat on the open descriptor refuses whatever was swapped
-// in during it.
+// opened — the stat-before-open rule memory.ReadBackupManifest applies, with
+// Lstat in place of Stat because a link is refused here. memoryFileOpenFlags
+// close the window between the Lstat and the open, and the fstat on the open
+// descriptor refuses whatever was swapped in during it.
 func openMemoryFile(path string) (*os.File, error) {
 	info, err := os.Lstat(path)
 	if err != nil {

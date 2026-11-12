@@ -101,46 +101,6 @@ func isOlder(a, b memory.Memory) bool {
 	return a.ID < b.ID
 }
 
-// correctionPairTargets returns the OLDER, prefilter-passing eligible memories
-// that at least one correction-marked memory demotes: they share
-// >= correctionMinSharedRare rare subject tokens with a NEWER correction. The
-// correction memory itself is never demoted. Deterministic and free — no LLM
-// call — because the correction's text ("already fixed on main", "no PR is
-// needed from us") is itself the resolution verdict.
-//
-// The frequency pool and the correction pool are both `loaded`, which is what
-// Run passes. The repair pass needs them chosen separately and calls
-// correctionPairTargetsFrom directly.
-func correctionPairTargets(loaded, cands []memory.Memory) []memory.Memory {
-	return correctionPairTargetsFrom(loaded, cands, loaded)
-}
-
-// correctionPairTargetsFrom is correctionPairTargets with the correction pool
-// separable from the frequency pool. `loaded` counts subject-token document
-// frequency — Run's pool, so the rare-token set is identical — while `cands` may
-// be rows outside it (the repair pass passes the RESOLVED pool, which
-// ResolveCandidates never returns), and `corrections` is where a demoting
-// correction is looked for. Keeping those three apart is what lets the repair
-// pass mirror Run exactly instead of approximately: a correction only asserts
-// anything while it is in the pool Run searches, i.e. while it is unresolved.
-//
-// It is correctionPairingsFrom with the corrections dropped, and it deduplicates
-// the targets, because a target paired by two corrections is still one demoted
-// row (Run counts Corrected per row) and the order a target first appears in is
-// the order the same loop has always produced.
-func correctionPairTargetsFrom(loaded, cands, corrections []memory.Memory) []memory.Memory {
-	seen := make(map[string]bool, len(cands))
-	var out []memory.Memory
-	for _, p := range correctionPairingsFrom(loaded, cands, corrections) {
-		if seen[p.Target.ID] {
-			continue
-		}
-		seen[p.Target.ID] = true
-		out = append(out, p.Target)
-	}
-	return out
-}
-
 // Pairing is one correction and the older, prefilter-passing candidate it
 // demotes. The pair is the unit the repair pass reports, not the target: a row
 // the pass leaves resolved has to say WHICH correction is asserting it, because

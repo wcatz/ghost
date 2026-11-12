@@ -9,9 +9,11 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -21,6 +23,75 @@ import (
 	"github.com/wcatz/ghost/internal/mcpinit"
 	"github.com/wcatz/ghost/internal/memory"
 )
+
+const lifecycleRunDeadline = 15 * time.Second
+
+func coordinatorGone(t *testing.T, pid int) {
+	t.Helper()
+	for i := 0; i < 50; i++ {
+		if err := syscall.Kill(pid, 0); errors.Is(err, syscall.ESRCH) {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Errorf("the coordinator (pid %d) is still alive", pid)
+}
+
+type lifecycleSandbox struct {
+	bin, root, tmp, configFile, dataHome string
+}
+
+func newLifecycleSandbox(t *testing.T) lifecycleSandbox {
+	t.Helper()
+	if testing.Short() {
+		t.Skip("builds the ghost binary")
+	}
+	root := t.TempDir()
+	bin := filepath.Join(root, "ghost")
+	build := exec.Command("go", "build", "-o", bin, ".")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("go build: %v\n%s", err, out)
+	}
+	s := lifecycleSandbox{
+		bin:        bin,
+		root:       root,
+		tmp:        filepath.Join(root, "tmp"),
+		configFile: filepath.Join(root, "config", "ghost", "config.yaml"),
+		dataHome:   filepath.Join(root, "data"),
+	}
+	for _, d := range []string{s.tmp, filepath.Dir(s.configFile), s.dataHome, filepath.Join(root, "empty-path")} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return s
+}
+
+func (s lifecycleSandbox) command(ctx context.Context, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, s.bin, append([]string{"lifecycle"}, args...)...)
+	cmd.Env = []string{
+		"HOME=" + s.root,
+		"XDG_CONFIG_HOME=" + filepath.Join(s.root, "config"),
+		"XDG_DATA_HOME=" + s.dataHome,
+		"XDG_STATE_HOME=" + filepath.Join(s.root, "state"),
+		"XDG_CACHE_HOME=" + filepath.Join(s.root, "cache"),
+		"TMPDIR=" + s.tmp,
+		"PATH=" + filepath.Join(s.root, "empty-path"),
+		"GHOST_DEV_FORBID_DATA_DIR=" + os.Getenv("GHOST_DEV_FORBID_DATA_DIR"),
+		"GHOST_OLLAMA_URL=http://127.0.0.1:1",
+		"CLAUDE_CODE_SESSION_ID=",
+	}
+	cmd.WaitDelay = 2 * time.Second
+	return cmd
+}
+
+func phasesConfig(resolve bool) string {
+	r := "false"
+	if resolve {
+		r = "true"
+	}
+	return "reflection:\n  auto_reflect: false\n  auto_resolve: " + r + "\n  auto_supersede: false\n"
+}
 
 // preLoopProject is seven characters on purpose: the parked pipe leaves room
 // for the first coordinator line only up to stderrParkHeadroom, and a longer
@@ -67,13 +138,12 @@ func TestLifecycleSignalBeforeThePhaseLoopIsAnInterruption(t *testing.T) {
 	if err := os.WriteFile(s.configFile, []byte(phasesConfig(true)), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	signals := filepath.Join(s.tmp, "ghost-audit-absent.signals")
 	seedPreLoopProject(t, s)
 
 	r, w, prefill := parkingPipe(t)
 	ctx, cancel := context.WithTimeout(context.Background(), lifecycleRunDeadline)
 	defer cancel()
-	cmd := s.command(ctx, "--project", preLoopProject, "--source", "claude-code", "--signals", signals)
+	cmd := s.command(ctx, "--project", preLoopProject, "--source", "claude-code")
 	cmd.Stderr = w
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)

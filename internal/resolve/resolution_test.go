@@ -640,10 +640,10 @@ func TestFormatBatchContentFoldsEveryLineBreak(t *testing.T) {
 
 // TestFormatBatchContentEvidenceLineStaysOutsideTheBlock: a note with a real
 // evidence line gets it on its own line after the block, byte-identical to the
-// line the audit renders, and the content before it is folded.
+// line the store renders, and the content before it is folded.
 func TestFormatBatchContentEvidenceLineStaysOutsideTheBlock(t *testing.T) {
-	ev := memory.UsefulnessEvidence{Contradicted: 2}.Line()
-	if !strings.HasPrefix(ev, "audit: verdicts contradicted=2") {
+	ev := memory.FlagEvidence{Flagged: 2}.Line()
+	if !strings.HasPrefix(ev, "audit: verdicts flagged=2") {
 		t.Fatalf("evidence line = %q", ev)
 	}
 	got := formatBatchContent([]Note{
@@ -698,7 +698,7 @@ func TestReplyEchoesNote(t *testing.T) {
 // TestBatchVerdictWithEvidenceStillParses: a batch whose notes carry evidence
 // lines still parses, in one batched call.
 func TestBatchVerdictWithEvidenceStillParses(t *testing.T) {
-	ev := memory.UsefulnessEvidence{Contradicted: 1}.Line()
+	ev := memory.FlagEvidence{Flagged: 1}.Line()
 	fp := &fakeProvider{resp: "1: RESOLVED | closed-by: the runbook it described was replaced\n2: KEEP"}
 	cls := NewResolutionClassifier(fp)
 	got, err := cls.IsResolvedNotes(context.Background(), []Note{
@@ -724,7 +724,7 @@ func TestBatchVerdictWithEvidenceStillParses(t *testing.T) {
 func TestIsResolvedNoteEvidenceOutsideBlock(t *testing.T) {
 	fp := &fakeProvider{resp: "KEEP"}
 	cls := NewResolutionClassifier(fp)
-	ev := memory.UsefulnessEvidence{Contradicted: 1}.Line()
+	ev := memory.FlagEvidence{Flagged: 1}.Line()
 	if _, err := cls.isResolvedNote(context.Background(), Note{Content: "a\nb", Evidence: ev}); err != nil {
 		t.Fatal(err)
 	}

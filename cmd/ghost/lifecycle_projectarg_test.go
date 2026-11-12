@@ -126,26 +126,3 @@ func TestLifecycleRefusalRendererBoundsAnOversizedOperand(t *testing.T) {
 		t.Errorf("an ordinary project operand was not named:\n%s", got)
 	}
 }
-
-// TestRunLifecycleAuditSkipWithholdsACredentialShapedProject: the audit phase's
-// skip line is a fourth place the project operand reaches lifecycle.log, and the
-// reviewer found it after the first three. The path is reachable in-process:
-// isolatedLifecycleEnv supplies a retrieval key and a sidecar, and a project
-// that resolves to nothing takes the skip branch.
-func TestRunLifecycleAuditSkipWithholdsACredentialShapedProject(t *testing.T) {
-	dataHome := isolatedLifecycleEnv(t)
-	seedAuditedCall(t, dataHome)
-	sidecar := writeAuditSidecar(t, t.TempDir())
-
-	key := lifecycleCredential()
-	printed := captureStderr(t, func() {
-		runLifecycleWithArgs(t, "--project", key, "--signals", sidecar)
-	})
-
-	if strings.Contains(printed, key) {
-		t.Errorf("the audit skip line printed the credential-shaped operand:\n%s", printed)
-	}
-	if !strings.Contains(printed, "withheld") {
-		t.Errorf("the audit skip line did not withhold with a placeholder:\n%s", printed)
-	}
-}

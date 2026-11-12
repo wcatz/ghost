@@ -18,7 +18,6 @@ import (
 	"time"
 
 	"github.com/wcatz/ghost/internal/ai"
-	"github.com/wcatz/ghost/internal/audit"
 	"github.com/wcatz/ghost/internal/config"
 	"github.com/wcatz/ghost/internal/hostevent"
 	"github.com/wcatz/ghost/internal/memory"
@@ -85,24 +84,6 @@ func logFailOpen(stderr io.Writer, stage string, err error) {
 	_, _ = fmt.Fprintf(stderr, "ghost hook: fail-open (%s: %v)\n", stage, err)
 }
 
-// openTranscript opens the transcript a hook payload named, after refusing
-// anything that is not a regular file. The path comes from the payload rather
-// than from Ghost, and a FIFO there would block the open until a writer appears
-// — a hang in a hook documented to fail open. A directory, device or socket is
-// refused for the same reason: the stat runs first, so a non-regular path is
-// never opened. It is the guard ReadBackupManifest applies, for the same
-// reason. A symlink is followed, and its target must be regular.
-func openTranscript(path string) (*os.File, error) {
-	info, err := os.Stat(path)
-	if err != nil {
-		return nil, err
-	}
-	if !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("not a regular file (%s)", info.Mode().Type())
-	}
-	return os.Open(path)
-}
-
 // runStop executes the stop/session-end handler: it sweeps an adapter-made
 // transcript and spawns the opt-in lifecycle. It prints nothing; the stop
 // event's stop_hook_active flag still short-circuits a re-stop.
@@ -121,86 +102,8 @@ func runStop(p hostevent.Payload, stdout io.Writer, stderr io.Writer, nudge bool
 	}
 
 	source := string(p.HostSource())
-	// The audit is read-only here and the comparison is not: the signals go over
-	// as a file the detached child reads, because the transcript three of the
-	// four hosts materialize is swept the moment this function returns, and
-	// because judging a memory needs its content — a store read on a path the
-	// agent is waiting on. The scan is passed as a thunk so it happens only when
-	// a child is actually going to be started (see spawnLifecycleIfConfigured).
-	spawnLifecycleIfConfigured(p.CWD, source, func() *audit.Signals {
-		return scanAuditSignals(p, stderr)
-	}, stderr)
+	spawnLifecycleIfConfigured(p.CWD, source, stderr)
 }
-
-// scanAuditSignals reads the transcript for what the agent DID with what Ghost
-// showed it, and returns it reduced to fingerprints — or nil when there is
-// nothing to compare.
-//
-// Reading only: no store, no config, nothing written. The sidecar is the
-// artefact, and it is written by the spawn that has a child to hand it to.
-//
-// Fails open at every step. A PARTIAL read is kept rather than dropped, because
-// the lines that were read are real evidence and the scanner has already marked
-// them degraded — which is the mark that lets a verdict filed from them be
-// discounted by whoever reads it. An empty scan returns nil rather than an empty
-// Signals: see Signals.Empty for the reading that would otherwise be persisted.
-//
-// The one failure that is NOT fail-open is a missing key, and that is by design:
-// a scan without one produces no tokens, so "no key" and "no evidence" would be
-// the same answer, and the second of those gets persisted as a claim. Instead the
-// key is resolved first, read-only, and a store that has never recorded a
-// retrieval — and so has no key file — produces no sidecar at all, which costs
-// this turn's audit and nothing else.
-func scanAuditSignals(p hostevent.Payload, stderr io.Writer) *audit.Signals {
-	if p.Contract == nil || p.TranscriptPath == "" {
-		return nil
-	}
-	if _, ok := hostevent.CapabilityFor(p.HostSource()); !ok {
-		return nil
-	}
-	key, err := memory.ReadRetrievalKey()
-	if err != nil {
-		logFailOpen(stderr, "read the retrieval key for the audit", err)
-		return nil
-	}
-	hasher, err := audit.NewHasher(key)
-	if err != nil {
-		logFailOpen(stderr, "build the audit token hasher", err)
-		return nil
-	}
-	f, err := openTranscript(p.TranscriptPath)
-	if err != nil {
-		logFailOpen(stderr, "open transcript for the audit", err)
-		return nil
-	}
-	defer f.Close() //nolint:errcheck
-
-	sig, ok, err := hostevent.ScanAudit(p.Contract.TranscriptFormat, f, hasher)
-	if !ok {
-		// No audit scanner for this format means the audit is off for this host —
-		// never that the host misbehaved — so this is not a fail-open line either.
-		return nil
-	}
-	if err != nil {
-		logFailOpen(stderr, "audit scan transcript", err)
-	}
-	if sig == nil || sig.Empty() {
-		return nil
-	}
-	// The session these words were written in, from the hook payload and never
-	// constructed. The comparison judges only the calls this session made, so a
-	// sidecar that did not name it would be judged against every call in the project.
-	// "" is passed through as it is: a payload with no id yields signals that judge
-	// nothing, which is the safe direction.
-	sig.SetSessionID(p.SessionID)
-	return sig
-}
-
-// auditSidecarDir is where the hook writes the sidecar. A var because the test
-// that asserts on the file has to keep it out of the real temp directory, and
-// because the directory is a property of the contract (a temp file handed to a
-// detached child) rather than of whatever the session was running in.
-var auditSidecarDir = os.TempDir
 
 // cleanupTransientTranscript removes an adapter-materialized transcript once
 // ghost is done with it. The opencode plugin writes under a mkdtemp
@@ -210,7 +113,7 @@ var auditSidecarDir = os.TempDir
 // leak transcript dirs forever (`opencode run` does exactly this).
 //
 // The path comes from the payload, and the temp directory is shared with
-// every other process on the machine — including Ghost's own audit sidecars,
+// every other process on the machine — including Ghost's own
 // harness scratch directories and other sessions' directories, all named
 // `ghost-…` — so the sweep removes only an entry it can tie to the layout the
 // plugin creates (see pluginSessionDir), and it removes it with two plain
@@ -259,8 +162,8 @@ const (
 // returns: the prefix followed by exactly the six characters mkdtemp
 // substitutes for its XXXXXX template, each from [A-Za-z0-9] (glibc, BSD and
 // libuv's Windows implementation all draw from that set). It is what keeps
-// `ghost-audit-*.signals`, `ghost-<kind>-<digits>` and any other `ghost-…`
-// name out: each carries a separator or a length the template cannot produce.
+// `ghost-<kind>-<digits>` and any other `ghost-…` name out: each carries a
+// separator or a length the template cannot produce.
 func isPluginSessionDirName(name string) bool {
 	rest, ok := strings.CutPrefix(name, opencodeSessionDirPrefix)
 	if !ok || len(rest) != 6 {
@@ -418,17 +321,7 @@ const maxProjectIDComponentBytes = fileNameMaxBytes - longestDerivedNameOverhead
 // (all default false), and bound how often the chain may start with
 // lifecycle.min_interval (default 30m, 0 to disable). Every failure path returns
 // silently: this must never block or fail the stop hook.
-//
-// signals, when non-nil, is the audit's evidence — a thunk, not a value, and that
-// is the whole design of the parameter. Every guard above can end this function
-// with no child at all, and scanning a session transcript is not free: a hook that
-// scanned on every turn and handed the result to a spawn the cooldown had just
-// refused would pay for an audit whose evidence was thrown away. Called after the
-// last guard, it runs exactly when a child exists to read it. The audit is not
-// what makes this function run — it rides the chain's own opt-in, its cooldown
-// and its pid file, so a user who has turned consolidation off gets no audit and
-// no new process either.
-func spawnLifecycleIfConfigured(cwd, source string, signals func() *audit.Signals, stderr io.Writer) {
+func spawnLifecycleIfConfigured(cwd, source string, stderr io.Writer) {
 	if cwd == "" {
 		return
 	}
@@ -554,22 +447,6 @@ func spawnLifecycleIfConfigured(cwd, source string, signals func() *audit.Signal
 	}
 	defer logFile.Close() //nolint:errcheck
 
-	// Written here, last, because it exists for this child: a sidecar the child
-	// never reads is a file for the sweep, and a session that produced no
-	// evidence produces no file at all. A write that fails costs the audit and
-	// nothing else — the phases behind it are still worth running.
-	signalsPath := ""
-	if signals != nil {
-		if sig := signals(); sig != nil {
-			path, err := audit.WriteSidecar(auditSidecarDir(), sig)
-			if err != nil {
-				slog.Warn("lifecycle spawn: cannot write the audit sidecar; this turn's verdicts are lost", "error", err)
-			} else {
-				signalsPath = path
-			}
-		}
-	}
-
 	// Pass the project ID, not the name: the coordinator keys its own lifecycle
 	// claim on the same value, so the pid file the hook just claimed for this
 	// child is the one the child checks. The phase subcommands resolve an id
@@ -577,9 +454,6 @@ func spawnLifecycleIfConfigured(cwd, source string, signals func() *audit.Signal
 	cmd := exec.Command(exe, "lifecycle", "--project", projectID)
 	if source != "" {
 		cmd.Args = append(cmd.Args, "--source", source)
-	}
-	if signalsPath != "" {
-		cmd.Args = append(cmd.Args, "--signals", signalsPath)
 	}
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
@@ -589,13 +463,6 @@ func spawnLifecycleIfConfigured(cwd, source string, signals func() *audit.Signal
 			_, _ = fmt.Fprintf(stderr, "ghost hook: lifecycle spawn skipped: cannot start the detached process (%v)\n", err)
 		}
 		recordSpawnFailure(projectID, cfg, err, stderr)
-		// The sidecar was written for a child that will never read it. Without
-		// this it sits in the OS temp dir holding the turn's fingerprints until
-		// the sweep finds it a day later, and every failed spawn on a machine
-		// that cannot detach leaves one behind.
-		if signalsPath != "" {
-			_ = os.Remove(signalsPath)
-		}
 		return
 	}
 }
@@ -605,9 +472,8 @@ func spawnLifecycleIfConfigured(cwd, source string, signals func() *audit.Signal
 // A var so a test can read the argv. The executable is os.Executable(), which
 // under `go test` is the test binary — a real Start would run this whole suite
 // again, in a child that would spawn its own children. Everything the tests
-// assert about the child (which project, which flags, whether a sidecar path
-// came with it) is decided before this call, so replacing it loses nothing but
-// the exec.
+// assert about the child (which project, which flags) is decided before this
+// call, so replacing it loses nothing but the exec.
 var startLifecycleChild = func(cmd *exec.Cmd) error {
 	detachProcess(cmd)
 	if err := cmd.Start(); err != nil {

@@ -354,7 +354,7 @@ func NewStore(db *sql.DB, logger *slog.Logger) *Store {
 // transaction (legs, hydration, edges and penalty lookups on one snapshot), and
 // holding the write lock across a full retrieval would block every concurrent
 // writer in the machine — the reflection, embedding and linking workers, and
-// any save arriving on the live MCP server. UsefulnessByMemory's two reads take
+// any save arriving on the live MCP server. FlagsByMemory's two reads take
 // theirs here for the same reason, at a smaller cost but the same lock. The
 // read handle's DSN has no _txlock, so the same transaction is a plain deferred
 // read: WAL readers do not wait on a writer, which is the whole point of
@@ -385,7 +385,7 @@ func (s *Store) warnNoReadHandle() {
 		return
 	}
 	s.warnOnce.Do(func() {
-		s.logger.Warn("store has no read-only handle: snapshot reads (candidate retrieval, usefulness evidence) take their transaction on the primary connection, whose DSN issues BEGIN IMMEDIATE, so the transaction holds the write lock; build the store with NewStoreWithRead and memory.OpenReadDB for a file-backed database")
+		s.logger.Warn("store has no read-only handle: snapshot reads (candidate retrieval, flag evidence) take their transaction on the primary connection, whose DSN issues BEGIN IMMEDIATE, so the transaction holds the write lock; build the store with NewStoreWithRead and memory.OpenReadDB for a file-backed database")
 	})
 }
 
@@ -1871,10 +1871,10 @@ var projectMergeStatements = []string{
 	// calls about memories that now live elsewhere to a project that no longer
 	// exists, and a later DeleteProject of that stale id could not reach it.
 	`UPDATE retrieval_record SET project_id = ? WHERE project_id = ?`,
-	// And the verdicts derived from those calls, which have the same two problems
-	// and one more: a verdict left naming the merged-away project is misattributed
-	// AND names a memory the report would try to render under a project that no
-	// longer exists.
+	// And the legacy verdicts derived from those calls (the table is read and
+	// written by nothing now), which have the same two problems: a row left
+	// naming the merged-away project is misattributed and a later DeleteProject
+	// of that stale id could not reach it.
 	`UPDATE retrieval_audit SET project_id = ? WHERE project_id = ?`,
 	// And this feature's flags (#648 slice 2), which carry all three problems
 	// exactly as the audit rows do — plus the sharper one: a flag's project_id
@@ -2124,10 +2124,8 @@ func (s *Store) mergeProjectTx(ctx context.Context, tx *sql.Tx, oldID, newID str
 		// one that no longer exists, which makes it both misattributed in a report
 		// and unreachable by a later delete of that stale id.
 		`UPDATE retrieval_record SET project_id = ? WHERE project_id = ?`,
-		// And this feature's verdicts, for the reason the list's own comment gives
-		// for every table in it, with the sharper edge that a verdict is only
-		// readable through its project: the report reads per project, so an orphan
-		// here is not merely misattributed, it is INVISIBLE.
+		// And the legacy verdicts, for the reason the list's own comment gives for
+		// every table in it.
 		`UPDATE retrieval_audit SET project_id = ? WHERE project_id = ?`,
 		// And its flags, which are the same shape with nothing to fall back on:
 		// memory_flags.project_id has no foreign key, so a merge that forgot this
@@ -2172,11 +2170,6 @@ type DeleteProjectSummary struct {
 	// table that references the project, and a count that silently omits a table
 	// the same command deletes is a summary that under-reports its own work.
 	RetrievalRecords int
-	// RetrievalAudits is the same for this feature's second table (#646): a
-	// verdict names a memory, and DeleteProject removes memories, so an audit row
-	// left behind would be the one row in the store that names a memory nobody can
-	// reach and a project nobody can find.
-	RetrievalAudits int
 	// MemoryFlags is the same again for #648 slice 2's flags. The principle the
 	// two fields above state does not stop at the feature that first stated it:
 	// this summary covers every table that references the project, and a table the
@@ -2287,17 +2280,11 @@ func (s *Store) DeleteProject(ctx context.Context, input string, apply bool) (De
 	if _, err := tx.ExecContext(ctx, `DELETE FROM retrieval_record WHERE project_id = ?`, id); err != nil {
 		return DeleteProjectSummary{}, fmt.Errorf("delete retrieval_record: %w", err)
 	}
-	// And the verdicts, by the CALL they were filed against — which is their own
-	// project_id, because a verdict's project is the project whose retrieval it
-	// judged (`audit.Run` stamps the call's project, and the schema's column
-	// comment says the project is the report's denominator). This is the same
-	// predicate the record delete above uses, and it is deliberately NOT memory
-	// ownership: a verdict is a claim about a call, not about the memory the call
-	// happened to admit, so it belongs with the call. That is also why a
-	// promotion does NOT reassign this column (only memory_flags and
-	// supersede_checked move with the memory): moving it would detach the verdict
-	// from the call its record_rowid still names, and the next audit pass would
-	// re-file it under the call's project anyway.
+	// And any retrieval_audit rows an older build filed. Nothing reads or writes
+	// the table any more and the schema keeps it, but it has no foreign key and
+	// each row names a memory id, so a project delete reaches it by the same
+	// project_id predicate the record delete above uses rather than leaving ids
+	// of a removed project behind. It is a plain delete; nothing reads the rows.
 	if _, err := tx.ExecContext(ctx, `DELETE FROM retrieval_audit WHERE project_id = ?`, id); err != nil {
 		return DeleteProjectSummary{}, fmt.Errorf("delete retrieval_audit: %w", err)
 	}
@@ -2342,7 +2329,6 @@ func (s *Store) DeleteProject(ctx context.Context, input string, apply bool) (De
 		"tasks", summary.Tasks, "decisions", summary.Decisions,
 		"token_usage", summary.TokenUsage, "audit_log", summary.AuditLog,
 		"retrieval_records", summary.RetrievalRecords,
-		"retrieval_audits", summary.RetrievalAudits,
 		"memory_flags", summary.MemoryFlags)
 	return summary, nil
 }
@@ -2396,11 +2382,6 @@ func countProjectRows(ctx context.Context, q queryRower, id string) (DeleteProje
 		`SELECT count(*) FROM retrieval_record WHERE project_id = ?`, id,
 	).Scan(&summary.RetrievalRecords); err != nil {
 		return DeleteProjectSummary{}, fmt.Errorf("count retrieval_record: %w", err)
-	}
-	if err := q.QueryRowContext(ctx,
-		`SELECT count(*) FROM retrieval_audit WHERE project_id = ?`, id,
-	).Scan(&summary.RetrievalAudits); err != nil {
-		return DeleteProjectSummary{}, fmt.Errorf("count retrieval_audit: %w", err)
 	}
 	if err := q.QueryRowContext(ctx,
 		`SELECT count(*) FROM memory_flags WHERE `+deleteProjectFlagRowsSQL, id,
@@ -5747,11 +5728,11 @@ func (s *Store) SetResolvedJustified(ctx context.Context, judged []Memory, why m
 //     only resolve row that can say a person did it, and it is the one worth
 //     being able to say: a name on a `resolve` row is a statement that nobody
 //     passed a classifier over that note, which is precisely the judgement a
-//     reader of the audit cannot otherwise check.
+//     reader of the history cannot otherwise check.
 //
 // It also drops resolve_kept_hash on every row it stamps, in the same
 // statement. The cache is a KEEP verdict under resolve.KeepStamp (content plus
-// any negative retrieval evidence), and a row the operator has just stamped is
+// any flag count), and a row the operator has just stamped is
 // not a KEEP the next pass may honour: leaving the
 // hash would make the ordinary pass skip the row as `N KEEP cached` for as long
 // as its text stood, so a note buried on purpose came straight back the moment
@@ -5804,7 +5785,7 @@ func (s *Store) MarkResolved(ctx context.Context, projectID string, ids []string
 
 // ResolveKeptHashes returns the key resolve recorded when it last judged each
 // memory KEEP, keyed by memory ID — the content hash, or that hash combined
-// with the negative audit evidence the verdict was judged with (#880), which
+// with the flag count the verdict was judged with (#880), which
 // is resolve.KeepStamp's two shapes. Only rows with a recorded key appear.
 func (s *Store) ResolveKeptHashes(ctx context.Context, projectID string) (map[string]string, error) {
 	s.mu.RLock()
@@ -5832,7 +5813,7 @@ func (s *Store) ResolveKeptHashes(ctx context.Context, projectID string) (map[st
 }
 
 // MarkResolveKept records KEEP verdicts (id -> resolve's keep stamp: the
-// content hash, plus the negative audit evidence the verdict was judged with
+// content hash, plus the flag count the verdict was judged with
 // when there was any — see resolve.KeepStamp, #880) for memories resolve
 // classified as not-resolved. It deliberately does not touch
 // updated_at: the content did not change, and bumping freshness would perturb
@@ -6479,13 +6460,11 @@ func (s *Store) PromoteToGlobal(ctx context.Context, projectID, id string) error
 	// memory that had already left it.
 	//
 	// retrieval_audit is deliberately NOT among them. Its project_id is the
-	// project of the retrieval CALL a verdict was filed against — `audit.Run`
-	// stamps the call's project, and the report groups by it — so the verdict
-	// belongs with the call, not with the memory the call admitted. Moving it
-	// would detach the verdict from the call its record_rowid still names and the
-	// next audit pass would re-file it under the call's project anyway, so a
-	// promotion leaves it alone and a project delete takes it with the calls
-	// whose project it records.
+	// project of the retrieval CALL a row was filed against, so the row belongs
+	// with the call, not with the memory the call admitted; moving it would
+	// detach it from the call its record_rowid still names. Nothing reads or
+	// writes the table now, so a promotion leaves it alone and a project delete
+	// takes it with the calls whose project it records.
 	//
 	//   - memory_flags.project_id carries no foreign key, so nothing cascades it
 	//     and a flag left naming the old project is one the per-project evidence

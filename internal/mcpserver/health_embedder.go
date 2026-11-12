@@ -10,7 +10,7 @@ package mcpserver
 //
 // That makes them the part of the report that must NOT run while the
 // diagnostic read is open. The read handle has ONE connection, and it is
-// shared with the retrieval snapshot (Candidates) and the usefulness read, so
+// shared with the retrieval snapshot (Candidates) and the flag-evidence read, so
 // a report that held it across a probe would make a concurrent search wait
 // for the probe — up to seven seconds of it — for a connection the probe does
 // not need. The probes therefore run BEFORE the read is opened, and the lines

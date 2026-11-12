@@ -1,7 +1,7 @@
 package assemble
 
 // The bare-token set moved from here to memory.IsSafeTokenRune, because the
-// retrieval audit's usefulness line renders a session id into a prompt from
+// flag-evidence reader renders an id into a prompt from
 // internal/memory and the dependency runs assemble -> memory: a reader in
 // internal/memory cannot call a function in the package that imports it.
 //

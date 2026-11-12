@@ -117,10 +117,10 @@ func TestContextPlainRefusalRunsNoSideEffect(t *testing.T) {
 	}
 }
 
-// TestContextPlainRefusalNamesTheAuditFlags: --project and --since are real flags
-// of `ghost context`, but of its --audit mode. The refusal says so, because the
-// reader who typed them most likely wanted the report.
-func TestContextPlainRefusalNamesTheAuditFlags(t *testing.T) {
+// TestContextPlainRefusalNamesUnknownFlags: --project and --since were flags of
+// the removed `ghost context --audit` mode. They are now unknown flags of the
+// session-start block and are refused as such.
+func TestContextPlainRefusalNamesUnknownFlags(t *testing.T) {
 	for _, argv := range [][]string{
 		{"--project", "ghost"},
 		{"--project=ghost"},
@@ -128,8 +128,8 @@ func TestContextPlainRefusalNamesTheAuditFlags(t *testing.T) {
 		{"--since=1h"},
 	} {
 		_, _, err := parseContextBlockArgs(argv)
-		if err == nil || !strings.Contains(err.Error(), "--audit") {
-			t.Errorf("parseContextBlockArgs(%v) error = %v, want a refusal naming --audit", argv, err)
+		if err == nil || !strings.Contains(err.Error(), "unknown flag") {
+			t.Errorf("parseContextBlockArgs(%v) error = %v, want an unknown-flag refusal", argv, err)
 		}
 	}
 }

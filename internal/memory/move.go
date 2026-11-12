@@ -49,8 +49,7 @@ type MoveMemoryResult struct {
 // identity, links, embeddings, provenance, flags, evidence and recorded history.
 // It refuses unknown source or target projects, and refuses a pinned or
 // persistent memory unless opts.Confirm is set. A dry run reports what would
-// move without writing. updated_at is not changed; retrieval audit rows stay
-// with the call that produced them.
+// move without writing. updated_at is not changed.
 func (s *Store) MoveMemory(ctx context.Context, fromProjectID, memoryID, toProjectID string, opts MoveMemoryOptions) (MoveMemoryResult, error) {
 	if fromProjectID == "" || memoryID == "" || toProjectID == "" {
 		return MoveMemoryResult{}, fmt.Errorf("move memory: from_project_id, memory_id and to_project_id are required")

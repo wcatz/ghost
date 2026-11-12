@@ -12,7 +12,7 @@ import (
 
 // The retrieval key lives in the data dir, which every local process can
 // write. A FIFO at its path blocked the open until a writer appeared, which
-// wedged the stop hook's audit scan and the coordinator's audit phase, and a
+// wedged the stop hook and the coordinator, and a
 // symlink was followed to whatever it named. Each call runs under a
 // three-second deadline so a regression fails instead of hanging.
 

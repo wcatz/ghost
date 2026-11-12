@@ -662,13 +662,9 @@ CREATE TABLE IF NOT EXISTS retrieval_record (
 -- a window of rows the report cannot order within.
 CREATE INDEX IF NOT EXISTS idx_retrieval_record_project ON retrieval_record(project_id);
 
--- #646 part 2: the retrieval AUDIT, one row per (call, kept memory), saying what
--- the agent did with what the call admitted. The grain is the PAIR and not the
--- call, because a memory's fate is a fact about that memory in that session that
--- no per-call row can hold -- and the pair is what makes a verdict replaceable:
--- keyed by record_rowid, a second pass over the same call overwrites exactly the
--- rows the first pass wrote, so a stop hook that fires after every turn does not
--- grow this table with the length of a session.
+-- Legacy (#646 part 2): one row per (call, kept memory), written by an older
+-- build. Nothing reads or writes this table now; it is kept because migrations
+-- are frozen.
 CREATE TABLE IF NOT EXISTS retrieval_audit (
     -- The project is the report's denominator. Every figure is per project, so a
     -- row that named no project would be a verdict about which project's retrieval
@@ -716,12 +712,9 @@ CREATE TABLE IF NOT EXISTS retrieval_audit (
     -- The STORE's clock, for the reason retrieval_record's is: the instant a row
     -- became durable is what places it against a transcript.
     recorded_at  TEXT NOT NULL DEFAULT (datetime('now')),
-    -- The hash of the CONTENT this verdict judged (schema v22, #879), stamped by
-    -- audit.Run from memory.ContentHash — the one digest Ghost compares. It is
-    -- what makes the verdict answerable after the fact: UsefulnessByMemory keeps
-    -- the row only while the stored content still hashes to it, so a metadata-only
-    -- write (retag, re-weight, a verified flag) can no longer withhold a contradicted
-    -- memory's evidence, and a real rewrite withdraws it. Deliberately NOT NULL
+    -- The hash of the CONTENT this row judged (schema v22, #879). The table is
+    -- no longer read or written; the column stays because migrations are frozen.
+    -- Deliberately NOT NULL
     -- DEFAULT '' rather than nullable: '' is the one value that means "this row
     -- predates the column", and the reader has a named legacy rule for exactly
     -- that value instead of a NULL branch. Deliberately LAST in this DDL: ALTER
@@ -729,11 +722,8 @@ CREATE TABLE IF NOT EXISTS retrieval_audit (
     -- on the column's POSITION, which columnShapes pins.
     content_hash TEXT NOT NULL DEFAULT ''
 );
--- One b-tree, on project_id, for the same per-project read the record table's has.
--- The audit's other predicate is record_rowid, and that one rides inside a
--- transaction that deletes the rows it re-inserts, so a second index would be an
--- insert maintained for a predicate whose rows are about to be removed.
--- TestRetrievalAuditsCarryOneIndex is what keeps this honest.
+-- Legacy: nothing reads or writes this table any more. The one index, on
+-- project_id, is kept as the frozen migrations created it.
 CREATE INDEX IF NOT EXISTS idx_retrieval_audit_project ON retrieval_audit(project_id);
 
 -- memory_flags (schema v23, #648 slice 2): one row per agent flag saying this
@@ -764,7 +754,7 @@ CREATE TABLE IF NOT EXISTS memory_flags (
     -- records keep their reason column while the report keeps its buckets.
     reason       TEXT NOT NULL,
     -- The hash of the CONTENT the flag was filed against, from memory.ContentHash
-    -- — the same rule v22 gave the audit rows (#879, #884). UsefulnessByMemory
+    -- — the same rule v22 gave the audit rows (#879, #884). FlagsByMemory
     -- keeps a flag only while the stored content still hashes to it, so editing
     -- the memory withdraws the flag filed against its old text, while a retag or
     -- a re-weight leaves it standing. '' is the "no hash" value the reader has a
@@ -781,7 +771,7 @@ CREATE TABLE IF NOT EXISTS memory_flags (
     recorded_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 -- One b-tree, on project_id, for the one predicate the reader has: the union
--- that feeds UsefulnessByMemory asks for a project's rows. The second predicate
+-- that feeds FlagsByMemory asks for a project's rows. The second predicate
 -- (memory_id) rides the cascade, which is a delete — the rows are gone either
 -- way, and an index maintained for it would be an insert cost on every flag for
 -- a lookup the delete does not do.

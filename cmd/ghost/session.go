@@ -16,7 +16,6 @@ import (
 // handleHelp), so a help request never runs the SessionStart side effects the
 // context block mirrors (Obsidian sync, session-count bump).
 const contextUsage = `Usage: ghost context [--cwd <dir>] [--as-of <RFC3339>] [--source <host>]
-       ghost context --audit [--project <name-or-id>] [--since <duration>]
 
 Prints the passive session-start context block for a directory. This is what
 the opencode adapter injects as instructions, because opencode does not
@@ -32,9 +31,9 @@ for the project and starts the Obsidian mirror when that is configured.
 
 This mode takes those three flags and nothing else. Anything else is refused
 with exit 1 before the block is rendered, so a refusal counts no session:
---project and --since (they belong to --audit), an unknown flag, a stray
-argument, --cwd with no value after it, an unknown --source, and --cwd,
---as-of or --source given twice. --source has no effect with --as-of.
+an unknown flag, a stray argument, --cwd with no value after it, an unknown
+--source, and --cwd, --as-of or --source given twice. --source has no effect
+with --as-of.
 
 --as-of <RFC3339> prints the block as the store stood at that instant instead
 (issue #647): the wording each memory held then, including memories deleted
@@ -49,34 +48,6 @@ ghost_memory_search with as_of judges no window at all, because a bound read
 from the current row is not evidence about the instant; it shows the bounds
 instead and says they are the current row's.
 No session is counted — a past reading is a diagnostic, not a session start.
-
---audit reports on what retrieval ACTUALLY did (issue #646). It is the other
-mode of this command and shares almost nothing with the block above: it opens
-the store read-only, runs none of the side effects (no Obsidian sync, no
-session count), and prints per-source figures — calls, memories kept, used,
-ignored, superseded in session, contradicted, and searches that kept nothing.
-
-  --project <name-or-id>  The project to report on (default: the one this
-                          directory resolves to, via --cwd or your own)
-  --since <duration>      How far back to look, by the store's own recorded_at
-                          (Go duration: 168h, 7d is not a unit; default:
-                          everything the store still holds)
-
-The report is ALWAYS about one project. A name, an id or a directory that
-resolves to nothing is refused and says so, naming --project, because a
-mistyped project answered with every project's figures would be a report about
-a scope nobody asked for. Figures are per source and are never pooled — a
-search and an injection answer different questions — and a source with no rows
-says so rather than reporting 0%. The percentage is the share of verdicts
-proved by a cited memory id; a match on wording alone is printed beside it as a
-heuristic. "ignored" means the agent's own words never mentioned the memory, and
-"restated by wording" is a token-overlap heuristic; neither is a relevance or
-usefulness score. One half of
-"missed" (a fact the agent re-derived and was never shown) is not measured by
-anything and is reported as no figure, not as a zero.
-
---as-of and --audit cannot be combined: one reports the store at an instant,
-the other reports retrieval over a window.
 `
 
 // contextAsOf reads the --as-of instant out of a `ghost context` argument list.
@@ -128,21 +99,16 @@ func contextAsOf(args []string) (*time.Time, error) {
 	return &utc, nil
 }
 
-// parseContextBlockArgs reads the arguments of `ghost context` WITHOUT --audit:
-// the session-start block. It takes --cwd and --as-of and nothing else.
+// parseContextBlockArgs reads the arguments of `ghost context`: the session-start
+// block. It takes --cwd and --as-of and nothing else.
 //
-// A strict parser, like parseContextAuditArgs, and for a sharper reason than
-// that one's: this mode is a session start, so a render counts a session for
+// A strict parser: this mode is a session start, so a render counts a session for
 // the directory's project and starts the Obsidian mirror. The parser used to
 // read --cwd and --as-of and drop every other token, so `ghost context
 // --project other` printed the block for the directory's project, counted a
 // session there and exited 0 — a different question answered, with side
 // effects, and no word that the argument was ignored (#1195). Everything here
 // is decided before runContext renders anything.
-//
-// --project and --since are refused with a pointer to --audit rather than as
-// unknown flags: they are real flags of this command, of its other mode, and
-// the reader who typed one most likely wanted the report.
 //
 // An EMPTY --cwd value is accepted and means the process's own directory, which
 // is what it has always meant. The opencode adapter spawns `ghost context
@@ -198,10 +164,6 @@ func parseContextBlockArgs(args []string) (string, *time.Time, error) {
 			if arg == "--source" && i+1 < len(args) {
 				i++
 			}
-		case arg == "--project" || strings.HasPrefix(arg, "--project="),
-			arg == "--since" || strings.HasPrefix(arg, "--since="):
-			name, _, _ := strings.Cut(arg, "=")
-			return "", nil, fmt.Errorf("%s is a flag of `ghost context --audit`, the retrieval report; the session-start block takes only --cwd and --as-of", name)
 		case strings.HasPrefix(arg, "-"):
 			return "", nil, fmt.Errorf("unknown flag %s", memory.RefusalArg("flag", arg))
 		default:
@@ -231,12 +193,6 @@ func parseContextBlockArgs(args []string) (string, *time.Time, error) {
 // past instant. Exit 1 and not 2: 2 is the dispatch's code for a command line it
 // cannot route (#1090), and the dispatch already routed this one — what rejected
 // the value is this command's own parser.
-//
-// --audit is the other mode, and it is the opposite in every respect: read-only,
-// no side effects, and a report of retrieval verdicts rather than a block of
-// memories. It is dispatched FIRST and on the flag alone, so an audit run never
-// reaches the side effects below — those exist because this command backs a
-// session start, and a report is not one. See context_audit.go.
 //
 // The exit code is RETURNED rather than passed to os.Exit, so the dispatch can
 // hand it back to runCLI and a test can read it; that is what makes #1090's
@@ -270,9 +226,6 @@ func contextSource(args []string) (hostevent.Source, error) {
 
 func runContext() int {
 	args := os.Args[2:]
-	if contextAuditRequested(args) {
-		return runContextAudit(args)
-	}
 	cwd, asOf, err := parseContextBlockArgs(args)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ghost context: %v\n", err)

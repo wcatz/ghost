@@ -124,7 +124,6 @@ func TestHealthIsBoundedAndKeepsStoreWideLines(t *testing.T) {
 		"**Embeddings:** disabled",
 		"**Memory links:**",
 		"**History:**",
-		"Retrieval",
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("store-wide line %q missing:\n%.800s", want, text)

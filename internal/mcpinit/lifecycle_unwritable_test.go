@@ -23,7 +23,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wcatz/ghost/internal/audit"
 	"github.com/wcatz/ghost/internal/config"
 	"github.com/wcatz/ghost/internal/memory"
 )
@@ -226,7 +225,7 @@ func TestSpawnLifecycle_UnwritableDataDirRefusesAndReports(t *testing.T) {
 			refuseDataDirWrites(t, dataDir)
 
 			var stderr bytes.Buffer
-			spawnLifecycleIfConfigured(projDir, "claude-code", func() *audit.Signals { return nil }, &stderr)
+			spawnLifecycleIfConfigured(projDir, "claude-code", &stderr)
 
 			if len(*seen) != 0 {
 				t.Errorf("the lifecycle child was started despite the refused directory: %v", *seen)

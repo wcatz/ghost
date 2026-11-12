@@ -4,8 +4,7 @@ package memory
 // session or an operator chose, outside the «...» data delimiters.
 //
 // It lives here rather than in internal/assemble, where it was, because the
-// dependency runs assemble -> memory and not the other way round: the audit's
-// usefulness line renders a session id into a prompt, and a reader in internal/memory
+// dependency runs assemble -> memory and not the other way round: a reader in internal/memory
 // cannot call a function in the package that imports it. internal/assemble.Token
 // now delegates to SafeToken rather than keeping its own copy, so there is ONE
 // implementation of the rule — the same arrangement the stamp parsers already use
@@ -14,7 +13,7 @@ package memory
 // tests is the one that ships the bug.
 //
 // The rule is an ALLOWLIST, and that is the whole point. What it replaces is a
-// denylist — neutralSessionID in usefulness.go, this package's usefulness reader —
+// denylist — a hand-rolled session-id renderer —
 // and a denylist can only list what somebody thought of: it let U+2028 and U+0085 through (both LINE TERMINATORS to
 // JavaScript and to several newline-splitting readers), a bidi override that
 // reverses how the rest of a line displays, and an invisible zero-width space that
