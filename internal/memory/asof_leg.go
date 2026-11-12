@@ -1,12 +1,5 @@
 package memory
 
-// The historical retrieval leg (issue #647). memory_history is a VERSION log, so
-// a read at an instant T is a selection rather than a reconstruction: take each
-// memory's newest row at or before T and that row IS its state at T. This file
-// turns that selection into a ranked candidate set with the same shape the
-// assembler consumes for a current read, which is what lets one pipeline serve
-// both.
-
 import (
 	"context"
 	"fmt"
@@ -19,11 +12,6 @@ import (
 
 // AsOfUnknownNote is the sentence a surface shows when a historical read could
 // not place n in-scope memories at the requested instant, and "" for none.
-//
-// It is a function of the count rather than of a set, because the assembler has
-// only the count (CandidateSet.Unrecorded) while a direct caller has the set —
-// and the two must not be able to word the same fact differently. The set's own
-// UnknownNote delegates here for the same reason.
 func AsOfUnknownNote(n int) string {
 	if n <= 0 {
 		return ""
@@ -53,13 +41,6 @@ func asOfInstant(req CandidateRequest) time.Time {
 
 // AsOfSourceNote is the sentence stating where a historical answer's rows come
 // from, and it is the same sentence on every surface that shows one.
-//
-// It lives here rather than in a surface because the store owns the fact and two
-// surfaces already need it: a search, which adds what its retrieval could and
-// could not do, and a project listing, which only reads a set. A surface that
-// worded it itself would let the two drift, and a drift here is not cosmetic —
-// it is the difference between a reader knowing the block is a past reading and
-// taking it for a present one.
 func AsOfSourceNote(t time.Time) string {
 	return "as_of " + t.UTC().Format(time.RFC3339) +
 		": a historical read — these are the versions memory_history recorded at or before that instant, " +
@@ -69,20 +50,6 @@ func AsOfSourceNote(t time.Time) string {
 // AsOfUnversionedNote is the sentence stating which halves of a block a
 // historical read cannot fill, and it is the same sentence on every surface that
 // renders one.
-//
-// It is its own function because the omission is a separate fact from the
-// provenance of the rows, and both surfaces that read a past set have to say it:
-// a block that disclosed its instant and then printed today's tasks under it
-// would be contradicted by its own second half.
-//
-// It carves out every field a historical row line DOES carry from the current
-// row — tags, scope, pin, confidence, agent, source_ref and the validity window,
-// which are exactly the fields a row line renders that the history table does
-// not version — because "nothing in this block is a claim about the present"
-// would be false about them. AsOfValidityNote and AsOfBorrowedWindowNote both
-// LEAD with the borrow of the window's bounds and then say, each for its own
-// surface, what a verdict was or was not drawn from them; this sentence names
-// the whole set too, so the two notes cannot read as a contradiction.
 func AsOfUnversionedNote() string {
 	return "Tasks, decisions and learned context are not versioned, so they are omitted from a historical read rather " +
 		"than shown as they are now; a memory row's tags, scope, pin, confidence, agent, source_ref and validity " +
@@ -90,14 +57,6 @@ func AsOfUnversionedNote() string {
 		"this block is a claim about the present."
 }
 
-// asOfBorrowedWindowSentence is the lead sentence every historical read carries,
-// whichever surface rendered it and whatever that surface then did with the
-// window. It LEADS, because it is the one part all three share and the part a
-// reader needs before any verdict is read: the bounds, like tags, scope, pin,
-// confidence, agent and source_ref, are the current row's, because
-// memory_history versions none of them. A verdict drawn from a bound the row
-// holds today is a claim about today, so the sentence has to come before any
-// statement about what was withheld.
 func asOfBorrowedWindowSentence() string {
 	return "The window's bounds, like the row's tags, scope, pin, confidence, agent and source_ref, are read from " +
 		"the current row, because the history table does not version them."
@@ -125,39 +84,17 @@ func AsOfValidityNote(at time.Time, withheld int) string {
 // which today is ghost_memory_search with as_of. It leads with the same borrow
 // sentence the listings lead with, and then says what the absence of a verdict
 // means rather than leaving the reader to infer one from a missing marker.
-//
-// The absent verdict is the deliberate half (#910): memory_history versions no
-// validity, so the bounds an as_of row carries are the LIVE row's, and judging
-// them against T is what used to drop a row whose window has closed since or has
-// not opened yet. Stage 2 of the assembler therefore records no state for a
-// historical request, so a row is neither withheld as expired nor labelled not
-// yet valid, and no marker is evidence the row was inside its window then.
-// Without this sentence the silence reads as the verdict it replaced.
 func AsOfBorrowedWindowNote(at time.Time) string {
 	return asOfBorrowedWindowSentence() + " No verdict was drawn from them for this read, so no row is withheld as " +
 		"expired or labelled not yet valid: a bound the row holds today is not a claim about " +
 		at.UTC().Format(time.RFC3339) + ", and a missing marker is not evidence a row was inside its window then."
 }
 
-// asOfLeg is a query term prepared for matching against text, rather than for
-// FTS5.
-//
-// The two are not the same shape. FTS5 takes a query string and indexes the
-// tokens itself; here the tokens have to be matched by hand against a version's
-// content, because the index holds CURRENT content and the read is about a past
-// one. A term therefore keeps its token list — FTS5's unicode61 tokenizer
-// splits on non-alphanumerics, so `ghost_windows_arm64` is a PHRASE of three
-// tokens and matches only where they are adjacent — and its prefix flag, so the
-// `sqlite*` syntax the tool description advertises means the same thing here as
-// it does in the FTS leg.
 type asOfLeg struct {
 	tokens []string
 	prefix bool
 }
 
-// historicalTerms tokenizes a query the way the FTS leg's sanitizer selects it
-// (ftsQueryTerms, so the term budget, the identifier ranking and the stopword
-// rule are one rule) and prepares each term for matching.
 func historicalTerms(query string, logger *slog.Logger) []asOfLeg {
 	raw := ftsQueryTerms(query, ftsSearchWordLimit, logger)
 	if len(raw) == 0 {
@@ -234,31 +171,12 @@ func tokenizeForMatch(text string) []string {
 	return out
 }
 
-// asOfHit is one matched version and the number of query terms it matched.
 type asOfHit struct {
 	row  AsOfRow
 	hits int
-	// rank is the hit's place in the relevance order — matched terms first, then
-	// the historical composite — and is what the trace reports as the keyword
-	// leg's rank. It is not a bm25 rank: nothing here is scored by FTS5, because
-	// nothing here is indexed by it.
 	rank int
 }
 
-// candidatesAsOf is the whole historical retrieval: one read of the recorded
-// set, one keyword pass over the versions that matched, the same window,
-// decay and status demotion the current path applies, and the supersede
-// demotion the recorded supersede sequence supports.
-//
-// What it deliberately does NOT do is borrow anything that only describes the
-// present. No vector leg (an embedding is a vector of the text as it is now),
-// no link read (memory_links has no history), no near-duplicate demotion (same
-// reason), no scope narrowing against the live pool (the pool IS the historical
-// set). Each of those is a way to answer a question about T with a fact about
-// now, and the caller is told which of them did not run. The status demotion
-// is the one demotion that DOES apply, because both of its inputs — resolved_at
-// and project_id — are versioned: it describes the row as it stood at T rather
-// than borrowing the present's.
 func (cand *Store) candidatesAsOf(ctx context.Context, req CandidateRequest, p SearchParams, ftsTopK int, set *CandidateSet) (*CandidateSet, error) {
 	at := asOfInstant(req)
 	asof, err := ReadMemoriesAsOf(ctx, cand.queryDB(), req.Mode, req.ProjectID, at)
@@ -270,9 +188,6 @@ func (cand *Store) candidatesAsOf(ctx context.Context, req CandidateRequest, p S
 	terms := historicalTerms(req.Query, cand.logger)
 	var hits []asOfHit
 	// No extracted term means no term matched, never "no keyword filter": the
-	// current leg returns no rows for such a query, and treating the empty list
-	// as a filter that passes everything would report the whole in-scope set as
-	// an answerable keyword result.
 	if len(terms) > 0 {
 		for _, row := range asof.Rows {
 			n := 0
@@ -288,11 +203,6 @@ func (cand *Store) candidatesAsOf(ctx context.Context, req CandidateRequest, p S
 			hits = append(hits, asOfHit{row: row, hits: n})
 		}
 	}
-	// Relevance order: more matched terms first, then the historical composite
-	// (the same decay rule the current read ranks on, at T), then id. The
-	// composite is the tie-break rather than the primary key because a term count
-	// is the only relevance signal a keyword pass over unindexed text has — and
-	// saying so is why this order cannot be compared with an FTS5 ranking.
 	sort.SliceStable(hits, func(i, j int) bool {
 		if hits[i].hits != hits[j].hits {
 			return hits[i].hits > hits[j].hits
@@ -305,9 +215,6 @@ func (cand *Store) candidatesAsOf(ctx context.Context, req CandidateRequest, p S
 		return hits[i].row.ID < hits[j].row.ID
 	})
 
-	// The keyword leg's status is reported against the leg that ran. Truncated
-	// carries its production meaning: the leg returned at least as many rows as
-	// it was asked for, so it cannot support a completeness claim.
 	ftsStatus := LegStatus{
 		Applicable: true, Attempted: true, Available: true,
 		Eligible:         len(hits),
@@ -315,12 +222,7 @@ func (cand *Store) candidatesAsOf(ctx context.Context, req CandidateRequest, p S
 		CoverageComplete: len(hits) < ftsTopK,
 	}
 	set.Legs["fts"] = ftsStatus
-	// Not applicable, not attempted, and not a zero: no vector describes a past
-	// wording, so there was nothing to attempt and nothing failed.
 	set.Legs["vector"] = LegStatus{Applicable: false}
-	// No conflict or duplicate claim in either direction, because no link graph
-	// was read. The stage that would render "no link joins two of these
-	// candidates" says nothing for a status that is neither ok nor unavailable.
 	set.EdgesStatus = EdgeStatus{Status: edgesNotApplicable}
 
 	if len(hits) == 0 {
@@ -330,37 +232,10 @@ func (cand *Store) candidatesAsOf(ctx context.Context, req CandidateRequest, p S
 	scores := make(map[string]float64, len(hits))
 	for i := range hits {
 		hits[i].rank = i
-		// The keyword-only base the FTS paths use (see decayRank): 1/(K+rank+1).
-		// Fusion has no second leg to fuse, so the rank-based base is the whole
-		// score rather than one contribution to a sum.
-		//
-		// The status demotion the current path applies (demoteStatus) applies
-		// here too, and it is the SAME factor: a resolved row, and a `_global`
-		// row in a project-scoped search, are demoted rather than excluded. Its
-		// inputs are the VERSION's — resolved_at and project_id come from the
-		// version row — so the demotion describes the row as it stood at T and
-		// not as it stands now, which is the whole point of a historical read.
-		//
-		// It scales the BASE rather than the composite, which is the same place
-		// the current path scales the fused score: the base is a rank score
-		// whose neighbours sit within a percent or two of each other, so
-		// halving it sinks the row below the rows around it, while a halved
-		// composite would leave a demoted row ahead of a live one whose
-		// importance is under half its own.
 		scores[hits[i].row.ID] = 1.0 / float64(p.RRFK+i+1) *
 			statusDemotionFactor(hits[i].row.ResolvedAt != nil, hits[i].row.ProjectID, p.ProjectID)
 	}
 
-	// The window and the tail, cut exactly as the current path cuts them: the
-	// window is the top Fetch.Limit by base, decay reorders what is left of it,
-	// and the tail is the rest in the same decay order so a predicate that
-	// removes a window row is backfilled by the row that would have ranked next.
-	//
-	// The cut is by the BASE, and the base carries the demotion, so the
-	// demotion owns the cut the way it owns the current path's: a live project
-	// row that only a demoted row was keeping out of the window takes that
-	// slot. Cutting by the relevance order instead would make the window the
-	// head of one ranking and its answer the order of another.
 	ordered := asOfScoredOrder(hits, scores)
 	windowRows := make([]Memory, 0, min(len(ordered), req.Fetch.Limit))
 	for i, h := range ordered {
@@ -383,25 +258,12 @@ func (cand *Store) candidatesAsOf(ctx context.Context, req CandidateRequest, p S
 	return set, nil
 }
 
-// asOfComposite is the historical composite the current read ranks on: the
-// version's importance times the category-aware decay of its age measured to T.
-// It is DecayFactor over the version's own category and importance, which is why
-// a relabelled memory decays as what it was rather than as what it became -- and
-// over the `project` tier, because the change log records no tier at all (see
-// sortAsOfRows for why reading today's tier into a past ranking would be a claim
-// the table does not support).
 func asOfComposite(row AsOfRow, at time.Time) float64 {
 	return float64(row.Importance) * DecayFactor(row.Category, row.Content, RetentionProject, row.Pinned, ageDays(row.CreatedAt, at))
 }
 
 // asOfSupersedeDemote moves a memory that a live `supersedes` claim named at T
 // below the memory that replaced it, when both are in the answer.
-//
-// The same co-presence rule the current path applies: a claim about a memory
-// that is not in the answer cannot reorder anything, and demoting on it anyway
-// would make a historical read disagree with itself. The claim itself comes from
-// the recorded supersede/unsupersede sequence (AsOfRow.SupersededBy), never from
-// the live link table, whose edges describe the present.
 func asOfSupersedeDemote(window []Memory, hits []asOfHit) []Memory {
 	if len(window) < 2 {
 		return window
@@ -428,14 +290,6 @@ func asOfSupersedeDemote(window []Memory, hits []asOfHit) []Memory {
 	return StableDemote(window, func(m Memory) string { return m.ID }, penalty)
 }
 
-// asOfScoredOrder is the hits in the order their base scores rank them, with
-// the id as the tie-break so two reads of the same instant agree.
-//
-// The relevance order the hits were sorted into — matched terms, then the
-// historical composite — is the order the base score was derived from, so the
-// two orders differ only where the status demotion moved a row: the demotion
-// scales the base, and the scaled base is what the window and the tail are cut
-// by.
 func asOfScoredOrder(hits []asOfHit, scores map[string]float64) []asOfHit {
 	ordered := make([]asOfHit, len(hits))
 	copy(ordered, hits)
@@ -459,15 +313,6 @@ func asOfScoredOrder(hits []asOfHit, scores map[string]float64) []asOfHit {
 // whole matching corpus — one hydrated Memory per match — through every
 // assembler stage and the trace's signals, which is the work the current path caps
 // at roughly twice the window.
-//
-// The bound is disclosed rather than silent: the keyword leg's Truncated status
-// says the leg was cut short, and a caller that trusts CoverageComplete instead
-// learns nothing from this function either way.
-//
-// The rows it holds are the ones the window did not take, in the scored order
-// the window was cut from — the window's own rows are named by the window, not
-// by their place in the relevance order, so a row the demotion pushed out of
-// the window is a tail row and a row the demotion pulled into it is not.
 func asOfTail(ordered []asOfHit, window []Memory, limit int, scores map[string]float64, at time.Time) []Memory {
 	taken := make(map[string]bool, len(window))
 	for _, m := range window {
@@ -494,11 +339,6 @@ func asOfTail(ordered []asOfHit, window []Memory, limit int, scores map[string]f
 	return tail
 }
 
-// asOfCandidate pairs a version with the facts the historical leg produced for
-// it. VectorRank and VectorScore are -1 — the marks for a leg that did not
-// retrieve the row — so a consumer reading the trace cannot mistake the absent
-// vector leg for a cosine of zero, which would be a real measurement of "no
-// similarity".
 func asOfCandidate(m Memory, hits []asOfHit, scores map[string]float64, at time.Time) Candidate {
 	c := Candidate{Memory: m}
 	c.Base = scores[m.ID]

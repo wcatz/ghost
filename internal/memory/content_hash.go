@@ -1,12 +1,5 @@
 package memory
 
-// The ONE content hash Ghost stamps and compares, and the reason it lives here
-// rather than in internal/resolve: a stamp is compared against the text
-// read from `memories`, so the algorithm belongs to the package that owns that
-// table. internal/resolve delegates to it (its own
-// KEEP-cache key is the same digest over the same bytes), which keeps one
-// implementation instead of two that drift.
-
 import (
 	"crypto/sha256"
 	"encoding/hex"
@@ -26,12 +19,6 @@ const ContentHashVersion = "v3"
 // ContentHash is sha256(ContentHashVersion || "\x00" || content), hex-encoded —
 // the digest of the TEXT alone, so a tag, importance, scope or `verified` edit
 // leaves it standing while a rewrite moves it.
-//
-// It is what makes a retrieval verdict answerable after the fact: a stamped row
-// says "I judged THIS text", and FlagsByMemory keeps the verdict only while
-// the stored content still hashes to it (#879). An empty stamp means the row
-// predates that column, and the reader falls back to its named legacy rule
-// rather than guessing at a hash.
 func ContentHash(content string) string {
 	sum := sha256.Sum256([]byte(ContentHashVersion + "\x00" + content))
 	return hex.EncodeToString(sum[:])
