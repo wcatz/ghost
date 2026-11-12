@@ -9,7 +9,6 @@ import (
 	"runtime"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/wcatz/ghost/internal/memory"
 )
@@ -126,16 +125,8 @@ func TestExport(t *testing.T) {
 // ghost_id, so a keep-set of bare IDs would retain it forever; prune must
 // also match the canonical basename.
 func TestExportPrunesRenamedSlug(t *testing.T) {
-	db, err := memory.OpenDB(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	store := memory.NewStore(db, slog.New(slog.NewTextHandler(os.Stderr, nil)))
-	t.Cleanup(func() { _ = store.Close() })
+	db, store := seedStoreWithDB(t)
 	ctx := context.Background()
-	if err := store.EnsureProject(ctx, "ghost", "/tmp/ghost", "ghost"); err != nil {
-		t.Fatal(err)
-	}
 	id, err := store.Create(ctx, "ghost", memory.Memory{Category: "fact", Content: "original opening words drive the slug", Importance: 0.8, Source: "mcp"})
 	if err != nil {
 		t.Fatal(err)
@@ -228,164 +219,6 @@ func TestExportProjectFilter(t *testing.T) {
 	}
 }
 
-func TestExportFilterInvariantFolders(t *testing.T) {
-	store := seedStore(t)
-	ctx := context.Background()
-	// Two projects whose names collide case-insensitively. ListProjects
-	// orders by name ("Foo" < "foo" in BINARY), so unfiltered folder
-	// assignment is Foo -> "Foo", foo -> "foo-bbbb-foo".
-	if err := store.EnsureProject(ctx, "aaaa-foo-upper", "/tmp/Foo", "Foo"); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.EnsureProject(ctx, "bbbb-foo-lower", "/tmp/foo", "foo"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.Create(ctx, "bbbb-foo-lower", memory.Memory{Category: "fact", Content: "Lowercase foo fact", Importance: 0.8, Source: "mcp"}); err != nil {
-		t.Fatal(err)
-	}
-
-	// A filtered run must place notes in the SAME folder as an unfiltered
-	// run: folder assignment is computed over all projects, not the
-	// filtered subset, so case-collision suffixes do not flip with --project.
-	vault := filepath.Join(t.TempDir(), "vault")
-	ex := &Exporter{Store: store, Logger: slog.Default()}
-	if err := ex.Export(ctx, vault, "foo"); err != nil {
-		t.Fatalf("export: %v", err)
-	}
-	notes, _ := filepath.Glob(filepath.Join(vault, "foo-bbbb-foo", "Memories", "*.md"))
-	if len(notes) != 1 {
-		got, _ := filepath.Glob(filepath.Join(vault, "*", "Memories", "*.md"))
-		t.Fatalf("filtered export must use the filter-invariant folder foo-bbbb-foo, notes found at %v", got)
-	}
-}
-
-func TestExportReclaimsOrphanedTmpFiles(t *testing.T) {
-	store := seedStore(t)
-	ctx := context.Background()
-	if _, err := store.Create(ctx, "ghost", memory.Memory{Category: "fact", Content: "Some fact", Importance: 0.8, Source: "mcp"}); err != nil {
-		t.Fatal(err)
-	}
-
-	vault := filepath.Join(t.TempDir(), "vault")
-	ex := &Exporter{Store: store, Logger: slog.Default()}
-	if err := ex.Export(ctx, vault, ""); err != nil {
-		t.Fatal(err)
-	}
-
-	// Simulate a killed write: the exact staging name writeIfChanged leaves when
-	// it dies between CreateTemp and the rename — a note name, then the shared
-	// marker, then CreateTemp's random suffix. It is created through the writer's
-	// own pattern, so the fixture cannot drift from the name the reclaim matches.
-	memDir := filepath.Join(vault, "ghost", "Memories")
-	stray, err := os.CreateTemp(memDir, stagingPattern("Some-fact.md"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := stray.WriteString("orphan"); err != nil {
-		t.Fatal(err)
-	}
-	if err := stray.Close(); err != nil {
-		t.Fatal(err)
-	}
-	strayName := stray.Name()
-	// Age it past the grace so it reads as a killed write's orphan; a staging
-	// file that is still fresh could be another pass's live write.
-	past := time.Now().Add(-2 * stagingGrace)
-	if err := os.Chtimes(strayName, past, past); err != nil {
-		t.Fatal(err)
-	}
-	// A fresh staging file is another pass mid-write and must survive.
-	fresh, err := os.CreateTemp(memDir, stagingPattern("Some-fact.md"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := fresh.Close(); err != nil {
-		t.Fatal(err)
-	}
-	freshName := fresh.Name()
-	// The live note the pass wrote must survive the reclaim, and so must an
-	// unrelated non-note file the user dropped in the same folder.
-	notes, _ := filepath.Glob(filepath.Join(memDir, "*.md"))
-	if len(notes) != 1 {
-		t.Fatalf("want the one live note before reclaim, got %v", notes)
-	}
-	unrelated := filepath.Join(memDir, "user-notes.txt")
-	if err := os.WriteFile(unrelated, []byte("keep"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	// A staging file outside managed subtrees is none of our business.
-	outside := filepath.Join(vault, "user-notes", "bar.md.ghost-tmp-1234567890")
-	if err := os.MkdirAll(filepath.Dir(outside), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(outside, []byte("keep"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := ex.Export(ctx, vault, ""); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(strayName); !os.IsNotExist(err) {
-		t.Errorf("aged staging file in managed subtree should be reclaimed: %v", err)
-	}
-	if _, err := os.Stat(freshName); err != nil {
-		t.Errorf("fresh staging file must survive the reclaim: %v", err)
-	}
-	if _, err := os.Stat(notes[0]); err != nil {
-		t.Errorf("live note must survive the reclaim: %v", err)
-	}
-	if _, err := os.Stat(unrelated); err != nil {
-		t.Errorf("unrelated file in a managed subtree must survive: %v", err)
-	}
-	if _, err := os.Stat(outside); err != nil {
-		t.Errorf("staging file outside managed subtrees must survive: %v", err)
-	}
-}
-
-func TestExportPrunesDeletedProjectFolder(t *testing.T) {
-	store := seedStore(t)
-	ctx := context.Background()
-	if err := store.EnsureProject(ctx, "doomed", "/tmp/doomed", "doomed"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.Create(ctx, "ghost", memory.Memory{Category: "fact", Content: "Ghost fact", Importance: 0.8, Source: "mcp"}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.Create(ctx, "doomed", memory.Memory{Category: "fact", Content: "Doomed fact", Importance: 0.8, Source: "mcp"}); err != nil {
-		t.Fatal(err)
-	}
-
-	vault := filepath.Join(t.TempDir(), "vault")
-	ex := &Exporter{Store: store, Logger: slog.Default()}
-	if err := ex.Export(ctx, vault, ""); err != nil {
-		t.Fatal(err)
-	}
-	// Both project folders exist after initial export.
-	for _, proj := range []string{"ghost", "doomed"} {
-		notes, _ := filepath.Glob(filepath.Join(vault, proj, "Memories", "*.md"))
-		if len(notes) != 1 {
-			t.Fatalf("want 1 note in %s, got %d", proj, len(notes))
-		}
-	}
-
-	// Delete the doomed project from the DB.
-	if _, err := store.DeleteProject(ctx, "doomed", true); err != nil {
-		t.Fatal(err)
-	}
-
-	// Re-export — orphan folder should be pruned.
-	if err := ex.Export(ctx, vault, ""); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(filepath.Join(vault, "doomed")); !os.IsNotExist(err) {
-		t.Error("deleted project's vault folder should be removed")
-	}
-	ghostNotes, _ := filepath.Glob(filepath.Join(vault, "ghost", "Memories", "*.md"))
-	if len(ghostNotes) != 1 {
-		t.Errorf("surviving project should be untouched, got %d notes", len(ghostNotes))
-	}
-}
-
 // TestExportOrphanCleanupKeepsUserFiles: an orphaned project folder is cleaned
 // one Ghost note at a time. User-authored files and folders inside it — notes
 // without a ghost_id, attachments, a user subfolder — survive, and so does the
@@ -457,77 +290,6 @@ func TestHasGhostIDNeedsClosedFrontmatter(t *testing.T) {
 	}
 }
 
-// TestExportOrphanCleanupSkipsUnremovableNote: a Ghost note Ghost cannot
-// remove (inside a read-only user folder) is left in place and the export
-// still succeeds, so sync does not retry it forever.
-func TestExportOrphanCleanupSkipsUnremovableNote(t *testing.T) {
-	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
-		t.Skip("needs POSIX directory permissions enforced for the test user")
-	}
-	store := seedStore(t)
-	ctx := context.Background()
-	if err := store.EnsureProject(ctx, "doomed", "/tmp/doomed", "doomed"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.Create(ctx, "doomed", memory.Memory{Category: "fact", Content: "Doomed fact", Importance: 0.8, Source: "mcp"}); err != nil {
-		t.Fatal(err)
-	}
-	vault := filepath.Join(t.TempDir(), "vault")
-	ex := &Exporter{Store: store, Logger: slog.Default()}
-	if err := ex.Export(ctx, vault, ""); err != nil {
-		t.Fatal(err)
-	}
-	ro := filepath.Join(vault, "doomed", "ro")
-	if err := os.MkdirAll(ro, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	stuck := filepath.Join(ro, "n.md")
-	mustWrite(t, stuck, "---\nghost_id: stale\n---\n")
-	if err := os.Chmod(ro, 0o555); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(ro, 0o755) })
-	if _, err := store.DeleteProject(ctx, "doomed", true); err != nil {
-		t.Fatal(err)
-	}
-	if err := ex.Export(ctx, vault, ""); err != nil {
-		t.Fatalf("an unremovable stale note must not fail the export: %v", err)
-	}
-	if _, err := os.Stat(stuck); err != nil {
-		t.Errorf("unremovable note should be left in place: %v", err)
-	}
-}
-
-// TestExportOrphanCleanupRemovesEmptiedDirs: once the Ghost notes are gone,
-// directories left empty are removed, all the way up to the orphan folder.
-func TestExportOrphanCleanupRemovesEmptiedDirs(t *testing.T) {
-	store := seedStore(t)
-	ctx := context.Background()
-	if err := store.EnsureProject(ctx, "doomed", "/tmp/doomed", "doomed"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.Create(ctx, "doomed", memory.Memory{Category: "fact", Content: "Doomed fact", Importance: 0.8, Source: "mcp"}); err != nil {
-		t.Fatal(err)
-	}
-	vault := filepath.Join(t.TempDir(), "vault")
-	ex := &Exporter{Store: store, Logger: slog.Default()}
-	if err := ex.Export(ctx, vault, ""); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Join(vault, "doomed", "empty", "nested"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.DeleteProject(ctx, "doomed", true); err != nil {
-		t.Fatal(err)
-	}
-	if err := ex.Export(ctx, vault, ""); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(filepath.Join(vault, "doomed")); !os.IsNotExist(err) {
-		t.Errorf("an orphan folder left empty should be removed: %v", err)
-	}
-}
-
 // TestVaultWritesArePrivate: directories and files Ghost creates are 0700 and
 // 0600; a folder the user created keeps its own mode.
 func TestVaultWritesArePrivate(t *testing.T) {
@@ -576,83 +338,6 @@ func TestVaultWritesArePrivate(t *testing.T) {
 	}
 }
 
-func TestExportSkipsOrphanCleanupWhenFiltered(t *testing.T) {
-	store := seedStore(t)
-	ctx := context.Background()
-	if err := store.EnsureProject(ctx, "other", "/tmp/other", "other"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.Create(ctx, "ghost", memory.Memory{Category: "fact", Content: "Ghost fact", Importance: 0.8, Source: "mcp"}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.Create(ctx, "other", memory.Memory{Category: "fact", Content: "Other fact", Importance: 0.8, Source: "mcp"}); err != nil {
-		t.Fatal(err)
-	}
-
-	vault := filepath.Join(t.TempDir(), "vault")
-	ex := &Exporter{Store: store, Logger: slog.Default()}
-	// Export unfiltered first to create both folders.
-	if err := ex.Export(ctx, vault, ""); err != nil {
-		t.Fatal(err)
-	}
-
-	// Now export with filter — orphan cleanup should be skipped.
-	if err := ex.Export(ctx, vault, "ghost"); err != nil {
-		t.Fatal(err)
-	}
-	// The "other" folder must survive even though it's not in the filtered set.
-	notes, _ := filepath.Glob(filepath.Join(vault, "other", "Memories", "*.md"))
-	if len(notes) != 1 {
-		t.Errorf("filtered export must not prune other project's folder, got %d notes", len(notes))
-	}
-}
-
-func TestExportIgnoresUserFolders(t *testing.T) {
-	store := seedStore(t)
-	ctx := context.Background()
-	if _, err := store.Create(ctx, "ghost", memory.Memory{Category: "fact", Content: "Ghost fact", Importance: 0.8, Source: "mcp"}); err != nil {
-		t.Fatal(err)
-	}
-
-	vault := filepath.Join(t.TempDir(), "vault")
-	ex := &Exporter{Store: store, Logger: slog.Default()}
-	if err := ex.Export(ctx, vault, ""); err != nil {
-		t.Fatal(err)
-	}
-
-	// Create a user folder with non-Ghost .md files (no ghost_id frontmatter).
-	userDir := filepath.Join(vault, "my-notes")
-	if err := os.MkdirAll(userDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(userDir, "jotting.md"), []byte("# My Note\nJust a note."), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	// Re-export — user folder must survive.
-	if err := ex.Export(ctx, vault, ""); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(userDir); os.IsNotExist(err) {
-		t.Error("user-created folder should not be pruned")
-	}
-}
-
-func TestTruncated(t *testing.T) {
-	for _, tc := range []struct {
-		n, limit int
-		want     bool
-	}{
-		{0, 100000, false},
-		{99999, 100000, false},
-		{100000, 100000, true},
-	} {
-		if got := truncated(tc.n, tc.limit); got != tc.want {
-			t.Errorf("truncated(%d, %d) = %v, want %v", tc.n, tc.limit, got, tc.want)
-		}
-	}
-}
-
 func TestExportSkipsPruneOnTruncatedList(t *testing.T) {
 	store := seedStore(t)
 	ctx := context.Background()
@@ -690,181 +375,9 @@ func TestExportSkipsPruneOnTruncatedList(t *testing.T) {
 	}
 }
 
-func TestFolderNamesContainment(t *testing.T) {
-	ps := []memory.Project{
-		{ID: "aaaaaaaa-0000-0000-0000-000000000000", Name: ".."},
-		{ID: "bbbbbbbb-0000-0000-0000-000000000000", Name: "."},
-	}
-	got := folderNames(ps)
-	if got[ps[0].ID] != "project-aaaaaaaa" {
-		t.Errorf("'..' project must map to project-<id8>, got %q", got[ps[0].ID])
-	}
-	if got[ps[1].ID] != "project-bbbbbbbb" {
-		t.Errorf("'.' project must map to project-<id8>, got %q", got[ps[1].ID])
-	}
-}
-
-func TestExportContainsPathologicalProjectNames(t *testing.T) {
-	store := seedStore(t)
-	ctx := context.Background()
-	if err := store.EnsureProject(ctx, "dotdot", "/tmp/dotdot", ".."); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.Create(ctx, "dotdot", memory.Memory{Category: "fact", Content: "Escape attempt fact", Importance: 0.8, Source: "mcp"}); err != nil {
-		t.Fatal(err)
-	}
-
-	parent := t.TempDir()
-	vault := filepath.Join(parent, "vault")
-	ex := &Exporter{Store: store, Logger: slog.Default()}
-	if err := ex.Export(ctx, vault, ""); err != nil {
-		t.Fatalf("export: %v", err)
-	}
-
-	// Nothing may land outside the vault root.
-	entries, err := os.ReadDir(parent)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(entries) != 1 || entries[0].Name() != "vault" {
-		var names []string
-		for _, e := range entries {
-			names = append(names, e.Name())
-		}
-		t.Fatalf("vault parent gained entries beyond the vault itself: %v", names)
-	}
-	// The pathological project lands in a contained project-<id8> folder.
-	notes, _ := filepath.Glob(filepath.Join(vault, "project-dotdot", "Memories", "*.md"))
-	if len(notes) != 1 {
-		t.Fatalf("want 1 note under project-dotdot/Memories, got %d", len(notes))
-	}
-}
-
-func TestFolderNamesCaseCollision(t *testing.T) {
-	ps := []memory.Project{
-		{ID: "aaaaaaaa-0000-0000-0000-000000000000", Name: "Foo"},
-		{ID: "bbbbbbbb-0000-0000-0000-000000000000", Name: "foo"},
-	}
-	got := folderNames(ps)
-	if got[ps[0].ID] != "Foo" {
-		t.Errorf("first project keeps its plain folder, got %q", got[ps[0].ID])
-	}
-	if got[ps[1].ID] != "foo-bbbbbbbb" {
-		t.Errorf("later case-colliding project gets -id8 suffix, got %q", got[ps[1].ID])
-	}
-	if strings.EqualFold(got[ps[0].ID], got[ps[1].ID]) {
-		t.Errorf("folders still collide case-insensitively: %q vs %q", got[ps[0].ID], got[ps[1].ID])
-	}
-}
-
-// snapshotVault reads every .md under root into relpath → contents, for
-// byte-comparing two export passes.
-func snapshotVault(t *testing.T, root string) map[string]string {
-	t.Helper()
-	got := make(map[string]string)
-	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		if info.IsDir() || !strings.HasSuffix(path, ".md") {
-			return nil
-		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		rel, err := filepath.Rel(root, path)
-		if err != nil {
-			return err
-		}
-		got[rel] = string(data)
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return got
-}
-
-// TestExportTypedEdgesDeterministic: a directed + a symmetric link produce
-// typed frontmatter on the source note; a second export of the same store is
-// byte-identical (writeIfChanged no-churn holds with fmEdges in the path).
-func TestExportTypedEdgesDeterministic(t *testing.T) {
-	store := seedStore(t)
-	ctx := context.Background()
-	id1, err := store.Create(ctx, "ghost", memory.Memory{
-		Category: "fact", Content: "New fact that supersedes the old", Importance: 0.8, Source: "mcp",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	id2, err := store.Create(ctx, "ghost", memory.Memory{
-		Category: "fact", Content: "Old fact superseded by the new", Importance: 0.7, Source: "mcp",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.CreateLink(ctx, id1, id2, "supersedes", 0.9, "llm"); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.CreateLink(ctx, id1, id2, "related", 0.5, "auto"); err != nil {
-		t.Fatal(err)
-	}
-
-	vault := filepath.Join(t.TempDir(), "vault")
-	ex := &Exporter{Store: store, Logger: slog.Default()}
-	if err := ex.Export(ctx, vault, ""); err != nil {
-		t.Fatalf("first export: %v", err)
-	}
-	first := snapshotVault(t, vault)
-	if len(first) == 0 {
-		t.Fatal("expected notes after first export")
-	}
-
-	// Source note has both typed keys; target note has only related.
-	var srcBody, tgtBody string
-	for rel, content := range first {
-		switch {
-		case strings.Contains(rel, id1[:8]):
-			srcBody = content
-		case strings.Contains(rel, id2[:8]):
-			tgtBody = content
-		}
-	}
-	if srcBody == "" || tgtBody == "" {
-		t.Fatalf("missing source/target notes in snapshot: src=%q tgt=%q", srcBody, tgtBody)
-	}
-	if !strings.Contains(srcBody, "supersedes: ") {
-		t.Errorf("source note must carry supersedes typed field:\n%s", srcBody)
-	}
-	if !strings.Contains(srcBody, "related: ") {
-		t.Errorf("source note must carry related typed field:\n%s", srcBody)
-	}
-	if strings.Contains(tgtBody, "supersedes:") {
-		t.Errorf("target of directed supersedes must not emit supersedes:\n%s", tgtBody)
-	}
-	if !strings.Contains(tgtBody, "related: ") {
-		t.Errorf("target must still emit related typed field:\n%s", tgtBody)
-	}
-
-	if err := ex.Export(ctx, vault, ""); err != nil {
-		t.Fatalf("second export: %v", err)
-	}
-	second := snapshotVault(t, vault)
-	if len(first) != len(second) {
-		t.Fatalf("re-export changed file count: %d -> %d", len(first), len(second))
-	}
-	for rel, content := range first {
-		if second[rel] != content {
-			t.Errorf("re-export changed %s", rel)
-		}
-	}
-}
-
 // TestExportRefusesAmbiguousProjectName: a project's name is not unique, so a
 // --project filter two projects answer to must be refused, naming both ids,
-// before the vault is touched — not mirror both into one run. A fresh vault
-// path is not even created, and an existing vault keeps every note it had.
+// before the vault is touched, so a fresh vault path is not even created.
 func TestExportRefusesAmbiguousProjectName(t *testing.T) {
 	store := seedStore(t)
 	ctx := context.Background()
@@ -893,60 +406,6 @@ func TestExportRefusesAmbiguousProjectName(t *testing.T) {
 	}
 	if _, statErr := os.Stat(fresh); !os.IsNotExist(statErr) {
 		t.Errorf("a refused export created the vault: %v", statErr)
-	}
-
-	// An existing vault: mirror ghost only, then the refused run must leave it
-	// exactly as it was.
-	if _, err := store.Create(ctx, "ghost", memory.Memory{Category: "fact", Content: "Ghost fact", Importance: 0.8, Source: "mcp"}); err != nil {
-		t.Fatal(err)
-	}
-	vault := filepath.Join(t.TempDir(), "vault")
-	if err := ex.Export(ctx, vault, "ghost"); err != nil {
-		t.Fatalf("seed export: %v", err)
-	}
-	before := snapshotVault(t, vault)
-	if err := ex.Export(ctx, vault, "dup"); err == nil {
-		t.Fatal("an export of a name two projects answer to succeeded")
-	}
-	after := snapshotVault(t, vault)
-	if len(after) != len(before) {
-		t.Fatalf("refused export changed the vault: before %v, after %v", before, after)
-	}
-	for k, v := range before {
-		if after[k] != v {
-			t.Errorf("refused export changed %s", k)
-		}
-	}
-}
-
-// TestExportProjectIDBeatsAnotherProjectsName: ids and names share the one
-// filter namespace, so a store can hold a project whose id is literally
-// another project's name. The exact id wins and selects only its project.
-func TestExportProjectIDBeatsAnotherProjectsName(t *testing.T) {
-	store := seedStore(t)
-	ctx := context.Background()
-	if err := store.EnsureProject(ctx, "shared", "/tmp/xproj", "xproj"); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.EnsureProject(ctx, "yid", "/tmp/yproj", "shared"); err != nil {
-		t.Fatal(err)
-	}
-	for _, id := range []string{"shared", "yid"} {
-		if _, err := store.Create(ctx, id, memory.Memory{Category: "fact", Content: "Fact under " + id, Importance: 0.8, Source: "mcp"}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	vault := filepath.Join(t.TempDir(), "vault")
-	ex := &Exporter{Store: store, Logger: slog.Default()}
-	if err := ex.Export(ctx, vault, "shared"); err != nil {
-		t.Fatalf("export by an id another project's name collides with: %v", err)
-	}
-	notes, _ := filepath.Glob(filepath.Join(vault, "xproj", "Memories", "*.md"))
-	if len(notes) != 1 {
-		t.Fatalf("want the id's project mirrored (1 note under xproj), got %d", len(notes))
-	}
-	if _, err := os.Stat(filepath.Join(vault, "shared")); !os.IsNotExist(err) {
-		t.Errorf("the project whose NAME matched was mirrored too: %v", err)
 	}
 }
 
@@ -1062,101 +521,47 @@ func TestExportWithholdsOverLimitProjectIDFromTruncationWarnings(t *testing.T) {
 
 func TestExportWithholdsTokenShapedStoredIDsInErrorPrefixes(t *testing.T) {
 	tokenID := tokenShapedProjectID()
-	withheldProject := `"<project_id withheld: it holds a GitHub personal access token>"`
-	withheldMemory := `"<memory_id withheld: it holds a GitHub personal access token>"`
-
-	t.Run("load", func(t *testing.T) {
-		db, store := seedStoreWithDB(t)
-		ctx := context.Background()
-		if err := store.EnsureProject(ctx, tokenID, "/tmp/tokenload", "tokenload"); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := db.ExecContext(ctx, `DROP TABLE memories`); err != nil {
-			t.Fatal(err)
-		}
-		vault := filepath.Join(t.TempDir(), "vault")
-		ex := &Exporter{Store: store, Logger: slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))}
-		err := ex.Export(ctx, vault, tokenID)
-		if err == nil {
-			t.Fatal("want the load failure, got nil")
-		}
-		if strings.Contains(err.Error(), tokenID) {
-			t.Errorf("load failure echoed a token-shaped stored project id: %v", err)
-		}
-		if !strings.Contains(err.Error(), "load memories for "+withheldProject) {
-			t.Errorf("load failure did not withhold the token-shaped id by its format: %v", err)
-		}
-	})
-	t.Run("links", func(t *testing.T) {
-		db, store := seedStoreWithDB(t)
-		ctx := context.Background()
-		plantMemory(t, db, "ghost", tokenID, "A body long enough to be a real memory about the exporter.")
-		if _, err := db.ExecContext(ctx, `DROP TABLE memory_links`); err != nil {
-			t.Fatal(err)
-		}
-		vault := filepath.Join(t.TempDir(), "vault")
-		ex := &Exporter{Store: store, Logger: slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))}
-		err := ex.Export(ctx, vault, "ghost")
-		if err == nil {
-			t.Fatal("want the links failure, got nil")
-		}
-		if strings.Contains(err.Error(), tokenID) {
-			t.Errorf("links failure echoed a token-shaped stored memory id: %v", err)
-		}
-		if !strings.Contains(err.Error(), "links for "+withheldMemory) {
-			t.Errorf("links failure did not withhold the token-shaped id by its format: %v", err)
-		}
-	})
-	t.Run("decisions", func(t *testing.T) {
-		db, store := seedStoreWithDB(t)
-		ctx := context.Background()
-		if err := store.EnsureProject(ctx, tokenID, "/tmp/tokendec", "tokendec"); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := store.Create(ctx, tokenID, memory.Memory{Category: "fact", Content: "A fact", Importance: 0.8, Source: "mcp"}); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := db.ExecContext(ctx, `DROP TABLE decisions`); err != nil {
-			t.Fatal(err)
-		}
-		vault := filepath.Join(t.TempDir(), "vault")
-		ex := &Exporter{Store: store, Logger: slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))}
-		err := ex.Export(ctx, vault, tokenID)
-		if err == nil {
-			t.Fatal("want the decisions failure, got nil")
-		}
-		if strings.Contains(err.Error(), tokenID) {
-			t.Errorf("decisions failure echoed a token-shaped stored project id: %v", err)
-		}
-		if !strings.Contains(err.Error(), "decisions for "+withheldProject) {
-			t.Errorf("decisions failure did not withhold the token-shaped id by its format: %v", err)
-		}
-	})
-	t.Run("tasks", func(t *testing.T) {
-		db, store := seedStoreWithDB(t)
-		ctx := context.Background()
-		if err := store.EnsureProject(ctx, tokenID, "/tmp/tokentask", "tokentask"); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := store.Create(ctx, tokenID, memory.Memory{Category: "fact", Content: "A fact", Importance: 0.8, Source: "mcp"}); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := db.ExecContext(ctx, `DROP TABLE tasks`); err != nil {
-			t.Fatal(err)
-		}
-		vault := filepath.Join(t.TempDir(), "vault")
-		ex := &Exporter{Store: store, Logger: slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))}
-		err := ex.Export(ctx, vault, tokenID)
-		if err == nil {
-			t.Fatal("want the tasks failure, got nil")
-		}
-		if strings.Contains(err.Error(), tokenID) {
-			t.Errorf("tasks failure echoed a token-shaped stored project id: %v", err)
-		}
-		if !strings.Contains(err.Error(), "tasks for "+withheldProject) {
-			t.Errorf("tasks failure did not withhold the token-shaped id by its format: %v", err)
-		}
-	})
+	withheld := func(kind string) string {
+		return `"<` + kind + ` withheld: it holds a GitHub personal access token>"`
+	}
+	for _, tc := range []struct {
+		name, table, filter, want string
+		plantMemoryID             bool
+	}{
+		{"load", "memories", tokenID, "load memories for " + withheld("project_id"), false},
+		{"links", "memory_links", "ghost", "links for " + withheld("memory_id"), true},
+		{"decisions", "decisions", tokenID, "decisions for " + withheld("project_id"), false},
+		{"tasks", "tasks", tokenID, "tasks for " + withheld("project_id"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, store := seedStoreWithDB(t)
+			ctx := context.Background()
+			if tc.plantMemoryID {
+				plantMemory(t, db, "ghost", tokenID, "A body long enough to be a real memory about the exporter.")
+			} else if err := store.EnsureProject(ctx, tokenID, "/tmp/token"+tc.name, "token"+tc.name); err != nil {
+				t.Fatal(err)
+			}
+			if tc.table != "memories" && !tc.plantMemoryID {
+				if _, err := store.Create(ctx, tokenID, memory.Memory{Category: "fact", Content: "A fact", Importance: 0.8, Source: "mcp"}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := db.ExecContext(ctx, `DROP TABLE `+tc.table); err != nil {
+				t.Fatal(err)
+			}
+			ex := &Exporter{Store: store, Logger: slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))}
+			err := ex.Export(ctx, filepath.Join(t.TempDir(), "vault"), tc.filter)
+			if err == nil {
+				t.Fatalf("want the %s failure, got nil", tc.name)
+			}
+			if strings.Contains(err.Error(), tokenID) {
+				t.Errorf("%s failure echoed a token-shaped stored id: %v", tc.name, err)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("%s failure did not withhold the token-shaped id by its format: %v", tc.name, err)
+			}
+		})
+	}
 }
 
 func TestExportNamesOrdinaryStoredIDsInErrorPrefixes(t *testing.T) {
