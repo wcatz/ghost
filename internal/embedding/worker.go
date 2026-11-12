@@ -13,32 +13,17 @@ import (
 	"github.com/wcatz/ghost/internal/memory"
 )
 
-// memoryStore is the subset of provider.MemoryStore needed by the worker.
-// UnembeddedMemoryIDs is asked for the worker's own identity, so a vector
-// written by a previous model (or a previous task-prefix setting) comes back as
-// unembedded and is rewritten — the worker needs no separate refresh path.
 type memoryStore interface {
 	ListProjects(ctx context.Context) ([]memory.Project, error)
 	UnembeddedMemoryIDs(ctx context.Context, projectID, identity string, limit int) ([]string, error)
 	GetMemoryContent(ctx context.Context, id string) (string, error)
-	// StoreEmbeddingForContent stores the vector only if the memory's content is
-	// still the text it was computed from, and reports whether it did.
 	StoreEmbeddingForContent(ctx context.Context, memoryID string, vec []float32, model, content string) (bool, error)
 }
 
-// OllamaDownMarkerFilename is the sentinel file checkAlive writes into
-// dataDir the first time it observes Ollama unreachable, and removes once
-// Ollama answers reachable again. `ghost mcp status` (internal/mcpinit) reads
-// it to report outage duration (see issue #287). It's a plain file rather
-// than a ghost_state database column because Ollama connectivity is a single
-// global infra fact, not project-scoped data, and because `ghost mcp status`
-// runs as a separate, short-lived CLI process from the long-lived MCP server
-// that hosts this worker — an in-process-only counter here would be
-// invisible to it, so the fact has to be persisted to disk. The file holds an
-// RFC3339 UTC timestamp of when Ollama was first observed down.
+// OllamaDownMarkerFilename names the file that records when Ollama was first observed down.
 const OllamaDownMarkerFilename = "ollama-down-since"
 
-// Worker periodically embeds memories that don't yet have vectors.
+// Worker periodically embeds memories without vectors.
 type Worker struct {
 	client   *Client
 	store    memoryStore
@@ -46,31 +31,15 @@ type Worker struct {
 	interval time.Duration
 	dataDir  string
 
-	// mu guards inconclusive, which the sweep carries between intervals, and
-	// slowRows.
-	mu sync.Mutex
-	// inconclusive counts consecutive SWEEPS that did not answer. It is the
-	// evidence a single probe cannot be: see inconclusiveStampsAfter.
+	mu           sync.Mutex
 	inconclusive int
-
-	// slowRows holds the ids of memories whose embed timed out, so later
-	// batches try them last (see EmbedPending). In memory only and bounded by
-	// maxSlowRows; guarded by mu.
-	slowRows map[string]struct{}
+	slowRows     map[string]struct{}
 }
 
-// maxSlowRows bounds Worker.slowRows. Past it a newly timed-out row is not
-// recorded, which only means it is tried in the store's order again.
 const maxSlowRows = 1024
 
-// stallAfterTimeouts is how many consecutive embed timeouts in one batch are
-// read as a stalled endpoint rather than slow rows. One is not enough: the
-// client's timeout firing on one over-long document looks exactly like a
-// stall, and that row, never embedded, comes back first on every pass. Two
-// costs a pacified endpoint one extra request per batch.
 const stallAfterTimeouts = 2
 
-// isSlowRow reports whether id timed out in an earlier batch.
 func (w *Worker) isSlowRow(id string) bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -78,7 +47,6 @@ func (w *Worker) isSlowRow(id string) bool {
 	return ok
 }
 
-// noteSlowRow records that id's embed timed out.
 func (w *Worker) noteSlowRow(id string) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -90,15 +58,12 @@ func (w *Worker) noteSlowRow(id string) {
 	}
 }
 
-// forgetSlowRow drops id once it has been embedded.
 func (w *Worker) forgetSlowRow(id string) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	delete(w.slowRows, id)
 }
 
-// slowRowsLast reorders ids so the rows that timed out before come after every
-// other row, keeping the store's order within each group.
 func (w *Worker) slowRowsLast(ids []string) []string {
 	out := make([]string, 0, len(ids))
 	var slow []string
@@ -112,48 +77,9 @@ func (w *Worker) slowRowsLast(ids []string) []string {
 	return append(out, slow...)
 }
 
-// inconclusiveStampsAfter is how many consecutive sweep TICKS must fail to
-// answer before the down-since marker is written for an endpoint that is not
-// REFUSING connections.
-//
-// One observation is not enough, and the asymmetry is the point: a probe that
-// missed its own 2s deadline is far more often a busy machine than a dead
-// endpoint, and a marker written on the first of those is reported by
-// `ghost mcp status` for as long as the machine stays busy. But a marker written
-// only on a conclusive refusal is a regression in the other direction (#287's
-// diagnostic), because the endpoints that need it least are the ones that answer
-// fastest: a wedged accept loop, a remote or tunnelled URL whose packets a
-// firewall drops, and a host that has stopped scheduling all look like "the
-// request did not come back", never like a refusal. Those then report "Ollama
-// unreachable" with no duration beside it, forever.
-//
-// So the marker follows the SIGNAL rather than a single probe: consecutive ticks
-// that all went unanswered is a pattern, and any tick that answers SPENDS the
-// streak (see SweepOnce), so a stall spread over minutes cannot accumulate into
-// an outage that was never established.
-//
-// It counts TICKs, and that is the whole difficulty — the count is advanced once
-// per `SweepOnce` call, never per probe, because `SweepOnce` probes at the top
-// AND `EmbedPending` re-probes after every failed embed, so a wedged endpoint
-// can produce a dozen probes inside one tick. Counting probes would satisfy the
-// threshold within a single tick and stamp the marker on exactly the busy
-// machine the streak exists to protect against.
-//
-// A tick counts whether or not the sweep gets PAST its gate, and that is what
-// keeps the duration reachable for a hung endpoint at all: `SweepOnce` gates
-// strictly and skips every project, but it still probes once and still calls
-// noteSweep, so the clock runs for as long as the hang lasts. Three ticks is
-// three worker intervals, so at the daemon's 2 minutes (cmd/ghost/mcp.go) the
-// shortest hang this reports a duration for is about six minutes: the shortest
-// real outage worth a duration line, against a busy machine never getting one.
 const inconclusiveStampsAfter = 3
 
-// NewWorker creates a background embedding worker. dataDir is the ghost data
-// directory (config.DataDir()) where the Ollama-down marker file (see
-// OllamaDownMarkerFilename and checkAlive) is written and removed as
-// reachability changes; pass "" to disable that bookkeeping entirely (e.g.
-// tests that don't exercise it, or a caller whose own config.DataDir() call
-// failed).
+// NewWorker creates a background embedding worker.
 func NewWorker(client *Client, store memoryStore, logger *slog.Logger, interval time.Duration, dataDir string) *Worker {
 	return &Worker{
 		client:   client,
@@ -164,44 +90,12 @@ func NewWorker(client *Client, store memoryStore, logger *slog.Logger, interval 
 	}
 }
 
-// checkAlive reports whether Ollama is currently reachable and, as a side
-// effect, maintains the on-disk down-since marker (OllamaDownMarkerFilename)
-// that `ghost mcp status` reads to report outage duration, returning the
-// tri-state the probe found.
-//
-// The marker is the reason this is not a bool, and it is written on EITHER of
-// the two negative answers — but for different evidence, which is what
-// inconclusiveStampsAfter is for. A conclusive Unreachable writes it at once
-// (only if one doesn't already exist, so a still-down Ollama doesn't keep
-// resetting its own "down since" clock on every poll). An Inconclusive writes it
-// only once several have gone unanswered in a row, because a single one is a
-// busy machine far more often than a dead endpoint, and the endpoints a refusal
-// never describes — a wedged accept loop, a dropped remote URL — are exactly
-// the ones that need the duration (see the constant for the full argument).
-//
-// Reachable removes the marker. An inconclusive probe never does: not answering
-// is not evidence the outage is over.
-//
-// A blank dataDir (set by callers that don't care about the marker) disables
-// this bookkeeping and behaves exactly like calling client.Probe(ctx)
-// directly. Best-effort: a failure to write or remove the marker is logged at
-// debug level and never changes the reported reachability.
 func (w *Worker) checkAlive(ctx context.Context) Reachability {
 	got := w.client.Probe(ctx)
 	if w.dataDir == "" {
 		return got
 	}
 
-	// Only the CONCLUSIVE answers, and only where the marker can exist at all.
-	// The blank-dataDir early return above is what confines this to the daemon:
-	// `embedSupersedeCorpus` builds its worker with "" precisely because the
-	// marker is the daemon's outage bookkeeping, and a one-shot pass has no
-	// outage to keep time, so no `ghost resolve` or `ghost supersede` run can
-	// reach this. Within the daemon a refusal needs no corroboration — it is an
-	// answer — so it stamps on the spot rather than waiting for a sweep. Reachable
-	// removes it. An inconclusive probe does neither: it cannot end a real
-	// outage, and turning a stall into one is what the streak exists to prevent,
-	// so see noteSweep.
 	markerPath := filepath.Join(w.dataDir, OllamaDownMarkerFilename)
 	switch got {
 	case Reachable:

@@ -1,7 +1,4 @@
-// Package linking discovers relationships between memories by comparing
-// their embeddings, persisting them as memory_links edges. It follows the
-// same self-healing lifecycle as embeddings: reflection may wipe and
-// recreate memories at any time, and the periodic sweep relinks them.
+// Package linking discovers relationships between memories by comparing embeddings.
 package linking
 
 import (
@@ -12,7 +9,6 @@ import (
 	"github.com/wcatz/ghost/internal/memory"
 )
 
-// linkStore is the subset of memory.Store needed by the worker.
 type linkStore interface {
 	ListProjects(ctx context.Context) ([]memory.Project, error)
 	UnscannedEmbeddedMemoryIDs(ctx context.Context, projectID string, limit int) ([]string, error)
@@ -24,7 +20,7 @@ type linkStore interface {
 	TrimOverCapRelatedDegrees(ctx context.Context) error
 }
 
-// Worker periodically links embedded memories to their nearest neighbors.
+// Worker periodically links embedded memories to nearest neighbors.
 type Worker struct {
 	store     linkStore
 	logger    *slog.Logger
@@ -37,13 +33,12 @@ const (
 	maxCandidates = 6
 )
 
-// NewWorker creates a background linking worker. Memories whose cosine
-// similarity is at or above threshold get a 'related' link.
+// NewWorker creates a background linking worker.
 func NewWorker(store linkStore, logger *slog.Logger, interval time.Duration, threshold float32) *Worker {
 	return &Worker{store: store, logger: logger, interval: interval, threshold: threshold}
 }
 
-// Run sweeps all projects on a ticker. Blocks until ctx is cancelled.
+// Run sweeps projects on a ticker until ctx is cancelled.
 func (w *Worker) Run(ctx context.Context) {
 	ticker := time.NewTicker(w.interval)
 	defer ticker.Stop()
@@ -58,12 +53,6 @@ func (w *Worker) Run(ctx context.Context) {
 	}
 }
 
-// safeSweepOnce wraps SweepOnce with panic recovery. A panic here must not
-// escape into Run's select loop: unwinding past Run itself would leave
-// nothing left to fire the loop's next tick, so linking would stop for good
-// even after the panic is otherwise "handled". Recovering inside this small
-// function means control returns to Run — still live — once this call
-// completes, so the loop keeps going on the next tick.
 func (w *Worker) safeSweepOnce(ctx context.Context) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -73,9 +62,7 @@ func (w *Worker) safeSweepOnce(ctx context.Context) {
 	w.SweepOnce(ctx)
 }
 
-// SweepOnce links unscanned embedded memories across all projects. It first
-// trims any memory whose live related degree exceeds the cap, repairing rows
-// that accumulated links before the cap existed.
+// SweepOnce links unscanned embedded memories across all projects.
 func (w *Worker) SweepOnce(ctx context.Context) {
 	if err := w.store.TrimOverCapRelatedDegrees(ctx); err != nil {
 		w.logger.Error("linking: trim over-cap related degrees", "error", err)
@@ -116,13 +103,6 @@ func (w *Worker) processProject(ctx context.Context, projectID string) {
 			continue
 		}
 		if len(vec) == 0 {
-			// A nil vector means the row's vector belongs to another vector
-			// space than the one this process embeds into (see
-			// Store.GetEmbedding), so there is nothing to compare it with.
-			// Skipping without MarkLinkScanned is deliberate: the memory stays
-			// in the queue and is linked once the embedding worker rewrites its
-			// vector. Marking it scanned here would spend the memory's one scan
-			// slot on a pass that produced no edge.
 			w.logger.Debug("linking: no usable vector yet", "memory_id", memory.RefusalArg("memory_id", id))
 			continue
 		}
@@ -136,13 +116,6 @@ func (w *Worker) processProject(ctx context.Context, projectID string) {
 			continue
 		}
 		sourceScope := sourceMemories[0].Scope
-		// The scope filter runs inside the store, before its candidate limit, so
-		// the limit counts neighbours this source is allowed to link to. Filtering
-		// here instead — or widening the fetch by a fixed factor to compensate —
-		// only moves the cutoff: enough conflicting rows above the compatible one
-		// still hide it, and the source is marked scanned below, so it is never
-		// reconsidered.
-		//
 		// +1 because the memory itself is its own nearest neighbor.
 		candidates, err := w.store.SearchVectorScoped(ctx, projectID, vec, maxCandidates+1, sourceScope)
 		if err != nil {
@@ -154,9 +127,6 @@ func (w *Worker) processProject(ctx context.Context, projectID string) {
 			if cand.MemoryID == id || cand.Score < w.threshold {
 				continue
 			}
-			// The store already applied this filter. Kept because linkStore is an
-			// interface: it is the invariant the candidate list must satisfy, not a
-			// property of the one implementation behind it today.
 			if memory.ScopesConflict(sourceScope, cand.Scope) {
 				continue
 			}
@@ -167,21 +137,14 @@ func (w *Worker) processProject(ctx context.Context, projectID string) {
 			}
 			linked++
 		}
-		// Only mark scanned when every link write succeeded, so missing
-		// edges are retried on the next sweep.
 		if failed {
 			continue
 		}
-		// vec, not a fresh read: the store records the scan only while the
-		// vector this pass compared is still the memory's embedding, so an
-		// edit that landed mid-scan leaves the memory queued for its new text.
 		if err := w.store.MarkLinkScanned(ctx, id, vec); err != nil {
 			w.logger.Error("linking: mark scanned", "error", err, "memory_id", memory.RefusalArg("memory_id", id))
 		}
 	}
 	if linked > 0 {
-		// linked counts CreateLink writes; symmetric pairs normalize to one
-		// row, so the distinct edge count can be lower.
 		w.logger.Info("linking: batch complete", "project_id", memory.RefusalArg("project_id", projectID), "scanned", len(ids), "link_writes", linked)
 	}
 }

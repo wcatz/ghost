@@ -6,29 +6,12 @@ import (
 	"time"
 )
 
-// Sync mirrors once immediately, then re-exports whenever PRAGMA data_version
-// reports a commit from another connection. Runs until ctx is cancelled.
-//
-// data_version is per-connection, so db must be pinned to a single pooled
-// connection (SetMaxOpenConns(1) — memory.OpenDB does this) for polls to
-// compare against a stable baseline.
+// Sync mirrors the store to the vault until ctx is cancelled.
 func Sync(ctx context.Context, ex *Exporter, db *sql.DB, vaultDir, projectFilter string, interval time.Duration) error {
-	// Capture the baseline BEFORE the initial export, mirroring the loop's
-	// read-before-export order. Export is a sequence of independent autocommit
-	// reads, not one snapshot; a commit that lands mid-export would otherwise
-	// be baked into `last` here and never re-exported until an unrelated later
-	// commit. Reading first makes the worst case one redundant re-export on the
-	// first tick instead of a silently dropped change.
 	last, err := dataVersion(ctx, db)
 	if err != nil {
 		return err
 	}
-	// The initial export takes the same failure path as a tick export: log
-	// and keep looping. Returning here would kill auto-sync permanently on a
-	// transient startup blip (vault volume not yet mounted, busy disk), and
-	// silently — the tick loop is what logs. A failed attempt resets last to
-	// -1, a value data_version never takes, so the very next tick sees a
-	// difference and retries without needing another commit.
 	if err := ex.Export(ctx, vaultDir, projectFilter); err != nil {
 		ex.Logger.Warn("obsidian sync: initial export failed, will retry next tick", "error", err)
 		last = -1
@@ -49,8 +32,6 @@ func Sync(ctx context.Context, ex *Exporter, db *sql.DB, vaultDir, projectFilter
 				continue
 			}
 			if err := ex.Export(ctx, vaultDir, projectFilter); err != nil {
-				// Baseline stays put: the version delta persists, so the
-				// next tick retries without needing another commit.
 				ex.Logger.Warn("obsidian sync: export failed, will retry next tick", "error", err)
 				continue
 			}
@@ -59,8 +40,6 @@ func Sync(ctx context.Context, ex *Exporter, db *sql.DB, vaultDir, projectFilter
 	}
 }
 
-// dataVersion reads SQLite's per-connection change counter; it increments
-// whenever another connection commits to the database.
 func dataVersion(ctx context.Context, db *sql.DB) (int64, error) {
 	var v int64
 	err := db.QueryRowContext(ctx, "PRAGMA data_version").Scan(&v)

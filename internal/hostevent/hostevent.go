@@ -1,17 +1,4 @@
-// Package hostevent implements the normalized host-event contract (version 1):
-// a thin, versioned envelope over the de-facto cross-host hook dialect
-// (Claude Code / codex / goose share the same stdin JSON fields and block
-// protocol). See docs/superpowers/specs/2026-08-23-normalized-host-contract-design.md.
-//
-// Design invariants:
-//
-//   - Fail-open is absolute. Every parse or validation failure returns an
-//     error; callers log one line to stderr, print nothing to stdout, and
-//     exit 0 — "allow the stop" is the only failure response ghost emits.
-//   - Host-specific payload extras (model, turn_id, permission_mode, reason,
-//     agent_id, …) are tolerated and ignored; unknown fields never reject a
-//     payload.
-//   - Transcript scanning is selected by format, never by source.
+// Package hostevent implements the normalized host-event contract.
 package hostevent
 
 import (
@@ -19,9 +6,6 @@ import (
 	"strings"
 )
 
-// Transcript formats known to the contract. An adapter names the shape of the
-// transcript it points a hook at with one of these values, by format, never by
-// source.
 const (
 	FormatNone               = "none"
 	FormatClaudeJSONL        = "claude-jsonl"
@@ -30,25 +14,16 @@ const (
 	FormatCodexRollout       = "codex-rollout"
 )
 
-// ContractVersion is the current envelope version. Adapters must send
-// contract.version == ContractVersion; anything else fails open.
+// ContractVersion is the current envelope version.
 const ContractVersion = 1
 
-// Event is a canonical lifecycle event name (argv form).
+// Event is a canonical lifecycle event name.
 type Event string
 
-// The v1 event set. argv uses the lowercase kebab forms; payloads may carry
-// the hosts' camelCase names ("SessionStart", "Stop", "SessionEnd") —
-// NormalizeEvent maps both spellings onto these canonical values.
 const (
-	EventSessionStart Event = "session-start"
-	EventStop         Event = "stop"
-	EventSessionEnd   Event = "session-end"
-	// EventMessageSubmit fires when the user submits a message, before the host
-	// processes it (Claude Code's UserPromptSubmit). EventEdit fires after a
-	// file-editing tool ran (Claude Code's PostToolUse, matched to Edit, Write
-	// and MultiEdit). Both are the working-moment channel: a host that cannot add
-	// context beside a message or a tool result has no entry for them.
+	EventSessionStart  Event = "session-start"
+	EventStop          Event = "stop"
+	EventSessionEnd    Event = "session-end"
 	EventMessageSubmit Event = "message-submit"
 	EventEdit          Event = "edit"
 )
@@ -56,7 +31,6 @@ const (
 // Source identifies the host adapter that produced the event.
 type Source string
 
-// Known sources. The list doubles as the capability matrix key set.
 const (
 	SourceClaudeCode Source = "claude-code"
 	SourceCodex      Source = "codex"
@@ -64,24 +38,13 @@ const (
 	SourceOpencode   Source = "opencode"
 )
 
-// Capability reports what output protocols a host honors, per its published
-// documentation (spec §2.1 matrix).
+// Capability reports what output protocols a host honors.
 type Capability struct {
 	BlockStop     bool
 	InjectContext bool
-	// WorkingMoment is true when the host adds a hook's additionalContext beside
-	// a user message and beside an edit tool's result. Only Claude Code is
-	// documented to; every other source stays false and the events are a silent
-	// no-op for it.
 	WorkingMoment bool
 }
 
-// capabilityMatrix mirrors the spec's v1 source-capability table. codex blocks
-// Stop via {"decision":"block"} or delivers non-blocking feedback through
-// hookSpecificOutput.additionalContext; it injects via SessionStart
-// additionalContext; goose blocks Stop subject to a host-side consecutive-block
-// cap we never rely on; opencode plugins have no stop-blocking or injection
-// surface.
 var capabilityMatrix = map[Source]Capability{
 	SourceClaudeCode: {BlockStop: true, InjectContext: true, WorkingMoment: true},
 	SourceCodex:      {BlockStop: true, InjectContext: true},
@@ -89,31 +52,20 @@ var capabilityMatrix = map[Source]Capability{
 	SourceOpencode:   {BlockStop: false, InjectContext: false},
 }
 
-// CapabilityFor returns the documented capabilities for source. ok is false
-// for unknown sources; callers must fail open on !ok.
+// CapabilityFor returns the capabilities for source.
 func CapabilityFor(source Source) (Capability, bool) {
 	cap, ok := capabilityMatrix[source]
 	return cap, ok
 }
 
-// Envelope is ghost's namespaced extension object inside the payload. It is
-// nested under the "contract" key rather than merged into top-level fields
-// because hosts already use top-level "source" for their own semantics (the
-// session start reason: startup|resume|clear|compact); a collision there
-// would break verbatim passthrough of native payloads.
-//
-// Payload.Contract is a pointer so a single JSON pass distinguishes an absent
-// envelope (nil — Parse completes it from authoritative argv values) from an
-// explicit-but-invalid one (non-nil zero value — rejected, never repaired).
+// Envelope is the contract envelope inside a payload.
 type Envelope struct {
 	Version          int    `json:"version"`
 	Source           string `json:"source"`
 	TranscriptFormat string `json:"transcript_format,omitempty"`
 }
 
-// Payload is contract v1: the envelope plus the shared dialect fields every
-// conforming host already sends. Field names deliberately match the hosts'
-// common input schema so native payloads parse without translation.
+// Payload is the normalized host-event payload.
 type Payload struct {
 	Contract       *Envelope       `json:"contract"`
 	HookEventName  string          `json:"hook_event_name"`
@@ -124,15 +76,13 @@ type Payload struct {
 	Raw            json.RawMessage `json:"-"`
 }
 
-// HostSource returns the envelope's host id.
+// HostSource returns the envelope source.
 func (p Payload) HostSource() Source { return Source(p.Contract.Source) }
 
-// Event returns the payload's normalized canonical event.
+// Event returns the payload's normalized event.
 func (p Payload) Event() Event { return NormalizeEvent(p.HookEventName) }
 
-// NormalizeEvent maps accepted spellings of a v1 event ("stop", "Stop",
-// "session-start", "SessionStart", "sessionend", "SessionEnd") onto the
-// canonical Event form, or "" for unrecognized names.
+// NormalizeEvent maps accepted event spellings to the canonical form.
 func NormalizeEvent(name string) Event {
 	key := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(name), "-", ""))
 	switch key {

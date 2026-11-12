@@ -12,11 +12,7 @@ import (
 
 const markerName = ".ghost-vault"
 
-// readDirFn is swappable so tests can force ensureVault's ReadDir call to
-// fail deterministically — os.Chmod-based fault injection is unreliable
-// across CI privilege levels (e.g. a process with CAP_DAC_READ_SEARCH can
-// bypass a directory's permission bits).
-var readDirFn atomic.Value // func(string) ([]os.DirEntry, error)
+var readDirFn atomic.Value
 
 func init() { readDirFn.Store(os.ReadDir) }
 
@@ -25,9 +21,6 @@ func readDir(dir string) ([]os.DirEntry, error) {
 	return fn(dir)
 }
 
-// ensureVault prepares dir as a Ghost-managed mirror target. Fresh or empty
-// dirs are initialized with the marker; a non-empty dir without the marker is
-// refused — Ghost never adopts a folder it didn't create.
 func ensureVault(dir string) error {
 	entries, err := readDir(dir)
 	if os.IsNotExist(err) {
@@ -47,36 +40,12 @@ func ensureVault(dir string) error {
 	return os.WriteFile(filepath.Join(dir, markerName), []byte(`{"schema_version":1}`+"\n"), 0o600)
 }
 
-// tmpMarker is the shared stem of the staging name writeIfChanged gives a note
-// while it is being written, and the name prune reclaims. The writer and the
-// reclaim read this one constant so they cannot drift apart — and the drift is
-// what made the reclaim dead: the writer moved to os.CreateTemp, which names a
-// staged file "<note>.md.ghost-tmp-<random>", while prune still matched a fixed
-// ".ghost-tmp" suffix no staged file ever ended with, so a staging file a killed
-// export left behind kept its note text in the vault forever.
 const tmpMarker = ".ghost-tmp"
 
-// stagingPattern is the os.CreateTemp pattern writeIfChanged stages a note
-// with. It is a function rather than an inline expression so a test can create a
-// file with the real pattern instead of a name that only looks like one.
 func stagingPattern(noteBase string) string { return noteBase + tmpMarker + "-*" }
 
-// stagingGrace bounds how long a staging file may sit before prune reclaims it.
-// A manual export and the auto-sync worker can run at once, so one pass's prune
-// can reach the other pass's live staging file between its os.CreateTemp and its
-// Rename; reclaiming that would fail the write with ENOENT. A file younger than
-// this is left alone, and a killed write's orphan is older than it.
 const stagingGrace = time.Minute
 
-// isStagingName reports whether base names a staging file writeIfChanged can
-// leave behind when it is killed between the create and the rename. Such a name
-// is a note name — one ending in ".md", the only extension the writer stages —
-// followed by tmpMarker and then either nothing (the fixed name a build before
-// the CreateTemp form used) or the "-" plus random suffix CreateTemp appends.
-//
-// The marker is taken from the RIGHT so a name that merely contains it earlier
-// is not mistaken for a staging file, and the ".md" guard keeps an unrelated
-// file that happens to mention the marker from being reclaimed.
 func isStagingName(base string) bool {
 	i := strings.LastIndex(base, tmpMarker)
 	if i <= 0 || !strings.HasSuffix(base[:i], ".md") {
@@ -86,10 +55,6 @@ func isStagingName(base string) bool {
 	return rest == "" || rest[0] == '-'
 }
 
-// readAndCompare opens the path with the given flags, checks it is a regular
-// file on fstat, reads it, and compares to content. Returns (true, nil) if
-// identical, (false, nil) if different, and (false, err) on any open/read/fstat
-// error so the caller falls through to the temp+rename.
 func readAndCompare(path string, flags int, content string) (bool, error) {
 	f, err := os.OpenFile(path, flags, 0)
 	if err != nil {
@@ -110,17 +75,7 @@ func readAndCompare(path string, flags int, content string) (bool, error) {
 	return string(existing) == content, nil
 }
 
-// writeIfChanged writes content atomically (temp+rename), skipping the write
-// when the file already has identical content — no mtime churn.
 func writeIfChanged(path, content string) (bool, error) {
-	// Only a non-regular entry that is not a symlink (FIFO, device, socket,
-	// directory) is refused, and it is refused unopened, because opening a
-	// FIFO blocks until a writer appears. A symlinked note is compared by
-	// reading through the link, so one whose target already holds the content
-	// is left alone; otherwise the rename replaces the link with a regular
-	// file. Every open is non-blocking and the descriptor is checked before a
-	// byte is read, so an entry swapped after the Lstat cannot block either;
-	// a compare that fails for any reason falls through to the replace.
 	if info, err := os.Lstat(path); err == nil {
 		flags := obsidianOpenFlags
 		switch {

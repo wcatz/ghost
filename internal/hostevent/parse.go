@@ -7,61 +7,16 @@ import (
 	"io"
 )
 
-// maxPayloadBytes bounds one hook payload. A var so tests can lower it.
-//
-// A payload is an envelope — an event name, a session id, a cwd, a transcript
-// path, the contract object — and it is retained twice: once decoded into
-// Payload, once verbatim in Raw. Nothing else on the path bounded it: the
-// caller read stdin with an unbounded io.ReadAll, so a host (or anything that
-// can write to the hook's stdin) chose how much memory a fail-open path
-// allocates. ReadPayload is the bounded read, and Parse's check refuses what
-// it returns past the ceiling. One mebibyte is three orders of magnitude more than any v1 envelope
-// needs; past it the outcome is the package's only outcome, an error the caller
-// turns into "allow the stop".
 var maxPayloadBytes = 1 << 20
 
-// errPayloadTooLarge reports a payload past maxPayloadBytes.
 var errPayloadTooLarge = errors.New("hook payload exceeds the size ceiling")
 
-// ReadPayload reads one hook payload from r, stopping one byte past the
-// ceiling. Parse's length check refuses what it returns when it is over, but
-// only a bounded read keeps the ceiling from being a check made after the
-// allocation it exists to prevent: the hook's stdin is written by the host,
-// or by anything that can write to it, and an unbounded io.ReadAll lets it
-// choose how much memory a fail-open path holds.
+// ReadPayload reads one hook payload from r with a size bound.
 func ReadPayload(r io.Reader) ([]byte, error) {
 	return io.ReadAll(io.LimitReader(r, int64(maxPayloadBytes)+1))
 }
 
-// Parse builds a Payload from raw stdin bytes. The contract is mandatory:
-// sourceArg and eventArg must be non-empty and known, and hook_event_name must
-// normalize to eventArg. Any mismatch, unknown value, or unparseable JSON is
-// an error — callers fail open.
-//
-// Size: a payload past maxPayloadBytes is refused before it is decoded, and a
-// refused payload retains nothing in Raw. The caller's fail-open handling needs
-// no second case for it — an error is an error.
-//
-// Envelope completion: hosts in the shared dialect (Claude Code, codex, goose)
-// send no contract object — their payloads pass through verbatim and the
-// authoritative argv values complete the envelope. An EXPLICIT contract object
-// must agree with argv strictly; there is no fallback parsing of unversioned
-// payloads (the contract has no legacy mode), and --source remains required.
-//
-// Host-specific extras at the top level (model, turn_id, permission_mode,
-// reason, source, agent_id, …) are ignored by this struct but preserved in
-// Raw for handlers that need them (e.g. the Claude session-start gate reads
-// agent_id from Raw).
-//
-// Goose field aliasing: goose follows the Open Plugins hooks spec, and its
-// published payload shape does NOT reuse the dialect's field names — it sends
-// `event` where the dialect uses hook_event_name and `working_dir` where the
-// dialect uses cwd. For --source goose only, each native field is used as a
-// fallback when its dialect counterpart is absent or empty, so
-// `<ghost> hook <event> --source goose` parses a native goose payload
-// directly — no shell shim between goose and ghost. Dialect fields always win
-// when present, argv still must agree with the effective event name, and Raw
-// keeps the original bytes verbatim either way.
+// Parse builds a Payload from raw bytes and validates it against the contract.
 func Parse(data []byte, eventArg, sourceArg string) (Payload, error) {
 	if sourceArg == "" {
 		return Payload{}, fmt.Errorf("missing --source (the contract has no legacy mode; re-run `ghost mcp init` to migrate hook wiring)")
@@ -75,8 +30,6 @@ func Parse(data []byte, eventArg, sourceArg string) (Payload, error) {
 		return Payload{}, fmt.Errorf("unknown --source %q", sourceArg)
 	}
 
-	// Checked before the copy, so a refused payload costs the caller nothing
-	// beyond the buffer it already read.
 	if len(data) > maxPayloadBytes {
 		return Payload{}, fmt.Errorf("%w (%d bytes, ceiling %d)", errPayloadTooLarge, len(data), maxPayloadBytes)
 	}
@@ -88,9 +41,6 @@ func Parse(data []byte, eventArg, sourceArg string) (Payload, error) {
 	}
 	applyGooseAliases(&p, data, wantSource)
 
-	// Absent (or null) contract object → argv completes the envelope. An
-	// explicit contract must validate strictly below; `"contract": {}` is
-	// explicit-but-invalid and is rejected, never silently completed.
 	if p.Contract == nil {
 		p.Contract = &Envelope{
 			Version:          ContractVersion,
@@ -123,9 +73,6 @@ func Parse(data []byte, eventArg, sourceArg string) (Payload, error) {
 	return p, nil
 }
 
-// defaultFormatFor names the native transcript format of hosts in the shared
-// dialect, used only when argv completes an absent envelope. Sources without a
-// v1 scanner mapping start at "none" until their adapter lands.
 func defaultFormatFor(source Source) string {
 	switch source {
 	case SourceClaudeCode:
@@ -137,30 +84,18 @@ func defaultFormatFor(source Source) string {
 	}
 }
 
-// gooseNativeFields mirrors the native payload fields goose actually sends,
-// per the Open Plugins hooks spec: `event` and `working_dir` instead of the
-// dialect's hook_event_name and cwd. It is a separate aux struct — not extra
-// Payload fields — because Payload already exposes an Event() method (a field
-// of that name cannot coexist) and because non-goose payloads must never have
-// these names populated on the contract struct.
 type gooseNativeFields struct {
 	Event      string `json:"event"`
 	WorkingDir string `json:"working_dir"`
 }
 
-// applyGooseAliases backfills goose's native field names onto the dialect
-// fields, but only for --source goose and only where the dialect field is
-// absent or empty — a present hook_event_name/cwd always wins over its alias,
-// and other sources parse untouched. The payload's own event name is still
-// validated against argv afterwards, so an aliased disagreement is rejected
-// exactly like a native-dialect one.
 func applyGooseAliases(p *Payload, data []byte, source Source) {
 	if source != SourceGoose || (p.HookEventName != "" && p.CWD != "") {
 		return
 	}
 	var native gooseNativeFields
 	if err := json.Unmarshal(data, &native); err != nil {
-		return // malformed JSON already failed the Payload unmarshal above
+		return
 	}
 	if p.HookEventName == "" {
 		p.HookEventName = native.Event
