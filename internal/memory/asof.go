@@ -11,7 +11,6 @@ import (
 )
 
 // AsOfRow is one memory's state at the requested instant.
-// Content, Category, Importance, ResolvedAt and Source come from the version row
 type AsOfRow struct {
 	Memory
 
@@ -24,7 +23,6 @@ type AsOfRow struct {
 }
 
 // AsOfSet is one project's memory set as it stood at an instant.
-// Rows is every memory that was live at T, tombstoned and not-yet-created
 type AsOfSet struct {
 	Rows    []AsOfRow
 	Unknown []AsOfRow
@@ -33,6 +31,8 @@ type AsOfSet struct {
 
 // UnknownNote is the sentence a surface must show when Unknown is non-empty, and
 // "" when it is not. It is a method rather than a field so a caller cannot
+// render a disclosure that is no longer true: the note is a statement about this
+// set, and a set that is complete has none to make.
 func (s *AsOfSet) UnknownNote() string {
 	if s == nil {
 		return ""
@@ -55,6 +55,9 @@ func (s *AsOfSet) UnknownIDs() []string {
 
 // Live returns the rows a knowledge surface shows: the known ones that were not
 // resolved at T. It is a named filter so a caller cannot invent its own idea of
+// "live" — the current read excludes resolved rows in SQL
+// (GetTopMemories) and a historical read has to exclude them by the same rule
+// or the two surfaces would disagree about what a project knows.
 func (s *AsOfSet) Live() []AsOfRow {
 	if s == nil {
 		return nil
@@ -72,7 +75,12 @@ const asOfStampLayout = "2006-01-02 15:04:05"
 
 func asOfStamp(t time.Time) string { return t.UTC().Format(asOfStampLayout) }
 
+// asOfScopeClause is the project predicate the read uses, per project mode, and
+// the arguments that go with it. It is the same three-way distinction the
+// retrieval legs make, and it exists as a function because the read applies the
+// predicate to two different tables (memory_history.project_id for the versioned
 // rows, memories.project_id for the unversioned ones) and the two must not be
+// able to disagree about which memories are in scope.
 func asOfScopeClause(mode ProjectMode, projectID string) (string, []any) {
 	switch mode {
 	case AllProjects:
@@ -86,6 +94,9 @@ func asOfScopeClause(mode ProjectMode, projectID string) (string, []any) {
 
 // ReadMemoriesAsOf reads the memory set a project held at t, from any handle —
 // a Store's snapshot transaction, its own handle, or the read-only connection
+// the session hook opens. It is a package function rather than a method for the
+// same reason SupersedePenalties and DemotionPenalties are: two of the three
+// callers hold no Store.
 func ReadMemoriesAsOf(ctx context.Context, q Queryer, mode ProjectMode, projectID string, t time.Time) (*AsOfSet, error) {
 	stamp := asOfStamp(t)
 	clause, clauseArgs := asOfScopeClause(mode, projectID)
@@ -289,7 +300,7 @@ func asOfArgs(stamp string, scope []any) []any {
 	return args
 }
 
-// The row's own created_at is the right answer whenever it can give one: it is
+// asOfCreatedAt is the instant a memory's AGE is measured from at T.
 func asOfCreatedAt(createdAt, versionRecordedAt string, at time.Time) string {
 	stamp := parseCreatedAt(createdAt)
 	if !stamp.IsZero() && !stamp.After(at) {
@@ -323,7 +334,8 @@ func qualifyScopeClause(clause, table string) string {
 	return strings.ReplaceAll(clause, "project_id", table+".project_id")
 }
 
-// have done then, made by a table that never recorded it. The cost is that a
+// sortAsOfRows orders a set the way GetTopMemories orders the current one:
+// composite score descending, then importance, then the newer memory, then id.
 func sortAsOfRows(rows []AsOfRow, t time.Time) {
 	sort.SliceStable(rows, func(i, j int) bool {
 		a, b := rows[i], rows[j]
@@ -343,7 +355,6 @@ func sortAsOfRows(rows []AsOfRow, t time.Time) {
 }
 
 // MemoriesAsOf reads the memory set this store's project held at t.
-// A Store method because every retrieval surface goes through a Store; the
 func (s *Store) MemoriesAsOf(ctx context.Context, projectID string, t time.Time) (*AsOfSet, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -353,6 +364,9 @@ func (s *Store) MemoriesAsOf(ctx context.Context, projectID string, t time.Time)
 
 // MemoriesAsOfAll is MemoriesAsOf with no project predicate, for a
 // cross-project historical read. The set is the union of every project's, and a
+// version row's own project_id decides which bucket each memory falls in, so a
+// memory that had already been promoted is counted under the bucket it was in at
+// T.
 func (s *Store) MemoriesAsOfAll(ctx context.Context, t time.Time) (*AsOfSet, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

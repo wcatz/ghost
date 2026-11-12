@@ -20,6 +20,8 @@ func BackupFileName(dbPath string, at time.Time) string {
 
 // BackupCounts is the per-table row count of a backup file, in a fixed order so
 // the printed report is stable. It counts what the snapshot holds, not what the
+// live database held a moment later: a restore is checked against the file, so
+// these are the numbers that have to match it.
 type BackupCounts struct {
 	Projects    int `json:"projects"`
 	Memories    int `json:"memories"`
@@ -52,7 +54,11 @@ func (s *Store) Backup(ctx context.Context, dest string) (BackupResult, error) {
 	return res, nil
 }
 
+// vacuumAndCount takes the copy and counts it, and returns everything but the
+// manifest path. Split out of Backup so the extent of the lock is one function
+// rather than a span a reader has to infer from where a defer happens to sit:
 // the manifest write reads the whole file again, and must not be inside it (see
+// Backup).
 func (s *Store) vacuumAndCount(ctx context.Context, dest string) (BackupResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -71,7 +77,9 @@ func (s *Store) vacuumAndCount(ctx context.Context, dest string) (BackupResult, 
 	return BackupResult{Path: dest, Bytes: info.Size(), Counts: counts}, nil
 }
 
-// full copy nothing names is the outcome the error must never leave.
+// afterVacuumFailure is the account of a backup that failed after its vacuum
+// returned. The CLI prints no report for a failed backup, so this error is the
+// only description of what is now on disk at dest.
 func afterVacuumFailure(dest string, cause error) error {
 	if info, err := os.Lstat(dest); err == nil && info.Mode().IsRegular() && info.Size() == 0 {
 		_ = os.Remove(dest)
@@ -95,6 +103,7 @@ func countBackupContents(ctx context.Context, path string) (BackupCounts, error)
 
 // CountRows counts the rows a backup report prints, in the order the report
 // prints them. Exported so a caller holding only a *sql.DB — the pre-migration
+// path, which has no Store yet — can produce the same numbers.
 func CountRows(ctx context.Context, db *sql.DB) (BackupCounts, error) {
 	var counts BackupCounts
 	queries := []struct {
@@ -116,7 +125,9 @@ func CountRows(ctx context.Context, db *sql.DB) (BackupCounts, error) {
 	return counts, nil
 }
 
-// file at 0600 first means it is never born wider. SQLite accepts an existing
+// vacuumInto is the one implementation of "copy this database to that path":
+// create the destination at 0600 before SQLite writes a byte of it, VACUUM INTO
+// it, and run the permission pass afterwards.
 func vacuumInto(ctx context.Context, db *sql.DB, dest string) error {
 	target, err := vacuumTarget(dest)
 	if err != nil {
@@ -143,7 +154,9 @@ func vacuumTarget(dest string) (string, error) {
 	return u.String(), nil
 }
 
+// reserveBackupPath creates dest as an empty 0600 regular file and closes it, so
 // the copy is never born wider than the database it came from and the path is
+// claimed atomically.
 func reserveBackupPath(dest string) error {
 	if dir := filepath.Dir(dest); dir != "" {
 		if info, err := os.Stat(dir); err != nil || !info.IsDir() {

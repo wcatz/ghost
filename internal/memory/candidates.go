@@ -14,6 +14,7 @@ import (
 
 // ProjectMode is the storage-level distinction the retrieval SQL requires: a
 // project search also admits `_global` rows, an unresolved project admits only
+// them, and a cross-project search has no project predicate at all.
 type ProjectMode string
 
 const (
@@ -24,6 +25,8 @@ const (
 
 // Condition selects which retrieval legs run. It is part of the retriever
 // contract rather than a SearchParams field because a nil query vector already
+// means the vector leg is not attempted, which is a different statement from
+// asking for vector-only retrieval.
 type Condition string
 
 const (
@@ -34,6 +37,8 @@ const (
 
 // CandidateRequest is one retrieval: what to fetch, from where, and the clock
 // every time-dependent decision is made against. Now is required and is used
+// end to end — the candidate path never reads the wall clock, so a ranking and
+// the trace describing it cannot disagree about what time it was.
 type CandidateRequest struct {
 	ProjectID string
 	Mode      ProjectMode
@@ -47,12 +52,18 @@ type CandidateRequest struct {
 	AsOf      *time.Time
 	Fetch     Fetch
 	Explain   bool
-	// its policies discarded and a window its caller never stated.
+	// Passive carries the selection policies for an empty query, one per bucket,
+	// and is populated only for passive retrieval. An empty query with NO policy is
+	// refused (ErrPassiveUnsupported) rather than served as an empty set, which
+	// would read as a store holding nothing; a policy that names no bucket, states
+	// no over-fetch, overstates the ceiling or repeats a bucket is refused for the
+	// same reason in a different shape — see validatePassivePolicies.
 	Passive []SlicePolicy
 }
 
 // Fetch is the retrieval depth. FTSTopK and VectorTopK are the per-leg depths
 // (production fetches twice the window from each leg); Limit is the window
+// itself, not a trim applied to the result.
 type Fetch struct {
 	FTSTopK, VectorTopK int
 	Limit               int // Candidates returns a wider untrimmed set
@@ -60,6 +71,8 @@ type Fetch struct {
 
 // SlicePolicy is one passive bucket's selection rules: how wide to fetch, in
 // what order, which categories are behavioural, and whether a near-duplicate
+// loser is dropped rather than demoted. The buckets differ by policy, not by
+// accident, so each carries its own.
 type SlicePolicy struct {
 	Bucket                string
 	Order                 string // decay or pinned_importance_updated
@@ -73,13 +86,21 @@ type SlicePolicy struct {
 	IncludeGlobal         bool
 	ItemCap               int
 	DemoteOnlyWhenOverCap bool
+	// ExcludeSeen is reserved for the project-context bucket, which is the one
 	// passive policy that must not repeat a row the project bucket already
+	// showed. Nothing reads it yet, deliberately: a field that silently did
+	// nothing would be worse than an absent one, so it is stated as unread until
+	// the surface that needs it lands, and the migration of that surface is
+	// where it gets honoured rather than a silent no-op here.
 	ExcludeSeen       bool
 	DropDemotedLosers bool
 }
 
 // DroppedLoser is one near-duplicate loser the retriever removed rather than
 // ranked last — from a collapsed query window or a passive bucket — with the
+// ids of the rows it lost to (sorted, never empty). The Candidate is the row as
+// the retriever scored it, so a consumer reads the same project, score and age
+// it would have read had the row been returned.
 type DroppedLoser struct {
 	Candidate
 	LostTo   []string
@@ -88,9 +109,17 @@ type DroppedLoser struct {
 
 // CandidateSet is one retrieval's rows plus the facts about how they were
 // retrieved. Widened reports that the set is larger than the requested window,
+// which is the assembler's evidence that it could filter before closing.
 type CandidateSet struct {
 	Rows []Candidate
+	// DroppedLosers are the near-duplicate losers the retriever REMOVED instead
+	// of ranking last (a query window, which collapses its pairs, or a passive
+	// bucket whose policy sets DropDemotedLosers), each with the ids of the rows
+	// it lost to. They are not in Rows, and the assembler cannot rediscover them:
 	// the removal happened over a window whose edges it never saw. Carrying them
+	// is what lets stage 6 put each one in the trace and the retrieval record
+	// with its reason. Empty on every read in which the window held no
+	// near-duplicate edge to act on.
 	DroppedLosers    []DroppedLoser
 	Edges            []LinkEdge
 	EdgesStatus      EdgeStatus
@@ -98,17 +127,49 @@ type CandidateSet struct {
 	Widened          bool
 	Unrecorded       int
 	ValidityExcluded int
+	// PinnedBeyond is, per project (the row's own, so a union bucket's `_global` rows are counted under `_global`), how many eligible pinned rows never
+	// entered the window: the window is a LIMIT, and a bucket holding more pinned
+	// rows than the window has places reads only the first of them. Set only for
+	// a bucket whose whole window is pinned (the only case in which a pinned row
+	// can be past it); absent otherwise. It is what lets the assembler say how many
 	// pinned rows a cap cut when it never saw some of them. The window is the
+	// over-fetch the fetch read and not the selected set: the selected set is the
+	// window plus the replacements of pinned rows, which are fetched past it so
+	// they can hold a slot beside the row they replaced.
 	PinnedBeyond map[string]int
+	// WindowExtra is, per passive bucket, how many rows the set carries beyond the
+	// bucket's over-fetch: the replacements of pinned rows, fetched past the LIMIT
+	// so they can hold a slot. A caller deriving how many eligible rows lie past the
 	// window must count them as inside it, or it counts them twice.
 	WindowExtra map[string]int
 
 	// buys, and with it false these fields are never touched, so the plain
 
+	// Excluded is the pre-scope fused candidate pool the returned set does NOT
+	// carry, in the pool's fused-score order (which Rows is not). It is the
+	// rows scope narrowing removed before window selection, plus the eligible
 	// rows the window and its tail never reached; together with Rows and
+	// FloorDropped it partitions the pool every leg surfaced, so an
+	// explanation can account for every candidate the search saw. A row in it
+	// is explained by the same trace verdict that excluded it: scope_matched
+	// false is the scope complaint, everything else is the result window.
 	Excluded []Memory
+	// FloorDropped is what the vector similarity floor removed from the
+	// VECTOR leg without the keyword leg retrieving the row either — the
+	// candidates the floor cut out of the retrieval entirely, in the raw
+	// vector-leg order the floor saw them. (A dual-leg row the floor cut from
+	// the vector side still reaches fusion on its keyword term and so lives
+	// in Rows or Excluded, with its floor_dropped fact on the trace.) It is
+	// why "your query matched nothing strongly enough" is reported rather
 	// than read as a candidate that never existed. Hydrated, as Rows and
+	// Excluded are, on the same snapshot as the rest of the read.
 	FloorDropped []Memory
+	// RankFacts is the ranking path's own per-candidate record, keyed by
+	// memory id, covering every row in Rows, Excluded and FloorDropped. The
+	// explain projection reads every scoring fact from it — leg ranks, the
+	// pre-status fused base, status factor, scope verdict, reservation
+	// exchange, decay, floor and window-scoped penalties — so the numbers it
+	// reports are the numbers that ranked, not a re-computation. A missing
 	// entry is a row the ranking genuinely never scored.
 	RankFacts       map[string]*RankFact
 	ExplainKnobs    ExplainKnobs
@@ -117,6 +178,12 @@ type CandidateSet struct {
 
 // ExplainKnobs is the resolved fusion configuration one ranking ran under. It is
 // carried on the CandidateSet so the explain projection can name what a score
+// MEANS without re-deriving it: every fused base is the sum, over the legs that
+// retrieved the row, of weight/(RRFK+rank+1), with FTSWeight on the keyword leg
+// and VecWeight on the vector leg, and VectorFloor is the cosine the vector leg
+// was cut on. They are the values the fusion and the floor READ, copied from the
+// parameters the ranking ran with, so a number reported against them is the
+// number that decided.
 type ExplainKnobs struct {
 	RRFK                 int
 	FTSWeight, VecWeight float64
@@ -125,20 +192,41 @@ type ExplainKnobs struct {
 
 // Candidate is one hydrated row with the scoring facts fusion produced for it.
 // The facts are carried rather than re-derived, so a trace cannot report a
+// different number from the one that ranked the row.
 type Candidate struct {
 	Memory
 	// absent leg must not look like one.
 	FTSRank, VectorRank int
 	VectorScore         float64
 	FetchedBy           string
+	// SupersededBy is, for a passive row, pinned or not, the ids of the rows in
+	// the same window that supersede it through a live `supersedes` edge, read
+	// with the demotion's own edge rules (supersedePenaltyRows) except that a
 	// keep-forever (retention-exempt) target, which the demotion never sinks, is
+	// named too: a marker withholds nothing. The assembler marks the row on its line
+	// when a named superseder is on the page: a live edge switches the lexical
+	// guess (MaybeReplacedBy) off for its pair, and resolve never retires a
+	// convention or a preference, so this is the only signal the edge leaves. Only
+	// a PINNED, non-exempt row's name moves anything else: a pin guarantees a slot and not a
+	// rank above the row that replaced it, so such a row is ordered directly
+	// behind its superseder and the superseder is reserved too. On a query read
+	// it names the same superseders among the edge scope (querySupersededBy),
+	// for the marker only.
 	SupersededBy       []string
 	MaybeReplacedBy    []string
 	FloorReserved      bool
 	Base, Decay, Score float64
 	AgeDays            float64
 	KeywordReserved    bool
+	// Unembedded says the vector leg could not have retrieved this row: it
+	// carries no embedding the leg could score — no vector at all, one stamped
+	// with a different identity, or one whose width differs from the query's.
 	// It is false whenever the vector leg is not in play (no embedder, no query
+	// vector, a failed leg), because then no row is judged against that leg. The
+	// leg-consensus stage reads it so a row the vector leg could never see is
+	// not penalised for lacking vector agreement (#1319): a row saved moments
+	// ago has no embedding yet, and its silence must not read as a second leg's
+	// dissent.
 	Unembedded bool
 	Evidence   EvidenceCounts
 }
@@ -152,6 +240,8 @@ type LinkEdge struct {
 
 // LegStatus is what one retrieval leg did. CoverageComplete is the reason an
 // empty answer may claim absence: a leg that skipped unembedded or
+// dimension-mismatched rows, or that returned exactly as many rows as it was
+// asked for, cannot support that claim.
 type LegStatus struct {
 	Attempted, Available bool
 	Err                  string
@@ -164,9 +254,17 @@ type LegStatus struct {
 
 // EdgeStatus is the edge lookup's own outcome, kept separate from the rows so a
 // failed lookup can never read as "no edges exist": "ok" (the query ran, and
+// may have returned none), "unavailable" (a successful query returned no
+// edges) or "err" (the query failed).
 type EdgeStatus struct {
 	Status, Err string
+	// Chunks is how many queries the edge read took. The read is chunked, so a
 	// pair whose endpoints land in different chunks is never read, and a caller
+	// whose window exceeds the chunk therefore gets a partial picture. A whole-set
+	// claim ("no link joins two of these candidates") is only true at one chunk, so
+	// the count travels with the status rather than staying a detail of the loop.
+	// Zero means no query ran, which is the same thing: with fewer than two
+	// candidates no pair can exist.
 	Chunks int
 }
 
@@ -180,6 +278,8 @@ const (
 
 // ErrPassiveUnsupported is returned for an empty-query request. Passive
 // retrieval is specification, not absence: the session-start policies land with
+// the migration that moves that surface onto this seam, and until then an
+// honest error beats an empty result set.
 var ErrPassiveUnsupported = errors.New("passive retrieval is not served by Candidates yet")
 
 const edgeChunkIDs = 200
@@ -412,6 +512,11 @@ func (s *Store) Candidates(ctx context.Context, req CandidateRequest) (*Candidat
 	return set, nil
 }
 
+// unembeddedAmong returns the candidates that carry no embedding the vector leg
+// could score: no vector at all, one stamped with a different identity, or one
+// whose width differs from the query's. The three cases are the two filters the
+// scan applies, and they are applied in its order — identity first, then width —
+// because a row the leg saw is a row the leg ranked, and everything else is one
 // it could never have considered.
 func unembeddedAmong(ctx context.Context, db Queryer, candidates []Candidate, identity string, width int) (map[string]bool, error) {
 	out := make(map[string]bool, len(candidates))
@@ -655,7 +760,9 @@ func (s *Store) runCandidateLegs(ctx context.Context, req CandidateRequest, p Se
 	return out, vec, nil
 }
 
-// describe rows the leg never considered.
+// keywordValidityExcluded counts the rows that matched the query but lie outside
+// their validity window — the rows the keyword leg's SQL predicate removed
+// before its LIMIT (#1053).
 func (s *Store) keywordValidityExcluded(ctx context.Context, req CandidateRequest, project string, allProjects bool) (int, error) {
 	query, args := keywordValidityExcludedStatement(project, sanitizeFTS(req.Query, s.logger), req.Now, allProjects)
 	var n int
@@ -673,6 +780,10 @@ func poolIDsOf(pool []*hybridCandidate) []string {
 	return ids
 }
 
+// fillExplain builds the explain-only fields on a candidate set the caller
+// asked to explain. It runs after Rows is final, or instead of window
+// selection when scope narrowed the pool to nothing, and it hydrates the two
+// excluded buckets over the SAME snapshot the ranking read — the explain
 // payload must describe the same database state as the search it explains.
 func (s *Store) fillExplain(ctx context.Context, set *CandidateSet, req CandidateRequest, p SearchParams, preScope []string) error {
 	// then the eligible rows the window and its tail never reached. The
@@ -723,7 +834,12 @@ func (s *Store) fillExplain(ctx context.Context, set *CandidateSet, req Candidat
 	return nil
 }
 
+// orderByIDs reorders hydrated rows to match an id list. GetByIDs does not
+// preserve order, and the explain buckets are reported in the order the
+// retrieval saw each row — fused order for the pool, raw leg order for the
+// floor drops — so the two are reconciled here. A row the snapshot no longer
 // holds is absent from the result, exactly as if it had never been a
+// candidate.
 func orderByIDs(hydrated []Memory, ids []string) []Memory {
 	byID := make(map[string]Memory, len(hydrated))
 	for _, m := range hydrated {
@@ -738,7 +854,11 @@ func orderByIDs(hydrated []Memory, ids []string) []Memory {
 	return out
 }
 
-// matches. A retrieval failure and an empty result must not look alike.
+// hydrateWindow materialises the selected window, falling back to the wider
+// pool when a window id no longer exists. It is the same two reads production
+// search performs, in the same order, for the same reason: the leg results are
+// an earlier snapshot, and a row deleted since then has to disappear rather than
+// be emitted from stale leg data.
 func hydrateWindow(ctx context.Context, s *Store, window HybridWindow, pool []*hybridCandidate) ([]Memory, error) {
 	if len(window.IDs) == 0 {
 		return nil, nil

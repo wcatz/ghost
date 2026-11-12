@@ -29,12 +29,23 @@ func readableStampSQL(col string) string {
 		" OR (" + day + " IS NOT NULL AND " + col + " = " + day + "))"
 }
 
+// stampComparableSQL is the column as it is compared against the bound Now, which
+// is bound at WHOLE-SECOND precision (stampLayoutForSQL truncates it). A stored
+// fraction is cut off so both sides are whole seconds, and the comparison is
+// inclusive on both ends. That makes the SQL predicate a SUPERSET of Go's rule:
 // truncation can only pull a bound toward the same second as Now, never across
+// it, so any row Go keeps (`until >= now`, `from <= now`, at full precision) is
+// kept here. It may admit a row Go then drops at stage 2 (from `12:00:00.5` with
+// a Now of `12:00:00.3`); that costs one LIMIT slot and nothing else. It never
+// drops a row Go calls valid, whatever sub-second part Now carries.
 func stampComparableSQL(col string) string {
 	return "CASE WHEN length(" + col + ") > 19 THEN substr(" + col + ", 1, 19) ELSE " + col + " END"
 }
 
-// is the one rule the two forms must share (see readableStampSQL). A readable
+// validityMatchesSQL is the SQL form of memory.ValidityState's window test: a row
+// is admitted when its window contains the bound Now (valid_from <= now AND
+// valid_until >= now). It returns the fragment with TWO ? placeholders, bound in
+// text order — valid_until then valid_from — both to the same now stamp.
 func validityMatchesSQL() string { return validityMatchesSQLFor("") }
 
 func validityMatchesSQLFor(prefix string) string {
@@ -92,7 +103,9 @@ func (s *Store) candidatesPassive(ctx context.Context, req CandidateRequest, set
 		return nil, err
 	}
 	var rows []Candidate
+	// Each bucket's rows are one contiguous run of the set, in the bucket's own
 	// order; the replacement arrangement below works inside a run, never across
+	// two, because each run is cut by its own cap.
 	var runs []int
 	for _, pol := range req.Passive {
 		fetched, losers, window, err := s.passiveBucket(ctx, req, pol, cols)
@@ -177,7 +190,8 @@ func (s *Store) candidatesPassive(ctx context.Context, req CandidateRequest, set
 	return set, nil
 }
 
-// never entered it, and the selected set is wider than the window by the
+// passiveBucket runs one policy: the fetch, the selection, the demotions, and
+// the selected rows followed by the rest of the window.
 func (s *Store) passiveBucket(ctx context.Context, req CandidateRequest, pol SlicePolicy, cols passiveColumns) ([]Candidate, []DroppedLoser, []Memory, error) {
 	memories, err := s.passiveWindow(ctx, req, pol, cols)
 	if err != nil {
@@ -197,14 +211,20 @@ func (s *Store) passiveBucket(ctx context.Context, req CandidateRequest, pol Sli
 	return selected, losers, window, nil
 }
 
+// passiveKeyScanVisited counts the rows the threshold scan has read since the
+// last reset, and it exists so a test can pin the READ COUNT rather than a
+// duration: the property the scan is for is that a bucket's low-ranked tail is
 // never read, and that is a number, not a timing. It is process state rather
+// than a field because the scan is a free function over a cursor and no caller
+// should have to carry a counter it does not read.
 var passiveKeyScanVisited atomic.Int64
 
 func resetPassiveKeyScan() { passiveKeyScanVisited.Store(0) }
 
 func passiveKeyScanReads() int64 { return passiveKeyScanVisited.Load() }
 
-// so a row's rank is never above its importance (see decayRankingSQL and
+// passiveWindow is a policy's window: the top OverFetch rows under the policy's
+// own order, kept by a THRESHOLD SCAN rather than by sorting the bucket.
 func (s *Store) passiveWindow(ctx context.Context, req CandidateRequest, pol SlicePolicy, cols passiveColumns) ([]Memory, error) {
 	pinned, err := s.scanPassiveKeys(ctx, req, pol, cols, true, nil)
 	if err != nil {
@@ -245,7 +265,11 @@ func (s *Store) scanPassiveKeys(ctx context.Context, req CandidateRequest, pol S
 	return window, nil
 }
 
+// scanPassiveRankKey scans one key row and computes its rank. Importance is
+// scanned as the double the column holds rather than through Memory.Importance
 // (a float32), because the tie it breaks must be the tie the SQL ordered on: a
+// value the store holds that float32 cannot name would otherwise rank differently
+// here than it did in the engine.
 func scanPassiveRankKey(rows *sql.Rows, now time.Time) (passiveRankKey, error) {
 	var key passiveRankKey
 	var pinned int
@@ -308,7 +332,14 @@ func (s *Store) passiveMaxDecay(ctx context.Context, req CandidateRequest, pol S
 	return maxDecay
 }
 
+// passiveMaxDecayForBucket is one bucket population's worst-case decay: the
+// factor of the most favourable category present, at the population's youngest
 // created_at. It answers by seeking, never scanning: the MAX picks the youngest
+// instant out of the bucket (index seek) and the category probe picks the most
+// favourable category that is there at all (index seek). Both fall back to the
+// neutral factor when they cannot be read, which makes the bound looser rather
+// than wrong — an unread row may then rank past the window, but never one that
+// should have been read.
 func (s *Store) passiveMaxDecayForBucket(ctx context.Context, pol SlicePolicy, cols passiveColumns, now time.Time) float64 {
 	where, args := passivePopulationSQL(pol, CandidateRequest{}, cols)
 	where += " AND pinned = 0"
@@ -349,7 +380,9 @@ func (s *Store) passiveCategoryPresent(ctx context.Context, where string, args [
 	return found == 1
 }
 
-// better ones never contains it unless the order puts it first.
+// passiveRankKeyLess is the policy's window order over scan keys, and it is the
+// SQL ORDER BY the fetch used to state, moved into Go so the engine does not
+// sort the bucket. It reports whether a ranks before b.
 func passiveRankKeyLess(a, b passiveRankKey, order string) bool {
 	if a.pinned != b.pinned {
 		return a.pinned
@@ -375,7 +408,15 @@ func passiveRankKeyLess(a, b passiveRankKey, order string) bool {
 	return a.id < b.id
 }
 
+// passiveRankKey is one row's rank facts, read by the threshold scan before the
+// row is hydrated. It carries a dated flag, derived in SQL, because the rank's
+// category-aware decay treats a dated fact differently from a timeless one, and
+// it holds importance as the double the column stores so the tie it breaks is
 // the engine's. The bucket's content is never carried into Go here, but the
+// engine does read it: the GLOB behind the flag runs over `content` for each
+// scanned row of category fact (the `category = 'fact' AND` guard short-circuits
+// every other row), so the scan's read count, which counts rows, does not see
+// that cost. It is accepted so the scan and every other rank share one rule.
 type passiveRankKey struct {
 	id         string
 	pinned     bool
@@ -388,6 +429,8 @@ type passiveRankKey struct {
 	rank       float64
 }
 
+// hydratePassiveWindow reads the full rows of the window's keys, in the window's
+// order. It is the one read that carries content, and it is bounded by the
 // window: the bucket's rows are never materialised.
 func (s *Store) hydratePassiveWindow(ctx context.Context, keys []passiveRankKey, cols passiveColumns) ([]Memory, error) {
 	if len(keys) == 0 {
@@ -421,7 +464,11 @@ func (s *Store) hydratePassiveWindow(ctx context.Context, keys []passiveRankKey,
 	return out, nil
 }
 
-// window has closed must not spend one of its slots: judging it before it is
+// passiveKeyScanSQL builds one threshold scan's statement: the rank columns, the
+// population, and the importance order the index serves. It does not limit or
+// order by the policy's own order, because the window is kept in Go
+// (scanPassiveKeys) — this statement only has to hand the rows over in
+// importance order, which is what makes the stop condition sound.
 func passiveKeyScanSQL(pol SlicePolicy, req CandidateRequest, cols passiveColumns, pinned bool) (string, []any) {
 	retention := "retention"
 	if !cols.HasTier {
@@ -462,6 +509,9 @@ func passiveKeyScanSQL(pol SlicePolicy, req CandidateRequest, cols passiveColumn
 		ORDER BY ` + orderBy, args
 }
 
+// passiveReplacementsOfPinned reads the rows that supersede a pinned row of the
+// window and are not in it, from the same population and under the same validity
+// predicate as the fetch, so a replacement the fetch would withhold is not
 // brought in. It costs one statement, and only when the window holds a pinned row.
 func (s *Store) passiveReplacementsOfPinned(ctx context.Context, req CandidateRequest, pol SlicePolicy, cols passiveColumns, window []Memory) ([]Memory, error) {
 	var pinnedIDs, windowIDs []any
@@ -493,7 +543,13 @@ func (s *Store) passiveReplacementsOfPinned(ctx context.Context, req CandidateRe
 	return scanMemories(rows)
 }
 
-// there, and every row carries no scope, so an unscoped row never conflicts with a
+// passivePopulationSQL is the WHERE half a bucket's fetch and the validity probe
+// that counts what the filter removed from it SHARE: the policy's project
+// predicate with its bucket binding, `resolved_at IS NULL`, and the scope
+// predicate where the store has the column. It is one function so the two
+// statements cannot disagree about which rows the window is over — a probe run
+// over a different population would report exclusions the fetch never
+// considered, and the difference is exactly the row set the verdict describes.
 func passivePopulationSQL(pol SlicePolicy, req CandidateRequest, cols passiveColumns) (string, []any) {
 	projectClause := "project_id = ?"
 	if pol.IncludeGlobal {
@@ -547,10 +603,23 @@ func (s *Store) passivePinnedBeyond(ctx context.Context, req CandidateRequest, p
 
 // PassiveEligibleCountCap bounds the eligible-count aggregate. The count is
 // HEADER ARITHMETIC — it says how many rows the store holds against the
+// over-fetch's window — and it is the one read on this path the threshold scan
+// cannot bound, because the rows the scan never read are exactly the ones the
+// count is about. An exact census of a bucket past this many rows costs a table
+// pass at every session start for a number a reader does not act on, so the
+// aggregate stops here and reports that it did (capped), which makes the header
+// say the bucket holds AT LEAST this many rows. It is exported so a test of a
+// header that crosses it names the bound rather than repeating the number.
 const PassiveEligibleCountCap = 10000
 
 // PassiveEligibleCount is how many rows the policy's bucket holds that the
 // window's fetch could ever draw from, and how many of those the fetch's own
+// validity predicate removes before the window. Both come from ONE statement over
+// passivePopulationSQL, the population the fetch and the validity probe already
+// share, so the count and the window cannot disagree about which rows are in
+// play and a validity-excluded row is counted once: inside `eligible`, and again
+// as `validityExcluded`, never as a second row. `eligible - validityExcluded` is
+// the number of rows the window could hold if it had no bound.
 func (s *Store) PassiveEligibleCount(ctx context.Context, pol SlicePolicy, now time.Time, scope map[string]string) (eligible, validityExcluded int, capped bool, err error) {
 	cols, err := passiveColumnsFor(s)
 	if err != nil {
@@ -576,7 +645,13 @@ func (s *Store) PassiveEligibleCount(ctx context.Context, pol SlicePolicy, now t
 	return eligible, validityExcluded, eligible >= PassiveEligibleCountCap, nil
 }
 
-// not counted), never an overcount.
+// passiveValidityExcluded counts the rows in one bucket's window that the validity
+// predicate removed BEFORE the LIMIT — the rows that would have been fetched had
+// they been in their window. It exists because filtering in SQL leaves the
+// assembler a set that is empty with no stage having run, and "the window came
+// back empty" (no_memories) and "rows were found and withheld as out of date"
+// (all_invalid) are different facts a caller acts on differently; the census
+// surface may claim absence only for the first.
 func (s *Store) passiveValidityExcluded(ctx context.Context, req CandidateRequest, pol SlicePolicy, cols passiveColumns) (int, bool, error) {
 	if !cols.HasValidity {
 		return 0, false, nil
@@ -631,7 +706,15 @@ func (s *Store) selectPassive(ctx context.Context, memories []Memory, pol SliceP
 	return out, losers, nil
 }
 
+// passiveSupersededBy reads, for each eligible row, pinned or not, the ids of the
+// eligible rows that supersede it, sorted. The edge rules are the demotion's own
+// (supersedePenaltyRows: a live edge only, the scope exemption) EXCEPT the
 // persistent-retention exemption: a keep-forever target is never sunk, but it is
+// named here, because a live edge switches the lexical guess off for its pair
+// and a marker withholds nothing. The name is for the marker only; the slot
+// rules read passivePinnedOnly, which leaves an exempt row out. A failed read is
+// logged and means no row is named, which leaves the pins first and every row
+// unmarked — the order and the lines before the marker existed.
 func (s *Store) passiveSupersededBy(ctx context.Context, rows []passiveRow) map[string][]string {
 	ids := make([]string, len(rows))
 	for i, r := range rows {
@@ -651,7 +734,12 @@ func (s *Store) passiveSupersededBy(ctx context.Context, rows []passiveRow) map[
 	return out
 }
 
+// passivePinnedOnly is the subset of a passiveSupersededBy map whose targets are
+// PINNED rows the demotion would sink (not retention-exempt): the one input the
+// slot reservation (passiveReserve) and the arrangement (passiveArrange) read.
 // Naming an unpinned or a keep-forever row must not widen the reservation or
+// move a row, so the two maps are kept apart, and this subset is exactly the map
+// the pinned path read before every row was named.
 func passivePinnedOnly(named map[string][]string, rows []passiveRow) map[string][]string {
 	out := map[string][]string{}
 	for _, r := range rows {
@@ -689,6 +777,10 @@ func passiveReserve(chosen, rest []passiveRow, supersededBy map[string][]string)
 	return passiveArrange(append(chosen, tailReserved...), supersededBy), newRest
 }
 
+// passiveArrange is a stable partition with one exception. The reserved rows
+// (pinned rows and the replacements of pinned rows) come first, each group in the
+// order it arrived — except a superseded pinned row, which is taken out of the
+// reserved run and placed directly behind its first-ranked superseder, so a pin
 // never outranks the row that replaced it. The unpinned, unreplaced rows follow.
 func passiveArrange(rows []passiveRow, supersededBy map[string][]string) []passiveRow {
 	repl := passiveReplacements(supersededBy)
@@ -770,7 +862,8 @@ type passiveRow struct {
 	score float64
 }
 
-// convention, preference and decision never appear at all.
+// passiveTwoPass returns the window ordered with the behavioral reservation
+// first.
 func passiveSelect(rows []passiveRow, pol SlicePolicy) (chosen, rest []passiveRow, floor map[string]bool) {
 	if !pol.TwoPass || pol.BehaviorFloor <= 0 {
 		return rows, nil, nil
@@ -789,7 +882,9 @@ func passiveSelect(rows []passiveRow, pol SlicePolicy) (chosen, rest []passiveRo
 	return picked, rest, floor
 }
 
+// passivePoolCap is how many rows the two-pass selection admits: twice the item
 // cap, never more than the window, and never fewer than the behavioral floor it
+// has to honour.
 func passivePoolCap(pol SlicePolicy, window int) int {
 	cap := pol.ItemCap
 	if cap <= 0 {
@@ -983,13 +1078,19 @@ func decayRankingSQLAt(now time.Time, hasTier bool) (string, []any) {
 	return strings.ReplaceAll(base, "julianday('now')", "julianday(?)"), args
 }
 
-// readers have never needed to ask what schema they are looking at — and
+// passiveColumns is the shape of the store this request is reading: the SELECT
+// list to use, and whether the tier half of the decay order is available.
 type passiveColumns struct {
 	list        string
 	HasTier     bool
 	HasScope    bool
 	HasValidity bool
+	// HasProvenance gates the EVIDENCE read, which is not a column in the memories
+	// table at all: `memory_provenance` is a table migrateV18 creates, so a store
 	// below that floor has never had it. Unlike the demotion lookups, which degrade
+	// to "no penalty", this one is a returned error — and an error here would turn
+	// exactly the pre-tier store the rest of this function exists to support into no
+	// session context at all.
 	HasProvenance   bool
 	ProvenanceKnown bool
 }
@@ -1043,7 +1144,9 @@ func passiveColumnsFor(s *Store) (passiveColumns, error) {
 	}, nil
 }
 
+// isMissingTable reports whether an error is the absence of a TABLE, which is the
 // one evidence-read failure that means "this store has never recorded an
+// observation" rather than "this read did not work".
 func isMissingTable(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "no such table")
 }
@@ -1057,6 +1160,9 @@ const (
 	evidenceReadSkip
 )
 
+// evidenceReadMode is the three-way decision, and the order matters: what the store
+// is KNOWN to have is asked first, because "present" is the only state that admits
+// the plain read, and "unknown" is checked before "absent" so an unreadable version
 // never takes the skipping branch.
 func (c passiveColumns) evidenceReadMode() evidenceReadMode {
 	switch {

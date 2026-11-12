@@ -7,6 +7,8 @@ import (
 
 // IsConsolidatable reports whether m may be rewritten by reflect.
 // It is the Go mirror of replaceableRowSQL: a row the replace may delete,
+// reuse or merge into. Every caller that decides "will reflect see this?"
+// uses this predicate, so the filter lives in one place.
 func IsConsolidatable(m Memory) bool {
 	if m.Pinned {
 		return false

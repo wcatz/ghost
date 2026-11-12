@@ -28,7 +28,10 @@ func AsOfUnknownNote(n int) string {
 		" They are left out of the answer rather than answered with today's text, and nothing here is a guess about them."
 }
 
+// asOfInstant is the clock one retrieval runs against: AsOf when the request is
 // historical, Now otherwise. One function because the two must never be read
+// separately — a row chosen by one clock and ranked by another would be a
+// ranking of a set the retrieval did not return.
 func asOfInstant(req CandidateRequest) time.Time {
 	if req.AsOf != nil {
 		return *req.AsOf
@@ -46,6 +49,7 @@ func AsOfSourceNote(t time.Time) string {
 
 // AsOfUnversionedNote is the sentence stating which halves of a block a
 // historical read cannot fill, and it is the same sentence on every surface that
+// renders one.
 func AsOfUnversionedNote() string {
 	return "Tasks, decisions and learned context are not versioned, so they are omitted from a historical read rather " +
 		"than shown as they are now; a memory row's tags, scope, pin, confidence, agent, source_ref and validity " +
@@ -60,6 +64,10 @@ func asOfBorrowedWindowSentence() string {
 
 // AsOfValidityNote is the sentence an as_of LISTING prints: it judged validity
 // at the requested instant, and withheld (and counts) what that excluded. The
+// two surfaces that render one are ghost_project_context's as_of branch and the
+// ghost context --as-of session block, both of which judge through
+// memory.ValidityAt. It leads with the borrow and only then states the verdict,
+// so a reader meets the caveat before the claim it qualifies.
 func AsOfValidityNote(at time.Time, withheld int) string {
 	note := asOfBorrowedWindowSentence() + " Validity judged at " + at.UTC().Format(time.RFC3339) +
 		": a memory whose validity window had closed or had not yet opened at that instant is withheld."
@@ -74,6 +82,8 @@ func AsOfValidityNote(at time.Time, withheld int) string {
 
 // AsOfBorrowedWindowNote is the sentence a read that judged no window prints,
 // which today is ghost_memory_search with as_of. It leads with the same borrow
+// sentence the listings lead with, and then says what the absence of a verdict
+// means rather than leaving the reader to infer one from a missing marker.
 func AsOfBorrowedWindowNote(at time.Time) string {
 	return asOfBorrowedWindowSentence() + " No verdict was drawn from them for this read, so no row is withheld as " +
 		"expired or labelled not yet valid: a bound the row holds today is not a claim about " +
@@ -101,7 +111,11 @@ func historicalTerms(query string, logger *slog.Logger) []asOfLeg {
 	return terms
 }
 
+// matches reports whether the term occurs in the token list. A phrase term
+// matches on adjacency, which is what FTS5 does with a quoted term; a prefix
+// term matches on the last token's prefix, which is what the trailing `*` does.
 // The whole term must match — never a prefix of the first token — so a query for
+// "wal" cannot be answered by "walrus".
 func (l asOfLeg) matches(tokens []string) bool {
 	if len(l.tokens) == 0 || len(tokens) < len(l.tokens) {
 		return false
@@ -130,7 +144,11 @@ func (l asOfLeg) matches(tokens []string) bool {
 	return false
 }
 
+// tokenizeForMatch splits text into the tokens a term can match: runs of letters
+// and digits, case-folded. FTS5's default tokenizer does the same and also
 // removes diacritics; this does not, so an accented word matches only when the
+// query spells it the same way. That is a narrower match on a path that is
+// already narrower than the FTS leg, and it is stated rather than approximated.
 func tokenizeForMatch(text string) []string {
 	var (
 		out  []string
@@ -244,7 +262,8 @@ func asOfComposite(row AsOfRow, at time.Time) float64 {
 	return float64(row.Importance) * DecayFactor(row.Category, row.Content, RetentionProject, row.Pinned, ageDays(row.CreatedAt, at))
 }
 
-// the recorded supersede/unsupersede sequence (AsOfRow.SupersededBy), never from
+// asOfSupersedeDemote moves a memory that a live `supersedes` claim named at T
+// below the memory that replaced it, when both are in the answer.
 func asOfSupersedeDemote(window []Memory, hits []asOfHit) []Memory {
 	if len(window) < 2 {
 		return window
@@ -285,7 +304,15 @@ func asOfScoredOrder(hits []asOfHit, scores map[string]float64) []asOfHit {
 	return ordered
 }
 
+// asOfTail is the rows the window cut, in the same order the window came back
+// in, and BOUNDED at the window like hydrateTail's. It exists as a function
+// rather than a sort.SliceStable at the call site because the current path's tail
 // and this one must agree on both the order and the bound: a predicate that
+// reaches past the window is backfilled from it, so two orderings would make the
+// same predicate reach for different rows, and an unbounded tail would walk the
+// whole matching corpus — one hydrated Memory per match — through every
+// assembler stage and the trace's signals, which is the work the current path caps
+// at roughly twice the window.
 func asOfTail(ordered []asOfHit, window []Memory, limit int, scores map[string]float64, at time.Time) []Memory {
 	taken := make(map[string]bool, len(window))
 	for _, m := range window {
