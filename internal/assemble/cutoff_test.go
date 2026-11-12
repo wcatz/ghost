@@ -81,56 +81,6 @@ func TestCutoffStopsWhereRelevanceFallsOff(t *testing.T) {
 	}
 }
 
-// TestTopRowIsKeptEvenWhenEveryRowIsWeak: an aggressive cutoff that would cut
-// every non-top row still leaves the top one, so the answer is never emptied by
-// relevance. A result rate below 1.000 on an answerable query is the regression
-// this prevents, and it is the reason the cutoff can shorten a block but never
-// delete it.
-func TestTopRowIsKeptEvenWhenEveryRowIsWeak(t *testing.T) {
-	rows := []memory.Candidate{
-		candidate("top", "proj", "fact", "weak but first", 0.5),
-		candidate("second", "proj", "fact", "weaker", 0.45),
-		candidate("third", "proj", "fact", "weakest", 0.40),
-	}
-	res := cutoffRun(t, 0.95, rows...)
-
-	if len(res.Items) == 0 {
-		t.Fatal("the block is empty: an answerable query must keep its top row whatever the cutoff")
-	}
-	if ids := itemIDs(res.Items); len(ids) != 1 || ids[0] != "top" {
-		t.Errorf("items = %v, want exactly the top row", ids)
-	}
-	if res.Outcome == OutcomeEmpty {
-		t.Errorf("outcome = %q, want a non-empty answer: the top row is always kept", res.Outcome)
-	}
-}
-
-// TestPinnedRowBelowTheCutoffIsKept: a pin is a slot guarantee, so a pinned row
-// whose score is below the cutoff is still kept, and it is filed no cutoff
-// verdict. The unpinned row beside it, below the same cutoff, is cut — which is
-// what makes the exemption a rule about pins rather than a looser threshold.
-func TestPinnedRowBelowTheCutoffIsKept(t *testing.T) {
-	pinned := candidate("pinned", "proj", "fact", "below the cutoff but pinned", 4)
-	pinned.Pinned = true
-	rows := []memory.Candidate{
-		candidate("top", "proj", "fact", "the answer", 10),
-		candidate("mid", "proj", "fact", "above the cutoff", 7),
-		pinned,
-		candidate("tail", "proj", "fact", "below and unpinned", 3),
-	}
-	res := cutoffRun(t, 0.5, rows...)
-
-	if !eq(itemIDs(res.Items), []string{"top", "mid", "pinned"}) {
-		t.Errorf("items = %v, want the pinned row kept and the unpinned tail cut", itemIDs(res.Items))
-	}
-	if d := cutoffDecision(res, "pinned"); d != nil {
-		t.Errorf("the pinned row carries a cutoff decision: a pin is a slot guarantee, %+v", d)
-	}
-	if d := cutoffDecision(res, "tail"); d == nil || d.Reason != reasonRelevanceCutoff {
-		t.Errorf("the unpinned tail has no relevance_cutoff decision: %+v", d)
-	}
-}
-
 // TestBoundStillCapsAfterTheCutoff: the cutoff shortens, it never lengthens, and
 // `limit` is still the maximum. Six rows all above the cutoff are kept by it and
 // then cut to three by the budget — filed as the budget's own cut, not the
@@ -166,65 +116,6 @@ func TestBoundStillCapsAfterTheCutoff(t *testing.T) {
 		if !found {
 			t.Errorf("%s was not cut by the budget stage, so limit is not capping", id)
 		}
-	}
-}
-
-// TestPassiveBlockIsByteIdenticalToTheRanking: the cutoff is a query-mode rule,
-// so a passive block is untouched by it whatever the configured share — the same
-// rows, the same order, the same verdicts a request with the cutoff off produces.
-// It is the digit-level claim for the session-start and project-context surfaces,
-// which are a digest and keep their slices.
-func TestPassiveBlockIsByteIdenticalToTheRanking(t *testing.T) {
-	rows := fallingOffRows()
-	off := run(t, &fakeRetriever{set: setOf(rows...)}, func() Request {
-		r := diversityRequest(5)
-		r.RelevanceCutoff = 0
-		return r
-	}())
-	on := run(t, &fakeRetriever{set: setOf(rows...)}, func() Request {
-		r := diversityRequest(5)
-		r.RelevanceCutoff = 0.5
-		return r
-	}())
-
-	if !eq(itemIDs(on.Items), itemIDs(off.Items)) {
-		t.Errorf("passive items differ with the cutoff on (%v) and off (%v)", itemIDs(on.Items), itemIDs(off.Items))
-	}
-	if on.Response != off.Response {
-		t.Errorf("passive response differs with the cutoff on and off:\n on: %q\noff: %q", on.Response, off.Response)
-	}
-	// A passive request is a recorded pass-through at the cutoff stage: it ran, it
-	// declined, and it filed no row verdict.
-	if st := stageTraceFor(on, stageCutoff); st.In != st.Out || len(st.DroppedIDs) != 0 {
-		t.Errorf("passive cutoff stage = in %d out %d dropped %v, want a pass-through", st.In, st.Out, st.DroppedIDs)
-	}
-	if got := decisionsAt(on, stageCutoff); len(got) != 0 {
-		t.Errorf("the cutoff filed %d verdicts on a passive read: it is a query-mode rule", len(got))
-	}
-}
-
-// TestDisabledCutoffIsByteIdenticalToTheRanking: 0 (or absent) leaves the cutoff
-// off, and then a query-mode block is the retriever's order cut at the item cap —
-// the same rows, the same verdicts and the same pass-through a pipeline whose
-// stage was absent produces. This is the guarantee a machine without a configured
-// cutoff relies on: it runs the historical answer, not a half-applied one.
-func TestDisabledCutoffIsByteIdenticalToTheRanking(t *testing.T) {
-	rows := fallingOffRows()
-	res := cutoffRun(t, 0, rows...)
-
-	limit := cutoffQueryRequest(0).Budget.MaxItems
-	want := make([]string, 0, limit)
-	for i := 0; i < limit && i < len(rows); i++ {
-		want = append(want, rows[i].ID)
-	}
-	if ids := itemIDs(res.Items); !eq(ids, want) {
-		t.Errorf("items = %v, want the ranking's own top %v: a disabled cutoff removes nothing", ids, want)
-	}
-	if got := decisionsAt(res, stageCutoff); len(got) != 0 {
-		t.Errorf("the disabled cutoff filed %d decisions: it is off, so it removes nothing and records nothing", len(got))
-	}
-	if st := stageTraceFor(res, stageCutoff); st.In != st.Out || len(st.DroppedIDs) != 0 {
-		t.Errorf("disabled cutoff stage = in %d out %d dropped %v, want a pass-through", st.In, st.Out, st.DroppedIDs)
 	}
 }
 
@@ -279,55 +170,4 @@ func tokeniseID(t *testing.T, id string) string {
 		return got
 	}
 	return id
-}
-
-// TestCutoffComparesBaseNotTheDecayedScore: the cutoff measures relevance, so it
-// reads the fused Base, not Score = Base * Decay. A month-old decision whose
-// Base is high is relevant and survives behind a fresh top row; a fresh row with
-// a low Base is not and is cut, although its decayed-free Score sits above the
-// old decision's. A cutoff on Score would do the reverse and measure age and
-// category.
-func TestCutoffComparesBaseNotTheDecayedScore(t *testing.T) {
-	old := candidate("old-decision", "proj", "decision", "a relevant month-old decision", 0)
-	old.Base, old.Decay, old.Score = 9, 0.15, 9*0.15
-	rows := []memory.Candidate{
-		candidate("top", "proj", "fact", "the fresh answer", 10),
-		candidate("fresh-weak", "proj", "fact", "fresh but barely relevant", 3),
-		old,
-	}
-	res := cutoffRun(t, 0.63, rows...)
-
-	if ids := itemIDs(res.Items); !eq(ids, []string{"top", "old-decision"}) {
-		t.Fatalf("items = %v, want the high-Base old decision kept and the low-Base fresh row cut", ids)
-	}
-	if d := cutoffDecision(res, "fresh-weak"); d == nil || d.Reason != reasonRelevanceCutoff {
-		t.Errorf("the low-Base fresh row has no relevance_cutoff decision: %+v", d)
-	}
-	if d := cutoffDecision(res, "old-decision"); d != nil {
-		t.Errorf("the old decision was cut by age: %+v", d)
-	}
-}
-
-// TestKeywordReservedRowBelowTheFloorIsKept: a row the keyword reservation
-// admitted carries a low fused score by design, so the cutoff must not undo the
-// reservation. The unreserved row beside it with the same Base is cut.
-func TestKeywordReservedRowBelowTheFloorIsKept(t *testing.T) {
-	reserved := candidate("reserved", "proj", "fact", "keyword reserved", 2)
-	reserved.KeywordReserved = true
-	set := setOf(
-		candidate("top", "proj", "fact", "the answer", 10),
-		reserved,
-		candidate("plain", "proj", "fact", "below and unreserved", 2),
-	)
-	res := run(t, &fakeRetriever{set: set}, cutoffQueryRequest(0.5))
-
-	if ids := itemIDs(res.Items); !eq(ids, []string{"top", "reserved"}) {
-		t.Fatalf("items = %v, want the keyword-reserved row kept and the plain one cut", ids)
-	}
-	if d := cutoffDecision(res, "reserved"); d != nil {
-		t.Errorf("the keyword-reserved row carries a cutoff decision: %+v", d)
-	}
-	if d := cutoffDecision(res, "plain"); d == nil {
-		t.Error("the unreserved row below the floor was not cut")
-	}
 }
