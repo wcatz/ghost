@@ -176,3 +176,31 @@ func TestSessionStartWithholdsGlobalCoveredByHostInstructions(t *testing.T) {
 		t.Errorf("global tally = %+v, want 1 withheld", tally.globals)
 	}
 }
+
+// TestRenderSessionContextForOpencodeWithholdsAgentsMdRules: the `ghost context`
+// path opencode's plugin calls. With the opencode source, a global restating a
+// rule from the project's AGENTS.md is left out; without a source, it stays.
+func TestRenderSessionContextForOpencodeWithholdsAgentsMdRules(t *testing.T) {
+	dir, dbPath := historicalStore(t)
+	t.Setenv("OPENCODE_CONFIG_DIR", filepath.Join(t.TempDir(), "oc"))
+	writeFile(t, filepath.Join(dir, "AGENTS.md"), sampleInstructions)
+	db, err := memory.OpenDB(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT OR IGNORE INTO projects (id, path, name) VALUES ('_global', '_global', 'global')`); err != nil {
+		t.Fatal(err)
+	}
+	const rule = "NEVER add Co-Authored-By or any AI attribution to commit messages. All commits belong to the user."
+	if _, err := db.Exec(`INSERT INTO memories (id, project_id, category, content, importance, source, pinned) VALUES ('COVERED1', '_global', 'preference', ?, 1.0, 'mcp', 1)`, rule); err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+
+	if plain := RenderSessionContext(dir); !strings.Contains(plain, "COVERED1") {
+		t.Fatalf("without a source the rule must stay:\n%s", plain)
+	}
+	if oc := RenderSessionContextFor(dir, hostevent.SourceOpencode); strings.Contains(oc, "COVERED1") {
+		t.Errorf("opencode block repeats a rule its AGENTS.md already gives it:\n%s", oc)
+	}
+}
