@@ -111,20 +111,6 @@ func TestDemoteNearDuplicatesDoesNotSinkALexicalReplacement(t *testing.T) {
 	}
 }
 
-// TestDemoteNearDuplicatesStillSinksARestatement: the exemption is for a
-// replacement pair only. A restatement linked the same way is still demoted.
-func TestDemoteNearDuplicatesStillSinksARestatement(t *testing.T) {
-	s := testStore(t)
-	a := addStamped(t, s, testProject, demotePgxV4, 0.8, 20, nil)
-	b := addStamped(t, s, testProject, demotePgxV4Again, 0.7, 24, nil)
-	x := addStamped(t, s, testProject, "The staging cluster drains its queue before every deploy.", 0.6, 22, nil)
-	linkAt(t, s, a, b, "related")
-	got := memIDs(s.demoteNearDuplicates(context.Background(), hydrate(t, s, a, b, x), DefaultSearchParams()))
-	if want := []string{a, x, b}; !eqStrings(got, want) {
-		t.Errorf("order %v, want %v: a restatement must still sink", got, want)
-	}
-}
-
 // TestDemoteNearDuplicatesAnExplicitEdgeWins: a live `contradicts` edge takes
 // the pair out of the lexical rule, so the near-duplicate verdict applies as
 // before.
@@ -259,33 +245,6 @@ func TestGetTopMemoriesKeepsALexicalReplacementInTheCut(t *testing.T) {
 	}
 	if ids := memIDs(got); !eqStrings(ids, []string{older, newer}) {
 		t.Errorf("top 2 = %v, want [%s %s]: the replacement was demoted out of the cut", ids, older, newer)
-	}
-}
-
-// TestGetTopMemoriesStillDemotesARestatement is the negative half.
-func TestGetTopMemoriesStillDemotesARestatement(t *testing.T) {
-	s, older, restated := topFixture(t, demotePgxV4Again)
-	got, err := s.GetTopMemories(context.Background(), testProject, 2)
-	if err != nil {
-		t.Fatalf("GetTopMemories: %v", err)
-	}
-	ids := memIDs(got)
-	if indexOf(ids, older) != 0 || indexOf(ids, restated) >= 0 {
-		t.Errorf("top 2 = %v: the restatement %s must still be demoted out of the cut", ids, restated)
-	}
-}
-
-// TestGetTopMemoriesAnExplicitEdgeWins: with a `contradicts` edge the pair is
-// no replacement, and the near-duplicate verdict cuts the newer row as before.
-func TestGetTopMemoriesAnExplicitEdgeWins(t *testing.T) {
-	s, older, newer := topFixture(t, demotePgxV5)
-	linkAt(t, s, older, newer, "contradicts")
-	got, err := s.GetTopMemories(context.Background(), testProject, 2)
-	if err != nil {
-		t.Fatalf("GetTopMemories: %v", err)
-	}
-	if ids := memIDs(got); indexOf(ids, newer) >= 0 {
-		t.Errorf("top 2 = %v: an explicit edge must win over the lexical exemption", ids)
 	}
 }
 

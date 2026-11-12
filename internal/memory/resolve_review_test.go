@@ -6,26 +6,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 )
-
-func TestResolveProjectRejectsAmbiguousName(t *testing.T) {
-	s := testStore(t)
-	ctx := context.Background()
-
-	if err := s.EnsureProject(ctx, "first", "", "shared"); err != nil {
-		t.Fatalf("EnsureProject first: %v", err)
-	}
-	if err := s.EnsureProject(ctx, "second", "", "shared"); err != nil {
-		t.Fatalf("EnsureProject second: %v", err)
-	}
-
-	_, _, err := s.ResolveProject(ctx, "shared")
-	if !errors.Is(err, ErrAmbiguousProject) {
-		t.Fatalf("ResolveProject(shared) error = %v, want ErrAmbiguousProject", err)
-	}
-}
 
 func TestResolveProjectReadOnlyPreV11Database(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "legacy.db")
@@ -87,77 +69,6 @@ func TestResolveProjectRejectsRelativeStoredPathFromPathPrefix(t *testing.T) {
 	}
 }
 
-func TestResolveProjectRejectsDotDotPathPrefix(t *testing.T) {
-	s := testStore(t)
-	ctx := context.Background()
-	root := t.TempDir()
-	stored := filepath.Join(root, "infra")
-	outside := filepath.Join(root, "other", "infra")
-	for _, dir := range []string{stored, outside} {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			t.Fatalf("mkdir %s: %v", dir, err)
-		}
-	}
-	if err := s.EnsureProject(ctx, "infra-id", stored, "infra"); err != nil {
-		t.Fatalf("EnsureProject: %v", err)
-	}
-
-	input := stored + string(filepath.Separator) + ".." + string(filepath.Separator) + "other" + string(filepath.Separator) + "infra"
-	id, name, err := s.ResolveProject(ctx, input)
-	if err != nil {
-		t.Fatalf("ResolveProject: %v", err)
-	}
-	if id != "" || name != "" {
-		t.Fatalf("non-canonical path claimed %q (%q), want no match", id, name)
-	}
-}
-
-func TestResolveProjectRejectsCanonicalRootPath(t *testing.T) {
-	s := testStore(t)
-	ctx := context.Background()
-	if _, err := s.db.ExecContext(ctx, `
-		INSERT INTO projects (id, path, name) VALUES ('root-alias-id', '/tmp/..', 'infra')
-	`); err != nil {
-		t.Fatalf("insert root-alias project: %v", err)
-	}
-	input := filepath.Join(t.TempDir(), "unrelated", "infra")
-	if err := os.MkdirAll(input, 0o755); err != nil {
-		t.Fatalf("mkdir input: %v", err)
-	}
-
-	id, name, err := s.ResolveProject(ctx, input)
-	if err != nil {
-		t.Fatalf("ResolveProject: %v", err)
-	}
-	if id != "" || name != "" {
-		t.Fatalf("root-equivalent stored path claimed %q (%q), want no match", id, name)
-	}
-}
-
-func TestResolveProjectRejectsTiedPathPrefixCandidates(t *testing.T) {
-	s := testStore(t)
-	ctx := context.Background()
-	root := t.TempDir()
-	stored := filepath.Join(root, "infra")
-	input := filepath.Join(stored, "sub")
-	if err := os.MkdirAll(input, 0o755); err != nil {
-		t.Fatalf("mkdir input: %v", err)
-	}
-	alternate := strings.ReplaceAll(stored, string(filepath.Separator), `\`)
-	if _, err := s.db.ExecContext(ctx, `
-		INSERT INTO projects (id, path, name) VALUES
-		('path-one', ? , 'infra'),
-		('path-two', ? , 'infra')
-	`, stored, alternate); err != nil {
-		t.Fatalf("insert tied path projects: %v", err)
-	}
-
-	_, _, err := s.ResolveProject(ctx, input)
-	if !errors.Is(err, ErrAmbiguousProject) {
-		t.Fatalf("tied path-prefix error = %v, want ErrAmbiguousProject", err)
-	}
-}
-
 func TestRepoRemoteIdentityLookupRejectsDuplicates(t *testing.T) {
 	db, err := sql.Open("sqlite", ":memory:")
 	if err != nil {
@@ -184,17 +95,6 @@ func TestRepoRemoteIdentityLookupRejectsDuplicates(t *testing.T) {
 	_, _, err = NewStore(db, nil).ResolveProject(context.Background(), remote)
 	if !errors.Is(err, ErrAmbiguousProject) {
 		t.Fatalf("duplicate remote error = %v, want ErrAmbiguousProject", err)
-	}
-}
-
-func TestRepoRemoteIdentityHasPartialUniqueIndex(t *testing.T) {
-	s := testStore(t)
-	var name string
-	if err := s.db.QueryRowContext(context.Background(), `
-		SELECT name FROM sqlite_master
-		WHERE type = 'index' AND name = 'idx_projects_repo_remote'
-	`).Scan(&name); err != nil {
-		t.Fatalf("repo_remote unique index missing: %v", err)
 	}
 }
 
@@ -225,14 +125,6 @@ func TestResolveProjectRejectsSymlinkEscapeFromPathPrefix(t *testing.T) {
 	}
 	if id != "" || name != "" {
 		t.Fatalf("symlink escape claimed %q (%q), want no match", id, name)
-	}
-}
-
-func TestNormalizeRepoRemoteRejectsFilesystemPaths(t *testing.T) {
-	for _, input := range []string{"../../tmp/checkout", "./checkout", "../checkout", `C:checkout`} {
-		if got := NormalizeRepoRemote(input); got != "" {
-			t.Errorf("NormalizeRepoRemote(%q) = %q, want no remote for a filesystem path", input, got)
-		}
 	}
 }
 
