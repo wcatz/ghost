@@ -378,7 +378,8 @@ func CheckImportedID(id string) error {
 	return nil
 }
 
-// line-ending class.
+// CheckImportedProjectID is CheckImportedID for a project's id, and it is
+// deliberately WEAKER on two counts: a space is allowed, and so is any length.
 func CheckImportedProjectID(id string) error {
 	if unprintableInIdentifier(id, false) != "" {
 		return fmt.Errorf("project id must hold no control character, line separator, backtick or data delimiter — it is printed inside backticks " +
@@ -403,6 +404,7 @@ func CheckImportedProjectText(field, value string) error {
 	return nil
 }
 
+// unprintableInIdentifier returns "" when s holds nothing that can end a rendered
 // line, a backtick span or a «...» data block, and the reason otherwise.
 func unprintableInIdentifier(s string, spaces bool) string {
 	for _, r := range s {

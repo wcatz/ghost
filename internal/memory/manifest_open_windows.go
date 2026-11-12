@@ -4,5 +4,5 @@ package memory
 
 import "os"
 
-// manifestOpenFlags creates or opens a manifest sidecar for writing.
+// manifestOpenFlags are the flags a manifest sidecar is created with.
 const manifestOpenFlags = os.O_CREATE | os.O_WRONLY

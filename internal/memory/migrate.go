@@ -13,7 +13,8 @@ const schemaVersion = 31
 
 func SchemaVersion() int { return schemaVersion }
 
-// export holds, and it deliberately does not migrate: the caller opening
+// DBUserVersion reads PRAGMA user_version off an open database, which is the
+// schema version a store is actually at.
 func DBUserVersion(db *sql.DB) (int, error) { return dbUserVersion(db) }
 
 func dbUserVersion(q Queryer) (int, error) {
@@ -918,7 +919,8 @@ func migrateV19(tx *sql.Tx) error {
 	return nil
 }
 
-// line, and a v20 written in 2027 would still create v20's table. The stamp and
+// migrateV20 adds the retrieval record: one row per retrieval call, holding what
+// the call retrieved and what it kept (#646).
 func migrateV20(tx *sql.Tx) error {
 	if err := refuseForeignRetrievalRecordTable(tx); err != nil {
 		return err

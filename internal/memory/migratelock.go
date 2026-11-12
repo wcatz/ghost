@@ -7,7 +7,8 @@ import (
 
 func migrationLockPath(dbPath string) string { return dbPath + ".migrate.lock" }
 
-// acquireMigrationLock takes the per-database migration lock and returns a release function.
+// acquireMigrationLock blocks until this caller holds the migration lock for
+// dbPath, and returns the function that releases it.
 func acquireMigrationLock(dbPath string) (func(), error) {
 	if dbPath == ":memory:" {
 		return func() {}, nil
