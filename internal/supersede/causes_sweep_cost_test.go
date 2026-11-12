@@ -8,10 +8,6 @@ import (
 )
 
 // countingCausesStore records every 'causes' invalidation the pass ISSUES, not
-// every one that moves a row. `causesTakenStore` in reassess_sweep_test.go counts
-// the other half — what moved — and the two halves are the same distinction the
-// row itself draws between CausesDroppable and CausesDropped. This one exists for
-// the third question: how many writes the pass was willing to make at all.
 type countingCausesStore struct {
 	*memory.Store
 	calls []string
@@ -25,28 +21,11 @@ func (c *countingCausesStore) InvalidateLink(ctx context.Context, sourceID, targ
 }
 
 // TestTheCausesSweepIsSkippedWhereThereIsNothingToSweep is the cost half of the
-// gated reverse sweep in the CAUSES branch, and the two halves are separate tests
-// because they are separate claims.
-//
-// The correctness half is TestACausesCycleIsSettledRatherThanFrozen: a gated
-// sweep has to DROP the cycle's other edge, or the pair stays a contradiction. This
-// one is about the other side — an UNGATED sweep reaches InvalidateLink for a pair
-// whose graph holds nothing in that direction, and every call is a write attempt
-// inside the pass's transaction: a second round trip per CAUSES verdict on the
-// ordinary agreeing pair, which is the pair shape the pass produces most of.
-//
-// Nothing observable in the RESULT distinguishes the two, which is exactly why the
-// claim needs its own probe rather than a bigger assertion on a shared fixture: a
-// mutation that ungates the sweep changes the write count and nothing else, and an
-// assertion made only from counters would not notice.
 func TestTheCausesSweepIsSkippedWhereThereIsNothingToSweep(t *testing.T) {
 	store, db := seed(t)
 	ctx := context.Background()
 
 	// The ORDINARY shape: one live 'causes' edge, already running the way a
-	// CAUSES verdict writes it, and stamped old so the pair is re-judged. This is
-	// not seedCausesCycle — a cycle is the shape where the sweep is LOAD-BEARING,
-	// and this test is about the pair where there is nothing to sweep.
 	newer, older := add(t, store, db, "the restore is being rewritten to run on one spindle", []float32{1, 0, 0}, "2026-09-01 00:00:00"),
 		add(t, store, db, "the restore path on one spindle is safe and fast", []float32{0.98, 0.02, 0}, "2026-01-01 00:00:00")
 	if err := store.CreateLinkJudged(ctx, older, newer, string(RelationCauses), 0.9, "llm", "2020-01-01 00:00:00"); err != nil {

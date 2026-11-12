@@ -10,18 +10,6 @@ import (
 )
 
 // seedCycle writes the CYCLE a pass before #778 could leave: both directions of
-// one pair live, each a real graph row, over two memories whose timestamps DO
-// order them. The pair is the #641 shape, and both edges are the state the
-// creation pass now refuses outright (Result.Bidirectional) and names
-// `ghost supersede --reassess --apply` as the repair — so the repair has to be
-// able to do it, or the advertised command is a dry run that changes nothing.
-//
-// fixFirst chooses which edge is written first, and therefore which one the
-// store hands back first. That order is not a promise — LinksByRelationSource
-// has no ORDER BY — and the pass must not read it as a direction, so every
-// assertion about a cycle is written over BOTH orders. That is what keeps a
-// pass which happens to agree with this machine's row order from passing for the
-// right reason.
 func seedCycle(t *testing.T, store *memory.Store, db *sql.DB, staleText, fixText string, fixFirst bool) (stale, fix string) {
 	t.Helper()
 	ctx := context.Background()
@@ -43,12 +31,6 @@ func seedCycle(t *testing.T, store *memory.Store, db *sql.DB, staleText, fixText
 }
 
 // linkOrderStore hands Reassess the live edges in a chosen order. It exists
-// because "the store's row order is not a promise" is only testable if a test can
-// CHOOSE the order: the shipped query has no ORDER BY and in practice returns the
-// edge whose source id sorts first, which on random hex ids is a coin flip — so a
-// test that relied on it would pin one side of that flip or the other, and a pass
-// that read the order as a direction would pass half the time for the wrong
-// reason. Every cycle assertion therefore runs on both.
 type linkOrderStore struct {
 	*memory.Store
 	reversed bool
@@ -78,10 +60,6 @@ var cycleOrders = []struct {
 }
 
 // outcomeForEdge is the CycleOutcome that names a given live edge as the one
-// that stands, read off the pair the pass reported. The constants name a
-// POSITION in the pair, and the position is the store's row order, so a test
-// pins the constant that matches the edge that survived rather than a position
-// it read from the store first.
 func outcomeForEdge(t *testing.T, c CyclicPair, edge [2]string) CycleOutcome {
 	t.Helper()
 	switch edge {
@@ -106,10 +84,6 @@ func liveEdges(t *testing.T, store *memory.Store, ids ...string) [][2]string {
 }
 
 // liveCausesEdges reads the live 'causes' edges touching any of ids, as the graph
-// holds them. 'causes' is written older→newer, the reverse of 'supersedes', so a
-// withdrawal of stale→fix is the one whose sweep takes fix→stale — and getting
-// that backwards is what a sweep test has to be able to see, which is why the
-// reader returns the direction rather than a count.
 func liveCausesEdges(t *testing.T, store *memory.Store, ids ...string) [][2]string {
 	t.Helper()
 	seen := make(map[[2]string]bool)
@@ -134,9 +108,6 @@ func liveCausesEdges(t *testing.T, store *memory.Store, ids ...string) [][2]stri
 }
 
 // seedCauses writes a live 'causes'/'llm' edge, which is what a withdrawal
-// sweeps: a 'causes' link pointing INTO a note the pass just decided is still
-// current asserts the opposite of that decision, and 'causes' runs older→newer,
-// so the edge is (older of the supersedes edge, newer of it).
 func seedCauses(t *testing.T, store *memory.Store, from, to string) {
 	t.Helper()
 	if err := store.CreateLink(context.Background(), from, to, string(RelationCauses), 0.9, "llm"); err != nil {
@@ -145,15 +116,6 @@ func seedCauses(t *testing.T, store *memory.Store, from, to string) {
 }
 
 // TestReassessJudgesACycleOnceAndWithdrawsTheEdgeItsVerdictDenies is the reason
-// the advertised repair works. Reassess used to load every live edge and judge
-// each as an INDEPENDENT candidate, so a pair claimed in both directions was
-// asked the same question twice — and, with a classifier that cannot decline a
-// direction, both answers were SUPERSEDES and the cycle survived the repair that
-// exists to remove it, silently: Confirmed 2, Withdrawn 0.
-//
-// The pass now judges the UNORDERED pair once, in the orientation the timestamps
-// give it, and a verdict that names a direction keeps exactly that edge and
-// withdraws the one asserting the opposite.
 func TestReassessJudgesACycleOnceAndWithdrawsTheEdgeItsVerdictDenies(t *testing.T) {
 	for _, order := range cycleOrders {
 		t.Run(order.name, func(t *testing.T) {
@@ -179,11 +141,6 @@ func TestReassessJudgesACycleOnceAndWithdrawsTheEdgeItsVerdictDenies(t *testing.
 				t.Fatalf("Cyclic = %d pair(s), want 1: the report has to name the cycle, because a withdrawn count alone cannot show that a cycle was found", len(res.Cyclic))
 			}
 			// The classifier confirmed whatever direction it was asked about, and
-			// the direction asked about is the newer→older one by updated_at: the
-			// fix's own claim about the stale bug list. So THAT edge stands — in
-			// either row order, since the pass reads the timestamps and not the
-			// store's row order — and its reverse, the edge asserting the opposite,
-			// is withdrawn.
 			edges := liveEdges(t, base, stale, fix)
 			if len(edges) != 1 || edges[0] != [2]string{fix, stale} {
 				t.Fatalf("live supersedes edges = %v, want exactly [%s %s]: a cycle that survives the repair still demotes BOTH endpoints", edges, fix, stale)
@@ -208,12 +165,6 @@ func TestReassessJudgesACycleOnceAndWithdrawsTheEdgeItsVerdictDenies(t *testing.
 }
 
 // TestReassessReversedVerdictOnACycleKeepsTheOtherEdge: the mirror, and the case
-// that shows the pass is reading the verdict rather than counting verdicts. Asked
-// about fix→stale, a REVERSED verdict says the OLDER note (the stale bug list) is
-// the current one — which is what the stale→fix edge asserts. So the edge the
-// verdict names stands and the one it was asked about is withdrawn; a pass that
-// withdrew both on REVERSED would delete the correct claim along with the wrong
-// one and leave nothing.
 func TestReassessReversedVerdictOnACycleKeepsTheOtherEdge(t *testing.T) {
 	for _, order := range cycleOrders {
 		t.Run(order.name, func(t *testing.T) {
@@ -253,11 +204,6 @@ func TestReassessReversedVerdictOnACycleKeepsTheOtherEdge(t *testing.T) {
 }
 
 // TestReassessWithdrawsBothEdgesOfACycleTheVerdictDoesNotSupport: NEITHER and
-// CAUSES say the two notes are not a replacement of one another — in EITHER
-// direction, which is the only thing a verdict that declines to name a direction
-// can mean about a pair that has an edge in both. Both go: an edge left live
-// asserts what the verdict just denied, and a cycle is the version of that where
-// neither endpoint is reachable.
 func TestReassessWithdrawsBothEdgesOfACycleTheVerdictDoesNotSupport(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -296,16 +242,6 @@ func TestReassessWithdrawsBothEdgesOfACycleTheVerdictDoesNotSupport(t *testing.T
 }
 
 // TestReassessWithdrawsNeitherEdgeOfAnUndecidedCycle: the state where the pass
-// CANNOT decide, and the one that has to be loud. A missing verdict, and a pair
-// whose two rows share both timestamps so no direction is knowable at all, both
-// leave the graph exactly as they found it: there is no verdict to act on, and
-// withdrawing a half of a cycle on a hunch would be a claim this pass cannot
-// make. The cycle is still demoting both endpoints, so the report has to say so
-// and hand the operator the commands that settle it.
-//
-// This is the branch the timestamp tie and the unanswerable call share, and it
-// is the one the creation pass's own rule points at: #778 made Run refuse to
-// propose a direction it cannot know, and the repair refuses to invent one too.
 func TestReassessWithdrawsNeitherEdgeOfAnUndecidedCycle(t *testing.T) {
 	t.Run("no verdict", func(t *testing.T) {
 		store, db := seed(t)
@@ -354,10 +290,6 @@ func TestReassessWithdrawsNeitherEdgeOfAnUndecidedCycle(t *testing.T) {
 }
 
 // assertUndecidedCycle is the shared shape of the two outcomes that decide
-// NOTHING: nothing withdrawn, the cycle reported, both edges still live. The
-// outcome differs, and it is the one thing that tells the operator whether a re-run
-// answers it or only they do — so the caller names which of the two it is looking
-// at, rather than the test reading one sentence that claimed to be both.
 func assertUndecidedCycle(t *testing.T, store *memory.Store, res ReassessResult, withdrawn []WithdrawnEdge, a, b string, outcome CycleOutcome) {
 	t.Helper()
 	if res.Withdrawn != 0 || len(withdrawn) != 0 {
@@ -376,9 +308,6 @@ func assertUndecidedCycle(t *testing.T, store *memory.Store, res ReassessResult,
 }
 
 // TestReassessLeavesAnOrdinaryEdgeAloneWhileRepairingACycle: the cycle rule is
-// narrow on purpose. An ordinary edge in the same project is still judged as its
-// own candidate and answered by the same verdict function, so a fix that treated
-// every pair as a cycle (or grouped the wrong rows together) fails here.
 func TestReassessLeavesAnOrdinaryEdgeAloneWhileRepairingACycle(t *testing.T) {
 	store, db := seed(t)
 	ctx := context.Background()
@@ -441,22 +370,6 @@ func TestReassessCycleSurvivesADryRunUnwritten(t *testing.T) {
 
 // TestReassessSweepsTheCausesEdgeOfEveryCycleWithdrawalItDenies is the
 // both-relations sweep on a cycle, and it is quieter here than it is for an
-// ordinary edge — which is the whole reason it needs its own test.
-// InvalidateLink writes a history row for a 'supersedes' edge and NONE for a
-// 'causes' one, so a cycle withdrawal that drops its sweep deletes a second graph
-// row with nothing in memory_history to show it ever happened, and a review found
-// two mutations that turned the sweep off without any test noticing: one on the
-// SUPERSEDES branch and one on the second row of the NEITHER branch.
-//
-// Three shapes, because the sweep is a per-ROW decision and each row's arm
-// differs:
-//
-//   - SUPERSEDES keeps one edge and denies the other: that row sweeps.
-//   - NEITHER denies both: BOTH rows sweep, and each sweeps the 'causes' edge
-//     running the other way, so a pair holding two of them loses both.
-//   - CAUSES denies both but sweeps NEITHER, because a causes verdict AFFIRMS that
-//     relation — the same rule the ordinary path follows, and the one a "sweep
-//     everything on a cycle" simplification would break.
 func TestReassessSweepsTheCausesEdgeOfEveryCycleWithdrawalItDenies(t *testing.T) {
 	t.Run("one edge denied, its causes edge swept", func(t *testing.T) {
 		base, db := seed(t)
@@ -466,11 +379,6 @@ func TestReassessSweepsTheCausesEdgeOfEveryCycleWithdrawalItDenies(t *testing.T)
 			"bug: the relay stalls on every consumer rebalance",
 			"the relay rebalance stall is fixed: pin the consumer", false)
 		// The denied edge is stale→fix, so the 'causes' edge its withdrawal
-		// sweeps is fix→stale: 'causes' runs older→newer, and the sweep is
-		// InvalidateLink(older, newer). Both are seeded, so the assertion can also
-		// see that the KEPT edge's own 'causes' counterpart survives — only the
-		// denied edge sweeps, and a 'causes' edge pointing INTO the note the
-		// verdict affirmed may well be true.
 		seedCauses(t, base, fix, stale)
 		seedCauses(t, base, stale, fix)
 
@@ -534,9 +442,6 @@ func TestReassessSweepsTheCausesEdgeOfEveryCycleWithdrawalItDenies(t *testing.T)
 		seedCauses(t, base, stale, fix)
 
 		// REVERSED names the note the pass was asked ABOUT as the obsolete one, so
-		// the row it withdraws is the edge in the JUDGED direction — the mirror of
-		// the SUPERSEDES arm, and a different row, which is why it needs its own
-		// assertion rather than a shared one.
 		res, withdrawn, err := Reassess(ctx, store, &mockClassifier{verdict: func(string, string) Relation { return RelationReversed }}, "p", true, discardLogger())
 		if err != nil {
 			t.Fatalf("Reassess: %v", err)
@@ -593,9 +498,6 @@ func TestReassessSweepsTheCausesEdgeOfEveryCycleWithdrawalItDenies(t *testing.T)
 	})
 
 	// A DRY RUN is the other half of the sweep's contract: an operator deciding
-	// about --apply is deciding about that second deletion too, and this reads it
-	// through a different code path from the --apply sweep above (a GetLinks
-	// prediction rather than the invalidation's own count).
 	t.Run("a dry run predicts the sweep it would perform", func(t *testing.T) {
 		base, db := seed(t)
 		store := linkOrderStore{Store: base, reversed: false}

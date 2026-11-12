@@ -20,36 +20,6 @@ import (
 )
 
 // This file is #806: two CONCURRENT `ghost supersede <project> --apply` passes,
-// and whether they can both write their half of a supersedes cycle.
-//
-// The three rules #778 added all work inside ONE pass: a pair is proposed once,
-// a live edge's direction beats the scan's, and a pair already claimed both ways
-// is refused outright. Nothing in them says anything about two passes, because
-// each of the three is decided from what THIS pass read — and `ghost supersede`
-// is a command, not a daemon, so two operators (or an operator and the
-// stop-hook's lifecycle phase, with auto_supersede on) can run one each.
-//
-// The window is real and it is wide. A pass reads the live edges, runs a scan,
-// and spends a classify call — seconds to minutes — before its first write. Two
-// passes that read the same empty graph and scan the same pair in OPPOSITE
-// directions both find nothing to refuse, and both then write: a cycle, whose two
-// edges each demote the endpoint the other promotes, so both memories of the pair
-// drop out of ranked injection and neither edge withdraws the other. That is the
-// shape #778 found in a real store, and the only thing missing was a second
-// process to write the other half in the same run.
-//
-// Opposite orientations are not free, which is what makes this narrow rather
-// than constant: they need an endpoint's updated_at to move between the two
-// scans, because that is the chronology orient() reads. A tag edit through a
-// live `ghost mcp` moves it, and so does anything else that touches a row's
-// metadata without touching its text. The fixture below makes that edit between
-// the two scans, from the parent, on purpose — the race is the point, so it is
-// staged rather than waited for.
-//
-// The fix is at the store, not in the CLI: the reverse edge is re-checked inside
-// the write transaction that creates the edge, which is the only place two
-// processes can be serialised against each other without either of them taking a
-// lock the other has to know about (see the store method's doc comment).
 
 // TestMain owns the temp dir the child program is built into. The build itself
 // is lazy (applyRaceHelper), so a -run filter that selects no multi-process test
@@ -74,9 +44,6 @@ var (
 )
 
 // applyRaceHelper builds the child program once per test binary and returns its
-// path. A build failure is a test failure, never a skip: the alternative is a
-// suite that silently stops covering the case on any machine whose toolchain
-// cannot build it.
 func applyRaceHelper(t *testing.T) string {
 	t.Helper()
 	applyRaceOnce.Do(func() {
@@ -88,9 +55,6 @@ func applyRaceHelper(t *testing.T) string {
 		cmd := exec.Command("go", "build", "-o", applyRacePath, "./testdata/applyrace")
 		cmd.Dir = "."
 		// The module cache and build cache are the ambient ones, as in
-		// internal/memory's multi-process helper: a test may use the toolchain's
-		// cache and must not redirect it somewhere it would be wiped between the
-		// two invocations.
 		if out, err := cmd.CombinedOutput(); err != nil {
 			applyRaceBuildErr = fmt.Errorf("go build ./testdata/applyrace: %v\n%s", err, out)
 		}
@@ -112,10 +76,6 @@ type applyRaceReport struct {
 	Refused   int         `json:"refused"`
 	Opposite  int         `json:"opposite_live"`
 	// CausesCreated mirrors the child's `causes_created`: the two relations are
-	// written through different writers, so one total cannot say which of them a
-	// pass reached for. It counts VERDICTS, and CausesWritten mirrors the child's
-	// `causes_written` so a parent can tell the two apart — the race this harness
-	// stages is the one state where they differ (#834).
 	CausesCreated int    `json:"causes_created"`
 	CausesWritten int    `json:"causes_written"`
 	Error         string `json:"error"`
@@ -131,24 +91,12 @@ type applyRaceChild struct {
 }
 
 // applyRaceBarrierTimeout bounds each of the parent's waits for a child to reach
-// a state. It is a deadlock backstop, not a performance budget: the child
-// announces itself within milliseconds of starting and the parent releases it
-// within milliseconds of that, and a child that is never released is a failed
-// run, which the timeout turns into a named failure instead of a hung binary.
 const applyRaceBarrierTimeout = 60 * time.Second
 
 // TestTwoApplyPassesCannotWriteACycle is the reproduction and the guard in one:
-// two real processes, two real stores on one file, the shipped pass, and a
-// classifier that answers SUPERSEDES to whatever direction it is handed — the
-// hostile input #778 measured, used here because the CLASSIFIER IS NOT THE
-// VARIABLE. Both passes get an answer that says yes; the question is whether the
-// graph can end up holding both of them.
 func TestTwoApplyPassesCannotWriteACycle(t *testing.T) {
 	if testing.Short() {
 		// It builds a helper program and starts two processes, which is more
-		// than a unit test should cost. It makes no LLM call of any kind, so
-		// unlike the harness suites it needs no GHOST_LIVE_TESTS: the expensive
-		// part is the process count, and that is what -short opts out of here.
 		t.Skip("multi-process test: builds a helper binary and spawns processes; skipped under -short")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*applyRaceBarrierTimeout)
@@ -180,30 +128,15 @@ func TestTwoApplyPassesCannotWriteACycle(t *testing.T) {
 		t.Fatalf("%v", err)
 	}
 	// The edit that flips the pair's chronology, between the two scans. A TAG
-	// edit and not a content one, because that is what a live `ghost mcp` does
-	// to a note nobody rewrote — and because a content edit would delete the
-	// row's embedding, which would remove it from the second pass's scan and
-	// quietly turn this into a test of a different thing (a pair neither pass
-	// proposes is a test that passes for the wrong reason).
-	//
-	// Nothing about this write is illegal or unusual. It is a note being
-	// retagged while a maintenance pass is mid-flight, which is the ordinary
-	// reason a pass's snapshot is stale by the time it writes.
 	retag(t, store, stale)
 
 	// Pass two, started after that edit: same graph, same corpus, and now the
-	// OTHER orientation. It is held at its own classify call too, so its read of
-	// the graph still predades the first pass's write — which is what makes the
-	// two writes race rather than queue.
 	second := startApplyPass(ctx, t, db, barrier, home, "second")
 	if err := waitApplyBarrier(barrier, "second-asked"); err != nil {
 		t.Fatalf("%v", err)
 	}
 
 	// Release the first pass and wait for it to be gone before releasing the
-	// second, so the order the two writes reach the graph in is defined rather
-	// than left to the scheduler: the second pass's write is the one that must
-	// find the first pass's edge already there.
 	releaseApplyPass(barrier, "first")
 	firstReport := first.wait(t)
 	releaseApplyPass(barrier, "second")
@@ -236,9 +169,6 @@ func TestTwoApplyPassesCannotWriteACycle(t *testing.T) {
 			edges)
 	}
 	// The pass that lost the race is told so rather than left to report a link
-	// it did not write: one pass wrote the edge, the other had a verdict about a
-	// pair that was no longer unclaimed, and a report that said "linked" for both
-	// would be claiming a graph change one of them did not make.
 	wrote, refused := 0, 0
 	for _, rep := range []applyRaceReport{firstReport, secondReport} {
 		wrote += rep.Created
@@ -254,24 +184,6 @@ func TestTwoApplyPassesCannotWriteACycle(t *testing.T) {
 }
 
 // TestTwoApplyPassesCannotWriteACausesCycle is #823's half of the same race, and
-// it is a separate test rather than a table row because the harm is a different
-// one: two 'causes' edges demote nothing, so what two concurrent passes produce
-// is not a pair that drops out of ranking but a pair whose two notes are recorded
-// as having caused each other — a contradiction a reader of the graph cannot
-// resolve and no repair can see, because `--reassess` loads live 'supersedes'
-// edges only.
-//
-// Everything else is the shape above, unchanged and for the same reasons: two real
-// processes, one file, a barrier held inside the classify call, and a retag
-// between the two scans to make them read the pair in opposite directions. The
-// direction the retag flips matters for 'causes' as it does for 'supersedes' — the
-// pair's chronology is what the scan orients by either way — and the child writes
-// its 'causes' edge in the orientation it was asked about, which is the orientation
-// that moved.
-//
-// The refusal is the store's, inside the write transaction, and the loser is told
-// so. Both halves matter: a pass that wrote nothing and said nothing would look
-// exactly like a pass that found nothing.
 func TestTwoApplyPassesCannotWriteACausesCycle(t *testing.T) {
 	if testing.Short() {
 		t.Skip("multi-process test: builds a helper binary and spawns processes; skipped under -short")
@@ -331,10 +243,6 @@ func TestTwoApplyPassesCannotWriteACausesCycle(t *testing.T) {
 			edges)
 	}
 	// The edge that stands is the FIRST writer's, in 'causes' convention: the pass
-	// asked about (newer, older) and wrote (older → newer), because a cause
-	// precedes its effect. A graph holding the other pass's direction would be the
-	// same state reached by a different route, and this test is about which write
-	// landed, so the direction is checked rather than inferred from the count.
 	wantEdge := [2]string{earlyReport.Asked[0][1], earlyReport.Asked[0][0]}
 	if edges[0] != wantEdge {
 		t.Errorf("live 'causes' edges = %v, want the first writer's direction %v ('causes' is written older → newer, and it asked about %v)",
@@ -342,12 +250,6 @@ func TestTwoApplyPassesCannotWriteACausesCycle(t *testing.T) {
 	}
 
 	// Both passes reached a verdict, and exactly one write landed — so this is
-	// the one fixture where the two counters disagree, and the disagreement is
-	// the whole of #834. CausesCreated counts VERDICTS (2) and CausesWritten
-	// counts WRITES (1), so a report can count the writes and the dry-run hint
-	// can keep counting the verdicts. Before CausesWritten existed the only way
-	// to say "one edge was written" here was to subtract the refusals, which is
-	// a report re-deriving a fact the pass already had.
 	verdicts, written, refused := 0, 0, 0
 	for _, rep := range []applyRaceReport{earlyReport, lateReport} {
 		verdicts += rep.CausesCreated
@@ -367,9 +269,6 @@ func TestTwoApplyPassesCannotWriteACausesCycle(t *testing.T) {
 			refused, earlyReport, lateReport)
 	}
 	// And the two disagree by exactly the refusal, which is the relation #834
-	// turned on: CausesCreated is the verdict count the dry-run hint keys off,
-	// CausesWritten is what the graph gained, and the difference is the one pair
-	// the store refused.
 	if verdicts-written != refused {
 		t.Errorf("verdicts %d - writes %d = %d, want the %d refused write(s): the write count and the verdict count differ by the refusals and by nothing else (%+v / %+v)",
 			verdicts, written, verdicts-written, refused, earlyReport, lateReport)
@@ -393,10 +292,6 @@ func seedSharedStore(t *testing.T, path string) (*sql.DB, *memory.Store) {
 }
 
 // retag moves a memory's updated_at without touching its text, which is what an
-// ordinary edit through a live `ghost mcp` does to a note nobody rewrote. The
-// tag is a real change, so the write is a real one — nothing here pokes the
-// column directly, because a fixture that rewrites updated_at behind the store's
-// back would also be a fixture that proved nothing about what the store does.
 func retag(t *testing.T, store *memory.Store, id string) {
 	t.Helper()
 	if err := store.UpdateMemory(context.Background(), "p", id, nil, nil, nil, []string{"retagged-mid-pass"}); err != nil {
@@ -405,19 +300,11 @@ func retag(t *testing.T, store *memory.Store, id string) {
 }
 
 // startApplyPass spawns one `ghost supersede <project> --apply` pass against the
-// shared database. Its HOME family and both XDG roots point into the test's temp
-// dir, so a code path inside the child that reaches for the user's real profile —
-// a config lookup, a data dir — finds nothing there instead of reading or
-// writing the machine's actual Ghost install. The database is passed by path, so
-// nothing in this test needs the real one; the guard is what keeps it that way.
 func startApplyPass(ctx context.Context, t *testing.T, db, barrier, home, label string) *applyRaceChild {
 	return startApplyPassAnswering(ctx, t, db, barrier, home, label, "supersedes")
 }
 
 // startApplyPassAnswering is startApplyPass with the relation the child's fake
-// classifier answers, which is the only difference between the two races this
-// file stages: the interleaving, the barrier and the retag are the same, and only
-// the write under test differs.
 func startApplyPassAnswering(ctx context.Context, t *testing.T, db, barrier, home, label, verdict string) *applyRaceChild {
 	t.Helper()
 	c := &applyRaceChild{
@@ -447,9 +334,6 @@ func startApplyPassAnswering(ctx context.Context, t *testing.T, db, barrier, hom
 }
 
 // wait collects one child's report. The report is parsed even when the process
-// failed: a child that dies still prints what it saw, and that is the only place
-// the reason exists — dropping it on a non-zero exit would leave "exit status 1"
-// as the whole diagnosis.
 func (c *applyRaceChild) wait(t *testing.T) applyRaceReport {
 	t.Helper()
 	select {
@@ -475,9 +359,6 @@ func releaseApplyPass(barrier, label string) {
 }
 
 // waitApplyBarrier blocks until a pass has announced that it has read the graph
-// and reached its classify call, which is the state the run depends on. It names
-// the barriers already present when it gives up, because "which of the two passes
-// got that far" is the question a failure of this test raises.
 func waitApplyBarrier(dir, name string) error {
 	deadline := time.Now().Add(applyRaceBarrierTimeout)
 	for {
@@ -498,9 +379,6 @@ func waitApplyBarrier(dir, name string) error {
 }
 
 // TestApplyPassWritesAnEdgeWhenNothingOpposesIt is the other half, and it is here
-// because a guard that refuses everything would pass the test above. One pass, no
-// concurrent writer, one pair: the edge is written, in the direction the
-// timestamps gave, and the pass says it linked it.
 func TestApplyPassWritesAnEdgeWhenNothingOpposesIt(t *testing.T) {
 	if testing.Short() {
 		t.Skip("multi-process test: builds a helper binary and spawns processes; skipped under -short")

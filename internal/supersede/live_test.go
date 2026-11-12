@@ -1,12 +1,4 @@
 // internal/supersede/live_test.go
-//
-// The labeled eval for the supersedes classifier (issue #686). An independent
-// judge graded every edge one real v0.35.0 dry run proposed over a real project
-// store — 253 candidate pairs, 32 proposed supersedes edges — and measured 43%
-// precision, with every wrong edge a pair whose two notes are BOTH still true.
-// The fix has to be measured, not asserted, so this set scores the shipped
-// decision (the deterministic veto, then the prompt, then the parser) against
-// labels drawn from the classes that judge named.
 package supersede
 
 import (
@@ -20,26 +12,12 @@ import (
 )
 
 // liveEvalNewerCreated and liveEvalOlderCreated are synthetic stamps carried by
-// every fixture below. Only their order matters, and every fixture is written so
-// the newer note really is the later one: the reversed-direction question
-// (#641) is scored by its own labeled set, not by mixing a stale note into a
-// precision measurement.
 const (
 	liveEvalNewerCreated = "2026-07-02 10:15:00"
 	liveEvalOlderCreated = "2026-05-11 08:40:00"
 )
 
 // supersedeEvalCase is one labeled pair. `want` is one of two verdicts —
-// SUPERSEDES or NEITHER — because precision is the number the harm is measured
-// in: of the edges the pass would write, how many retire a claim that is
-// genuinely false. A REVERSED or CAUSES answer to one of these is a recall miss
-// and is scored as such, never as a false positive, because it writes no
-// supersedes edge.
-//
-// `veto` records that VetoSupersede settles the pair before any call. It is a
-// property of the fixture text, not of the model, and the non-live
-// TestSupersedeEvalFixturesAgreeWithTheVeto holds it to the production
-// function.
 type supersedeEvalCase struct {
 	name  string
 	class string
@@ -50,15 +28,6 @@ type supersedeEvalCase struct {
 }
 
 // liveSupersedeCases is the labeled set: 14 true supersessions and 18 pairs
-// whose two notes are both still true, drawn from the classes the judge named
-// (#686's 14, plus #779's four).
-//
-// The text is synthetic — an invented ingest/pricing/ledger service estate with
-// invented versions, ports and hosts. No real memory text goes into the repo,
-// and a real note would be a poor fixture anyway: the classes that matter here
-// are shapes (an addendum, a restatement, a partial fix of one detail in a
-// many-fact note), and a shape has to be free of the real corpus's accidental
-// overlap with the model to be a measurement of anything.
 var liveSupersedeCases = []supersedeEvalCase{
 	// ---- true supersessions: the older note's claim stops being true ----
 	{
@@ -263,16 +232,6 @@ var liveSupersedeCases = []supersedeEvalCase{
 	},
 
 	// ---- #779's four measured classes, one fixture each ----
-	//
-	// #686's set asked whether two notes can both be true. These four ask the
-	// harder question that 55% precision over 108 distinct proposals on three
-	// more real stores turned up: both notes are still true AND the newer one is
-	// plainly about the older one, so a classifier reading for "did this change
-	// that?" reaches SUPERSEDES. They are in this file rather than only in a
-	// unit test because they are the fixtures the live eval scores against a
-	// real harness, and a rubric clause with no labeled pair under it is a
-	// clause nothing measures. The class strings are the four classes the issue
-	// names, so the by-class table in the eval report reads back the issue.
 	{
 		name:  "partial-claim",
 		class: "#779: a partial-claim supersession (one claim of four retired)",
@@ -291,10 +250,6 @@ var liveSupersedeCases = []supersedeEvalCase{
 		name:  "recurring-defect",
 		class: "#779: a recurring defect read as a fix chain",
 		// The same index name appears in both notes, deliberately and in full: the
-		// class IS a defect seen twice, and a fixture that paraphrased the second
-		// sighting would not be the shape the rule is about. A duplicate-phrase
-		// scan flags it; this is the one repetition in this file that is the point
-		// rather than an editing slip.
 		older: "A fresh ingest container comes up without the index on ledger.entries.settled_at, so the first reconciliation scans the whole table.",
 		newer: "A fresh ingest container again came up without the index on ledger.entries.settled_at, because the bootstrap migration still does not create it.",
 		want:  RelationNeither,
@@ -382,50 +337,6 @@ func (s *evalScores) add(c supersedeEvalCase, verdict Relation, err error) {
 }
 
 // TestLiveSupersedePrecision scores the shipped supersedes decision against the
-// labeled set: the deterministic imperative veto first (free, no call), then the
-// prompt, then the parser, on the single-pair path and — the way the pass
-// actually runs — again through the batched path at the shipped batch size.
-//
-// It needs a working LLM CLI (claude, opencode, codex, or goose) and makes real,
-// billable calls, so it is OFF unless GHOST_LIVE_TESTS=1 (#548), and it skips
-// when no CLI answers. Set GHOST_TEST_SOURCE=opencode to compel a harness and
-// GHOST_OPENCODE_MODEL to pin its model; the measured figures in the pull request
-// come from the free opencode model.
-//
-// The gate is precision at 0.90, the issue's target: of the edges this pass
-// writes, at least nine in ten must retire a claim that is genuinely false.
-// Recall is reported without a gate, because a missed supersession costs a
-// duplicated pair in search while a false one costs a memory an agent will never
-// be reminded of — so the two are not symmetric and the pass is KEEP-biased.
-//
-// Measured with GHOST_OPENCODE_MODEL=opencode/big-pickle (free, so the run is
-// reproducible for anyone), twice, on this set:
-//
-//   - first run: 0.93 precision / 1.00 recall on both paths. The one false edge
-//     was "partial-fix" — a correction to one detail of a many-fact note — and
-//     the batched path also answered CAUSES on "failure-and-cause", which writes
-//     no supersedes edge and is a recall miss, the low-harm direction.
-//   - after the rubric grew a clause for that class (the edge demotes the whole
-//     note, so the facts a one-detail correction did not touch are what an agent
-//     still needs): 1.00 precision / 1.00 recall on both paths, 14 of 14 edges
-//     correct, 2 of the 14 both-true pairs settled by the veto for free, and no
-//     unparseable reply on either path.
-//
-// Both figures are for the same 28 pairs; the second run is a re-measurement of
-// the same set after one rubric clause was added, not an independent sample.
-//
-// THE SET IS NOW 32 PAIRS AND NEITHER FIGURE COVERS THE FOUR ADDED SINCE. #779
-// added one fixture per class its measurement named — partial-claim, release-log,
-// recurring-defect, parallel-investigation — and they are the four hardest
-// NEITHER pairs in the file, because they are the shapes a real model was
-// measured getting wrong. A figure measured before a fixture existed says
-// nothing about how the rubric that fixture was written for handles it, so the
-// numbers above are NOT a measurement of what this test now scores and must not
-// be quoted as one. docs/architecture.md and docs/configuration.md carry the same
-// caveat, and TestTheQuotedEvalFiguresAreScopedToTheSetTheyWereMeasuredOn holds
-// the set size against the counts they quote. Re-measuring is a separate
-// exercise (GHOST_LIVE_TESTS=1) and the resulting numbers belong in
-// docs/benchmarks.md; the person who runs it owns them.
 func TestLiveSupersedePrecision(t *testing.T) {
 	if !ai.LiveTestsEnabled() {
 		t.Skip("live LLM test makes billable harness calls; set GHOST_LIVE_TESTS=1 to run")
