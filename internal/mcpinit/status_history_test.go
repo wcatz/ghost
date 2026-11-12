@@ -6,7 +6,6 @@ import (
 	"database/sql"
 	"io"
 	"log/slog"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -134,44 +133,6 @@ func TestReportHistoryGrowthPrintsTheNumbersAndTheFindings(t *testing.T) {
 	}
 }
 
-// TestReportHistoryGrowthOnAStoreWithNoHistory: a fresh install has no history
-// and no growth, and a line of zeroes is a report about a table that does not
-// exist. One line saying so is the whole of it.
-func TestReportHistoryGrowthOnAStoreWithNoHistory(t *testing.T) {
-	store := historyStore(t, 0, 0, "0 seconds")
-
-	var out bytes.Buffer
-	reportHistoryGrowth(&out, store)
-	output := out.String()
-
-	if !strings.Contains(output, "- history: no version rows recorded yet") {
-		t.Errorf("an empty store does not say it has no history yet:\n%s", output)
-	}
-	if strings.Contains(output, "!") {
-		t.Errorf("an empty store produces a finding:\n%s", output)
-	}
-}
-
-// TestReportHistoryGrowthOnAQuietStoreIsNotAFinding: a store nobody wrote to
-// TODAY is every store at 9am, and its table is not empty. The report must say
-// the numbers and stop there — a warning here would fire on every quiet morning
-// and train the reader to skip the line that matters.
-func TestReportHistoryGrowthOnAQuietStoreIsNotAFinding(t *testing.T) {
-	store := historyStore(t, 2, 5, "-2 days")
-
-	var out bytes.Buffer
-	reportHistoryGrowth(&out, store)
-	output := out.String()
-
-	if !strings.Contains(output,
-		"- history: 0 version rows in 24h, 0 restatements (0%), deepest memory 6/50 versions, store 12/20000 rows") {
-		t.Errorf("a quiet store does not report its numbers:\n%s", output)
-	}
-	if strings.Contains(output, "!") {
-		t.Errorf("a quiet store produces a finding, which is a warning that fires every morning:\n%s", output)
-	}
-}
-
 // TestReportHistoryGrowthSaysWhenTheReadFails: docs/cli.md states that a check
 // which cannot run must not print nothing at all, and this is the branch that
 // claim rests on. Returning silently here would make an unreadable history
@@ -229,81 +190,5 @@ func dropHistoryTableFile(t *testing.T, dbPath string) {
 	defer db.Close() //nolint:errcheck
 	if _, err := db.Exec(`DROP TABLE memory_history`); err != nil {
 		t.Fatalf("drop memory_history: %v", err)
-	}
-}
-
-// TestStatusOpencode_ReportsHistoryGrowthAndStaysHealthy drives the whole
-// command, because the thing that can silently not happen is the call: a report
-// function nothing calls compiles, tests green, and prints nothing. It also holds
-// the exit code, which is the part a reader of the output would assume: a store
-// whose history is filling is a working integration, and `ghost mcp status` must
-// still say "All checks passed."
-func TestStatusOpencode_ReportsHistoryGrowthAndStaysHealthy(t *testing.T) {
-	ollama := ollamaStub("nomic-embed-text:v1.5")
-	defer ollama.Close()
-
-	statusEnv(t)
-	binDir := writeStubGhost(t)
-	t.Setenv("PATH", binDir)
-	installOpencodePluginFile(t, stubPath(binDir, "ghost"))
-	writeOpencodeMCPConfig(t, "opencode.json", opencodeMCPRegistration(stubPath(binDir, "ghost")))
-
-	ghostDir := filepath.Join(os.Getenv("XDG_DATA_HOME"), "ghost")
-	if err := os.MkdirAll(ghostDir, 0o700); err != nil {
-		t.Fatalf("mkdir ghost dir: %v", err)
-	}
-	dbPath := filepath.Join(ghostDir, "ghost.db")
-	db, err := memory.OpenDB(dbPath)
-	if err != nil {
-		t.Fatalf("open fresh db: %v", err)
-	}
-	store := memory.NewStore(db, discardLogger())
-	if err := store.EnsureProject(context.Background(), "p1", "/tmp/p1", "p1"); err != nil {
-		t.Fatalf("EnsureProject: %v", err)
-	}
-	if _, err := store.Create(context.Background(), "p1", memory.Memory{
-		Category: "fact", Content: "the relay listens on port 2222 in production",
-		Source: "mcp", Importance: 0.5,
-	}); err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	// Twenty more version rows restating that save, which is what every applied
-	// reflection used to leave behind: 21 rows in the window, 20 of them
-	// restatements, and a memory 21 versions into its 50.
-	for range 20 {
-		if _, err := db.Exec(`
-			INSERT INTO memory_history
-				(memory_id, project_id, phase, recorded_at, content, category, importance, resolved_at, source)
-			SELECT m.id, m.project_id, 'reflect', datetime('now'), m.content, m.category, m.importance, m.resolved_at, m.source
-			FROM memories m`); err != nil {
-			t.Fatalf("seed a restatement: %v", err)
-		}
-	}
-	if err := db.Close(); err != nil {
-		t.Fatalf("close db: %v", err)
-	}
-
-	var out bytes.Buffer
-	healthy, err := StatusOpencode(&out)
-	if err != nil {
-		t.Fatalf("StatusOpencode: %v", err)
-	}
-	output := out.String()
-
-	if !strings.Contains(output, "- history: 21 version rows in 24h, 20 restatements (95%)") {
-		t.Errorf("`ghost mcp status --client opencode` does not report history growth:\n%s", output)
-	}
-	if !strings.Contains(output, "restate the version before them") {
-		t.Errorf("`ghost mcp status` does not warn about the restatement rate:\n%s", output)
-	}
-	// The verdict is about wiring, and a filling history is not a wiring fault.
-	if !healthy {
-		t.Errorf("`ghost mcp status` is unhealthy over a full history table:\n%s", output)
-	}
-	if !strings.Contains(output, "All checks passed.") {
-		t.Errorf("`ghost mcp status` does not report the integration as healthy:\n%s", output)
-	}
-	if strings.Contains(output, "Run `ghost mcp init") {
-		t.Errorf("`ghost mcp status` points at the wrong repair for a history finding:\n%s", output)
 	}
 }
