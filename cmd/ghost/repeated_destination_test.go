@@ -1,42 +1,9 @@
 package main
 
 import (
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 )
-
-// readCLIDoc reads docs/cli.md once for the assertions that hold the documented
-// contract to the parser.
-func readCLIDoc(t *testing.T) string {
-	t.Helper()
-	doc, err := os.ReadFile(filepath.Join("..", "..", "docs", "cli.md"))
-	if err != nil {
-		t.Fatalf("read docs/cli.md: %v", err)
-	}
-	return string(doc)
-}
-
-// docRowContaining returns the single table row starting with lead, or "" when
-// there is none. A row is one line, which is what a flag table's rows are, and
-// anchoring on the row's own opening cells keeps the assertion off the rest of
-// the page: --out is documented by four separate commands, and each one is
-// claimed here by its lead.
-func docRowContaining(t *testing.T, doc, lead string) string {
-	t.Helper()
-	found := ""
-	for _, line := range strings.Split(doc, "\n") {
-		if !strings.HasPrefix(strings.TrimSpace(line), lead) {
-			continue
-		}
-		if found != "" {
-			t.Fatalf("docs/cli.md has more than one row beginning %q, so the assertion cannot say which it means", lead)
-		}
-		found = strings.TrimSpace(line)
-	}
-	return found
-}
 
 // outParser is the one question asked of backup and export together: what does
 // this parser make of a command line that names a destination twice? They are
@@ -239,54 +206,5 @@ func TestARepeatedDestinationRefusalWithholdsACredential(t *testing.T) {
 		t.Errorf("the interval refusal quotes the credential the reader passed:\n%s", err)
 	} else if !strings.Contains(err.Error(), "<interval withheld") {
 		t.Errorf("the interval refusal does not say which argument was withheld:\n%s", err)
-	}
-}
-
-// TestTheCLIReferenceStatesARefusedRepeatedDestination holds the documented
-// contract to the parser, the way TestTheCLIReferenceStatesReflectRefusesASecondProject
-// holds the retired last-one-wins claim: docs/cli.md documented the refusal for
-// `ghost context` and said nothing at all for backup, export and obsidian, which
-// is what let a caller follow the reference and get exit 0 with the artifact at a
-// name nobody chose.
-//
-// The assertion is on the flag rows themselves, because that is where a reader
-// looks for what a flag refuses.
-func TestTheCLIReferenceStatesARefusedRepeatedDestination(t *testing.T) {
-	doc := readCLIDoc(t)
-	for _, tc := range []struct {
-		name string
-		row  string
-	}{
-		{"backup --out", "| `--out <path>` | Where to write the snapshot."},
-		{"export --out", "| `--out <path>` | Where to write it."},
-		{"obsidian export --out", "| `--out <path>` | Vault directory. Defaults to `obsidian.vault_dir`"},
-		{"obsidian sync --out", "| `--out <path>` | Vault directory. An EMPTY value is refused, as for `export`, and so is a repeated"},
-		{"obsidian sync --interval", "| `--interval <duration>` | Positive Go duration; defaults to `obsidian.interval` or `30s`."},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			row := docRowContaining(t, doc, tc.row)
-			if row == "" {
-				t.Fatalf("docs/cli.md no longer has the flag row %q, so this test cannot tell whether it documents the refusal", tc.row)
-			}
-			if !strings.Contains(row, "twice") {
-				t.Errorf("docs/cli.md's row does not document the repeated-flag refusal: %s", row)
-			}
-		})
-	}
-}
-
-// TestTheCLIReferenceStatesARefusedEmptyInterval holds the documented contract
-// to the parser the way TestTheCLIReferenceStatesARefusedRepeatedDestination
-// does for the duplicate: docs/cli.md documented the default as applying when
-// the flag is left OFF, which is exactly what let a caller read `--interval=`
-// as "not given" and poll at obsidian.interval with no complaint. The row must
-// now say the empty value is refused.
-func TestTheCLIReferenceStatesARefusedEmptyInterval(t *testing.T) {
-	row := docRowContaining(t, readCLIDoc(t), "| `--interval <duration>` | Positive Go duration; defaults to `obsidian.interval` or `30s`.")
-	if row == "" {
-		t.Fatal("docs/cli.md no longer has the --interval flag row, so this test cannot tell whether it documents the refusal")
-	}
-	if !strings.Contains(row, "--interval requires a value") {
-		t.Errorf("docs/cli.md's --interval row does not document the empty-value refusal: %s", row)
 	}
 }

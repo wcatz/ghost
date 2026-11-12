@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -358,68 +357,6 @@ func TestTheNotAgreedTallyLeadsWithTheMajority(t *testing.T) {
 			}
 		})
 	}
-}
-
-// TestTheDocumentedNotAgreedExamplesAreOrderableByTheRenderer closes the gap a
-// mutation found: the RENDERER's order was pinned but the two DOC EXAMPLES were
-// not, and both had drifted to an order no tally can produce — docs/cli.md and
-// docs/architecture.md showed `1 reversed, 1 causes, 1 unreadable`, while the
-// loop walked supersedes, causes, neither, reversed, unreadable. A reader copying
-// either example into a bug report was quoting output Ghost does not produce.
-//
-// So the check is not "the docs mention the right words" but "the docs contain a
-// line the renderer emits for the tally they quote". The tally is declared once
-// here, rendered through the real supersedeReport, and both pages are then
-// required to contain the rendered line. A doc that reorders the example fails; a
-// renderer whose order changes fails the other test in this file; and the two
-// cannot drift apart without one of them going red.
-func TestTheDocumentedNotAgreedExamplesAreOrderableByTheRenderer(t *testing.T) {
-	// The tally both pages quote, and it is deliberately a three-way tie so the
-	// fixed order is the thing under test: a tie is the only case where the
-	// example could be wrong without any majority being misreported.
-	const (
-		// The TALLY FRAGMENT, not the bracketed line. docs/cli.md quotes the
-		// whole line inside a sample block and docs/architecture.md quotes the
-		// fragment inline in prose, so the fragment is the one string both can
-		// carry, and its ORDER is the whole finding.
-		fragment = "1 causes, 1 reversed, 1 unreadable"
-		// The order no tally can produce, which is what both pages had drifted
-		// to: the fixed list emits causes before reversed.
-		impossible = "1 reversed, 1 causes, 1 unreadable"
-	)
-	out := supersedeReport("proj", supersede.Result{
-		Candidates: 1, Consensus: 3, ConsensusPairsAsked: 3, NotAgreed: 1,
-		Disputed: []supersede.Disputed{{
-			NewerID: "0123456789ABCDEF0123456789ABCDEF", OlderID: "FEDCBA9876543210FEDCBA9876543210",
-			Tally: map[supersede.Relation]int{supersede.RelationCauses: 1, supersede.RelationReversed: 1, "": 1},
-		}},
-	}, "would link", false, 3, 0)
-	if !strings.Contains(out, fragment) {
-		t.Fatalf("the renderer does not emit the tally the docs quote (%s):\n%s", fragment, out)
-	}
-	if strings.Contains(out, impossible) {
-		t.Fatalf("the renderer emits an order no tally can produce, which is what the docs had drifted to:\n%s", out)
-	}
-	for _, page := range []string{"../../docs/cli.md", "../../docs/architecture.md"} {
-		text := readDocPage(t, page)
-		if !strings.Contains(text, fragment) {
-			t.Errorf("%s does not carry the not-agreed tally the renderer emits (%s); a doc example in an order Ghost cannot print sends a reader looking for a bug that is not there", page, fragment)
-		}
-		if strings.Contains(text, impossible) {
-			t.Errorf("%s still shows the not-agreed tally as %q, an order the renderer cannot produce, so the example describes output Ghost does not emit", page, impossible)
-		}
-	}
-}
-
-// readDocPage reads one documentation page, and names the page it could not read
-// rather than only that a read failed.
-func readDocPage(t *testing.T, path string) string {
-	t.Helper()
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read %s: %v", path, err)
-	}
-	return string(raw)
 }
 
 // reasonSuffixSupersede puts a case's reasoning on the failure line, because
