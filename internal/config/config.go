@@ -49,6 +49,7 @@ const (
 
 // LifecycleConfig controls when the Stop hook may spawn the auto-consolidation
 // chain. It is a separate section from reflection.* on purpose: reflection.*
+// says WHICH phases run, this says HOW OFTEN.
 type LifecycleConfig struct {
 	MinInterval string `koanf:"min_interval"`
 }
@@ -74,14 +75,23 @@ func (c LifecycleConfig) MinIntervalDuration() time.Duration {
 
 // DefaultScratchMaxBytes is the compiled per-root scratch budget: 512 MiB.
 // It is the value scratch.max_bytes takes when the key is unset, and the
+// fallback when config loading itself fails.
 const DefaultScratchMaxBytes int64 = 512 * 1024 * 1024
 
 // DefaultRelevanceCutoff is the compiled value of context.relevance_cutoff, the
 // assembler's relative-to-top cutoff on query-mode blocks (#954). It lives here
+// rather than as a bare literal in the defaults map so the bench that measures
+// the cutoff (`ghost bench --context`, via ContextRequest) and the config layer
+// that ships it read ONE number and cannot drift. A value of 0 is off; see
+// ContextConfig.RelevanceCutoff.
 const DefaultRelevanceCutoff float64 = 0.63
 
 // DefaultNoAnswerCosine is the compiled value of context.no_answer_cosine, the
 // assembler's absolute no-answer bar on query-mode blocks (#955): a block whose
+// best vector cosine is below it is withheld and the answer says nothing cleared
+// the bar. Like DefaultRelevanceCutoff it lives here so the bench that measures
+// the bar (`ghost bench --no-answer-sweep`, via ContextRequest) and the config
+// layer that ships it read ONE number. 0 is off.
 const DefaultNoAnswerCosine float64 = 0.62
 
 // DefaultEmbeddingModel is the compiled value of embedding.model, and the model
@@ -206,6 +216,12 @@ type LinkingConfig struct {
 
 // InjectionConfig controls how the SessionStart hook selects which project
 // memories to inject. It biases the limited slot budget toward high-signal,
+// hard-to-derive categories (gotcha/convention/preference/decision) without
+// growing the total footprint. behavior_floor of 0 disables the bias entirely
+// (pure DecayRankingSQL selection, the historical behavior). category_caps
+// bounds how many pass-1 reserved slots a single behavioral category may take,
+// so a gotcha-heavy corpus cannot fill every guaranteed slot with gotchas
+// (a 46% gotcha share would otherwise dominate the floor).
 type InjectionConfig struct {
 	BehaviorFloor      int                `koanf:"behavior_floor"`
 	BehaviorCategories []string           `koanf:"behavior_categories"`
@@ -216,6 +232,8 @@ type InjectionConfig struct {
 
 // DefaultInjectionConfig returns the compiled injection defaults. It mirrors the
 // injection.* entries in the defaults map so callers that need a fallback when
+// Load() fails (e.g. the SessionStart hook's read-only path) never diverge from
+// the layered defaults.
 func DefaultInjectionConfig() InjectionConfig {
 	return InjectionConfig{
 		BehaviorFloor:      8,
@@ -268,6 +286,7 @@ const systemConfigPath = "/etc/ghost/config.yaml"
 
 // Load reads configuration with layered precedence.
 // After Load returns, the caller may apply CLI flag overrides by mutating
+// fields directly.
 func Load() (*Config, error) {
 	k := koanf.New(".")
 
@@ -461,6 +480,10 @@ func parseEnvValue(t reflect.Type, s string) (interface{}, error) {
 
 // LoadForHook loads configuration for a hook running inside someone else's
 // editor session (SessionStart injection, obsidian auto-sync, stop-hook
+// reflection, session routing). A broken config must not fail the host's
+// session, so the error is reported on stderr and FallbackConfig is returned:
+// the session still gets its context, and the user still finds out why their
+// settings are not taking effect.
 func LoadForHook() *Config {
 	cfg, err := Load()
 	if err == nil {
@@ -472,6 +495,7 @@ func LoadForHook() *Config {
 
 // FallbackConfig returns the Config for callers that must not fail on a broken
 // config file (LoadForHook, and the MCP server via cmd/ghost's bootstrap), so
+// one broken file can never change which values those paths use.
 func FallbackConfig() *Config {
 	if cfg, ok := decodeFallback(loadEnvLayer); ok {
 		return cfg
@@ -840,6 +864,7 @@ var envOverrides = []envOverride{
 
 // DataDirPath returns the ghost data directory path WITHOUT creating it, so
 // callers that must not leave a phantom directory behind (the stop hook's
+// no-LLM skip, marker reads) can still locate the store.
 func DataDirPath() (string, error) {
 	dataHome := os.Getenv("XDG_DATA_HOME")
 	if dataHome == "" {
@@ -864,6 +889,7 @@ func SetBuildVersion(v string) { buildVersion = v }
 
 // BuildVersion returns the version the data-directory check judges this build
 // by. It exists for the tests that need the guarded side without going through
+// a dispatch, and for a caller that wants to report which build answered.
 func BuildVersion() string { return buildVersion }
 
 // DataDir returns the ghost data directory, creating it if needed.
@@ -890,6 +916,7 @@ func ConfigFilePath() (string, error) {
 
 // EnsureConfigFile creates the platform's user config path from the embedded
 // example if it doesn't already exist. Returns the path and whether a new file
+// was created.
 func EnsureConfigFile() (path string, created bool, err error) {
 	path, err = ConfigFilePath()
 	if err != nil {
