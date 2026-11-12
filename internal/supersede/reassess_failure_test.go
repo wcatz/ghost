@@ -12,9 +12,6 @@ import (
 )
 
 // failingStore wraps a store and fails the Nth InvalidateLink, so the
-// partial-repair path can be exercised: each invalidation is its own
-// transaction, which is exactly why a failure half way through leaves real
-// changes behind.
 type failingStore struct {
 	*memory.Store
 	failAt int
@@ -55,12 +52,6 @@ func (p *pairReplyProvider) Classify(_ context.Context, _, userContent string) (
 }
 
 // TestReassessRetriesAFailedClassifyCall: a batch whose first call fails and
-// whose retry answers is judged, and the pass applies every withdrawal that
-// verdict produced. The failure #699's rehearsal hit was one call in a project
-// of many, and the rerun a minute later withdrew 76 of 87 — so the retry is what
-// stands between a blip and a rerun an operator has to remember to make. The
-// count is reported, because a pass that needed one must not look like a pass
-// that did not.
 func TestReassessRetriesAFailedClassifyCall(t *testing.T) {
 	store, db := seed(t)
 	ctx := context.Background()
@@ -99,11 +90,6 @@ func TestReassessRetriesAFailedClassifyCall(t *testing.T) {
 }
 
 // TestReassessReportsTheRepairItAlreadyMade pins the failure contract: a failed
-// invalidation returns the edges that DID land alongside the error, and the
-// summary is still logged. Each invalidation is its own transaction, so the
-// edges before the failure are gone and a later pass will not see them again —
-// LinksByRelationSource returns live edges only. A repair whose justification is
-// auditability cannot report nothing because its Nth write failed.
 func TestReassessReportsTheRepairItAlreadyMade(t *testing.T) {
 	store, db := seed(t)
 	ctx := context.Background()
@@ -155,13 +141,6 @@ func TestReassessReportsTheRepairItAlreadyMade(t *testing.T) {
 }
 
 // TestReassessAppliesVetoedWithdrawalsWhenABatchFails: #699's rehearsal lost
-// every withdrawal to one `opencode run` that exited 1 — including the edges the
-// deterministic veto had already settled, which needed no harness call at all and
-// are not the classifier's to decide. Those apply anyway: a withdrawal only puts
-// the older memory back into injection, which is the safe direction, and the
-// rerun a minute later withdrew 76 of 87. The pair the harness never answered is
-// reported unjudged with its edge left standing, and the pass still exits
-// non-zero so the rerun is asked for.
 func TestReassessAppliesVetoedWithdrawalsWhenABatchFails(t *testing.T) {
 	store, db := seed(t)
 	ctx := context.Background()
@@ -219,10 +198,6 @@ func TestReassessAppliesVetoedWithdrawalsWhenABatchFails(t *testing.T) {
 }
 
 // unreadableLinksStore fails GetLinks, the read liveCausesPairs makes to predict
-// the 'causes' sweep. It is the one failure the classify failure has to survive
-// alongside: the pass has already recorded which pairs it could not judge, and
-// an exit that dropped that record would report the unjudged edges as nothing
-// happened at all.
 type unreadableLinksStore struct {
 	*memory.Store
 }
@@ -232,11 +207,6 @@ func (unreadableLinksStore) GetLinks(context.Context, string) ([]memory.Link, er
 }
 
 // TestReassessKeepsTheClassifyFailureWhenThePredictionReadFails: two failures
-// in one run are joined, not replaced, and the summary is still logged. The
-// unjudged edges are half of what the operator has to fix, and this is the exit
-// that would otherwise report neither their text nor the log that explains the
-// partial state. A dry run is where the read happens at all, so that is the mode
-// this is exercised in.
 func TestReassessKeepsTheClassifyFailureWhenThePredictionReadFails(t *testing.T) {
 	store, db := seed(t)
 	ctx := context.Background()
@@ -294,10 +264,6 @@ func TestReassessKeepsTheClassifyFailureWhenThePredictionReadFails(t *testing.T)
 }
 
 // TestReassessUnderApplyNeverReadsThePrediction: the apply path's sweep count
-// comes from the sweep itself, so the prediction read a dry run needs is not
-// made. The store here cannot answer GetLinks at all, which is what makes this
-// the test: a discarded read must not be able to fail a repair that completed,
-// and the count reported has to be the one the sweep observed.
 func TestReassessUnderApplyNeverReadsThePrediction(t *testing.T) {
 	store, db := seed(t)
 	ctx := context.Background()
@@ -348,11 +314,6 @@ func TestReassessUnderApplyNeverReadsThePrediction(t *testing.T) {
 }
 
 // TestReassessDryRunSaysAPredictionItCouldNotReadIsUnknown: the dry-run half of
-// the read failure. The pass still lists what it would withdraw, but a row whose
-// 'causes' prediction could not be read says UNKNOWN rather than 0: the report
-// derives its count from these rows, so returning none of them would print
-// "would withdraw 0" beside a "1 vetoed" and print nothing at all about a second
-// deletion nobody looked for. The error still returns.
 func TestReassessDryRunSaysAPredictionItCouldNotReadIsUnknown(t *testing.T) {
 	store, db := seed(t)
 	ctx := context.Background()
@@ -401,10 +362,6 @@ func TestReassessDryRunSaysAPredictionItCouldNotReadIsUnknown(t *testing.T) {
 }
 
 // TestReassessDryRunWritesNothingWhenABatchFails: a dry run that hits the same
-// failure has the same report and the same non-zero exit, and still writes
-// nothing — the repair pass previews a deletion, so a preview that moved the
-// edge it was about to describe would leave the operator deciding about a
-// withdrawal that already happened.
 func TestReassessDryRunWritesNothingWhenABatchFails(t *testing.T) {
 	store, db := seed(t)
 	ctx := context.Background()
@@ -447,9 +404,6 @@ func TestReassessDryRunWritesNothingWhenABatchFails(t *testing.T) {
 }
 
 // TestReassessDryRunWritesNothingWhenARetryAnswers: the other half of "a dry run
-// writes nothing". A retried call that answers must change the verdicts the
-// preview reports and nothing else — the withdrawal is still a prediction, and
-// the pass still made no graph row.
 func TestReassessDryRunWritesNothingWhenARetryAnswers(t *testing.T) {
 	store, db := seed(t)
 	ctx := context.Background()
@@ -492,10 +446,6 @@ func TestReassessDryRunWritesNothingWhenARetryAnswers(t *testing.T) {
 }
 
 // TestReassessKeepsTheRowWhoseCausesSweepFailed: the other half of the failure
-// contract. The supersedes withdrawal for this edge landed, and the 'causes'
-// sweep that follows it failed — so the row must still be reported, or the count
-// and the list disagree and the edge is gone from the graph and from the report
-// at the same time.
 func TestReassessKeepsTheRowWhoseCausesSweepFailed(t *testing.T) {
 	store, db := seed(t)
 	ctx := context.Background()
@@ -521,9 +471,6 @@ func TestReassessKeepsTheRowWhoseCausesSweepFailed(t *testing.T) {
 		t.Errorf("the supersedes edge is still live: %d pair(s)", len(pairs))
 	}
 	// The sweep's outcome is UNKNOWN after a failed write, and the row has to say
-	// that rather than report a count: a definite 0 would tell an operator who
-	// read "would sweep 1" in the dry run that nothing else was deleted, which
-	// is the one reading this pass cannot afford.
 	if len(withdrawn) != 1 {
 		t.Fatalf("withdrawn = %+v, want one row", withdrawn)
 	}
@@ -557,18 +504,6 @@ func TestReassessKeepsTheRowWhoseCausesSweepFailed(t *testing.T) {
 }
 
 // TestReassessSweepsTheOtherRelationOnASelfContradictingVerdict: Run's contract
-// for NEITHER, the veto and REVERSED is a both-relations sweep — a 'causes' link
-// pointing INTO a note the pass has just decided is still current asserts the
-// opposite of that decision. The repair pass applies the same verdicts, so it
-// sweeps the same way. (A CAUSES verdict is left alone: there the existing
-// 'causes' edge may be saying something true, and a repair pass is not where
-// that is re-decided — see the CAUSES test below.)
-//
-// Each subcase states which half decided it and asserts the counter that proves
-// it: the NEITHER and REVERSED pairs carry a plain older note, so the classifier
-// really is asked and its verdict is really parsed. An imperative older note
-// would let the veto settle all three, and the scripted reply would never be
-// read — which is exactly how this test passed for the wrong reason once.
 func TestReassessSweepsTheOtherRelationOnASelfContradictingVerdict(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -606,9 +541,6 @@ func TestReassessSweepsTheOtherRelationOnASelfContradictingVerdict(t *testing.T)
 				t.Fatal(err)
 			}
 			// The dry run comes FIRST, as an operator runs it: it has to predict
-			// the sweep, or the summary says 0 above rows marked [+1 causes
-			// edge] — and it has to see the edge at all, which it cannot once the
-			// apply below has withdrawn it.
 			dryRes, dryWithdrawn, err := Reassess(ctx, store, NewRelationClassifier(&fakeProvider{resp: tc.reply}), "p", false, discardLogger())
 			if err != nil {
 				t.Fatalf("Reassess (dry): %v", err)
@@ -671,10 +603,6 @@ func TestReassessSweepsTheOtherRelationOnASelfContradictingVerdict(t *testing.T)
 }
 
 // TestReassessLeavesACausesEdgeUnderACausesVerdict: the sweep is for verdicts
-// that deny the relation, not for the one that affirms it. A CAUSES verdict
-// means the older note is still true, so the supersedes edge goes — but an
-// existing 'causes' edge may be recording exactly that, and deleting it would be
-// the repair pass deciding something it was not asked to decide.
 func TestReassessLeavesACausesEdgeUnderACausesVerdict(t *testing.T) {
 	store, db := seed(t)
 	ctx := context.Background()
@@ -720,9 +648,6 @@ func TestReassessCountersAddUpToLoaded(t *testing.T) {
 	store, db := seed(t)
 	ctx := context.Background()
 	// One edge per outcome: SUPERSEDES, NEITHER, CAUSES, REVERSED, and one the
-	// veto settles. Only the last pair's OLDER note states an imperative, so the
-	// other four reach the classifier; its newer note retires nothing, so the
-	// veto fires and the harness is never asked about it.
 	for i := 0; i < 5; i++ {
 		olderText := "The ingest service runs Redis 6.2, revision " + string(rune('a'+i)) + "."
 		if i == 4 {

@@ -12,23 +12,8 @@ import (
 )
 
 // The consensus gate (#779). Everything here uses a fake classifier and an
-// in-memory store: no harness, no network, no real corpus.
-//
-// The gate's claim is a claim about what a pass WRITES, so almost every test
-// here is stated as "this link exists in the graph" rather than "this counter is
-// N" — the counters are checked too, but a counter can be right while the graph
-// is wrong, and the graph is the harm.
 
 // perPassClassifier answers differently on each pass, which is the only property
-// a consensus test actually needs from a fake: the gate's entire purpose is to
-// act on agreement and refuse on disagreement, and a classifier that answers the
-// same thing every time can only exercise the first half.
-//
-// `script` is indexed by pass number and returns a verdict per pair, in the
-// order the pass received them. `pairsAsked` counts every pair across every
-// pass, and `passSizes` records how many pairs each pass was handed — so a test
-// can assert the multiplier on pairs separately from the batching, which are
-// different numbers and used to be conflated.
 type perPassClassifier struct {
 	script     []func(newer, older string) Relation
 	pairsAsked int
@@ -80,15 +65,6 @@ func linkCount(t *testing.T, store *memory.Store, ids ...string) int {
 }
 
 // TestConsensusWritesOnlyTheUnanimousEdges is the gate's whole claim: three
-// pairs, three passes, two unanimous and one split. Only the two may reach the
-// graph.
-//
-// The split is 2-of-1 rather than 1-of-1-of-1 because that is the case a
-// majority rule gets wrong, and a test that only refused a 1-of-3 split would
-// pass under a plurality implementation too. Nothing is written for it, and
-// nothing is written in the OTHER direction either: a pair the model cannot
-// settle must not acquire an edge pointing the other way, because the harm of a
-// backwards edge is the same as the harm of a wrong one.
 func TestConsensusWritesOnlyTheUnanimousEdges(t *testing.T) {
 	const (
 		unanimousA      = "the ingest service runs redis 6.2"
@@ -99,9 +75,6 @@ func TestConsensusWritesOnlyTheUnanimousEdges(t *testing.T) {
 		splitNewer      = "the ledger stream now has a consumer on the archive topic"
 	)
 	// Each pair's two notes are near-identical vectors and every OTHER pair's are
-	// orthogonal, so the scan proposes exactly the three pairs under test and no
-	// cross-pair candidates. Without that, the counter assertions would be about
-	// a dozen incidental pairs the fixtures never mention.
 	store, db := seed(t)
 	ctx := context.Background()
 	aOlder := add(t, store, db, unanimousA, []float32{1, 0, 0, 0}, "2026-01-01 00:00:00")
@@ -168,14 +141,6 @@ func TestConsensusWritesOnlyTheUnanimousEdges(t *testing.T) {
 }
 
 // TestConsensusAsksEveryPass is the re-ask requirement, and it is the test that
-// keeps the NEITHER cache from quietly answering pass 2 out of pass 1's verdict.
-//
-// The shape is chosen so that a cache read between passes would be visible: the
-// fake says NEITHER on pass 1 and SUPERSEDES on passes 2 and 3, and a pass 2 that
-// were served from a pass-1 cache row would answer NEITHER. Unanimity then fails
-// and the edge is not written — which is the exact silent failure this asserts
-// against, because the resulting report would look like a model that changed its
-// mind twice rather than a gate that asked once.
 func TestConsensusAsksEveryPass(t *testing.T) {
 	store, older, newer := twoNotePair(t,
 		"the ingest service runs redis 6.2",
@@ -217,25 +182,10 @@ func TestConsensusAsksEveryPass(t *testing.T) {
 }
 
 // TestConsensusDoesNotMultiplyThePairsSkipIfUnchangedWouldSkip is the
-// composition requirement with #792, and the cost argument with it.
-//
-// A live edge whose endpoints have not moved is not re-asked even once, and a
-// NEITHER-cached fresh pair is not re-asked at all. Neither should become N
-// questions. So the test seeds a converged project — one live edge, one cached
-// NEITHER, one fresh pair — and asserts the passes were asked about the fresh
-// pair N times and about NOTHING else. The counter is the point: without it, a
-// gate that tripled a converged project's calls would look identical in the
-// report and be invisible in the graph.
 func TestConsensusDoesNotMultiplyThePairsSkipIfUnchangedWouldSkip(t *testing.T) {
 	store, db := seed(t)
 	ctx := context.Background()
 	// A converged pair: an edge written long ago with neither endpoint edited
-	// since. unchangedLiveEdge is the existing helper for exactly this shape and
-	// is used rather than rebuilt so the test cannot drift from what #792 means
-	// by "unchanged".
-	// quietNewer is the LATER note of the pair, which is the direction
-	// unchangedLiveEdge requires: it asserts the scan re-proposes the pair in the
-	// edge's own direction, and a link written against it points newer->older.
 	quietOlder := add(t, store, db, "the metrics listener binds to port 9091", []float32{1, 0, 0, 0}, "2026-01-01 00:00:00")
 	quietNewer := add(t, store, db, "the metrics listener binds to port 9091 and nothing else", []float32{1, 0.01, 0, 0}, "2026-01-02 00:00:00")
 	unchangedLiveEdge(t, store, quietNewer, quietOlder)
@@ -329,11 +279,6 @@ func TestConsensusDryRunWritesNothing(t *testing.T) {
 }
 
 // TestConsensusUnanimousNeitherCachesAndUnanimousReversedRefuses: the gate is on
-// the WRITE, so the other two verdicts have to keep their own behaviour when every
-// pass agrees on them. A unanimous NEITHER is a decision (and is cached, so a
-// later pass costs nothing); a unanimous REVERSED is still refused rather than
-// written backwards, and is still never cached — the two properties #641 bought
-// are not properties of "every pass said the same thing".
 func TestConsensusUnanimousNeitherCachesAndUnanimousReversedRefuses(t *testing.T) {
 	t.Run("neither is cached", func(t *testing.T) {
 		store, _, _ := twoNotePair(t,
@@ -389,10 +334,6 @@ func TestConsensusUnanimousNeitherCachesAndUnanimousReversedRefuses(t *testing.T
 }
 
 // TestConsensusUnreadableIsNotDisagreement holds the three outcomes apart. A
-// pass whose reply the parser could not read has expressed no opinion, so a pair
-// where every pass was unreadable is UNCLASSIFIED — nothing decided, to be
-// re-asked — and not "not agreed", which would report a harness or prompt fault
-// as model instability and send an operator to raise the quorum for it.
 func TestConsensusUnreadableIsNotDisagreement(t *testing.T) {
 	t.Run("all passes unreadable", func(t *testing.T) {
 		store, _, _ := twoNotePair(t,
@@ -443,14 +384,6 @@ func TestConsensusUnreadableIsNotDisagreement(t *testing.T) {
 }
 
 // TestConsensusReportsItsOwnMultiplierOnAConvergedProject: a gated pass with
-// nothing to ask still has to say it ran, and say it ran N times over zero pairs.
-//
-// This is the case where the gate is working as designed — every fresh pair
-// cached, every live edge unchanged — and a report that read "consensus 0" or
-// omitted the line would say the opposite: that no gate was configured, or that
-// the run found nothing to do for some other reason. The difference matters to
-// the operator deciding whether a converged project is quiet because the gate
-// found nothing to disagree about or because the gate was never run.
 func TestConsensusReportsItsOwnMultiplierOnAConvergedProject(t *testing.T) {
 	store, db := seed(t)
 	ctx := context.Background()
@@ -488,16 +421,6 @@ func TestConsensusReportsItsOwnMultiplierOnAConvergedProject(t *testing.T) {
 }
 
 // TestConsensusIsReportedOnEveryReturnPath: the multiplier has to survive the
-// early returns, and they are the paths a converged or fully-refused project
-// takes — which is exactly where a gated run is most likely to be misread.
-//
-// There are two shapes here and the second is the one that shipped broken. The
-// cached-NEITHER project reaches the classify loop with an empty `pending`, and
-// the multiplier was set just before it. A project whose candidates are ALL
-// vetoed never gets that far: it returns at the veto, and a Consensus left at
-// zero there makes a gated run print no gate line at all, on a corpus that
-// produced five candidate pairs. The report would read exactly like an ungated
-// run, which is the failure the gate line exists to prevent.
 func TestConsensusIsReportedOnEveryReturnPath(t *testing.T) {
 	t.Run("every candidate vetoed", func(t *testing.T) {
 		store, db := seed(t)
@@ -545,23 +468,10 @@ func TestConsensusIsReportedOnEveryReturnPath(t *testing.T) {
 }
 
 // TestConsensusSurvivesAnErrorReturn: an error path returns a Result alongside
-// the error, and a caller that reads it — the bench harness does, and so does
-// anything deciding whether to retry — must not be told the multiplier was 1 on a
-// run configured for 3.
-//
-// The scan error is deliberately NOT in this test: `res` does not exist before
-// SelectCandidates returns, and the CLI prints no report on an error at all (it
-// writes the error to stderr and exits 1), so there is no page and no caller on
-// which a wrong multiplier could be read. The two paths covered here are the
-// link reads that happen after the result is built, where returning a bare
-// Result{} discarded a Result that was already in hand.
 func TestConsensusSurvivesAnErrorReturn(t *testing.T) {
 	store, db := seed(t)
 	ctx := context.Background()
 	// A LIVE edge, and it is load-bearing: the reclassify content read is only
-	// issued when there is a live edge whose endpoints need refreshing, so a
-	// corpus with no edges never reaches the return under test and the fixture
-	// would silently be scoring a different path.
 	older := add(t, store, db, "the ingest service runs redis 6.2", []float32{1, 0, 0}, "2026-01-01 00:00:00")
 	newer := add(t, store, db, "the ingest service now runs redis 7.2", []float32{0.99, 0.01, 0}, "2026-06-01 00:00:00")
 	if err := store.CreateLink(ctx, newer, older, "supersedes", 0.95, "llm"); err != nil {
@@ -585,9 +495,6 @@ func TestConsensusSurvivesAnErrorReturn(t *testing.T) {
 }
 
 // linkReadFailStore fails exactly one store method — the reclassify content read
-// — so the error path under test is reached without touching anything else. It
-// embeds the real store rather than reimplementing the interface, because the
-// point is the RETURN on the error path, not the read.
 type linkReadFailStore struct {
 	*memory.Store
 }
@@ -597,33 +504,6 @@ func (f *linkReadFailStore) GetByIDs(ctx context.Context, ids []string) ([]memor
 }
 
 // TestTheDisputedTypesCommentNamesTheRemediesThatWork holds the godoc on
-// `Disputed` to the same rule the report and both doc pages are held to, and it
-// exists because the first version of that comment said the opposite.
-//
-// A split between two readable verdicts reads as a model that cannot decide the
-// pair, and the natural first suggestion is a bigger sample. It is the wrong
-// suggestion: unanimity is STRICTLY HARDER to satisfy as N grows, so a pair that
-// split 2-1 at 3 has to satisfy one more pass at 4. The remedies are a re-run
-// (fresh passes may land on the same answer) and, for an operator, dropping the
-// flag to write what the first pass said.
-//
-// What the four statements share, and what this comment is careful to claim only
-// that, is the REFUSAL of a higher N: the report, docs/cli.md and
-// docs/architecture.md all say it is not a remedy, and the report and both pages
-// all offer a re-run. They do NOT all offer a different harness — the report and
-// both pages offer dropping the flag instead, and only the shipped comment names
-// a different harness, which is a maintainer's move rather than an operator's
-// and is supported by the note at supersedeNotAgreedLines ("only a lower N or a
-// different harness changes what is being asked"). Nothing here measures how a
-// split behaves as N grows beyond getting harder to satisfy, so nothing here
-// claims a trend.
-//
-// The comment is what a maintainer reads BEFORE touching the split path, and it
-// is the only one of the four that is not shown to an operator, so a wrong
-// remedy there is acted on silently.
-//
-// A comment is worth a test here for the same reason it is worth a test in the
-// report: a doc is a contract, and this one had already broken.
 func TestTheDisputedTypesCommentNamesTheRemediesThatWork(t *testing.T) {
 	// The comment is the doc comment on the type, so it is read off the source
 	// rather than duplicated here: a test that asserted its own copy of the text
@@ -671,22 +551,6 @@ func readSource(t *testing.T, name string) string {
 }
 
 // TestConsensusRefusesEveryTwoToOneSplit is (g): a split is a split whatever it
-// splits BETWEEN, and the four ways it can look are each separately wrong if the
-// tally folds one of them into another.
-//
-// The dangerous one is 2-SUPERSEDES / 1-REVERSED, because the two verdicts look
-// adjacent — they are the same question asked in two directions — and merging
-// them (`case v.supersedes + v.reversed == passes`) is a one-line change that
-// turns "two passes agree, one refuses the direction" into an EDGE. That is the
-// worst outcome the gate has: Run writes a live `supersedes` edge and then, on
-// the row itself, reports the pair as carrying a REVERSED verdict it never
-// returned. #641's harm was a backwards edge; this would be a forwards edge
-// built out of a refusal.
-//
-// So the tally is exercised over every two-to-one split, and a real pass is run
-// for the dangerous one rather than only calling quorum() — the graph is where
-// the harm is, and a counter that reads right while the edge exists is not a
-// fix.
 func TestConsensusRefusesEveryTwoToOneSplit(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -721,10 +585,6 @@ func TestConsensusRefusesEveryTwoToOneSplit(t *testing.T) {
 }
 
 // TestARejectedDirectionNeverBecomesAnEdge is the same split through the real
-// pass, and it is the half a tally unit test cannot reach. Two passes answer
-// SUPERSEDES for a fresh pair and the third answers REVERSED — the pair the gate
-// must refuse — and the assertion is on the GRAPH in both directions plus the
-// counts, because a Result that reads right while an edge exists is not a fix.
 func TestARejectedDirectionNeverBecomesAnEdge(t *testing.T) {
 	store, older, newer := twoNotePair(t,
 		"the ingest service runs redis 6.2",
@@ -763,16 +623,6 @@ func TestARejectedDirectionNeverBecomesAnEdge(t *testing.T) {
 }
 
 // TestConsensusLeavesALiveEdgeAloneWhenThePassesSplit is the second half of (g):
-// a disputed pair on a pair the graph ALREADY links is not a withdrawal, and the
-// code that could get this wrong does not exist — the disputed branch `continue`s
-// before the apply block, so nothing in `Run` invalidates. A mutation that adds
-// an InvalidateLink there would withdraw a correct edge, which is the one
-// direction the gate's whole argument forbids: "the passes split" is a statement
-// about the MODEL's stability and says nothing about which endpoint is current.
-//
-// The fixture is a live edge whose endpoints are edited (so skip-if-unchanged
-// does not hold it quiet), the passes split on it, and the edge has to survive —
-// with its stamp, because a write would have moved it.
 func TestConsensusLeavesALiveEdgeAloneWhenThePassesSplit(t *testing.T) {
 	store, db := seed(t)
 	ctx := context.Background()
@@ -829,11 +679,6 @@ func TestConsensusLeavesALiveEdgeAloneWhenThePassesSplit(t *testing.T) {
 }
 
 // TestConsensusAGateOfOneIsTheUngatedPass: the default is a single pass, and it
-// must be byte-for-byte the historical behaviour. A default that quietly gated
-// on one pass' agreement with itself would be a no-op costing nothing — which is
-// fine — but a default that gated on anything else would be a behaviour change
-// nobody asked for, so the ungated case is asserted directly: one pass, one call,
-// and the split pair written.
 func TestConsensusAGateOfOneIsTheUngatedPass(t *testing.T) {
 	store, older, newer := twoNotePair(t,
 		"the ingest service runs redis 6.2",
@@ -856,10 +701,6 @@ func TestConsensusAGateOfOneIsTheUngatedPass(t *testing.T) {
 }
 
 // TestRunIsTheUngatedConsensusPass: Run and RunWith(Consensus: 0) are the same
-// decision, and they are two entry points rather than one so that a caller which
-// has not heard of the gate keeps compiling. The test holds them to each other
-// through the graph, because a Run that quietly gained a multiplier would write
-// the same links and differ only in cost.
 func TestRunIsTheUngatedConsensusPass(t *testing.T) {
 	runOne := func(useRun bool) int {
 		store, older, newer := twoNotePair(t,
@@ -889,11 +730,6 @@ func TestRunIsTheUngatedConsensusPass(t *testing.T) {
 }
 
 // TestConsensusClassifyFailureIsFatalAndNamesThePass: a transport failure must
-// still abort the pass — every gate is worse than no gate if a dead harness reads
-// as an empty result — and the message has to name WHICH pass failed, because at
-// N=3 a reader who is not told which one died cannot tell a first-call failure
-// from a third-call one, and the remedy (rerun) is the same but the diagnosis is
-// not.
 func TestConsensusClassifyFailureIsFatalAndNamesThePass(t *testing.T) {
 	store, _, _ := twoNotePair(t,
 		"the ingest service runs redis 6.2",

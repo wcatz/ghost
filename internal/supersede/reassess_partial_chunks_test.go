@@ -10,35 +10,8 @@ import (
 )
 
 // This file is #808: what `ghost supersede --reassess` does with the verdicts the
-// chunks that ANSWERED produced when a later chunk's call died.
-//
-// Reassess submits every open pair to one ClassifyBatch, and ClassifyBatch
-// chunks it — eight pairs per harness call, because every call pays a process
-// spawn and the whole rubric while each extra pair adds only its two note bodies.
-// So a project with 87 live edges is eleven calls, and a transport failure in
-// call 7 used to discard calls 1..6: every open pair moved to Unjudged, every
-// answered verdict was thrown away, and the rerun paid for all eleven again.
-//
-// The all-or-nothing rule was deliberate, and the reason it was stated is the
-// reason it was wrong here: "a call that failed answers nothing about anything it
-// carried". That is true of the call that failed. It is not true of the calls
-// before it, whose verdicts are complete, parsed and indexed by pair number —
-// and nothing downstream needs the whole set. Each pair's verdict is read on its
-// own (settleCycle for a cycle, a four-way switch for an ordinary edge), a cycle
-// contributes exactly ONE candidate and so lives in exactly one chunk, and the
-// pass already has a partial-application contract: #699 made a failed call apply
-// the withdrawals a deterministic rule settled, report the rest unjudged, and
-// still return an error. This widens that contract from "what a rule settled for
-// free" to "what a call already answered for money". Nothing about the
-// withdrawals or the graph changes shape; only the amount of a paid answer the
-// pass is willing to throw away does.
 
 // chunkFailProvider answers the first answerFirst calls and fails every call
-// after it, which is what a harness that dies part way through a large store
-// looks like from the pass's side. It is a different shape from flakyProvider
-// (which fails the first N calls, so the retry answers) because the case here is
-// the opposite one: the failure has to come AFTER a good chunk, and a provider
-// that fails from the start never produces one.
 type chunkFailProvider struct {
 	reply       string
 	answerFirst int
@@ -54,11 +27,6 @@ func (p *chunkFailProvider) Classify(_ context.Context, _, _ string) (string, er
 }
 
 // chunked builds a classifier over p whose chunk size is small enough that the
-// fixture's pairs really are several calls: the shipped size is eight, so a
-// four-pair fixture would fit in ONE call and the case under test would not
-// exist. batchSize is a field on the classifier for exactly this (see
-// classifyBatchSize), and it is set here rather than by a fixture made
-// artificially large, which would also have had to keep the pairs plausible.
 func chunked(p *chunkFailProvider) *RelationClassifier {
 	cls := NewRelationClassifier(p)
 	cls.batchSize = 2
@@ -67,25 +35,16 @@ func chunked(p *chunkFailProvider) *RelationClassifier {
 }
 
 // summarising is the pass's logger writing into buf, so a test can assert on the
-// one summary line the pass emits. It is a helper because three of the
-// assertions below are about what that line says, and a report that counts only
-// one half of a partial repair is the failure this whole change is about.
 func summarising(buf *strings.Builder) *slog.Logger {
 	return slog.New(slog.NewTextHandler(buf, nil))
 }
 
 // TestReassessAppliesTheChunksThatAnswered is the ordinary-edge case: the first
-// chunk's verdicts are acted on, the failed chunk's pairs are the only ones
-// reported unjudged, and the pass still fails so the operator is asked for a
-// rerun.
 func TestReassessAppliesTheChunksThatAnswered(t *testing.T) {
 	store, db := seed(t)
 	ctx := context.Background()
 
 	// Four live edges, none vetoed and none scope-conflicting, so all four are
-	// open and the two chunks hold two pairs each. The texts differ per pair
-	// because a fixture whose pairs were identical would also be a fixture whose
-	// verdicts could not be told apart.
 	type pair struct{ newer, older string }
 	var pairs []pair
 	for _, texts := range [][2]string{
@@ -172,25 +131,11 @@ func TestReassessAppliesTheChunksThatAnswered(t *testing.T) {
 }
 
 // TestReassessKeepsACyclesVerdictFromAChunkThatAnswered is the case the issue
-// named as the possible reason all-or-nothing is REQUIRED: a cycle whose two
-// edges span two chunks. It is not, and the reason is structural rather than
-// lucky — a cycle contributes exactly ONE candidate (that is what #778 changed:
-// the two edges are one question), so a cycle cannot straddle a chunk boundary
-// and there is no pair whose verdict is split across two calls.
-//
-// So the two cycles in the answered chunk are settled to one standing edge each,
-// and the two in the failed chunk are reported NO-VERDICT with both their edges
-// live. That last distinction is the operator's next step, which is why the two
-// are separate outcomes: a missing verdict is answered by a rerun, and only a
-// pair with no knowable direction is the operator's to settle.
 func TestReassessKeepsACyclesVerdictFromAChunkThatAnswered(t *testing.T) {
 	store, db := seed(t)
 	ctx := context.Background()
 
 	// Four cyclic pairs, so every chunk holds two cycles and the whole fixture
-	// is cycles: the ordinary-edge case above covers the other shape, and this
-	// one is about the reporting the cycle branch owns. fixFirst alternates so
-	// the store's row order is not the same for every pair.
 	type pair struct{ stale, fix string }
 	var pairs []pair
 	for i, texts := range [][2]string{
@@ -257,9 +202,6 @@ func TestReassessKeepsACyclesVerdictFromAChunkThatAnswered(t *testing.T) {
 }
 
 // overReportingClassifier claims more pairs were answered than were asked about,
-// which no shipped classifier can do and every caller of a returned count has to
-// survive anyway: the count is about to be used as a SLICE BOUND, and a
-// classifier that does not add up deserves a report rather than a panic.
 type overReportingClassifier struct {
 	extra int
 }
@@ -276,9 +218,6 @@ func (c *overReportingClassifier) ClassifyBatch(_ context.Context, pairs []Candi
 }
 
 // TestReassessClampsAnOverReportedPrefix is the guard on that count. The pair
-// list is three long; a classifier that claims five were answered must leave the
-// pass settling at most three, naming at most three unjudged, and returning the
-// error — never indexing past the pairs it was given.
 func TestReassessClampsAnOverReportedPrefix(t *testing.T) {
 	store, db := seed(t)
 	ctx := context.Background()
