@@ -657,6 +657,8 @@ func (s *Server) notifyMemoryRow(ctx context.Context, projectID string) {
 
 // SetEmbedder configures optional vector embedding for hybrid search and
 // wires the store's onSave hook to notify the embedding worker via projectCh
+// (non-blocking). The store is type-asserted to *memory.Store, which is the
+// concrete type used in production.
 func (s *Server) SetEmbedder(e Embedder, projectCh chan<- string) {
 	s.embedder = e
 	s.projectCh = projectCh
@@ -672,12 +674,17 @@ func (s *Server) SetEmbedder(e Embedder, projectCh chan<- string) {
 
 // SetResolveCLI hands the loaded CLI config (harness binaries + model pins) to
 // the ghost_resolve handler. Called once from runMCP before Run; the zero
+// value is the no-config state (PATH lookup, no pin), so tests that skip it
+// keep the old behavior.
 func (s *Server) SetResolveCLI(cfg config.CLIConfig) {
 	s.resolveCLI = cfg
 }
 
 // SetContextConfig hands the assembler's relevance configuration to the search
 // handler. Called once from runMCP before Run. The zero value is the shipped
+// state — vector arm B off, which is what every machine without a measured
+// threshold should be on — so a caller that skips it is not silently running a
+// different floor, it is running the default one.
 func (s *Server) SetContextConfig(cfg config.ContextConfig) {
 	s.contextCfg = cfg
 }

@@ -316,6 +316,7 @@ func ProjectContextAt(ctx context.Context, store provider.MemoryStore, projectID
 
 // ProjectResourceAt is ProjectContextAt for the `ghost://project/{id}/context`
 // resource, which the recall_project prompt shares: the same memory read at the
+// resource's fixed cap, and a second request for the Global section.
 func ProjectResourceAt(ctx context.Context, store provider.MemoryStore, projectID string, now time.Time) (string, error) {
 	s := newMeasuredServer(store, now)
 	return s.buildProjectContext(ctx, projectID, "", s.searchResponseCap())
