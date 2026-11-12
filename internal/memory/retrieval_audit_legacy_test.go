@@ -9,18 +9,12 @@ import (
 	"testing"
 )
 
-// retrieval_audit is a legacy table: nothing reads it and nothing writes it.
-// The statements that still touch it (the migrations, the purge, the record
-// cap's orphan sweep, the project merge, the project delete) act on rows an
-// older build left behind, so these tests seed it with raw INSERTs.
-
 type legacyAudit struct {
 	project  string
 	rowid    int64
 	memoryID string
 }
 
-// seedLegacyAudit inserts one verdict row the way an older build stored it.
 func seedLegacyAudit(t *testing.T, s *Store, project string, recordRowID int64, memoryID string) {
 	t.Helper()
 	if _, err := s.db.ExecContext(context.Background(),
@@ -30,8 +24,6 @@ func seedLegacyAudit(t *testing.T, s *Store, project string, recordRowID int64, 
 		t.Fatalf("seed retrieval_audit: %v", err)
 	}
 }
-
-// readLegacyAudits returns the whole table, so an orphan anywhere fails a test.
 func readLegacyAudits(t *testing.T, s *Store) []legacyAudit {
 	t.Helper()
 	rows, err := s.db.QueryContext(context.Background(),
@@ -53,8 +45,6 @@ func readLegacyAudits(t *testing.T, s *Store) []legacyAudit {
 	}
 	return out
 }
-
-// seedCalls records n calls, each keeping one memory, and returns their rowids.
 func seedCalls(t *testing.T, s *Store, projectID string, n int) []int64 {
 	t.Helper()
 	ctx := context.Background()
@@ -74,10 +64,6 @@ func seedCalls(t *testing.T, s *Store, projectID string, n int) []int64 {
 	}
 	return rowids
 }
-
-// TestHistoryPurgeRemovesTheVerdictsNamingAMemory: the purge removes the
-// verdicts of the calls it deletes and the verdicts naming the memory whose call
-// survives, and leaves every other verdict alone.
 func TestHistoryPurgeRemovesTheVerdictsNamingAMemory(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -115,54 +101,6 @@ func TestHistoryPurgeRemovesTheVerdictsNamingAMemory(t *testing.T) {
 		t.Errorf("verdicts after the purge = %+v, want only the unattributed MEM2 row", got)
 	}
 }
-
-// TestTheRecordCapPairsOnEveryEvictionNotOnlyTheFirst: retrieval_record has no
-// AUTOINCREMENT, so past the cap every insert evicts one call, and each
-// eviction takes that call's verdicts.
-func TestTheRecordCapPairsOnEveryEvictionNotOnlyTheFirst(t *testing.T) {
-	s := testStore(t)
-	ctx := context.Background()
-	calls := seedCalls(t, s, testProject, 2)
-	restore := retrievalRecordRowsCap
-	retrievalRecordRowsCap = 1
-	t.Cleanup(func() { retrievalRecordRowsCap = restore })
-
-	judge := func(call int, memory string) int64 {
-		t.Helper()
-		if err := s.RecordRetrieval(ctx, RetrievalRecord{
-			ProjectID: testProject, Source: "search", QueryHash: digest(call), Outcome: "answerable",
-			Verdicts: []RowVerdict{{ID: memory, Kept: true, Stage: "fit", Reason: "fit_response"}},
-		}); err != nil {
-			t.Fatalf("RecordRetrieval (call %d): %v", call, err)
-		}
-		recs, err := s.RetrievalRecords(ctx, 1)
-		if err != nil || len(recs) != 1 {
-			t.Fatalf("RetrievalRecords: %v (%d rows)", err, len(recs))
-		}
-		seedLegacyAudit(t, s, testProject, recs[0].RowID, memory)
-		return recs[0].RowID
-	}
-	assertOnly := func(step, wantMemory string, wantRowID int64) {
-		t.Helper()
-		got := readLegacyAudits(t, s)
-		if len(got) != 1 {
-			t.Fatalf("%s: %d verdict(s) in the table, want 1 (%+v)", step, len(got), got)
-		}
-		if got[0].rowid != wantRowID || got[0].memoryID != wantMemory {
-			t.Errorf("%s: the surviving verdict is (%s, rowid %d), want (%s, rowid %d)", step,
-				got[0].memoryID, got[0].rowid, wantMemory, wantRowID)
-		}
-	}
-
-	seedLegacyAudit(t, s, testProject, calls[0], "MEM-1")
-	second := judge(902, "MEM-2")
-	assertOnly("after the second call", "MEM-2", second)
-	third := judge(903, "MEM-3")
-	assertOnly("after the third call", "MEM-3", third)
-}
-
-// TestTheRecordCapTakesTheVerdictsWithIt: the cap's eviction takes the verdicts
-// of the evicted calls and spares the unattributed one (record_rowid 0).
 func TestTheRecordCapTakesTheVerdictsWithIt(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -202,9 +140,6 @@ func TestTheRecordCapTakesTheVerdictsWithIt(t *testing.T) {
 		t.Errorf("survivors: %d for the kept call and %d unattributed, want 1 and 1", kept, unattributed)
 	}
 }
-
-// TestMergeProjectReassignsTheLegacyVerdicts: the project merge moves a legacy
-// verdict with its project, because project_id is not a foreign key.
 func TestMergeProjectReassignsTheLegacyVerdicts(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -229,73 +164,6 @@ func TestMergeProjectReassignsTheLegacyVerdicts(t *testing.T) {
 		}
 	}
 }
-
-// TestRepoClaimMergeReassignsTheLegacyVerdicts: the bind-recovery merge is the
-// second copy of the reassignment list, reached by a save from a directory
-// whose remote another project owns.
-func TestRepoClaimMergeReassignsTheLegacyVerdicts(t *testing.T) {
-	s := testStore(t)
-	ctx := context.Background()
-	const remote = "git@github.com:acme/gizmos.git"
-	if err := s.EnsureProjectWithRepo(ctx, "owner", "/tmp/owner", "owner", remote); err != nil {
-		t.Fatalf("EnsureProjectWithRepo: %v", err)
-	}
-	if err := s.EnsureProject(ctx, "named", "/tmp/named", "named"); err != nil {
-		t.Fatalf("EnsureProject: %v", err)
-	}
-	seedLegacyAudit(t, s, "named", 1, "MEM-1")
-
-	resolved, _, err := s.ResolveOrCreateRepoProject(ctx, "named", "named", "named", "/tmp/named", "named", remote)
-	if err != nil {
-		t.Fatalf("ResolveOrCreateRepoProject: %v", err)
-	}
-	if resolved != "owner" {
-		t.Fatalf("resolved project = %q, want owner: the merge this test needs did not happen", resolved)
-	}
-	got := readLegacyAudits(t, s)
-	if len(got) != 1 || got[0].project != "owner" {
-		t.Errorf("verdicts after the repository-claim merge = %+v, want one naming owner", got)
-	}
-}
-
-// TestPromoteToGlobalLeavesTheLegacyVerdictWithItsCall: a promotion does not
-// move a verdict; it belongs to the project of the call it was filed against.
-func TestPromoteToGlobalLeavesTheLegacyVerdictWithItsCall(t *testing.T) {
-	s := testStore(t)
-	ctx := context.Background()
-	id, err := s.Create(ctx, testProject, Memory{
-		Category: "fact", Content: "the verdict stays with the call that filed it", Source: "mcp", Importance: 0.5,
-	})
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	seedLegacyAudit(t, s, testProject, 1, id)
-
-	if err := s.PromoteToGlobal(ctx, testProject, id); err != nil {
-		t.Fatalf("PromoteToGlobal: %v", err)
-	}
-	got := readLegacyAudits(t, s)
-	if len(got) != 1 || got[0].project != testProject || got[0].memoryID != id {
-		t.Errorf("verdicts after the promotion = %+v, want one still naming %q", got, testProject)
-	}
-}
-
-// TestBothMergeStatementListsReassignTheLegacyVerdicts: the reassignment lives
-// in two lists that are kept in step on purpose.
-func TestBothMergeStatementListsReassignTheLegacyVerdicts(t *testing.T) {
-	src, err := os.ReadFile("store.go")
-	if err != nil {
-		t.Fatalf("read store.go: %v", err)
-	}
-	const stmt = "UPDATE retrieval_audit SET project_id = ? WHERE project_id = ?"
-	if n := strings.Count(string(src), stmt); n != 2 {
-		t.Errorf("the reassignment appears %d time(s) in store.go, want 2 — one per merge list", n)
-	}
-}
-
-// TestEveryWriterThatDeletesRetrievalRecordsTakesTheirVerdicts: every function
-// that deletes retrieval_record rows also deletes the retrieval_audit rows filed
-// against them, so no path leaves a verdict naming a call that is gone.
 func TestEveryWriterThatDeletesRetrievalRecordsTakesTheirVerdicts(t *testing.T) {
 	entries, err := os.ReadDir(".")
 	if err != nil {
@@ -315,13 +183,6 @@ func TestEveryWriterThatDeletesRetrievalRecordsTakesTheirVerdicts(t *testing.T) 
 		if err != nil {
 			t.Fatalf("read %s: %v", name, err)
 		}
-		// Split into top-level declarations by the `func ` line each one starts on,
-		// which is the coarsest split that still tells two paths apart. Each
-		// declaration's body is the lines up to the next one, and comment lines
-		// are dropped: a function that only EXPLAINS this rule must not be able to
-		// satisfy it. Whole-line `//` is the only comment form stripped, and it is
-		// enough here because every statement concerned opens its SQL with a
-		// backtick on the line after its `if`.
 		var fn, body string
 		seen := 0
 		flush := func() {
@@ -348,9 +209,6 @@ func TestEveryWriterThatDeletesRetrievalRecordsTakesTheirVerdicts(t *testing.T) 
 			body += line + "\n"
 		}
 		flush()
-		// And the scan must not have walked PAST a delete it could not attribute.
-		// A split that silently misses a path is the same failure as no check at
-		// all, wearing the costume of one, so it is reported rather than skipped.
 		if seen == 0 && strings.Contains(string(src), deletesRecords) {
 			t.Errorf("%s holds a %s statement that no declaration in it was credited with — this scan did not "+
 				"read that file correctly, so treat its silence above as unchecked", name, deletesRecords)
@@ -360,46 +218,6 @@ func TestEveryWriterThatDeletesRetrievalRecordsTakesTheirVerdicts(t *testing.T) 
 		t.Fatal("no function deletes retrieval_record rows — this test is not looking at what it claims to")
 	}
 }
-
-// declaredName is the name a `func` line declares, with a method's receiver
-// reduced to its type: `func (s *Store) RecordRetrieval(ctx ...) error` reads as
-// `(*Store).RecordRetrieval`, so a failure names the path rather than a
-// signature.
-//
-// The receiver is stripped FIRST and the name cut from what is left. Built the
-// other way round — rewriting the signature and then cutting at the first `(` —
-// it returns "" for every method, because the "(" of the receiver it just wrote
-// is the first one it finds; and an empty name is indistinguishable from "not a
-// declaration" to the scan that calls it, so a test that skips every method is a
-// test that passes on two of the three paths it was written to cover. That is not
-// hypothetical: it is what this function did the first time.
-func declaredName(line string) string {
-	name, recv := strings.TrimSpace(line), ""
-	if strings.HasPrefix(name, "(") {
-		if end := strings.Index(name, ") "); end >= 0 {
-			recv = strings.TrimSpace(name[1:end])
-			if i := strings.LastIndex(recv, " "); i >= 0 {
-				recv = recv[i+1:]
-			}
-			recv = strings.TrimPrefix(recv, "*")
-			name = name[end+2:]
-		}
-	}
-	if end := strings.IndexAny(name, "(\t "); end >= 0 {
-		name = name[:end]
-	}
-	if recv != "" {
-		return "(*" + recv + ")." + name
-	}
-	return name
-}
-
-// TestRetrievalAuditsToleratesAnUnreadableRow: the reader must not fail the
-// whole report because one row cannot be decoded — the state an operator is in
-
-// TestMigrateV21MatchesTheFreshDatabaseSchema is the v20 test's own shape, for
-// the verdict table: the migration path and the initSQL path must produce one
-// table, or an upgraded store and a fresh one disagree on what a verdict is.
 func TestMigrateV21MatchesTheFreshDatabaseSchema(t *testing.T) {
 	newDB := func(t *testing.T) *sql.DB {
 		t.Helper()
@@ -430,11 +248,6 @@ func TestMigrateV21MatchesTheFreshDatabaseSchema(t *testing.T) {
 	if err := tx.Commit(); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
-	// The arm above reproduces the v21 SHIP shape, and the comparison is against a
-	// fresh database — which initSQL can only ever describe as it is NOW, holding
-	// `content_hash` (schema v22). So the arm continues with the step that takes it
-	// from that frozen shape to the current one; stopping at v21 would compare v21's
-	// DDL with today's and report the difference as a defect in the v21 step.
 	tx, err = migrated.Begin()
 	if err != nil {
 		t.Fatalf("begin (v22): %v", err)
@@ -468,10 +281,6 @@ func TestMigrateV21MatchesTheFreshDatabaseSchema(t *testing.T) {
 		t.Errorf("migrateV21 did not create the project index: %v", err)
 	}
 }
-
-// TestMigrateV21RefusesAForeignRetrievalAuditTable: `CREATE TABLE IF NOT EXISTS`
-// is a silent no-op against a table somebody else owns, so the step would stamp
-// v21 over a shape every later write fails on. The error must name the remedy.
 func TestMigrateV21RefusesAForeignRetrievalAuditTable(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "ghost.db")
 	db, err := OpenDB(path)
@@ -498,70 +307,33 @@ func TestMigrateV21RefusesAForeignRetrievalAuditTable(t *testing.T) {
 		}
 	}
 }
-
-// TestMigrateV21LeavesAnEarlierStoreReadable: the step is additive, so a store
-// at v20 with rows keeps them, and nothing is backfilled.
-func TestMigrateV21LeavesAnEarlierStoreReadable(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "ghost.db")
-	db, err := OpenDB(path)
-	if err != nil {
-		t.Fatalf("OpenDB: %v", err)
+func declaredName(line string) string {
+	name, recv := strings.TrimSpace(line), ""
+	if strings.HasPrefix(name, "(") {
+		if end := strings.Index(name, ") "); end >= 0 {
+			recv = strings.TrimSpace(name[1:end])
+			if i := strings.LastIndex(recv, " "); i >= 0 {
+				recv = recv[i+1:]
+			}
+			recv = strings.TrimPrefix(recv, "*")
+			name = name[end+2:]
+		}
 	}
-	if _, err := db.Exec(
-		`INSERT INTO projects (id, path, name) VALUES ('p1', '/tmp/v21-p1', 'p1')`); err != nil {
-		t.Fatalf("seed project: %v", err)
+	if end := strings.IndexAny(name, "(\t "); end >= 0 {
+		name = name[:end]
 	}
-	if _, err := db.Exec(
-		`INSERT INTO retrieval_record (project_id, source, outcome) VALUES ('p1', 'search', 'answerable')`,
-	); err != nil {
-		t.Fatalf("seed record: %v", err)
+	if recv != "" {
+		return "(*" + recv + ")." + name
 	}
-	if err := db.Close(); err != nil {
-		t.Fatalf("close: %v", err)
-	}
-
-	reopened, err := OpenDB(path)
-	if err != nil {
-		t.Fatalf("reopen: %v", err)
-	}
-	defer reopened.Close() //nolint:errcheck
-	var n int
-	if err := reopened.QueryRow(`SELECT count(*) FROM retrieval_record`).Scan(&n); err != nil {
-		t.Fatalf("count records: %v", err)
-	}
-	if n != 1 {
-		t.Errorf("the migration dropped a recorded call: %d row(s) left", n)
-	}
-	// Nothing is backfilled. A verdict is a judgement ABOUT a transcript, and
-	// there is no transcript to judge: a synthesised row would say every call
-	// before this version was ignored, which is a claim nobody made.
-	if err := reopened.QueryRow(`SELECT count(*) FROM retrieval_audit`).Scan(&n); err != nil {
-		t.Fatalf("count verdicts: %v", err)
-	}
-	if n != 0 {
-		t.Errorf("the migration backfilled %d verdict(s) — none of them were judged", n)
-	}
+	return name
 }
 
-// TestMigrateV22AddsContentHashToExistingVerdicts: the step adds the column the
-// reader now keys on (#879), and it adds it to a store that already HOLDS
-// verdicts — so the two properties that matter are that the row survives and
-// that it comes through with the empty stamp rather than an invented one. An
-// empty stamp is precisely what the reader's named legacy rule is for, so a
-// backfill here would be a fabricated claim ("this verdict judged THIS text")
-// about rows whose judged text nothing recorded.
-//
-// The shape is compared against a fresh database for the reason the v21 test
-// compares its own: an upgraded store and a fresh one must be one schema, or the
-// same SELECT reads different columns on each path.
 func TestMigrateV22AddsContentHashToExistingVerdicts(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "ghost.db")
 	db, err := OpenDB(path)
 	if err != nil {
 		t.Fatalf("OpenDB: %v", err)
 	}
-	// Rewind to the state the v21 step leaves behind: the current table dropped and
-	// rebuilt under v21's own frozen DDL, with user_version stamped back to 21.
 	if _, err := db.Exec(`DROP TABLE retrieval_audit`); err != nil {
 		t.Fatalf("drop the current table: %v", err)
 	}
@@ -629,42 +401,3 @@ func TestMigrateV22AddsContentHashToExistingVerdicts(t *testing.T) {
 		t.Errorf("an upgraded store and a fresh one disagree on retrieval_audit: %s", diff)
 	}
 }
-
-// TestMigrateV22RefusesAForeignRetrievalAuditTable: the step is an ALTER, and
-// unlike CREATE TABLE IF NOT EXISTS an ALTER SUCCEEDS against any table holding
-// that name — so without the guard inside the step, a `retrieval_audit` somebody
-// else owns would be given a column and the store would be stamped current over
-// a shape nothing here can write. The guard names the remedy instead.
-func TestMigrateV22RefusesAForeignRetrievalAuditTable(t *testing.T) {
-	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "ghost.db"))
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	if _, err := db.Exec(initSQL); err != nil {
-		t.Fatalf("initSQL: %v", err)
-	}
-	if _, err := db.Exec(`DROP TABLE retrieval_audit`); err != nil {
-		t.Fatalf("drop: %v", err)
-	}
-	if _, err := db.Exec(`CREATE TABLE retrieval_audit (something_else TEXT)`); err != nil {
-		t.Fatalf("seed the foreign table: %v", err)
-	}
-	tx, err := db.Begin()
-	if err != nil {
-		t.Fatalf("begin: %v", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-	if err := migrateV22(tx); err == nil {
-		t.Fatal("migrateV22 added a column to a retrieval_audit that is not Ghost's")
-	} else {
-		for _, want := range []string{"retrieval_audit", "DROP TABLE"} {
-			if !strings.Contains(err.Error(), want) {
-				t.Errorf("error %q does not mention %q", err, want)
-			}
-		}
-	}
-}
-
-// TestRetrievalAuditsCarryOneIndex: every index on this table is a b-tree insert
-// inside the audit's write, and the report's own read is a full scan of a capped
