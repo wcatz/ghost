@@ -599,6 +599,7 @@ var valueFlagOwners = map[string][]string{
 	"parseCleanupSessionsArgs": {"opencode cleanup-sessions"},
 	"parseContextBlockArgs":    {"context"},
 	"contextAsOf":              {"context"},
+	"contextSource":            {"context"},
 	"parseContextAuditArgs":    {"context"},
 	"runHook":                  {"hook"},
 }
