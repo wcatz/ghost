@@ -12,8 +12,6 @@ import (
 
 const globalProjectID = "_global"
 
-// exportListLimit caps each per-project list query. A list that comes back
-// exactly this long may have been truncated by the store — see truncated.
 const exportListLimit = 100000
 
 // Exporter mirrors the store into a vault directory.
@@ -21,19 +19,12 @@ type Exporter struct {
 	Store  *memory.Store
 	Logger *slog.Logger
 
-	// listLimit overrides exportListLimit when > 0 (tests only).
 	listLimit int
 }
 
-// truncated reports whether a list of n rows fetched with the given limit
-// may have been silently cut off by the store. A truncated list would leave
-// entities out of the keep-set, and prune would then delete their notes —
-// so callers must treat the project as unsafe to prune.
 func truncated(n, limit int) bool { return n >= limit }
 
-// Export performs one full deterministic mirror pass. projectFilter of ""
-// mirrors everything; otherwise exactly one project (by ID, or by a name only
-// one project carries) plus _global. See selectProjects.
+// Export performs one mirror pass.
 func (e *Exporter) Export(ctx context.Context, vaultDir, projectFilter string) error {
 	limit := e.listLimit
 	if limit <= 0 {
@@ -43,8 +34,6 @@ func (e *Exporter) Export(ctx context.Context, vaultDir, projectFilter string) e
 	if err != nil {
 		return fmt.Errorf("list projects: %w", err)
 	}
-	// The filter is resolved BEFORE ensureVault, so a refused filter leaves the
-	// vault exactly as it was — not even created or marked.
 	selected, err := selectProjects(projects, projectFilter)
 	if err != nil {
 		return err
@@ -52,17 +41,13 @@ func (e *Exporter) Export(ctx context.Context, vaultDir, projectFilter string) e
 	if err := ensureVault(vaultDir); err != nil {
 		return err
 	}
-	// Folder assignment is computed over ALL projects before filtering so a
-	// --project run places notes in exactly the same folder as an unfiltered
-	// run, regardless of case-collision disambiguation.
 	folders := folderNames(projects)
 
-	// Pass 1: load all memories, build the global id → filename map for wikilinks.
 	type projData struct {
 		p        memory.Project
 		folder   string
 		memories []memory.Memory
-		trunc    bool // some list hit the limit — pruning this folder is unsafe
+		trunc    bool
 	}
 	var data []projData
 	fileFor := make(map[string]string)
@@ -75,8 +60,6 @@ func (e *Exporter) Export(ctx context.Context, vaultDir, projectFilter string) e
 		if trunc {
 			e.Logger.Warn("obsidian export: list truncated at limit", "project", memory.RefusalArg("project_id", p.ID), "kind", "memories", "limit", limit)
 		}
-		// One project's memories share one Memories/ directory, so they are
-		// named together: see noteNames for why a built name is not enough.
 		recs := make([]noteRecord, 0, len(mems))
 		for _, m := range mems {
 			recs = append(recs, noteRecord{id: m.ID, name: fileName(m)})
@@ -87,11 +70,6 @@ func (e *Exporter) Export(ctx context.Context, vaultDir, projectFilter string) e
 		data = append(data, projData{p: p, folder: folders[p.ID], memories: mems, trunc: trunc})
 	}
 
-	// Pass 2: render + diff-write + collect keep-set, then prune. The keep-set
-	// holds each entity's canonical path from the vault root, not its id and not
-	// its bare name: a content edit rewrites a memory in place (same ID, new
-	// slug), so the old-slug file is stale and its path is simply not in the
-	// set. See keepSet for why it is keyed on the path.
 	keep := make(keepSet)
 	var subtrees []string
 	written, skipped := 0, 0
@@ -153,15 +131,10 @@ func (e *Exporter) Export(ctx context.Context, vaultDir, projectFilter string) e
 			}
 			count(&written, &skipped, w)
 		}
-		// A truncated list means the keep-set is incomplete for this project:
-		// pruning would delete notes for entities we simply didn't see. Skip
-		// the folder — stale extras beat silent deletions.
 		if !d.trunc {
 			subtrees = append(subtrees, d.folder)
 		}
 	}
-	// Build the full set of known project folders (including truncated
-	// projects) so prune can distinguish deleted projects from active ones.
 	var knownFolders []string
 	if projectFilter == "" {
 		knownFolders = make([]string, 0, len(folders))
@@ -176,19 +149,6 @@ func (e *Exporter) Export(ctx context.Context, vaultDir, projectFilter string) e
 	return nil
 }
 
-// selectProjects filters the project list for one export pass: every project
-// when filter is "", otherwise the one project the filter names plus _global,
-// which rides along with any filter but never satisfies one on its own.
-//
-// It is the rule `ghost export --project` follows (internal/portable
-// selectProjects). An exact ID wins outright, before any name is considered:
-// an id is a primary key, and a store can hold a project whose id is literally
-// another project's name, so the id selects its project alone. A project's
-// NAME is not unique — `projects.path` and `projects.repo_remote` carry the only
-// unique indexes — so a name that more than one project answers to is REFUSED,
-// naming every matching id, rather than mirroring all of them into one vault
-// run. The filter and the ids are rendered through memory.RefusalArg, which
-// quotes the value and withholds one shaped like a credential.
 func selectProjects(projects []memory.Project, filter string) ([]memory.Project, error) {
 	if filter == "" {
 		return projects, nil
@@ -218,7 +178,6 @@ func selectProjects(projects []memory.Project, filter string) ([]memory.Project,
 		return nil, fmt.Errorf("project filter %s matches multiple projects by name: %s — name a project by its unique id",
 			memory.RefusalArg("project", filter), strings.Join(ids, ", "))
 	}
-	// Keep the store's listing order, so the pass order is the same as before.
 	selected := projects[:0:0]
 	for _, p := range projects {
 		if p.ID == match[0].ID || p.ID == globalProjectID {
@@ -236,8 +195,6 @@ func count(written, skipped *int, wrote bool) {
 	}
 }
 
-// folderName maps a project to its vault folder. _global gets "Global";
-// otherwise the sanitized project name (fallback: ID).
 func folderName(p memory.Project) string {
 	if p.ID == globalProjectID {
 		return "Global"
@@ -258,32 +215,8 @@ func folderName(p memory.Project) string {
 	return string(b)
 }
 
-// maxFolderName bounds one project folder. It is also the bound
-// adversarial.AssertLocalName enforces on the tree an export leaves behind, which
-// is what keeps the ceiling and the fixture from drifting apart without either
-// noticing.
 const maxFolderName = 120
 
-// folderNames maps each project ID to a distinct vault folder. Folders that
-// collide case-insensitively (APFS/NTFS would silently merge "Foo" and
-// "foo") are disambiguated: the first keeps its plain name, later collisions
-// get "-" + the first 8 chars of the project ID appended. Input order is
-// deterministic (ListProjects sorts by name), so folder assignment is too.
-//
-// Containment: a computed folder of ".", "..", "", or anything failing
-// filepath.IsLocal is replaced with "project-" + the project id's token — the
-// write path must stay under the vault root no matter what the projects table
-// holds, just like prune's subtree guard on the delete path. A folder longer
-// than maxFolderName is replaced the same way, because it fails differently but
-// just as completely: a project name is whatever a caller sent (EnsureProject
-// stores it verbatim, and an artifact carries its own), so an over-long one is
-// reachable, and MkdirAll answered ENAMETOOLONG for it on every export and every
-// retry — taking every other project's notes down with it. Replaced rather than
-// truncated, so two projects with the same over-long name still get distinct
-// folders.
-//
-// id-token collisions are astronomically unlikely (hex UUIDs); a collision would
-// merge folders/files in the vault without any data loss in the store.
 func folderNames(projects []memory.Project) map[string]string {
 	folders := make(map[string]string, len(projects))
 	seen := make(map[string]bool, len(projects))

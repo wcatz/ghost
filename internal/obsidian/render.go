@@ -1,5 +1,4 @@
-// Package obsidian mirrors Ghost's store into a plain-Markdown folder that
-// Obsidian reads natively. Strictly one-way: Ghost → vault.
+// Package obsidian mirrors Ghost's store into a Markdown vault.
 package obsidian
 
 import (
@@ -14,10 +13,6 @@ import (
 
 const banner = "> [!info] Mirrored from Ghost — edits here are not synced back.\n"
 
-// slug derives a stable-ish, readable filename prefix from the first ~6
-// content words: lowercase, alnum-only, dash-joined, max 40 chars.
-// Entirely non-ASCII content degrades to "note"; identity is preserved by
-// the id token in the filename.
 func slug(content string) string {
 	var words []string
 	for _, w := range strings.Fields(strings.ToLower(content)) {
@@ -44,10 +39,6 @@ func slug(content string) string {
 	return s
 }
 
-// aliasLabel derives a short, readable display name from text: the first line,
-// whitespace-collapsed, capped at 60 runes. Obsidian shows it in the graph and
-// Quick Switcher instead of the id-suffixed filename. Empty when text has no
-// usable content, in which case the caller omits the aliases key entirely.
 func aliasLabel(text string) string {
 	line := text
 	if i := strings.IndexByte(line, '\n'); i >= 0 {
@@ -61,34 +52,8 @@ func aliasLabel(text string) string {
 	return line
 }
 
-// idTokenWidth is how many bytes of an id name a note. It is also the width
-// adversarial.AssertLocalName's own bound leaves room for, which is what keeps
-// the fixture and this function from drifting apart silently.
 const idTokenWidth = 8
 
-// idToken is the filename fragment that identifies a record: the first
-// idTokenWidth bytes of its id when those name a single path component, and
-// otherwise a hash of the whole id.
-//
-// Every id ghost mints is hex, so the plain path is the only one a real record
-// takes and its note keeps the name it already had. The hashed path is for ids
-// that arrived from somewhere else: a portable artifact carries its own ids and
-// Store.ImportMemory writes them verbatim, so an id can hold a separator, a NUL
-// or a backslash. A separator in that fragment is not cosmetic — the note lands
-// outside the Memories/ subtree prune watches and is then deleted by it, because
-// the keep-set holds the un-cleaned name and never matches the file on disk; a
-// NUL makes the write fail with EINVAL, which fails the whole export on every
-// run and every retry. Hashing keeps the fragment one path element, and unlike
-// replacing the offending bytes it keeps two different ids apart, so two hostile
-// ids cannot collapse onto one filename.
-//
-// "Names a single path component" is deliberately permissive — a dash, a dot or
-// a space in the prefix is left exactly as it was — so the only ids that take
-// the hashed path are the ones that could have escaped or could not be created.
-// A tab, a newline or a carriage return is the one addition to that set: such a
-// name is a legal path component, but it is invisible to `ls`, breaks a glob in
-// any shell that does not quote its output, and cannot be typed by a user who
-// wants to open the note. A name nobody can name is not a name.
 func idToken(id string) string {
 	head := id
 	if len(head) > idTokenWidth {
@@ -113,15 +78,6 @@ func date(ts string) string {
 	return ts
 }
 
-// yamlScalar renders s as a single-line YAML scalar. Newlines and tabs are
-// flattened to spaces — the one-line-per-key rule that hasGhostID's scan depends
-// on — and the value is double-quoted with escaping whenever plain emission could
-// change the line's YAML meaning. The flattening is lossy and always will be, so
-// nothing may be keyed on reading an id back out of a note: see keepSet. When
-// flow is true the value is a flow-sequence item (a tag), so the structural
-// characters , [ ] { } force quoting anywhere in the string, not just at the
-// start. Well-formed values (hex ids, plain project names and tags) take the
-// plain path and render byte-identically to an unescaped emission.
 func yamlScalar(s string, flow bool) string {
 	s = strings.NewReplacer("\r\n", " ", "\n", " ", "\r", " ", "\t", " ").Replace(s)
 	if needsYAMLQuote(s, flow) {
@@ -130,8 +86,6 @@ func yamlScalar(s string, flow bool) string {
 	return s
 }
 
-// needsYAMLQuote reports whether s must be double-quoted to survive as a
-// single-line YAML scalar (see yamlScalar). s is assumed already flattened.
 func needsYAMLQuote(s string, flow bool) bool {
 	if s == "" || strings.TrimSpace(s) != s { // empty, or leading/trailing space
 		return true

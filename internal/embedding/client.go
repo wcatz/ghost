@@ -1,5 +1,4 @@
-// Package embedding provides a client for generating text embeddings
-// via a local Ollama instance.
+// Package embedding generates text embeddings via Ollama.
 package embedding
 
 import (
@@ -13,23 +12,17 @@ import (
 	"time"
 )
 
-// Client calls Ollama's /api/embed endpoint to generate embeddings.
+// Client generates embeddings through Ollama's /api/embed endpoint.
 type Client struct {
 	baseURL    string
 	model      string
 	dimensions int
-	// prefixes is the task-prefix pair this model requires (see prefix.go),
-	// resolved once at construction so neither embed path re-derives it.
-	prefixes TaskPrefixes
-	// identity is what this client stamps into memory_embeddings.model, and so
-	// what decides whether the vectors it wrote are still comparable with a
-	// query vector. See VectorIdentity.
+	prefixes   TaskPrefixes
 	identity   string
 	httpClient *http.Client
 }
 
-// NewClient creates an embedding client.
-// baseURL is the Ollama API base (e.g. "http://localhost:11434").
+// NewClient creates an embedding client for baseURL.
 func NewClient(baseURL, model string, dimensions int) *Client {
 	return &Client{
 		baseURL:    baseURL,
@@ -41,37 +34,25 @@ func NewClient(baseURL, model string, dimensions int) *Client {
 	}
 }
 
-// embedRequest is the Ollama /api/embed request body.
 type embedRequest struct {
 	Model string `json:"model"`
 	Input string `json:"input"`
 }
 
-// embedResponse is the Ollama /api/embed response.
 type embedResponse struct {
 	Embeddings [][]float32 `json:"embeddings"`
 }
 
-// EmbedDocument generates the embedding for text that will be STORED and
-// searched over later. Models that separate the two roles (nomic-embed-text)
-// need the document task prefix, which is applied here; the worker embeds
-// every memory through this method, so a memory never enters the index in the
-// wrong space.
-//
-// Returns an error if the service is unavailable.
+// EmbedDocument returns the embedding for stored text.
 func (c *Client) EmbedDocument(ctx context.Context, text string) ([]float32, error) {
 	return c.embed(ctx, c.prefixes.prefixedDocument(text))
 }
 
-// EmbedQuery generates the embedding for a SEARCH QUERY, applying the query
-// task prefix where the model requires one. Only vectors from this method may
-// be compared against stored vectors, for the same reason EmbedDocument
-// carries the document prefix.
+// EmbedQuery returns the embedding for a search query.
 func (c *Client) EmbedQuery(ctx context.Context, text string) ([]float32, error) {
 	return c.embed(ctx, c.prefixes.prefixedQuery(text))
 }
 
-// embed performs one /api/embed round trip with input already prepared.
 func (c *Client) embed(ctx context.Context, input string) ([]float32, error) {
 	body, err := json.Marshal(embedRequest{
 		Model: c.model,
@@ -115,35 +96,19 @@ func (c *Client) embed(ctx context.Context, input string) ([]float32, error) {
 	return vec, nil
 }
 
-// Reachability is what a liveness probe found, with the one distinction that
-// matters kept rather than flattened.
-//
-// Alive's original bool could not tell "nothing is listening" from "nothing
-// answered in time", so a caller gating work on it read a slow machine as a dead
-// endpoint. The two cost very different things: a wrong "down" makes a caller
-// skip work it could do, and a wrong "up" costs one bounded request. So the
-// answer is three-valued and every call site says which of the two it means.
+// Reachability reports the result of a liveness probe.
 type Reachability int
 
 const (
-	// Reachable: the endpoint answered 200.
+	// Reachable means the endpoint answered 200.
 	Reachable Reachability = iota
-	// Unreachable: the endpoint is not there. Either it answered with a
-	// non-200, or the connection was refused — both are an answer, and both mean
-	// there is no Ollama behind the URL.
+	// Unreachable means the endpoint refused or answered non-200.
 	Unreachable
-	// Inconclusive: the probe's OWN deadline expired. Something may be listening
-	// and simply too slow to answer this time: a machine under load, a proxy, a
-	// disk stall. It is evidence of nothing, and the difference from Unreachable
-	// is the whole point of this type. EmbedPending also returns it for a batch
-	// it stopped on a stalled endpoint or on a budget spent without embedding
-	// anything: the endpoint answered its liveness probe and still did not do
-	// the work in time.
+	// Inconclusive means the probe deadline expired.
 	Inconclusive
 )
 
-// String names the state for a log line, so a report says which of the three it
-// is rather than leaving a reader to infer it from a bool.
+// String returns the reachability state name.
 func (r Reachability) String() string {
 	switch r {
 	case Reachable:
@@ -155,25 +120,9 @@ func (r Reachability) String() string {
 	}
 }
 
-// aliveProbeTimeout bounds ONE liveness probe. It is short because the probe
-// runs before every sweep, every save-driven embed and every one-shot pass that
-// reads the index, and a probe that takes its full time is a caller waiting. It
-// is also why a timeout is reported as Inconclusive rather than Unreachable: at
-// this length a busy machine reaches it routinely, and a reachability answer
-// that flips on load is not a reachability answer.
-//
-// A var so a test can hand it milliseconds rather than sitting out the shipped
-// two, the same reason embedSupersedeCorpus's budget is a parameter and
-// maxOpencodeOutputLine is a var: a test that has to wait out the real one is a
-// test that does not run often enough to be trusted. The tests that need a probe
-// to MISS it lower this, and the tests that need it to arrive lower it too — so
-// the production value is the only one exercised by production, and every test
-// that lowers it says so.
 var aliveProbeTimeout = 2 * time.Second
 
-// Probe reports what one liveness check found: whether Ollama is reachable, and
-// if it is not, whether that is something it established or something that
-// merely failed to arrive in time.
+// Probe checks whether Ollama is reachable.
 func (c *Client) Probe(ctx context.Context) Reachability {
 	ctx, cancel := context.WithTimeout(ctx, aliveProbeTimeout)
 	defer cancel()
@@ -185,9 +134,6 @@ func (c *Client) Probe(ctx context.Context) Reachability {
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		if ctx.Err() != nil {
-			// The probe's own deadline (or a cancelled parent) — not a refusal.
-			// A client walking away from a refused connection does not wait out
-			// the timeout, so this cannot be a connection error.
 			return Inconclusive
 		}
 		return Unreachable
@@ -199,30 +145,18 @@ func (c *Client) Probe(ctx context.Context) Reachability {
 	return Unreachable
 }
 
-// Alive reports if Ollama is reachable by hitting the root endpoint. It is the
-// two-valued form, for the callers that only need to know whether to warn a
-// human: a health report that says "not reachable" during a stall is
-// conservative in the direction that costs nothing, so they do not need the
-// third state. A caller that decides whether to DO work must use Probe, because
-// that is where a false "down" is expensive.
+// Alive reports whether Ollama is reachable.
 func (c *Client) Alive(ctx context.Context) bool {
 	return c.Probe(ctx) == Reachable
 }
 
-// tagsResponse is the Ollama /api/tags response.
 type tagsResponse struct {
 	Models []struct {
 		Name string `json:"name"`
 	} `json:"models"`
 }
 
-// HasModel reports whether the configured model is installed in Ollama. Both
-// the configured name and each installed name are normalised to the spelling
-// Ollama resolves to — the leading "registry.ollama.ai/" and "library/"
-// prefixes dropped, and a missing (or empty) tag filled in as ":latest" — so
-// "registry.ollama.ai/library/nomic-embed-text:v1.5" and the bare
-// "nomic-embed-text:v1.5" name the one installed model, and an untagged name
-// (or one left with a trailing colon) matches its ":latest" variant.
+// HasModel reports whether the configured model is installed in Ollama.
 func (c *Client) HasModel(ctx context.Context) (bool, error) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
@@ -254,13 +188,6 @@ func (c *Client) HasModel(ctx context.Context) (bool, error) {
 	return false, nil
 }
 
-// resolvedModelName normalises a model name to the spelling Ollama resolves it
-// to before the /api/tags comparison: a leading "registry.ollama.ai/" and then
-// a leading "library/" are dropped, any other qualifier is kept — it names a
-// distinct model, so "hf.co/alice/m:q" and "hf.co/bob/m:q" do not collide — and
-// a name carrying no tag, including one left with a trailing colon, is filled
-// in as ":latest". It is deliberately narrower than ModelFamily, which answers
-// a different question: which task prefixes a model's weights require.
 func resolvedModelName(name string) string {
 	name = strings.TrimPrefix(name, "registry.ollama.ai/")
 	name = strings.TrimPrefix(name, "library/")
@@ -278,17 +205,12 @@ func (c *Client) Model() string {
 	return c.model
 }
 
-// Dimensions returns the expected embedding dimensionality.
+// Dimensions returns the embedding dimensionality.
 func (c *Client) Dimensions() int {
 	return c.dimensions
 }
 
-// Identity returns the vector-space identity of everything this client embeds:
-// the model, its dimensions, and whether a task prefix is applied (see
-// VectorIdentity). It is the value stored alongside each vector, and the value
-// memory.Store compares against to decide a stored vector is still usable —
-// so the store must be given the same string (SetEmbeddingIdentity) or it will
-// neither trust this client's vectors nor retire the previous ones.
+// Identity returns the vector-space identity for this client.
 func (c *Client) Identity() string {
 	return c.identity
 }
