@@ -486,13 +486,6 @@ func newVectorScratch() *vectorScratch {
 	return s
 }
 
-func (s *vectorScratch) allocationCount() int64 {
-	if s == nil {
-		return 0
-	}
-	return s.allocs.Load()
-}
-
 func (s *vectorScratch) borrow() *vectorRows {
 	v, _ := s.pool.Get().(*vectorRows)
 	if v == nil {

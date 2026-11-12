@@ -35,13 +35,6 @@ func parseScopeJSON(raw []byte) map[string]string {
 	return m
 }
 
-// ParseScopeJSON turns a stored memories.scope column back into a map. It is
-// parseScope for a caller that already holds the column text — a reader with its
-// own read-only handle rather than a Store scan, such as the session-start
-// loaders — so the two reads cannot disagree about what an unreadable column
-// means. It stays nil, rather than failing, for a value it cannot decode.
-func ParseScopeJSON(raw []byte) map[string]string { return parseScopeJSON(raw) }
-
 // ScopeMatches reports whether a memory's scope satisfies a request.
 func ScopeMatches(scope, want map[string]string) bool {
 	for key, wantVal := range want {
