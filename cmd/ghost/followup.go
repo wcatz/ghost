@@ -14,45 +14,6 @@ import (
 	"github.com/wcatz/ghost/internal/supersede"
 )
 
-// The second half of a supersede repair, stated by the first half.
-//
-// Withdrawing a 'supersedes' edge is not the whole repair. `ghost resolve`'s
-// piggyback stamped resolved_at on the older endpoint for free, and resolve's
-// own repair pass deliberately HONOURS a live edge as a floor — so the memory
-// the withdrawal just orphaned stays out of ranked injection until a second
-// pass clears it, and until then the operator has no way to know that. The
-// corpus reads as though the withdrawal did nothing, which is the invisibility
-// #686 was opened to remove.
-//
-// So an --apply run that withdrew edges says which memories are now repairable
-// and prints the command that repairs exactly them. Two forms, because the two
-// populations are different sizes: the command, for the handful of targets a
-// single wrong edge left behind, and a file under the data dir's scratch, for
-// the run that withdrew forty. The file is a --only-file input, so an operator
-// never has to retype a list the tool already computed, and the two lists cannot
-// drift because one is rendered from the other's argument.
-//
-// Only an --apply run prints any of this. A dry run withdrew nothing, so naming
-// its targets would be a follow-up command for a repair that has not happened
-// yet — and resolve would refuse it anyway, because the edges are still live
-// and that is exactly what its floor checks.
-
-// withdrawnTargets returns the memories whose 'supersedes' edges the pass
-// withdrew, deduplicated and grouped by the project each one lives in.
-//
-// Every row counts, including one this run did not itself invalidate: a
-// concurrent pass that took an edge first left the same state behind, which is
-// to say no live edge and a resolved_at nothing defends any more. The
-// alternative — reporting only the edges this process wrote — would drop a
-// memory that is just as repairable from a list the operator is about to run.
-//
-// The grouping is the repair's own requirement, not a presentation choice: a
-// resolve repair draws its pool from ResolvedCandidates(projectID), which filters
-// `project_id = ?`, so a `--only` selector resolved in one project and repaired
-// against another is a silent no-op under a block that promises a clear. It is
-// almost always one group — the project the pass was run against — and the
-// difference only appears for a target that lives in `_global` or, for
-// `ghost supersede _global --withdraw`, in a project (#786).
 func withdrawnTargets(withdrawn []supersede.WithdrawnEdge) []supersede.ProjectTargets {
 	rows := make([]supersede.RepairTarget, 0, len(withdrawn))
 	for _, w := range withdrawn {
@@ -64,17 +25,6 @@ func withdrawnTargets(withdrawn []supersede.WithdrawnEdge) []supersede.ProjectTa
 	return supersede.GroupByProject(rows)
 }
 
-// printReassessFollowup writes the follow-up block for ONE project's repairable
-// targets, and the id file beside it, and returns the path it wrote ("" when there
-// was nothing to write, or the write failed).
-//
-// It is a function over the two helpers because a caller that has targets in more
-// than one project calls it once per project, and three call sites doing that
-// loop by hand is three chances to print a command scoped to a project whose pool
-// does not hold the memory. The warning is returned to the caller rather than
-// printed here, so the caller decides where a scratch file that could not be
-// written goes: the repair it describes has already landed either way, so it is a
-// warning and not a failed run.
 func printReassessFollowup(projectName string, targets []string, writtenBy string) string {
 	path, err := writeReassessTargets(projectName, targets, writtenBy)
 	if err != nil {
@@ -83,51 +33,14 @@ func printReassessFollowup(projectName string, targets []string, writtenBy strin
 	return supersedeReassessFollowup(projectName, targets, path)
 }
 
-// resolveFollowupCommand renders the follow-up as a command line the operator
-// can paste. Full ids, not the eight-character abbreviations the reports use: a
-// prefix is unambiguous now and may not be after the operator's next save, and
-// this is a command about to be run rather than a line to read.
-//
-// The project name is a shell argument, and a project name is free text — the
-// reason scratch sanitizes it before it enters a file name is that a name can
-// hold a separator or a space. So a name that needs no quoting is rendered as
-// the positional the docs
-// use everywhere, and anything else goes through --project in single quotes,
-// which parseResolveArgs takes verbatim ("a dash-leading name is a name, not a
-// flag"). Rendering a bare `ghost resolve my proj …` would be two positionals
-// and a failed repair; rendering a name holding a shell metacharacter bare would
-// execute it.
-// The renderer is internal/followup's, because the MCP tool answers the same
-// question and the quoting here is what decides whether the command RUNS: one
-// implementation, two surfaces, no way for them to drift on the part that matters.
-//
-// The two returns after the command are the ids it could not carry, split by which
-// surface can still reach them: those holding a comma, and those holding a newline
-// that no surface can. supersedeReassessFollowup turns them into lines, because a
-// command that silently named fewer memories than the block above lists would be the
-// one lie this block must not tell — and an EMPTY command, which is what every id
-// holding a comma produces, must never be filled in with the unscoped form.
 func resolveFollowupCommand(projectName string, ids []string) (string, []string, []string) {
 	return followup.ResolveCommand(projectName, ids)
 }
 
-// shellQuote renders one POSIX shell argument, single-quoted. An embedded single
-// quote is closed, backslash-escaped and reopened, which is the only spelling a
-// POSIX shell reads back as one literal quote — and a project name is operator
-// text, so it is not guaranteed to hold none.
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
-// supersedeReassessFollowup renders the block an --apply run prints below the
-// per-edge list. path is the file the ids were written to, and is empty when the
-// write failed — the command is the primary form and never depends on it.
-//
-// The wording says "was held by", not "can now be cleared", because a note two
-// newer notes both supersede is still held after one of the two edges is
-// withdrawn (#697): the floor is counted per edge, so that repair reports the
-// row as still asserted and clears nothing. Promising a clear the pass will
-// refuse would be the one kind of lie this block must not tell.
 func supersedeReassessFollowup(projectName string, ids []string, path string) string {
 	if len(ids) == 0 {
 		return ""
@@ -138,63 +51,18 @@ func supersedeReassessFollowup(projectName string, ids []string, path string) st
 		"holds can now be cleared; one another edge still holds is reported as still\n" +
 		"asserted rather than cleared. Nothing outside this list is judged:\n")
 	cmd, viaFileOnly, unnameable := resolveFollowupCommand(projectName, ids)
-	// Never the unscoped command. When no id is carriable by --only the block says
-	// so and points at the file, because `ghost resolve <project> --reassess
-	// --apply` — the form with no --only — is the project-wide re-judge #698
-	// measured, and printing it here under a heading that promises nothing outside
-	// this list is judged would be the worst line in the report.
 	if cmd != "" {
 		fmt.Fprintf(&b, "  %s\n", cmd)
 	}
-	// The file line is printed only when the file can name something, which is
-	// `len(ids) > len(unnameable)`: writeReassessTargets omits the newline-bearing
-	// ids rather than writing two half-ids, so a file holding only those names no
-	// selector at all and readRefSelectors refuses it — pointing the operator at
-	// it would be pointing at a command that cannot run.
-	//
-	// A path holding a LINE BREAK fails the same test, for the reason the two
-	// copies of it below differ: there is no spelling of such a path that is both
-	// one line of output and an argument the parser reads back as the same path,
-	// so the file is not named and the ids are named instead.
 	fileHoldsSomething := path != "" && !containsLineBreak(path) && len(unnameable) < len(ids)
 	if fileHoldsSomething {
-		// Two forms of one path, and they are NOT the same string. The display copy
-		// is assemble.Label's, because a path is stored-adjacent text a reader looks
-		// at; the ARGUMENT is the raw value in single quotes, because that has to be
-		// byte-equal or the command does not run — which is exactly what
-		// internal/followup does with the same project name, and for the same
-		// reason: the quoting is the part that decides whether the command RUNS.
-		//
-		// Composing them the other way round is the bug this comment exists to
-		// prevent. Label renders a backtick as \` and a control character as an
-		// escape, and a backslash inside single quotes is literal, so
-		// `ghost resolve --project 'my\`proj' --reassess --apply` names a project
-		// that does not exist and a repair that will not run. Neither the path nor
-		// the project name is Ghost's to control — $GHOST_SCRATCH_DIR and a data
-		// directory under a spaced path both reach them — so the argument takes the
-		// real value and only the display copy is escaped.
 		fmt.Fprintf(&b, "  (the same ids are in %s, for `ghost resolve --project %s --reassess --only-file %s --apply`)\n",
 			assemble.Label(path), shellQuote(projectName), shellQuote(path))
 	}
-	// Both buckets, rendered once, by internal/followup — the same function the
-	// two MCP surfaces print them through. The ids are a stored value at the
-	// start of a line, so how they are spelled is the one rule all three surfaces
-	// must share, and it is decided next to the command that refused to carry
-	// them rather than at each of the loops that print them.
 	viaFileText, unnameableText := followup.RenderUncarriedIDs(viaFileOnly, unnameable)
-	// Every branch is driven by the buckets, not by `cmd == ""`, which has two
-	// causes: ids holding a comma (the file reaches them) and ids holding a
-	// newline (nothing does). Keying the wording off the empty command made a
-	// newline-only report claim the file was the only way and, three lines later,
-	// that no surface could name the id.
 	switch {
 	case len(viaFileOnly) == 0 && len(unnameable) == 0:
-		// Nothing to explain: every id is in the command above.
 	case len(viaFileOnly) == len(ids):
-		// Every id needs the file. The unscoped repair is DESCRIBED and not written
-		// out: rendering it here, even inside a warning, puts a copy-pasteable line
-		// that re-judges every resolved memory in the project directly under the
-		// block promising that nothing outside this list is judged.
 		if fileHoldsSomething {
 			fmt.Fprintf(&b, "  (no --only command can name them — every id holds a comma, which --only splits on —\n"+
 				"   so the file above is the only way to run this repair. Do NOT fall back on the same command\n"+
@@ -206,28 +74,14 @@ func supersedeReassessFollowup(projectName string, ids []string, path string) st
 			b.WriteString(viaFileText)
 		}
 	case len(viaFileOnly) > 0 && fileHoldsSomething:
-		// `--only` splits on commas, so an id holding one is not nameable by that
-		// flag however it is quoted, and the command above leaves it out rather
-		// than splitting it into selectors that name nothing. The file is the only
-		// surface that can carry it, so this is a warning about which line to run.
 		fmt.Fprintf(&b, "  (%d id(s) hold a comma, which --only cannot carry, so the command above leaves them out;\n"+
 			"   they are in the file, and the file is the only way to name them)\n", len(viaFileOnly))
 	case len(viaFileOnly) > 0:
-		// No file to point at: either the write failed or the path holds a line
-		// break and cannot be printed as one line of command. Either way pointing at
-		// it would point at nothing an operator can use, and the ids would be listed
-		// nowhere — the invisibility this whole block
-		// exists to remove. They are named here instead, which is what the MCP
-		// surface does for the same reason.
 		fmt.Fprintf(&b, "  (%d id(s) hold a comma and no id file can be named here, so they are named here;\n"+
 			"   no --only command can carry them — put each on its own line in a file and use --only-file)\n", len(viaFileOnly))
 		b.WriteString(viaFileText)
 	}
 	if len(unnameable) > 0 {
-		// No surface can name these: the file is one id per line, so a newline in
-		// an id becomes two selectors. Saying so is the whole answer, because
-		// pretending otherwise leaves a memory stamped resolved with nothing able
-		// to clear it.
 		fmt.Fprintf(&b, "  (%d id(s) hold a newline, which no --only or --only-file form can carry. No surface can\n"+
 			"   name them, so these stay resolved until the row is rewritten — delete and re-save the memory,\n"+
 			"   or re-import it under an id without a newline)\n", len(unnameable))
@@ -236,44 +90,8 @@ func supersedeReassessFollowup(projectName string, ids []string, path string) st
 	return b.String()
 }
 
-// containsLineBreak reports whether an id cannot be written as one line of an
-// --only-file. It is the one character class no surface can carry: --only splits
-// on commas, the file splits on newlines, and an id holding one is nameable by
-// neither.
 func containsLineBreak(id string) bool { return strings.ContainsAny(id, "\n\r") }
 
-// writeReassessTargets writes the follow-up's id list under the data dir's
-// scratch root and returns its path, so the printed command and the file can
-// never name different lists.
-//
-// The root is Ghost's own scratch, not the system temp: it is created 0700
-// beneath the data dir, the per-invocation reaping (which only collects
-// directories in Open's <pid>-<hex> shape) does not touch it, and an operator
-// who wants to read the list days later still can. The one rule that does
-// collect it is the id-file rule in scratch.Reap, on scratch's own 14-day
-// window rather than a caller's age: a repair an operator meant to run and did
-// not should still be there to run, and a list nobody ever ran must not
-// accumulate in the root forever, counting against the budget with nothing
-// left to take it. The name that rule recognises is the name this writes —
-// both come from scratch.ReassessTargetsName.
-//
-// Nothing is ever written OVER. The root can be a directory someone else shares
-// ($GHOST_SCRATCH_DIR, or a root an operator pointed at), the name is derived
-// from a project name and a clock, and a name derived from a clock is not
-// ownership: two runs of the same project in the same second agree on it, and
-// whoever else can write to the root can plant a symlink at it. So the name
-// carries a per-run token (scratch.UniqueSuffix), the file is opened O_EXCL — a
-// name that is already taken fails instead of being followed or truncated — and
-// a collision is retried under a fresh name. The two failure modes this buys
-// are a symlink not followed and another run's list not replaced, and the
-// operator's command can only ever point at the list this run wrote.
-//
-// writtenBy names the command that produced the list, and it is a parameter
-// because two commands write this file: `ghost supersede --reassess --apply` and
-// `ghost supersede --withdraw … --apply` orphan the same kind of resolution. A
-// file claiming the other command wrote it would be read days later by whoever
-// runs the repair, and that header is the only line in it saying where the ids
-// came from.
 func writeReassessTargets(projectName string, ids []string, writtenBy string) (string, error) {
 	if len(ids) == 0 {
 		return "", fmt.Errorf("no withdrawn targets to write")
@@ -284,32 +102,13 @@ func writeReassessTargets(projectName string, ids []string, writtenBy string) (s
 	}
 	head, viaFileOnly, unnameable := resolveFollowupCommand(projectName, ids)
 	if len(unnameable) == len(ids) {
-		// Nothing this file could name. Writing it anyway produces a list
-		// readRefSelectors refuses with "names no memory ids or prefixes", and the
-		// report would point the operator at a command that cannot run. The ids are
-		// named in the report instead, which is the only place they can be.
 		return "", fmt.Errorf("no id in this set is nameable through --only-file: all %d hold a newline", len(ids))
 	}
 	var b strings.Builder
-	// The header carries the command, and an id the command cannot carry makes it
-	// name fewer ids than the list below — so the header says so rather than
-	// letting the operator compare the two and wonder which was dropped. Which
-	// claim is made is driven by the buckets and not by `head == ""`, because an
-	// empty command has two causes and only one of them is a comma: an id holding
-	// a newline is one no surface can name, and calling that a comma says the
-	// file is the answer when the file is not carrying it.
-	// The format is unchanged otherwise, because this file is a --only-file input
-	// and readRefSelectors reads one id per line whatever the comment says.
 	switch {
 	case head != "":
 		fmt.Fprintf(&b, "# %s\n", head)
 	default:
-		// One arm, not two. An empty command with comma ids AND newline ids reaches
-		// here, and the two-word claim that "every one of them holds a comma" is
-		// false for the newline id — which the loop below deliberately omits and the
-		// trailing comment then admits is not below. So the header says what is true
-		// about both buckets: the ids it can carry are below, and the run is scoped
-		// to them.
 		fmt.Fprintf(&b, "# No --only command can name some of these ids: %d hold a comma, which --only\n"+
 			"# splits on, and %d hold a newline, which no form can carry. The ids this file CAN name\n"+
 			"# are below; run `ghost resolve <project> --reassess --only-file <this file> --apply`.\n",
@@ -321,11 +120,6 @@ func writeReassessTargets(projectName string, ids []string, writtenBy string) (s
 	}
 	fmt.Fprintf(&b, "# Written by `%s`: the targets of the edges it\n", writtenBy)
 	b.WriteString("# withdrew, one id per line. Use with `ghost resolve <project> --reassess --only-file`.\n")
-	// A newline in an id is the one character the file cannot carry either: this
-	// format is one id per line, so writing it verbatim produces two selectors,
-	// both naming nothing. The id is left out and named in the report instead,
-	// because a corrupt file that looks right is worse than a listed id with an
-	// honest note that no surface can reach it.
 	for _, id := range ids {
 		if containsLineBreak(id) {
 			continue
@@ -338,10 +132,6 @@ func writeReassessTargets(projectName string, ids []string, writtenBy string) (s
 	}
 	body := b.String()
 
-	// Three attempts, because a collision now means something else wrote between
-	// the name and the open — a second repair, or a name we guessed wrong. It
-	// does not mean the path is unusable, and giving up on the first would make
-	// the follow-up's file a coin flip.
 	for attempt := 0; attempt < reassessTargetsAttempts; attempt++ {
 		name, err := reassessTargetsName(projectName)
 		if err != nil {
@@ -350,8 +140,6 @@ func writeReassessTargets(projectName string, ids []string, writtenBy string) (s
 		path := filepath.Join(root, name)
 		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 		if errors.Is(err, fs.ErrExist) {
-			// Not ours. Ask for another name rather than reporting a failure the
-			// operator can do nothing about, and without touching what is there.
 			continue
 		}
 		if err != nil {
@@ -371,17 +159,8 @@ func writeReassessTargets(projectName string, ids []string, writtenBy string) (s
 	return "", fmt.Errorf("no free id file name under %s after %d attempts", root, reassessTargetsAttempts)
 }
 
-// reassessTargetsAttempts bounds the name search in writeReassessTargets.
 const reassessTargetsAttempts = 3
 
-// defaultReassessTargetsName builds the id file's name. The name lives in
-// internal/scratch (scratch.ReassessTargetsName) because scratch.Reap has to
-// recognise exactly the name this writes to decide when it may be collected,
-// and two spellings of one name are two things to get wrong.
-//
-// It is a variable so a test can pin the name and ask what the writer does when
-// that name is already taken, which is the only way to observe the refusal
-// without racing a clock.
 var defaultReassessTargetsName = scratch.ReassessTargetsName
 
 var reassessTargetsName = defaultReassessTargetsName
