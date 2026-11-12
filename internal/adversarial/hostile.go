@@ -7,6 +7,9 @@ import (
 
 // FormatControls returns text carrying a control that must never be printed raw
 // on a line a human or an agent reads: bidi overrides and isolates, line and
+// paragraph separators, the C1 next-line control, and the C0 controls a terminal
+// acts on. They are data, so a renderer may escape them but may not drop or
+// reorder them silently.
 func FormatControls() []Payload {
 	return []Payload{
 		{Name: "bidi-lre", Text: "before\u202abinside\u202cafter"},
@@ -29,6 +32,7 @@ func FormatControls() []Payload {
 
 // LineSeparators returns characters that end a line without being a control
 // character. Renderers must fold or escape them, and a reader that only asks
+// unicode.IsControl will miss both.
 func LineSeparators() []Payload {
 	return []Payload{
 		{Name: "line-separator", Text: "before\u2028after"},
@@ -36,7 +40,11 @@ func LineSeparators() []Payload {
 	}
 }
 
+// ZeroWidth returns invisible format characters embedded mid-word. They are
+// category Cf like the bidi controls, but they neither reorder nor break a
 // line: they hide a spelling from a reader, so a rendered row that prints one
+// raw can say one word and read as another. Each value sits between two letters
+// of one ordinary word, which is where a hidden character is hardest to notice.
 func ZeroWidth() []Payload {
 	return []Payload{
 		{Name: "zero-width-space", Text: "gh\u200bost"},
@@ -78,6 +86,7 @@ func FormatRunes() []rune {
 
 // AllControls is FormatControls, LineSeparators and ZeroWidth, for the render
 // boundaries whose job is to keep every stored character legible and on one
+// physical line.
 func AllControls() []Payload {
 	out := FormatControls()
 	out = append(out, LineSeparators()...)
@@ -86,6 +95,7 @@ func AllControls() []Payload {
 
 // TokenShaped returns values the token guard recognises as a token. They are
 // inert at a boundary whose whole job is to render stored text: the value may be
+// shown through the guard's own placeholder, but never replayed raw.
 func TokenShaped() []Payload {
 	return []Payload{
 		{Name: "github-token", Text: "ghp_0123456789abcdefghijklmnopqrstuvwxyzAB"},
@@ -97,6 +107,7 @@ func TokenShaped() []Payload {
 
 // Oversized returns a field far past every write-time bound the store and the
 // tools apply, so a boundary that is supposed to bound what it prints, or to
+// withhold an oversized value instead of quoting it, is exercised.
 func Oversized() []Payload {
 	long := strings.Repeat("a", 4096) + "token"
 	return []Payload{
@@ -109,12 +120,14 @@ func Oversized() []Payload {
 
 // MarkerPathShapes names the entries that are not a regular marker file. The
 // marker path lives in the data directory, which every local process can write,
+// so each of these is reachable by planting an entry where a marker belongs.
 func MarkerPathShapes() []string {
 	return []string{"fifo", "symlink-to-fifo", "symlink-to-marker", "directory"}
 }
 
 // MalformedStamps returns validity-stamp values that no accepted layout reads.
 // The save tool refuses each of them rather than storing a claim nobody can
+// interpret, and the import path is expected to apply the same rules.
 func MalformedStamps() []Payload {
 	return []Payload{
 		{Name: "not-a-date", Text: "not-a-date"},

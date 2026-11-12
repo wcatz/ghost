@@ -2,6 +2,9 @@ package main
 
 // PinsOverBucket is the store-efficiency arc for #1831: across sessions the owner
 // pins more rules than the project's session-start bucket holds (more than
+// sessionMemoriesCap, plus one long pin). The final session must be told about
+// the overflow in the pin result or the health output. The graded clause is that
+// the owner was told, not that every pin appears.
 func PinsOverBucket() Storyline {
 	pins := make([]Record, 0, 17)
 	for i := 1; i <= 16; i++ {
@@ -101,6 +104,8 @@ func longString(n int) string {
 
 // DuplicateNeverMerged is the store-efficiency arc for #1834: two sessions save
 // the same rule in near-identical words. After the lifecycle phases run (fake
+// harness), the store must hold one live row for the rule, and the session block
+// shows it once.
 func DuplicateNeverMerged() Storyline {
 	return Storyline{
 		Key:     "duplicate-never-merged",
@@ -154,6 +159,9 @@ func DuplicateNeverMerged() Storyline {
 
 // DatedGlobalStatus is the store-efficiency arc for #1832: a session saves a
 // dated rollout status line with ghost_save_global. A later session in a
+// different project must not carry that line in its session block once its
+// valid_until passes. The save result carries the advisory when no valid_until
+// was given.
 func DatedGlobalStatus() Storyline {
 	return Storyline{
 		Key:     "dated-global-status",

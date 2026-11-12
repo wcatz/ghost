@@ -16,6 +16,8 @@ import (
 
 // Check is one graded property of a finished run: a name a report can key on, a
 // verdict, and a detail line that says what was observed. A check with no
+// measurable observation behind it is not a check, which is why the judge check
+// exists only when the judge ran (see judgedCheck).
 type Check struct {
 	Name           string
 	Passed         bool

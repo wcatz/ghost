@@ -19,6 +19,7 @@ import (
 
 // Link is one edge the store holds, as the arc grade reads it: source supersedes
 // target, and an invalidated edge stands for nothing (supersede drops edges
+// rather than deleting the row).
 type Link struct {
 	Source, Target, Relation string
 	Invalidated              bool
@@ -33,6 +34,7 @@ type Stamp struct {
 
 // State is the graded end state of the run's own scratch store: the edges the arc
 // stages wrote and the stamps they left. Grading reads the ROWS, not the CLI's
+// prose, so a check cannot be passed or failed by a reworded output line.
 type State struct {
 	Links  []Link
 	Stamps map[string]Stamp
@@ -40,6 +42,7 @@ type State struct {
 
 // Ghost is the ghost surface a storyline run drives. Every method is one real
 // ghost invocation or one read of the run's scratch store, so a test fake
+// implements the whole surface without a binary and without a model.
 type Ghost interface {
 	Bind(ctx context.Context, project, workDir string) error
 	Save(ctx context.Context, project string, rec Record) (string, error)
@@ -107,6 +110,7 @@ const (
 
 // Passed reports whether every GATING check passed; an advisory check (the
 // judge) is reported but never decides. A run with no checks has graded nothing
+// and does not pass.
 func (r *Result) Passed() bool {
 	if len(r.Checks) == 0 {
 		return false
@@ -155,6 +159,7 @@ func (r *Result) idOf(key string) string {
 
 // Run is one storyline against one scratch-isolated Ghost. Ghost and Agent are
 // the two seams; everything else here is the sequencing, and the sequencing is
+// what the module is measuring.
 type Run struct {
 	Story        Storyline
 	WorkDir      string
@@ -513,6 +518,9 @@ func (g *binaryGhost) abort() {
 
 // Bind records the work dir as the project's checkout. project is the NAME the
 // storyline speaks; `ghost project bind` takes an id, and a project created by
+// `ghost_memory_save` under that name carries the same string as its id (the MCP
+// save path derives the id from the name when the argument is not path-shaped), so
+// one string addresses the project on both sides.
 func (g *binaryGhost) Bind(ctx context.Context, project, workDir string) error {
 	_, _, err := runGhost(ctx, g.env, g.bin, "project", "bind", project, workDir)
 	return err
@@ -548,6 +556,7 @@ func sessionScopeEnv(scope map[string]string) string {
 
 // Search runs the real ghost_memory_search. The write session is closed by
 // Settle, so a probe after the arc opens a fresh `ghost mcp` process; abort
+// closes it.
 func (g *binaryGhost) Search(ctx context.Context, project, query string, scope map[string]string) (string, error) {
 	if g.mcp == nil {
 		if err := g.start(ctx); err != nil {
@@ -627,6 +636,9 @@ func (g *binaryGhost) SaveRaw(ctx context.Context, project string, rec Record) (
 
 // Settle waits for every project memory to have an embedding row before the arc
 // stages read the store, then closes the MCP process. Supersede generates its
+// candidate pairs from vectors, and a missing one is reported as "0 candidate
+// pairs" rather than as an error — so an undrained store would grade the arc as
+// a model failure. An unreachable Ollama fails here, loudly, instead.
 func (g *binaryGhost) Settle(ctx context.Context) error {
 	if g.mcp != nil {
 		defer func() {
@@ -685,6 +697,10 @@ func (g *binaryGhost) waitForEmbeddings(ctx context.Context) error {
 
 // Restamp rewrites the timestamps so the seeding order is chronological order,
 // one minute apart. created_at/updated_at carry second granularity, so a run that
+// seeds a reversal a second after the claim it reverses leaves a tie and makes
+// the edge between them arbitrary — which the direction check would then grade as
+// a model failure. Timestamps are metadata: every record still arrived through
+// the real save path.
 func (g *binaryGhost) Restamp(_ context.Context, order []string) error {
 	db, err := memory.OpenDB(g.dbPath)
 	if err != nil {
@@ -713,6 +729,7 @@ func (g *binaryGhost) Restamp(_ context.Context, order []string) error {
 
 // State reads the graded end state through a read-only handle: the run's own
 // scratch store, opened the way every diagnostic read in this tree is opened, so
+// the grade cannot itself write to what it is grading.
 func (g *binaryGhost) State(ctx context.Context) (State, error) {
 	db, err := sql.Open("sqlite", "file:"+g.dbPath+"?mode=ro")
 	if err != nil {

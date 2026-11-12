@@ -12,6 +12,9 @@ import (
 
 // Record is one memory a stage's agent wrote. Everything about it that is
 // harness-only (Key, Mark, SupersededBy) never reaches a model: Key is the
+// grading identity, Mark is the substring the grader looks for in an injected
+// block, and SupersededBy is the same annotation eval/cycle's corpus uses, so
+// both suites read the same way.
 type Record struct {
 	Key          string
 	Category     string
@@ -25,7 +28,15 @@ type Record struct {
 	Pin          bool
 }
 
+// Probe is one search a reader of the project would run once the arc is over,
+// graded on the rows ghost_memory_search returns rather than on its verdict
 // line. Want is the record the search must lead to, Over the records that may
+// be returned but must rank BELOW Want (the claim Want replaced), and Absent the
+// records the search must not return at all (a record scoped elsewhere when the
+// probe carries a scope). Marked is the records whose row, when the search
+// returns it together with Want, must carry the replaced marker at its field
+// (the lexical guess's or the recorded relation's): the claim Want replaced,
+// read by an agent that searched before acting.
 type Probe struct {
 	Name   string
 	Query  string
@@ -38,12 +49,16 @@ type Probe struct {
 
 // Lure is a pair a fallible classifier would call a supersession although both
 // claims still hold — two values of one setting in two environments. The fake
+// harness's oracle answers SUPERSEDES for it, so the lure-refused check measures
+// whether Ghost's own guards keep the pair away from the classifier, not whether
+// a model resisted it.
 type Lure struct {
 	Older, Newer string
 }
 
 // AnswerCheck is one deterministic reading of a session's ANSWER. Any is a list
 // of alternative spellings, matched case-insensitively as substrings for Carries
+// and as whole tokens for Avoids; Name is what the report keys on.
 type AnswerCheck struct {
 	Name  string
 	Any   []string
@@ -52,6 +67,8 @@ type AnswerCheck struct {
 
 // Stage is one simulated session: the script the session is given, the records
 // its agent wrote once it had answered, and the keys whose Mark that session
+// must have been INJECTED with (see Storyline.Validate on why they must come
+// from an earlier stage).
 type Stage struct {
 	Script       string
 	Records      []Record
@@ -66,6 +83,7 @@ type Stage struct {
 
 // Storyline is a whole arc. Project is the Ghost project the run works in;
 // Opening is what the project already held before the first session, seeded
+// first so the block has real competition in it.
 type Storyline struct {
 	Key          string
 	Title        string
@@ -102,6 +120,8 @@ func (s Storyline) stageOf(key string) (int, bool) {
 
 // Order is every record in the order a real project accumulated them: the
 // opening notes, then each stage's. The chronology restamp walks it, and it is
+// what makes a supersedes direction a fact about the storyline rather than about
+// how fast the saves happened to land.
 func (s Storyline) Order() []Record {
 	out := make([]Record, 0, len(s.Opening))
 	out = append(out, s.Opening...)
@@ -124,6 +144,8 @@ func (s Storyline) RecordByKey(key string) (Record, bool) {
 
 // Validate rejects a storyline whose grade could not mean what it says, before
 // any model call: a missing mark grades nothing, a duplicated key grades one
+// record twice, and an expectation a session could only satisfy by reading its
+// own stage's writes would turn the carry-forward check into a tautology.
 func (s Storyline) Validate() error {
 	if strings.TrimSpace(s.Key) == "" {
 		return fmt.Errorf("storyline key is required")
@@ -413,6 +435,10 @@ func StorylineByKey(key string) (Storyline, error) {
 
 // ReversedDecision is candidate (d) from the design: a long-lived project whose
 // early architectural choice is later contradicted. Session 1 records the
+// choice, session 2 records its reversal, and session 3 has to act on the
+// reversal from a cold start — which is the only place the module's question
+// ("does injection carry forward what matters") can be answered about something
+// that actually matters.
 func ReversedDecision() Storyline {
 	return Storyline{
 		Key:     "reversed-decision",
