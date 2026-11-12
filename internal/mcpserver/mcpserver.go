@@ -26,6 +26,7 @@ import (
 	"github.com/wcatz/ghost/internal/claudeimport"
 	"github.com/wcatz/ghost/internal/config"
 	"github.com/wcatz/ghost/internal/followup"
+	"github.com/wcatz/ghost/internal/hostevent"
 	"github.com/wcatz/ghost/internal/mcpinit"
 	"github.com/wcatz/ghost/internal/memory"
 	"github.com/wcatz/ghost/internal/provider"
@@ -2296,7 +2297,40 @@ func (s *Server) pinnedOverflowNotice(ctx context.Context, projectID string) str
 	return fmt.Sprintf("— %d pinned (cap %d)%s.", ov.Count, ov.Cap, cut)
 }
 
-func (s *Server) pinnedOverflowsForHealth(ctx context.Context, read *diagnosticRead) ([]memory.PinnedOverflow, error) {
+// healthPinnedSkip is the health report's version of the session-start rule
+// that withholds a row the host already loaded from its instruction files: for
+// a client whose host Ghost can name (src, from ai.SourceForClientName), it
+// reports a pinned row covered by the host's user-level file, or, for a project
+// whose recorded path is a directory, by the files from that directory up. Such
+// a row never competes for a session-start slot, so it must not count toward an
+// overflow. An unnamed host gets nil, and every row counts.
+func healthPinnedSkip(src string, paths map[string]string) func(memory.Memory) bool {
+	if src == "" {
+		return nil
+	}
+	host := hostevent.Source(src)
+	covers := map[string]func(string) bool{}
+	coverFor := func(projectID string) func(string) bool {
+		if c, ok := covers[projectID]; ok {
+			return c
+		}
+		dir := ""
+		if p := paths[projectID]; projectID != memory.GlobalProjectID && filepath.IsAbs(p) {
+			if fi, err := os.Stat(p); err == nil && fi.IsDir() {
+				dir = p
+			}
+		}
+		c := mcpinit.InstructionCover(host, dir)
+		covers[projectID] = c
+		return c
+	}
+	return func(m memory.Memory) bool {
+		c := coverFor(m.ProjectID)
+		return c != nil && c(m.Content)
+	}
+}
+
+func (s *Server) pinnedOverflowsForHealth(ctx context.Context, read *diagnosticRead, skip func(memory.Memory) bool) ([]memory.PinnedOverflow, error) {
 	// Prefer the diagnostic view when available, so the health report answers
 	// from one snapshot.
 	var ms *memory.Store
@@ -2308,7 +2342,7 @@ func (s *Server) pinnedOverflowsForHealth(ctx context.Context, read *diagnosticR
 		return nil, nil
 	}
 	scope := config.LoadForHook().Injection.SessionScope
-	return ms.PinnedOverflows(ctx, time.Now(), scope)
+	return ms.PinnedOverflowsExcept(ctx, time.Now(), scope, skip)
 }
 
 func (s *Server) registerTools() {
@@ -4280,7 +4314,17 @@ func (s *Server) registerTools() {
 		// dropped, so absence means "nothing exceeds". Listed ids are the
 		// lowest-ranked pinned rows by importance (most at risk of being cut), not
 		// the exact rows the block drops.
-		if overflows, oerr := s.pinnedOverflowsForHealth(ctx, read); oerr != nil {
+		clientName := ""
+		if req != nil && req.Session != nil {
+			if p := req.Session.InitializeParams(); p != nil && p.ClientInfo != nil {
+				clientName = p.ClientInfo.Name
+			}
+		}
+		paths := make(map[string]string, len(projects))
+		for _, p := range projects {
+			paths[p.ID] = p.Path
+		}
+		if overflows, oerr := s.pinnedOverflowsForHealth(ctx, read, healthPinnedSkip(ai.SourceForClientName(clientName), paths)); oerr != nil {
 			fmt.Fprintf(&sb, "**Pinned rows that exceed the session-start bucket:** could not be read: %v\n", oerr)
 		} else if len(overflows) > 0 {
 			totalOverflow := len(overflows)
