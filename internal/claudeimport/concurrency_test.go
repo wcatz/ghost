@@ -11,15 +11,9 @@ import (
 	"github.com/wcatz/ghost/internal/memory"
 )
 
-// firstContactStore is one client's handle on a shared database, with the
-// project read that opens the import held until every client has reached it.
-//
-// That read decides whether the import writes, so holding it is how two
-// simultaneous first contacts are made deterministic: without the hold the two
-// goroutines below usually serialize by luck, and a test that only sometimes
-// reproduces the interleaving is not a regression test. With it, both clients
-// read the project as empty, which is exactly the state two real clients reach
-// when they arrive together.
+// firstContactStore holds the project read that opens the import until every
+// client has reached it, so two simultaneous first contacts both see an empty
+// project deterministically rather than by luck.
 type firstContactStore struct {
 	*memory.Store
 	arrived *sync.WaitGroup
@@ -32,26 +26,17 @@ func (s *firstContactStore) GetAll(ctx context.Context, projectID string, limit 
 }
 
 // TestConcurrentFirstContactImportsEachFileOnce is the regression test for the
-// doubling this package's dedup guard had: the guard was one pool read of the
-// project, taken before the loop, and the writes were unconditional — so two
-// clients that reached first contact together both read an empty project and
-// both imported every file, landing each one twice as byte-identical rows.
-//
-// Two handles on one database file stand in for two processes, and every call
-// that must be atomic has to hold across them. The assertion is the one the
-// issue states: one row per source file, however many clients import it at
-// once.
+// dedup guard being one pool read before the loop with unconditional writes:
+// two clients arriving together both read an empty project and each imported
+// every file. Two handles on one database file stand in for two processes; the
+// assertion is one row per source file however many clients import at once.
 func TestConcurrentFirstContactImportsEachFileOnce(t *testing.T) {
 	memDir := filepath.Join(t.TempDir(), "memory")
 	if err := os.MkdirAll(memDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	writeTempFile(t, memDir, "project_architecture.md", `---
-name: Architecture overview
-description: System design notes
-type: project
----
-The system uses a 3-layer architecture with memory, orchestrator, and AI layers.`)
+	writeTempFile(t, memDir, "project_architecture.md", "---\nname: Architecture overview\ndescription: System design notes\ntype: project\n---\n"+
+		"The system uses a 3-layer architecture with memory, orchestrator, and AI layers.")
 
 	ctx := context.Background()
 	const projectID = "test-project"
@@ -68,30 +53,24 @@ The system uses a 3-layer architecture with memory, orchestrator, and AI layers.
 		t.Fatalf("EnsureProject: %v", err)
 	}
 
-	var arrived sync.WaitGroup
+	var arrived, wg sync.WaitGroup
 	arrived.Add(2)
-
-	stores := make([]*firstContactStore, 2)
-	for i := range stores {
+	var (
+		results [2]int
+		errs    [2]error
+	)
+	for i := range results {
 		db, err := memory.OpenDB(dbPath)
 		if err != nil {
 			t.Fatalf("OpenDB %d: %v", i, err)
 		}
 		defer func() { _ = db.Close() }()
-		stores[i] = &firstContactStore{Store: memory.NewStore(db, logger), arrived: &arrived}
-	}
-
-	var (
-		wg      sync.WaitGroup
-		results [2]int
-		errs    [2]error
-	)
-	for i, store := range stores {
+		store := &firstContactStore{Store: memory.NewStore(db, logger), arrived: &arrived}
 		wg.Add(1)
-		go func(i int, store *firstContactStore) {
+		go func() {
 			defer wg.Done()
 			results[i], _, _, _, errs[i] = importFromDir(ctx, store, projectID, memDir, logger)
-		}(i, store)
+		}()
 	}
 	wg.Wait()
 
@@ -100,15 +79,11 @@ The system uses a 3-layer architecture with memory, orchestrator, and AI layers.
 			t.Fatalf("importFromDir %d: %v", i, err)
 		}
 	}
-
 	count, err := seed.CountMemories(ctx, projectID)
 	if err != nil {
 		t.Fatalf("CountMemories: %v", err)
 	}
-	if count != 1 {
-		t.Errorf("project holds %d memories after two concurrent first contacts, want 1 (one per source file); importers reported %d and %d", count, results[0], results[1])
-	}
-	if got := results[0] + results[1]; got != 1 {
-		t.Errorf("importers together reported %d new memories, want 1 — the file is imported once, by whichever client won", got)
+	if count != 1 || results[0]+results[1] != 1 {
+		t.Errorf("project holds %d memories, importers reported %d and %d; want 1 row and 1 import in total", count, results[0], results[1])
 	}
 }
