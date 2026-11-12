@@ -22,16 +22,12 @@ func TestStripAPIKey(t *testing.T) {
 	}
 }
 
-// fakeClaudeBinary writes a shell script standing in for `claude` that echoes
-// stdin/env visibility back so run()'s plumbing (args, env stripping, stdout
-// capture) can be verified without a real subprocess call.
 func fakeClaudeBinary(t *testing.T, script string) string {
 	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("shell script fake binary requires a POSIX shell")
 	}
-	// run() opens a scratch dir on every invocation; pin the root to the
-	// test's temp dir so the real data dir is never touched.
+
 	t.Setenv("GHOST_SCRATCH_DIR", t.TempDir())
 	dir := t.TempDir()
 	path := filepath.Join(dir, "claude")
@@ -42,14 +38,6 @@ func fakeClaudeBinary(t *testing.T, script string) string {
 	return path
 }
 
-// resetClaudeCapabilityProbe puts the process-wide capability cache back to its
-// cold state, for the same reason resetCodexFeatureProbe exists: one probe per
-// binary identity is deliberate, and a process-wide cache is therefore not
-// testable without a way to empty it.
-//
-// The single-flight group beside the cache needs no reset, and that asymmetry is
-// the property rather than an oversight: a flight is forgotten the moment it
-// lands, so there is no state here that outlives the call that created it.
 func resetClaudeCapabilityProbe(t *testing.T) {
 	t.Helper()
 	claudeCapabilityCache.Clear()
@@ -79,11 +67,8 @@ printf '%s' '{"memories":[]}'
 	}
 }
 
-// TestCLIClient_Classify_SplitsSystemPromptFromStdinUserContent: the system
-// prompt is small, fixed, and must stay a distinct --system-prompt argument so
-// it can never be confused with user content. The user content is the
 // untrusted, arbitrarily large part, so it travels on stdin (issue #560) and
-// must not appear in argv at all.
+
 func TestCLIClient_Classify_SplitsSystemPromptFromStdinUserContent(t *testing.T) {
 	bin := fakeClaudeBinary(t, `
 found_flag=0

@@ -12,31 +12,11 @@ import (
 	"testing"
 )
 
-// Tests for the one spawn funnel, harnessCommand, at the level the confinement
-// invariant is written in: every backend gets a working directory and
-// TMPDIR/TMP/TEMP inside an invocation-owned directory, whatever the scratch
-// root is doing, and no caller can be handed a command that would run
-// unconfined.
-//
 // #751 was the shape of bug these tests exist to catch. The funnel degraded to
-// "allowlisted environment, inherited working directory" when scratch.Open
-// failed, and the opencode and goose clients compensated with a private
-// MkdirTemp tree while the claude and codex clients — which discarded the flag
-// — ran the child in Ghost's own working directory with the inherited temp
-// variables. The fallback now lives in the funnel so no backend can forget it,
-// and these tests pin it for every backend rather than for one harnessKind.
 
-// fallbackTempRootEnv names the test-owned system temp the fallback directory
-// is created under. It is an environment variable rather than a returned value
-// because t.TempDir() mints a fresh directory on every call, and the assertion
-// needs the same one the child was confined under.
 const fallbackTempRootEnv = "GHOST_TEST_FALLBACK_TEMP_ROOT"
 
-// brokenScratchRoot points GHOST_SCRATCH_DIR at a path that cannot be created:
-// a regular file stands where the root's parent has to be a directory, so
-// scratch.Open fails with ENOTDIR. That is the same failure a dev build
 // pointed at a GHOST_DEV_FORBID_DATA_DIR data dir produces (#723), which is
-// exactly the case where confinement matters most.
 func brokenScratchRoot(t *testing.T) {
 	t.Helper()
 	blocker := filepath.Join(t.TempDir(), "not-a-dir")
@@ -46,36 +26,18 @@ func brokenScratchRoot(t *testing.T) {
 	t.Setenv("GHOST_SCRATCH_DIR", filepath.Join(blocker, "scratch"))
 }
 
-// childReportLine makes a fake harness report where it actually ran: the
-// working directory the kernel gave it and the temp variables it inherited.
-// It appends rather than truncating so the probe child and the run child stay
 // separately visible — the probe is a child too, and in #751 it was one of the
-// two that ran unconfined.
 const childReportLine = `{ printf 'CHILD pwd=%s tmpdir=%s tmp=%s temp=%s\n' "$PWD" "$TMPDIR" "$TMP" "$TEMP" >> "$HARNESS_FALLBACK_REPORT"; }` + "\n"
 
-// TestEveryHarnessClientChildIsConfinedWhenScratchFails is the end-to-end half
 // of #751, one subtest per backend. It drives each client's own run path with a
-// shell fake and reads back what the child SAW, rather than inspecting a
-// struct: the bug was never in harnessCommand's contract, it was in two clients
-// ignoring that contract, so the assertion has to be about the child.
-//
-// Each fake also answers the capability probe its client makes first
-// (`claude --help`, `codex features list`, `opencode --version`), so the probe
-// children are confined by the same assertion as the run children. Only fakes
-// are spawned, and HOME is a test directory, so nothing reaches a real harness,
-// a real home, or the shared system temp.
 func TestEveryHarnessClientChildIsConfinedWhenScratchFails(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell-script fake requires a POSIX shell")
 	}
 
 	for _, harness := range []struct {
-		name string
-		kind harnessKind
-		// minimum is the number of children a correct call makes: the run
-		// itself, plus the capability probe for the three clients that make
-		// one. Asserting it stops a fake that was never probed from quietly
-		// satisfying "every child was confined" with a single child.
+		name    string
+		kind    harnessKind
 		minimum int
 		script  string
 		reflect func(ctx context.Context, bin string) error
@@ -136,12 +98,7 @@ printf '%s\n' '{"type":"text","part":{"type":"text","text":"KEEP"}}'`,
 		t.Run(harness.name, func(t *testing.T) {
 			root := pinFallbackTempRoot(t)
 			brokenScratchRoot(t)
-			// A report the fakes append to, outside any invocation directory,
-			// since those are removed the moment the call returns.
 			report := filepath.Join(t.TempDir(), "children")
-			// A home that is a test directory, never the caller's: the point
-			// is to prove the child is confined, and a real home would let a
-			// passing test depend on the machine it ran on.
 			home := t.TempDir()
 			for key, value := range map[string]string{
 				"HOME":                    home,
@@ -149,10 +106,7 @@ printf '%s\n' '{"type":"text","part":{"type":"text","text":"KEEP"}}'`,
 				"XDG_CONFIG_HOME":         filepath.Join(home, "config"),
 				"XDG_DATA_HOME":           filepath.Join(home, "data"),
 				"HARNESS_FALLBACK_REPORT": report,
-				// The hatch is how a test-only name reaches a child; the
-				// alternative, adding it to the production allowlist, would be
-				// a hole in the policy these tests verify.
-				"GHOST_PASSTHROUGH_ENV": "HARNESS_FALLBACK_REPORT",
+				"GHOST_PASSTHROUGH_ENV":   "HARNESS_FALLBACK_REPORT",
 			} {
 				t.Setenv(key, value)
 			}
@@ -188,9 +142,6 @@ printf '%s\n' '{"type":"text","part":{"type":"text","text":"KEEP"}}'`,
 						t.Errorf("child %d saw %s=%q, want the invocation dir %q", i, key, got, child.pwd)
 					}
 				}
-				// The release runs on the way out of the call, so by now the
-				// directory is gone — which is the half that keeps harness
-				// droppings from filling a filesystem.
 				if _, err := os.Stat(child.pwd); !os.IsNotExist(err) {
 					t.Errorf("invocation dir %s outlived the call (err=%v)", child.pwd, err)
 				}
@@ -199,9 +150,6 @@ printf '%s\n' '{"type":"text","part":{"type":"text","text":"KEEP"}}'`,
 	}
 }
 
-// pinFallbackTempRoot redirects the system temp to a test-owned directory and
-// returns it, so the fallback directory the funnel creates is assertable and
-// the real shared temp is never written to.
 func pinFallbackTempRoot(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
@@ -212,8 +160,6 @@ func pinFallbackTempRoot(t *testing.T) string {
 	return root
 }
 
-// workingDir is the directory a child with no cmd.Dir would run in: the test
-// process's own working directory, which is Ghost's source tree.
 func workingDir(t *testing.T) string {
 	t.Helper()
 	dir, err := os.Getwd()
@@ -223,14 +169,6 @@ func workingDir(t *testing.T) string {
 	return dir
 }
 
-// resolvedComparable resolves p so two spellings of one directory compare
-// equal. The invocation dir is released before the report is read, so a path
-// under it may no longer exist; in that case its parent is resolved and the
-// base name rejoined, which is the same directory the child reported. Every
-// comparison goes through this because the child's $PWD is the kernel's
-// physical path while the harness sets the temp variables to the spelling it
-// was given — a host whose temp dir is reached through a symlink would
-// otherwise compare two spellings of one directory and fail.
 func resolvedComparable(t *testing.T, p string) string {
 	t.Helper()
 	if resolved, err := filepath.EvalSymlinks(p); err == nil {
@@ -243,7 +181,6 @@ func resolvedComparable(t *testing.T, p string) string {
 	return filepath.Join(parent, filepath.Base(p))
 }
 
-// childReport is one fake child's own account of where it ran.
 type childReport struct {
 	pwd    string
 	tmpdir string
@@ -251,9 +188,6 @@ type childReport struct {
 	temp   string
 }
 
-// readChildReports parses the lines the fakes appended. A malformed line is a
-// failure rather than a skip: a report the test cannot read is a report that
-// cannot support the assertion.
 func readChildReports(t *testing.T, path string) []childReport {
 	t.Helper()
 	data, err := os.ReadFile(path)
@@ -287,11 +221,7 @@ func readChildReports(t *testing.T, path string) []childReport {
 	return out
 }
 
-// TestHarnessCommandConfinesEveryClientWhenScratchFails is the funnel-level
 // half of #751: with the scratch root unusable, EVERY backend still gets a
-// confined command. The fallback directory is created with os.MkdirTemp, so it
-// lands under the system temp — which the test pins to its own directory, both
-// so the assertion can name it and so nothing reaches the real one.
 func TestHarnessCommandConfinesEveryClientWhenScratchFails(t *testing.T) {
 	for _, harness := range []struct {
 		name string
@@ -348,17 +278,9 @@ func TestHarnessCommandConfinesEveryClientWhenScratchFails(t *testing.T) {
 	}
 }
 
-// TestHarnessCommandFailsRatherThanRunUnconfined covers the other end of the
-// contract. If the scratch root cannot be created AND the system temp cannot
-// host a private directory either — the situation the scratch root exists to
-// survive — there is nowhere to confine a child to, so the funnel must return
 // an error and no command at all. A non-nil command here is the #751 shape one
-// level down: something a caller could run unconfined because it had nowhere
-// else to go.
 func TestHarnessCommandFailsRatherThanRunUnconfined(t *testing.T) {
 	brokenScratchRoot(t)
-	// A regular file where the temp root should be: os.MkdirTemp cannot create
-	// inside it, so the fallback has nowhere to go either.
 	blocker := filepath.Join(t.TempDir(), "not-a-dir")
 	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
@@ -366,13 +288,6 @@ func TestHarnessCommandFailsRatherThanRunUnconfined(t *testing.T) {
 	for _, key := range tempDirKeys {
 		t.Setenv(key, blocker)
 	}
-	// The precondition has to be real, not assumed. os.MkdirTemp derives its
-	// root from the platform's own notion of the system temp — $TMPDIR on unix,
-	// GetTempPath2 on Windows, which VERIFIES each candidate path and falls
-	// through to the next one when it is not a directory. Blocking the three
-	// variables is therefore not guaranteed to block the temp root there, and a
-	// test that assumed it would report a platform quirk as a policy breach.
-	// Probe the precondition, and say so plainly when it cannot be created.
 	if probe, err := os.MkdirTemp("", "block-probe-"); err == nil {
 		_ = os.RemoveAll(probe)
 		t.Skipf("this platform still resolved a writable temp root (%s) with every temp key blocked", os.TempDir())
@@ -391,22 +306,6 @@ func TestHarnessCommandFailsRatherThanRunUnconfined(t *testing.T) {
 	release() // safe to call even though nothing was created
 }
 
-// TestEveryHarnessCommandCallSiteChecksItsError pins the half of the contract
-// the other tests cannot reach: that no call site DISCARDS the error.
-//
-// This exists because a review gate found two call sites that did, in
-// TestLive* functions that never run, so no test would ever have caught it. The
-// defect was latent — those tests set a valid GHOST_SCRATCH_DIR, so the
-// returning-nil path was unreachable — which is precisely the failure mode: a
-// nil command is only handed back when the scratch root AND the system temp are
-// both unusable, and both live tests made that impossible. The damage on that
-// path is a nil-pointer dereference, not a wrong answer, because Output and Run
-// dereference their receiver before they can report anything.
-//
-// It parses the package rather than grepping it, so a call site reached through
-// any assignment form is seen, and an unrecognised one FAILS rather than being
-// skipped — a check that quietly passes because it recognised nothing is the
-// same class of bug it is looking for. Finding zero call sites is a failure too.
 func TestEveryHarnessCommandCallSiteChecksItsError(t *testing.T) {
 	entries, err := os.ReadDir(".")
 	if err != nil {
@@ -440,7 +339,6 @@ func TestEveryHarnessCommandCallSiteChecksItsError(t *testing.T) {
 				return true
 			}
 			// The blank identifier in the error's position: the exact #751 shape,
-			// and the one a reader cannot notice by skimming.
 			if ident, isIdent := assign.Lhs[2].(*ast.Ident); isIdent && ident.Name == "_" {
 				t.Errorf("%s:%d discards harnessCommand's error with _: the nil command that comes with it "+
 					"would be dereferenced, panicking instead of reporting the failure", name, where.Line)
@@ -453,8 +351,6 @@ func TestEveryHarnessCommandCallSiteChecksItsError(t *testing.T) {
 	}
 }
 
-// isHarnessCommandCall reports whether call targets the package's own
-// harnessCommand, by identifier or by selector on the current package.
 func isHarnessCommandCall(call *ast.CallExpr) bool {
 	switch fun := call.Fun.(type) {
 	case *ast.Ident:
