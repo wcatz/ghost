@@ -79,6 +79,12 @@ func (o *PinnedOverflow) Exceeded() bool {
 // count-only. Nil when the bucket fits. The reported ids are not guaranteed to
 // match what the block drops.
 func (s *Store) PinnedOverflow(ctx context.Context, projectID string, now time.Time, scope map[string]string) (*PinnedOverflow, error) {
+	return s.pinnedOverflow(ctx, projectID, now, scope, nil)
+}
+
+// pinnedOverflow is PinnedOverflow with a skip: a row skip reports does not
+// count against the cap (see PinnedOverflowsExcept).
+func (s *Store) pinnedOverflow(ctx context.Context, projectID string, now time.Time, scope map[string]string, skip func(Memory) bool) (*PinnedOverflow, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -110,6 +116,9 @@ func (s *Store) PinnedOverflow(ctx context.Context, projectID string, now time.T
 			if _, out := ValidityAt(m.ValidFrom, m.ValidUntil, m.VerifiedAt, now); out {
 				continue
 			}
+		}
+		if skip != nil && skip(m) {
+			continue
 		}
 		pinned = append(pinned, m)
 	}
@@ -143,6 +152,15 @@ func (s *Store) PinnedOverflow(ctx context.Context, projectID string, now time.T
 
 // PinnedOverflows returns every project whose pinned set exceeds its bucket.
 func (s *Store) PinnedOverflows(ctx context.Context, now time.Time, scope map[string]string) ([]PinnedOverflow, error) {
+	return s.PinnedOverflowsExcept(ctx, now, scope, nil)
+}
+
+// PinnedOverflowsExcept is PinnedOverflows leaving out the rows skip reports:
+// rows the session-start block withholds before the cap applies (a row the
+// host already loaded from its instruction files) never compete for a slot,
+// so counting them would report an overflow the block does not have. A nil
+// skip counts every row.
+func (s *Store) PinnedOverflowsExcept(ctx context.Context, now time.Time, scope map[string]string, skip func(Memory) bool) ([]PinnedOverflow, error) {
 	s.mu.RLock()
 	rows, err := s.queryDB().QueryContext(ctx, `SELECT DISTINCT project_id FROM memories WHERE pinned = 1 AND resolved_at IS NULL`)
 	s.mu.RUnlock()
@@ -163,7 +181,7 @@ func (s *Store) PinnedOverflows(ctx context.Context, now time.Time, scope map[st
 	}
 	var overflows []PinnedOverflow
 	for _, pid := range projects {
-		ov, err := s.PinnedOverflow(ctx, pid, now, scope)
+		ov, err := s.pinnedOverflow(ctx, pid, now, scope, skip)
 		if err != nil {
 			return nil, err
 		}

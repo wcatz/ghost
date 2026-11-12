@@ -41,7 +41,7 @@ func hostInstructionFiles(src hostevent.Source, cwd, home string) []string {
 			userDir = filepath.Join(home, ".claude")
 		}
 		candidates = append(candidates, filepath.Join(userDir, "CLAUDE.md"))
-		for dir := cwd; ; {
+		for dir := cwd; dir != ""; {
 			parent := filepath.Dir(dir)
 			if parent == dir {
 				break
@@ -65,7 +65,7 @@ func hostInstructionFiles(src hostevent.Source, cwd, home string) []string {
 			}
 		}
 		candidates = append(candidates, filepath.Join(cfgDir, "AGENTS.md"))
-		if !envTrue("OPENCODE_DISABLE_PROJECT_CONFIG") && !envTrue("OPENCODE_CONFIG_PROJECT_DISABLE") {
+		if cwd != "" && !envTrue("OPENCODE_DISABLE_PROJECT_CONFIG") && !envTrue("OPENCODE_CONFIG_PROJECT_DISABLE") {
 			stop := opencodeWalkStop(cwd, home)
 			for dir := cwd; ; {
 				candidates = append(candidates, filepath.Join(dir, "AGENTS.md"))
@@ -179,11 +179,23 @@ func coveredByInstructions(content string, blocks []map[string]bool) bool {
 
 // hostInstructionCover returns the session-start Covered predicate for a host
 // in cwd, or nil when the host loads no instruction file Ghost can read.
-// Unreadable files are skipped: a file Ghost cannot read withholds nothing.
 func hostInstructionCover(src hostevent.Source, cwd string) func(memory.Candidate) bool {
+	cover := InstructionCover(src, cwd)
+	if cover == nil {
+		return nil
+	}
+	return func(c memory.Candidate) bool { return cover(c.Content) }
+}
+
+// InstructionCover reports whether a memory's content restates a rule from the
+// instruction files the host loads for a session in dir. An empty dir reads
+// only the host's user-level file, which is all a cross-project bucket can rely
+// on. It returns nil when the host loads no file Ghost can read; an unreadable
+// file is skipped, so it withholds nothing.
+func InstructionCover(src hostevent.Source, dir string) func(content string) bool {
 	home, _ := os.UserHomeDir()
 	var blocks []map[string]bool
-	for _, p := range hostInstructionFiles(src, cwd, home) {
+	for _, p := range hostInstructionFiles(src, dir, home) {
 		f, err := os.Open(p)
 		if err != nil {
 			continue
@@ -198,5 +210,5 @@ func hostInstructionCover(src hostevent.Source, cwd string) func(memory.Candidat
 	if len(blocks) == 0 {
 		return nil
 	}
-	return func(c memory.Candidate) bool { return coveredByInstructions(c.Content, blocks) }
+	return func(content string) bool { return coveredByInstructions(content, blocks) }
 }

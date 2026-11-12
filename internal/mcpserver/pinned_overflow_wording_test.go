@@ -52,7 +52,7 @@ func TestPinnedOverflowNoticeAndHealthPinLowestByImportance(t *testing.T) {
 
 	// Health should also use wording
 	rd := &diagnosticRead{store: s}
-	overflows, err := srv.pinnedOverflowsForHealth(ctx, rd)
+	overflows, err := srv.pinnedOverflowsForHealth(ctx, rd, nil)
 	if err != nil {
 		t.Fatalf("pinnedOverflowsForHealth: %v", err)
 	}
@@ -127,7 +127,7 @@ func TestPinnedOverflowHealthListsLowestByImportance(t *testing.T) {
 	}
 	srv := &Server{store: s}
 	rd := &diagnosticRead{store: s}
-	ovs, err := srv.pinnedOverflowsForHealth(ctx, rd)
+	ovs, err := srv.pinnedOverflowsForHealth(ctx, rd, nil)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
