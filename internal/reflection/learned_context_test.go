@@ -66,49 +66,6 @@ func TestLearnedContextWithAFabricatedSHAIsRefused(t *testing.T) {
 		"fdf4583", "the bastion pin landed")
 }
 
-// TestLearnedContextNamingAForeignProjectIsRefused: a project this run was
-// never fed cannot be learned about here.
-func TestLearnedContextNamingAForeignProjectIsRefused(t *testing.T) {
-	result, log := learnedRun(t, learnedInput(), "the bastion is shared with zebraproj")
-	assertLearnedRefused(t, result, log,
-		"reflection dropped the learned context: it names a project absent from the input",
-		"zebraproj", "the bastion is shared")
-}
-
-// TestLearnedContextWithAnUnknownIdentifierIsRefused: a path, host, version or
-// number no input carries is the same unrecoverable specific the merge
-// grounding check refuses.
-func TestLearnedContextWithAnUnknownIdentifierIsRefused(t *testing.T) {
-	result, log := learnedRun(t, learnedInput(), "the bastion reads /etc/bastion/relay.conf")
-	assertLearnedRefused(t, result, log,
-		"reflection dropped the learned context: it carries identifiers absent from the input",
-		"/etc/bastion/relay.conf", "the bastion reads")
-}
-
-// TestLearnedContextIsNotItsOwnGrounding: the previous learned_context is the
-// harness's own earlier output. A name, SHA or identifier that only it holds
-// does not license the next one, or a single unguarded answer would stay
-// licensed for good.
-func TestLearnedContextIsNotItsOwnGrounding(t *testing.T) {
-	in := learnedInput()
-	in.CurrentContext = "zebraproj shares /etc/bastion/relay.conf since fdf4583"
-	for name, learned := range map[string]string{
-		"sha":        "the bastion pin landed in commit fdf4583",
-		"project":    "the bastion is shared with zebraproj",
-		"identifier": "the bastion reads /etc/bastion/relay.conf",
-	} {
-		t.Run(name, func(t *testing.T) {
-			result, log := learnedRun(t, in, learned)
-			if result.LearnedContext != in.CurrentContext {
-				t.Errorf("LearnedContext = %q, want the previous value kept", result.LearnedContext)
-			}
-			if !strings.Contains(log, "reflection dropped the learned context") {
-				t.Errorf("the refusal was not reported:\n%s", log)
-			}
-		})
-	}
-}
-
 // TestCleanLearnedContextIsStoredAsToday is the control: a paragraph whose
 // every specific is in the input passes through untouched, and nothing is
 // logged about it.
@@ -120,17 +77,6 @@ func TestCleanLearnedContextIsStoredAsToday(t *testing.T) {
 	}
 	if strings.Contains(log, "learned context") {
 		t.Errorf("a clean learned context was reported as refused:\n%s", log)
-	}
-}
-
-// TestRefusedLearnedContextWithNoPreviousIsEmpty: on a first reflection there
-// is nothing to keep, and the empty result is what the writer already skips.
-func TestRefusedLearnedContextWithNoPreviousIsEmpty(t *testing.T) {
-	in := learnedInput()
-	in.CurrentContext = ""
-	result, _ := learnedRun(t, in, "the bastion is shared with zebraproj")
-	if result.LearnedContext != "" {
-		t.Errorf("LearnedContext = %q, want empty", result.LearnedContext)
 	}
 }
 

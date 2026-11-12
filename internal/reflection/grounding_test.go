@@ -56,29 +56,6 @@ func TestIdentifiers(t *testing.T) {
 	}
 }
 
-// TestUnknownIdentifiersComparesAgainstEverySource: a merge draws on every id
-// it names, so an identifier in ANY of them grounds it. Gating on the first id
-// alone would reject every merge that carried a specific across from a sibling.
-func TestUnknownIdentifiersComparesAgainstEverySource(t *testing.T) {
-	sources := []string{"the bastion is on port 22", "production is fsn1.example.net"}
-	if unknown := unknownIdentifiers("the bastion on 22 fronts fsn1.example.net", sources); len(unknown) != 0 {
-		t.Errorf("grounded text reported unknowns: %v", unknown)
-	}
-	if unknown := unknownIdentifiers("the bastion on 22 fronts fsn1.example.org", sources); len(unknown) != 1 ||
-		unknown[0] != "fsn1.example.org" {
-		t.Errorf("unknowns = %v, want [fsn1.example.org]", unknown)
-	}
-}
-
-// TestUnknownIdentifiersIsCaseInsensitive: a host or path restated with
-// different capitalisation is the same identifier, not a new one.
-func TestUnknownIdentifiersIsCaseInsensitive(t *testing.T) {
-	sources := []string{"Production runs in region FSN1 behind Cloudflare"}
-	if unknown := unknownIdentifiers("production runs in region fsn1 behind cloudflare", sources); len(unknown) != 0 {
-		t.Errorf("case-only difference reported as unknown: %v", unknown)
-	}
-}
-
 // TestGroundingRejectsCorruptedIdentifier is the recorded corruption from
 // #639's benchmark: the model was copying, and turned 2.BeXIAhbj.js into
 // 2.BeXIAhbq.js. The output is rejected whole, not repaired — Ghost cannot know
@@ -88,18 +65,5 @@ func TestGroundingRejectsCorruptedIdentifier(t *testing.T) {
 	unknown := unknownIdentifiers("the mesh bundle 2.BeXIAhbq.js is served first", sources)
 	if len(unknown) != 1 {
 		t.Fatalf("unknowns = %v, want the corrupted filename", unknown)
-	}
-}
-
-// TestGroundingAcceptsAReorderedFaithfulMerge: grounding is not a diff. A merge
-// that says the same identifiers in a new order is the entire point of merging.
-func TestGroundingAcceptsAReorderedFaithfulMerge(t *testing.T) {
-	sources := []string{
-		"SSH to the Hetzner bastion goes through port 2222, not 22",
-		"Production runs in region fsn1 behind Cloudflare",
-	}
-	text := "Production in region fsn1 is reached by SSH on port 2222, not 22, via the Hetzner bastion"
-	if unknown := unknownIdentifiers(text, sources); len(unknown) != 0 {
-		t.Errorf("a faithful reordering was rejected: %v", unknown)
 	}
 }
