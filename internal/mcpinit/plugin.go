@@ -22,6 +22,8 @@ const (
 
 // RunningAsPlugin reports whether this ghost process is the binary Claude Code
 // installed inside the plugin cache, as opposed to a standalone install. It is
+// the safety gate: only a plugin-managed process may finalize plugin wiring or
+// refuse `ghost upgrade`.
 func RunningAsPlugin() bool {
 	if os.Getenv(pluginRootEnv) != "" {
 		return true
@@ -65,6 +67,9 @@ var managedPluginNames = []string{"ghost", "ghost-windows-amd64", "ghost-windows
 
 // PluginInstalled reports whether a Ghost plugin is installed for Claude Code
 // at all — detected by running-as-plugin OR by an entry in Claude Code's
+// installed-plugins registry. `ghost mcp init` uses this to defer rather than
+// double-wire alongside a plugin. A registry read failure is not fatal: it
+// degrades to the running-as-plugin signal.
 func PluginInstalled() bool {
 	if RunningAsPlugin() {
 		return true

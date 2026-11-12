@@ -22,6 +22,8 @@ import (
 
 // Status checks the health of the Ghost ↔ Claude Code integration. The
 // returned healthy bool reflects whether every check passed; err is reserved
+// for actual failures (I/O, config parse) that prevented the checks from
+// running at all.
 func Status(w io.Writer) (bool, error) {
 	_, _ = fmt.Fprintf(w, "\nGhost ↔ Claude Code integration status:\n\n")
 
@@ -211,6 +213,10 @@ func mcpCommandIsGhost(resolved, ghostBin string) bool {
 
 // StatusOpencode checks the health of the Ghost ↔ opencode integration.
 // Unlike Status, it reports only opencode-relevant checks — the ghost binary,
+// the mcp.ghost entry in the opencode config, Ollama, and the client-agnostic
+// embedding/link stats. Claude-only checks (hooks, permissions, autoMemory,
+// redirects) are never reported here, so a clean opencode setup prints
+// "All checks passed." without the Claude CLI installed.
 func StatusOpencode(w io.Writer) (bool, error) {
 	_, _ = fmt.Fprintf(w, "\nGhost ↔ opencode integration status:\n\n")
 
@@ -305,6 +311,11 @@ func contractHookWired(sf *settingsFile, hookEvent, eventToken, wantSource, ghos
 
 // ReportStaleIntegrations warns when existing client wiring predates the
 // running binary. Pre-contract Claude hooks fail open on every fire (no
+// context injection, no save-nudge, no lifecycle spawns), and a drifted
+// opencode lifecycle plugin means idle events never reach ghost at all —
+// neither failure is visible to the user, so `ghost upgrade` surfaces them
+// instead of silently disabling a working integration. Best-effort and
+// completely silent when everything is current; read-only.
 func ReportStaleIntegrations(w io.Writer) {
 	var hints []string
 

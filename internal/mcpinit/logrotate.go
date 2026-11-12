@@ -81,12 +81,18 @@ const LogRotateCap = logRotateCap
 
 // OpenLogForAppend is openLogForAppend for a caller outside this package: the
 // MCP server's GHOST_LOG_FILE redirect names an arbitrary path rather than a
+// data-dir file, and takes the same cap, single ".1" copy and 0600 create. The
+// path is the operator's choice, so a symlink there is followed; a FIFO or
+// other special file is refused.
 func OpenLogForAppend(path string) (*os.File, error) {
 	return openLogWith(path, createOperatorLog)
 }
 
 // RotatingLog is an append-only log writer that holds the cap while it is
 // open. openLogForAppend checks the size once, at open, which is enough for a
+// log opened per run but not for the MCP server's GHOST_LOG_FILE redirect: the
+// server keeps one descriptor for its whole life, so under GHOST_DEBUG a
+// session that stays open for days would grow the file without bound.
 type RotatingLog struct {
 	mu     sync.Mutex
 	path   string

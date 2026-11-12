@@ -41,14 +41,23 @@ const (
 
 // NoLLMBackendError is the marker error text for the specific failure this
 // surface exists for: auto-reflect enabled but no claude/opencode/codex/goose
+// binary reachable, so reflect was skipped instead of run. Shared by the stop
+// hook's spawn guard and the lifecycle coordinator so both record the same
+// diagnosable fact.
 const NoLLMBackendError = "no CLI LLM backend available; reflect skipped"
 
 // UnsafeProjectIDError is the marker cause for a project whose id cannot be a
 // filename component. The stop hook's spawn guard records it, and the
+// session-start alert recognises it so it asks for an id a lifecycle file can
+// be keyed on instead of offering a retry that cannot work for such an id.
 const UnsafeProjectIDError = "project id is not a safe filename component, so no lifecycle bookkeeping can be keyed on it"
 
 // InterruptedBySignal opens the sentence the lifecycle coordinator records when
 // a signal stops its chain ("interrupted by SIGTERM while running resolve",
+// "... before supersede"). Shared with that writer so the alert can find the
+// sentence wherever it lands in the stored error: on the first line when
+// nothing failed before it, or at the end of an earlier phase's tail, joined
+// with "; ", when something did.
 const InterruptedBySignal = "interrupted by SIGTERM"
 
 const phaseErrorPrefix = "error: "
@@ -68,6 +77,11 @@ type lifecycleFailureMarker struct {
 
 // WriteLifecycleFailure records a failed (or never-started) consolidation
 // chain as an atomically-replaced marker in config.DataDir(). project may be
+// a name, id, or path (Store.ResolveProject semantics); it is resolved to the
+// project ID so the next session-start can match it against the session's own
+// resolution, falling back to the raw value when the store cannot resolve it.
+// Best-effort by contract: callers ignore the error — failing to record a
+// failure must never itself fail a run.
 func WriteLifecycleFailure(project string, phasesFailed []string, firstErr string) error {
 	dataDir, err := config.DataDirPath()
 	if err != nil {
@@ -145,6 +159,7 @@ func markerErrorField(text string) string {
 
 // ClearLifecycleFailure removes every marker recording THIS project. A missing
 // marker is success, not an error; the data dir is never created just to delete
+// nothing.
 func ClearLifecycleFailure(project string) error {
 	dataDir, err := config.DataDirPath()
 	if err != nil {
@@ -229,6 +244,8 @@ func projectMarkerFile(project string) string {
 
 // LifecycleFailureMarkerFile is projectMarkerFile for callers outside the
 // package — the lifecycle command's tests, which must name the file the
+// writer really produces rather than spell a stem of their own (a stale
+// spelling would make an "is absent" assertion pass vacuously).
 func LifecycleFailureMarkerFile(project string) string {
 	return projectMarkerFile(project)
 }
