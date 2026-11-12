@@ -147,6 +147,9 @@ func TestSessionStartWithholdsGlobalCoveredByHostInstructions(t *testing.T) {
 		t.Fatal(err)
 	}
 	insertProject(t, db, "pcover", canonical, "cover")
+	if _, err := db.Exec(`INSERT OR IGNORE INTO projects (id, path, name) VALUES ('_global', '_global', 'global')`); err != nil {
+		t.Fatalf("insert _global: %v", err)
+	}
 	for id, content := range map[string]string{
 		"COVERED0": "NEVER add Co-Authored-By or any AI attribution to commit messages. All commits belong to the user.",
 		"KEPTROW0": "NEVER stack PRs (a PR based on another PR's branch). Every piece of work gets its own branch against main.",
