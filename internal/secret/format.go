@@ -7,6 +7,7 @@ import (
 )
 
 // IsFormatRune reports whether r is a Unicode FORMAT character — category Cf —
+// and so carries no width of its own and prints as nothing a reader can see.
 func IsFormatRune(r rune) bool {
 	if r < 0x00AD {
 		return false

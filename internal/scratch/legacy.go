@@ -20,6 +20,9 @@ type LegacyFile struct {
 }
 
 // LegacyReport lists strict-signature droppings per legacy location. The scan
+// is top-level only (no recursion): the droppings were written directly into
+// these directories, and descending into foreign trees would widen the
+// removal surface for no benefit.
 type LegacyReport struct {
 	CacheDir     string
 	CacheFiles   []LegacyFile
@@ -30,6 +33,8 @@ type LegacyReport struct {
 }
 
 // ScanLegacy lists strict-signature regular files in the two legacy
+// locations. Missing directories are flagged, not an error: most machines will
+// have cleaned at least one already. Nothing is removed.
 func ScanLegacy(cacheDir, tmpDir string) LegacyReport {
 	cacheFiles, cacheMissing := scanLegacyDir(cacheDir)
 	tempFiles, tempMissing := scanLegacyDir(tmpDir)
@@ -62,6 +67,8 @@ func scanLegacyDir(dir string) (files []LegacyFile, missing bool) {
 }
 
 // WriteLegacyReport prints the report-only view: per-location counts and
+// bytes, every candidate path, and totals. It removes nothing — with
+// --apply absent this is the whole command.
 func WriteLegacyReport(w io.Writer, r LegacyReport) error {
 	if _, err := fmt.Fprintln(w, "legacy scratch leftovers (report only — nothing is removed without --apply):"); err != nil {
 		return err
@@ -133,6 +140,10 @@ func (p probe) inUse(path string) (inUse, ok bool) {
 }
 
 // CleanLegacy removes the report's candidates under --apply. It returns the
+// count of files removed, bytes removed, candidates skipped, and the first
+// write error encountered while narrating (reporting is best-effort per line,
+// but a failed write is returned rather than dropped, matching
+// WriteLegacyReport).
 func CleanLegacy(w io.Writer, r LegacyReport) (removed int, removedBytes int64, skipped int, err error) {
 	note := func(format string, args ...any) {
 		if err != nil {

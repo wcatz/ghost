@@ -48,6 +48,8 @@ type Release struct {
 }
 
 // Asset represents a release asset. Digest is GitHub's own digest of the bytes
+// it holds, in the form "sha256:<hex>" — see VerifyAssetDigest for why that
+// field and not checksums.txt is the one an upgrade trusts.
 type Asset struct {
 	Name               string `json:"name"`
 	BrowserDownloadURL string `json:"browser_download_url"`
@@ -103,14 +105,20 @@ func readCapped(r io.Reader, limit int64, what string) ([]byte, error) {
 }
 
 // ChecksumCap is the largest checksums.txt ReadChecksums will read. It is
+// exported so a caller that has to serve a manifest larger than the cap — a
+// test of the cap itself — names the same number this package refuses over,
+// rather than a copy of it that can drift.
 func ChecksumCap() int64 { return maxChecksumBytes }
 
 // ReadChecksums reads a checksums.txt manifest, refusing anything over
+// maxChecksumBytes.
 func ReadChecksums(r io.Reader) ([]byte, error) {
 	return readCapped(r, maxChecksumBytes, "checksums.txt")
 }
 
 // ReadArchive reads a release archive, refusing anything over maxArchiveBytes
+// (200 MiB). The cap is on the compressed transfer; ExtractBinary applies its
+// own cap to what the archive decompresses into, which this one cannot bound.
 func ReadArchive(r io.Reader) ([]byte, error) {
 	return readCapped(r, archiveCap, "release archive")
 }
@@ -139,6 +147,10 @@ func FindAsset(rel *Release) (*Asset, error) {
 }
 
 // Download fetches the asset and returns the reader. Caller must close: the
+// request's deadline is ended there, and it has to outlive this function
+// because the body is read after Download returns. The body is not bounded
+// here — read it through ReadArchive or ReadChecksums so the size it is allowed
+// to reach is named in one place.
 func Download(ctx context.Context, url string) (io.ReadCloser, error) {
 	ctx, cancel := context.WithTimeout(ctx, downloadTimeout)
 
@@ -172,6 +184,8 @@ func (b *deadlineBody) Close() error {
 }
 
 // FindChecksumAsset locates the checksums.txt asset published alongside the
+// release binaries (goreleaser's default checksum manifest name — present on
+// every ghost release).
 func FindChecksumAsset(rel *Release) (*Asset, error) {
 	for i := range rel.Assets {
 		if rel.Assets[i].Name == "checksums.txt" {
@@ -182,6 +196,10 @@ func FindChecksumAsset(rel *Release) (*Asset, error) {
 }
 
 // VerifyChecksum checks that sha256(data) matches the entry for assetName in a
+// checksums.txt manifest (goreleaser format: "<hex sha256>  <filename>" per
+// line, with an optional binary-mode "*" filename prefix). It errors if the
+// entry is missing or the digest mismatches, so a corrupted or substituted
+// archive never reaches Replace.
 func VerifyChecksum(data []byte, checksumsText, assetName string) error {
 	sum := sha256.Sum256(data)
 	got := hex.EncodeToString(sum[:])
@@ -206,6 +224,7 @@ func VerifyChecksum(data []byte, checksumsText, assetName string) error {
 const sha256HexLen = 2 * sha256.Size
 
 // VerifyAssetDigest checks that data matches the digest GitHub reports for this
+// release asset.
 func VerifyAssetDigest(data []byte, asset *Asset) error {
 	if asset == nil {
 		return fmt.Errorf("no release asset to verify")
@@ -236,6 +255,10 @@ func VerifyAssetDigest(data []byte, asset *Asset) error {
 var zipMagic = []byte("PK")
 
 // ExtractBinary extracts the ghost binary from a release archive: the .tar.gz
+// every unix release ships, or the .zip every Windows release ships
+// (goreleaser's format_overrides). Before #558 the zip was handed to a gzip
+// reader, so `ghost upgrade` failed with "gzip: invalid header" on one of the
+// two platforms ghost builds for.
 func ExtractBinary(archive []byte) ([]byte, error) {
 	if bytes.HasPrefix(archive, zipMagic) {
 		return extractZipBinary(archive)

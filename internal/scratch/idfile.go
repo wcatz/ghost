@@ -14,6 +14,9 @@ var reassessIDFile = regexp.MustCompile(
 	`^supersede-reassess-[A-Za-z0-9._-]{1,40}-[0-9]{8}T[0-9]{6}Z-([0-9]+)-[0-9a-f]{16}\.ids$`)
 
 // ReassessTargetsName builds the follow-up id file's name: the repair, the
+// project, the UTC second for a human reading a directory listing, and a
+// per-run token so no two runs — or anything else in the root — can hold the
+// same name.
 func ReassessTargetsName(projectName string) (string, error) {
 	suffix, err := UniqueSuffix()
 	if err != nil {

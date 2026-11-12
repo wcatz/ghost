@@ -18,6 +18,8 @@ import (
 const staleAge = 24 * time.Hour
 
 // BudgetResult reports what one pre-spawn scratch budget check did. It is a
+// value returned for tests and callers that care; EnforceBudget never fails a
+// spawn on account of it.
 type BudgetResult struct {
 	Root        string
 	MaxBytes    int64
@@ -34,6 +36,7 @@ type BudgetResult struct {
 }
 
 // Size walks dir and returns the total bytes and count of regular files it
+// could read, plus the number of entries it could not read (skipped).
 func Size(dir string) (bytes int64, files int, skipped int, err error) {
 	walkErr := filepath.WalkDir(dir, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -77,6 +80,7 @@ func Size(dir string) (bytes int64, files int, skipped int, err error) {
 }
 
 // EnforceBudget runs the per-root scratch budget check BEFORE each harness
+// spawn (harnessCommand is the single call site). The order is fixed:
 func EnforceBudget() BudgetResult {
 	maxBytes := config.LoadForHook().Scratch.MaxBytes
 	if maxBytes <= 0 {

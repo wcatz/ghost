@@ -20,6 +20,9 @@ var resolveKeywords = []string{
 }
 
 // Verdict is the classifier's answer for one memory. UNKNOWN means the reply
+// did not contain an explicit, parseable KEEP or RESOLVED verdict; it is kept
+// visible and is deliberately not entered into the KEEP cache so the next pass
+// can ask again.
 type Verdict string
 
 const (
@@ -29,6 +32,11 @@ const (
 )
 
 // Classifier decides whether each memory is resolved evidence, an explicit
+// terminal conclusion / still-active knowledge, or an unparseable answer. The
+// LLM implementation lives in resolution.go; tests inject a deterministic fake.
+// It is biased to KEEP when the model expresses uncertainty, but a parse
+// failure is UNKNOWN rather than an implicit KEEP. Batched so one call
+// adjudicates many notes; the KEEP-cache skip happens in Run.
 type Classifier interface {
 	IsResolvedBatch(ctx context.Context, contents []string) ([]Verdict, error)
 }
@@ -36,11 +44,15 @@ type Classifier interface {
 const keepCacheHashVersion = memory.ContentHashVersion
 
 // ContentHash is the KEEP-cache key: resolve's question is content-only, so a
+// tag or importance edit must not invalidate a cached verdict. The version
+// prefix is hashed in with the content (see keepCacheHashVersion).
 func ContentHash(content string) string {
 	return memory.ContentHash(content)
 }
 
 // KeepStamp is the KEEP-cache key for ONE judged KEEP, and it carries both
+// halves of the question the gate asks (#880): has this content been judged,
+// and has anything doubted it since?
 func KeepStamp(content string, ev memory.FlagEvidence) string {
 	base := ContentHash(content)
 	if ev.Flagged > 0 {
@@ -143,6 +155,17 @@ func Prefilter(mems []memory.Memory) []memory.Memory {
 }
 
 // Run loads eligible candidates, applies two deterministic demotion signals,
+// prefilters the rest, settles the KEEP vetoes and the KEEP cache, classifies
+// what is left in batches, and — when apply is true — stamps resolved_at on
+// every confirmed memory still holding the judged identity in one batch (a row
+// rewritten or promoted while it was being classified is refused and counted as
+// stale, #1052) and records the newly-judged KEEP hashes. On apply the second
+// return is the confirmed rows the write ACTUALLY stamped — the applied
+// listing — so a refused row is never rendered as resolved, least of all with
+// the pre-write text the verdict was reached on; a dry run (apply=false) writes
+// nothing and returns the full confirmed set, because that is exactly what an
+// apply would stamp. A classifier error on any batch is fatal so a partial pass
+// is never silently applied.
 func Run(ctx context.Context, store resolveStore, cls Classifier, projectID string, apply bool, logger *slog.Logger) (Result, []memory.Memory, error) {
 	loaded, err := store.ResolveCandidates(ctx, projectID)
 	if err != nil {

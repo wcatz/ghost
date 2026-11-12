@@ -22,6 +22,8 @@ import (
 )
 
 // FirstAttestedVersion is the first ghost release whose assets the release
+// workflow attests, and therefore the first one `ghost upgrade` refuses to
+// install without an attestation.
 const FirstAttestedVersion = "0.43.0"
 
 const repoSlug = "wcatz/ghost"
@@ -33,6 +35,7 @@ const (
 )
 
 // AttestationRequiredFor reports whether a release at this version has to carry
+// an attestation before `ghost upgrade` will install it.
 func AttestationRequiredFor(version string) bool {
 	cmp, err := CompareVersions(coreVersion(version), FirstAttestedVersion)
 	return err != nil || cmp >= 0
@@ -47,11 +50,14 @@ func coreVersion(s string) string {
 }
 
 // ReleaseWorkflowIdentity returns the certificate SAN and issuer an attestation
+// for a ghost release has to carry: this repository's release workflow, run
+// from the tag for that version, under GitHub's OIDC issuer.
 func ReleaseWorkflowIdentity(version string) (san, issuer string) {
 	return releaseWorkflowSAN + "@refs/tags/v" + strings.TrimPrefix(version, "v"), gitHubOIDCIssuer
 }
 
 // ErrNoAttestation reports that the attestation service holds no attestation
+// for the bytes it was asked about.
 var ErrNoAttestation = errors.New("no attestation is published for this release asset")
 
 var (
@@ -72,6 +78,7 @@ type attestationEntry struct {
 }
 
 // FetchAttestationBundles returns the raw Sigstore bundles GitHub holds for
+// digestHex, a sha256 digest as hex.
 func FetchAttestationBundles(ctx context.Context, apiBaseURL, digestHex string) ([][]byte, error) {
 	if len(digestHex) != sha256HexLen {
 		return nil, fmt.Errorf("attestation lookup needs a %d-character sha256 digest, got %d characters", sha256HexLen, len(digestHex))
@@ -216,6 +223,8 @@ func releaseAttestationPolicy(san, issuer string, artifactDigest []byte) (verify
 }
 
 // VerifyReleaseAttestation reports whether any of bundles proves that this
+// repository's release workflow, running from the tag for version, signed
+// artifact — the bytes the client downloaded.
 func VerifyReleaseAttestation(bundles [][]byte, version string, artifact []byte, trusted root.TrustedMaterial) error {
 	if len(bundles) == 0 {
 		return fmt.Errorf("there is no attestation bundle to check for %s", version)
@@ -284,12 +293,15 @@ type AttestationResult struct {
 }
 
 // AttestationVerifier checks a release asset against GitHub's attestation
+// service. Its fields are the two seams: where the service is, and where the
+// trust root comes from.
 type AttestationVerifier struct {
 	APIBaseURL      string
 	TrustedMaterial func(context.Context) (root.TrustedMaterial, error)
 }
 
 // Check decides the whole question for one release asset: whether the bytes the
+// client downloaded may be installed, and why not if they may not.
 func (v *AttestationVerifier) Check(ctx context.Context, archive []byte, version string) AttestationResult {
 	if !AttestationRequiredFor(version) {
 		return AttestationResult{
@@ -323,6 +335,8 @@ func (v *AttestationVerifier) Check(ctx context.Context, archive []byte, version
 }
 
 // LiveAttestationCheck returns the Check a real `ghost upgrade` uses: GitHub's
+// attestations service, and the Sigstore trust root fetched from the public TUF
+// repository and cached under the ghost data directory.
 func LiveAttestationCheck(dataDir func() (string, error)) func(context.Context, []byte, string) AttestationResult {
 	v := &AttestationVerifier{
 		APIBaseURL:      attestationAPIBaseURL,

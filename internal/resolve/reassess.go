@@ -24,6 +24,8 @@ type reassessStore interface {
 }
 
 // ReassessResult summarizes a reassess pass. Unlike Result it has no "would
+// resolve" side: every input row is already resolved, so the only outcomes are
+// "still resolved" and "back in the ranked surface".
 type ReassessResult struct {
 	Loaded        int // already-resolved eligible memories the pass considered
 	Demoted       int // already-resolved rows Run's free demotions still assert; left alone
@@ -41,6 +43,7 @@ type ReassessResult struct {
 }
 
 // HoldKind is which of Run's two free demotions is asserting a row, because the
+// two need different remedies and an operator cannot tell which from a count.
 type HoldKind string
 
 const (
@@ -49,6 +52,9 @@ const (
 )
 
 // Hold is one thing asserting an already-resolved row, and the id an operator
+// acts on. Holder is the edge's SOURCE — 'supersedes' is written newer→older, so
+// the source is the newer note an operator withdraws or reads — and the
+// correction's own id.
 type Hold struct {
 	Kind   HoldKind
 	Holder string
@@ -61,6 +67,18 @@ type HeldMemory struct {
 }
 
 // Reason is the sentence the report prints for a held row. Sorted on a copy —
+// supersedes before corrections, then by id — so the list reads the same way
+// however the caller assembled it, and so a report a reader compares between two
+// runs is comparable. Empty when nothing holds the row, which the pass never
+// renders: a row with no holder is not a held row.
+// Reason is the sentence a report prints about what holds the row, and it is a
+// DISPLAY method rather than a fact about the graph: the holders are stored ids
+// (a supersedes source, a correction's paired row), so each one is rendered
+// through assemble.Token exactly as the id on the same line is. A holder that is
+// a pre-#791 import id, a restored snapshot row or a hand-edited row can hold a
+// newline, and because it is printed mid-line the text after that newline begins
+// a line of its own, outside every «» block. What the store holds is unchanged —
+// this is the one place the reason is built, and it has one caller.
 func (h HeldMemory) Reason() string {
 	if len(h.Holds) == 0 {
 		return ""
@@ -84,6 +102,11 @@ func (h HeldMemory) Reason() string {
 }
 
 // Reassess re-runs the vetoes and the classifier over the memories resolve has
+// ALREADY stamped resolved_at, and returns the ones that now come back KEEP (in
+// load order). With apply it clears resolved_at on exactly those rows and
+// records the classifier's KEEP verdicts under KeepStamp over the same flag
+// count the ordinary pass reads, so the ordinary pass does not re-ask a note
+// that was just repaired. Dry-run (apply=false) writes nothing.
 func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectID string, apply bool, scope Scope, logger *slog.Logger) (ReassessResult, []memory.Memory, error) {
 	var res ReassessResult
 	pool, err := store.ResolvedCandidates(ctx, projectID)

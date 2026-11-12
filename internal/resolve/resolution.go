@@ -17,6 +17,12 @@ type classifyProvider interface {
 }
 
 // ResolutionClassifier answers the still-needed-or-history question, batching up
+// to batchSize notes per classify call (see IsResolvedBatch). It is biased to
+// KEEP: a false RESOLVED buries a still-useful memory (dropping it from
+// injection), whereas a missed one merely leaves the status quo. A RESOLVED
+// therefore has to name what closed the note (see parseVerdict), and a reply
+// that contains no explicit verdict is UNKNOWN — parse failures must not be
+// mistaken for an explicit KEEP or enter the KEEP cache.
 type ResolutionClassifier struct {
 	client    classifyProvider
 	batchSize int          // 0 means classifyBatchSize
@@ -25,6 +31,7 @@ type ResolutionClassifier struct {
 }
 
 // NewResolutionClassifier wraps a classifyProvider (typically *ai.CLIProvider
+// or *ai.SourceProvider) as a Classifier.
 func NewResolutionClassifier(client classifyProvider) *ResolutionClassifier {
 	return &ResolutionClassifier{client: client, batchSize: classifyBatchSize}
 }
@@ -74,11 +81,17 @@ const classifyBatchSystemPrompt = classifyRubric + classifyBatchInstructions
 const classifyBatchSize = 8
 
 // IsResolved returns the classifier's explicit verdict for one note. A
+// transport error is returned separately from an unparseable reply; the latter
+// is VerdictUnknown, not an implicit KEEP. Every call goes through one
+// CLI-harness provider, so callers do not need a second provider fallback.
 func (h *ResolutionClassifier) IsResolved(ctx context.Context, content string) (Verdict, error) {
 	return h.isResolvedNote(ctx, Note{Content: content})
 }
 
 // Note is one candidate as the classifier is shown it: the stored content, and
+// Ghost's own audit-evidence line when the audit holds one. They travel
+// separately so the content can be folded to one physical line while the
+// evidence keeps its own line outside the «...» block (#1633).
 type Note struct {
 	Content  string
 	Evidence string
@@ -92,6 +105,8 @@ func (n Note) joined() string {
 }
 
 // NoteClassifier is the optional richer form of Classifier: it takes content
+// and evidence apart. ResolutionClassifier implements it; a Classifier that
+// does not is handed Note.joined strings.
 type NoteClassifier interface {
 	IsResolvedNotes(ctx context.Context, notes []Note) ([]Verdict, error)
 }
@@ -146,6 +161,9 @@ func ReasonlessValue(value string) bool {
 }
 
 // ReasonedField reports whether the first occurrence of key in fields carries a
+// value that names something (see ReasonlessValue). The value may sit on the
+// key's own field ("closed-by: the runbook was replaced") or, when the model
+// broke the line right after the colon, in the following field.
 func ReasonedField(fields []string, key string) bool {
 	for i, f := range fields {
 		field := strings.ToLower(strings.Trim(f, reasonEdge))
@@ -208,6 +226,9 @@ func isNegation(t string) bool {
 }
 
 // IsResolvedBatch classifies one or more notes, chunking them into calls of at
+// most batchSize notes, and returns one verdict per note in the same order.
+// VerdictUnknown means that note's reply line was missing or garbled; it is
+// not treated as an explicit KEEP.
 func (h *ResolutionClassifier) IsResolvedBatch(ctx context.Context, contents []string) ([]Verdict, error) {
 	notes := make([]Note, len(contents))
 	for i, c := range contents {
@@ -217,6 +238,8 @@ func (h *ResolutionClassifier) IsResolvedBatch(ctx context.Context, contents []s
 }
 
 // IsResolvedNotes is IsResolvedBatch over notes that carry their evidence line
+// apart from their content. See IsResolvedBatch for the chunking and fallback
+// contract.
 func (h *ResolutionClassifier) IsResolvedNotes(ctx context.Context, contents []Note) ([]Verdict, error) {
 	if len(contents) == 0 {
 		return nil, nil
@@ -413,6 +436,9 @@ func echoKey(l string) string {
 }
 
 // Calls reports how many provider classify calls this classifier has made,
+// including the lone-tail and any single-note fallback calls. One batched call
+// covers up to batchSize notes, so compare this against the note count to see
+// the batching win.
 func (h *ResolutionClassifier) Calls() int { return h.calls }
 
 func logReply(resp string) string {
@@ -420,6 +446,9 @@ func logReply(resp string) string {
 }
 
 // SetLogger attaches a logger for unparseable-reply diagnostics. It is
+// optional: without one, a fully unparseable batch reply still falls back to
+// per-note calls, but the offending reply is not recorded. The CLI attaches its
+// logger so a garbled batch reply reaches the log file.
 func (h *ResolutionClassifier) SetLogger(l *slog.Logger) { h.logger = l }
 
 func quoteData(s string) string {

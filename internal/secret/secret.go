@@ -13,6 +13,8 @@ import (
 )
 
 // Finding names the credential format Detect matched. Both fields are safe to
+// log, return to a caller, and put in front of a model: Rule is a stable
+// machine-comparable slug, Label is a short human-readable format name.
 type Finding struct {
 	Rule  string
 	Label string
@@ -741,6 +743,9 @@ func isDigit(r rune) bool  { return r >= '0' && r <= '9' }
 func isLetter(r rune) bool { return isLower(r) || isUpper(r) }
 
 // Detect reports whether text contains a credential-shaped value, and which
+// format it matched. It is a pure function of its input and is cheap enough to
+// call on every save: text is bounded by memory.MaxContentLen and the rules are
+// linear scans.
 func Detect(text string) (Finding, bool) {
 	if text == "" {
 		return Finding{}, false

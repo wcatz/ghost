@@ -23,6 +23,9 @@ const ownerFile = ".owner"
 const startNone = "none"
 
 // Root returns the scratch root, creating it (0700) if needed. The root is
+// $GHOST_SCRATCH_DIR when set and non-empty, otherwise <dataDir>/scratch. The
+// permissions are tightened explicitly because MkdirAll leaves an existing
+// directory's mode alone and the override may name a pre-existing shared dir.
 func Root() (string, error) {
 	root := os.Getenv(envDir)
 	if root == "" {
@@ -47,6 +50,9 @@ type Dir struct {
 }
 
 // UniqueSuffix returns a token no other run of this binary produces for the same
+// moment: the pid, and 16 hex characters of fresh randomness — the exact shape
+// Open names a per-invocation directory with, so this package has one naming
+// scheme rather than two.
 func UniqueSuffix() (string, error) {
 	token, err := randomToken()
 	if err != nil {
@@ -64,6 +70,12 @@ func randomToken() (string, error) {
 }
 
 // Open creates a fresh per-invocation directory directly under the root,
+// named <pid>-<random-hex>, and writes the ownerFile marker inside it with the
+// creating pid, a random per-invocation token, and the process's
+// creation-time token. The marker lets Reap tell a directory whose owner is
+// still running from one abandoned by a crash, and the creation-time token
+// additionally lets it tell a live owner from a pid the OS recycled after the
+// owner exited.
 func Open() (*Dir, error) {
 	root, err := Root()
 	if err != nil {
@@ -98,6 +110,7 @@ var removeTree = os.RemoveAll
 var removeFile = os.Remove
 
 // SetRemoveTreeForTest replaces the tree removal for another package's test
+// and returns the function that restores it. Production code never calls it.
 func SetRemoveTreeForTest(f func(string) error) (restore func()) {
 	prev := removeTree
 	removeTree = f
@@ -150,6 +163,11 @@ func makeRemovable(path string) {
 }
 
 // Release removes the directory and everything under it. It restores owner
+// permissions on the way down so a subtree left without write permission can
+// still be removed. It is best-effort: removal errors are ignored because
+// Release also runs on early returns and on paths Reap may already have
+// collected. It is safe to call more than once and safe when the directory is
+// already gone.
 func (d *Dir) Release() {
 	if d == nil {
 		return
@@ -159,6 +177,7 @@ func (d *Dir) Release() {
 }
 
 // Reap removes stale per-invocation directories from the scratch root. It
+// scans only the root's direct entries and never the root itself.
 func Reap(maxAge time.Duration) (removed, failed int, err error) {
 	root, err := Root()
 	if err != nil {

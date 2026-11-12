@@ -70,6 +70,10 @@ func isOlder(a, b memory.Memory) bool {
 }
 
 // Pairing is one correction and the older, prefilter-passing candidate it
+// demotes. The pair is the unit the repair pass reports, not the target: a row
+// the pass leaves resolved has to say WHICH correction is asserting it, because
+// the two reasons a row stays resolved need different remedies — a supersedes
+// edge can be withdrawn, a correction pairing cannot be, it can only be read.
 type Pairing struct {
 	Correction memory.Memory
 	Target     memory.Memory

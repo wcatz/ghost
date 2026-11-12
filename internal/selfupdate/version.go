@@ -7,6 +7,10 @@ import (
 )
 
 // CompareVersions compares two semantic versions and returns -1 if a is older
+// than b, 0 if they are equal, and 1 if a is newer than b. A leading "v" and
+// any build metadata are ignored, and prerelease identifiers are ordered by the
+// semver rules, so "0.9.0" is older than "0.10.0" and "1.0.0-rc.1" is older
+// than "1.0.0".
 func CompareVersions(a, b string) (int, error) {
 	pa, err := parseVersion(a)
 	if err != nil {
@@ -30,12 +34,16 @@ func CompareVersions(a, b string) (int, error) {
 }
 
 // IsPrerelease reports whether a release tag names a prerelease — a candidate
+// that is not a release yet, like "0.35.0-rc.1" or "1.0.0-beta".
 func IsPrerelease(s string) bool {
 	v, err := parseVersion(s)
 	return err == nil && v.prerelease != ""
 }
 
 // IsRelease reports whether a version string names a published release: a
+// parseable semantic version with no prerelease identifier. "0.35.0",
+// "v0.35.0" and "0.35.0+dirty" are releases; "dev", "nightly", "1.0" and
+// "0.36.0-rc.1" are not.
 func IsRelease(s string) bool {
 	v, err := parseVersion(s)
 	return err == nil && v.prerelease == ""

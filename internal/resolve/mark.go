@@ -12,6 +12,9 @@ import (
 )
 
 // MarkStore is the subset of *memory.Store a targeted mark needs; narrowed for
+// testability. It is the same shape as reassessStore minus the classifier, the
+// evidence read and the two pool reads: nothing here asks a model anything, and
+// the only writes go through MarkResolved, which is the ordinary store path.
 type MarkStore interface {
 	memref.Store
 	GetByIDs(ctx context.Context, ids []string) ([]memory.Memory, error)
@@ -19,6 +22,10 @@ type MarkStore interface {
 }
 
 // MarkRequest is one operator's request: the refs as typed, the project they are
+// read in, the provenance the `resolve` history rows carry, and whether to
+// write. It is a value rather than seven parameters because the two callers —
+// the CLI and the MCP tool — have to name the same seven, and a transposition
+// between them would stamp rows in one project from a ref resolved in another.
 type MarkRequest struct {
 	ProjectID  string
 	Refs       []string
@@ -42,6 +49,8 @@ type MarkedMemory struct {
 }
 
 // MarkResult summarizes a request. Resolved counts the refs that named a row this
+// project owns; Marked counts the stamps THIS call wrote, which is 0 in a dry run
+// and can be lower than Resolved for any of the three per-row no-ops.
 type MarkResult struct {
 	Resolved        int
 	Marked          int
@@ -54,6 +63,8 @@ type MarkResult struct {
 }
 
 // Mark stamps resolved_at on the memories the request names and returns them
+// resolved to full ids. A dry run (Apply=false) resolves, loads and reports
+// without writing.
 func Mark(ctx context.Context, store MarkStore, req MarkRequest, logger *slog.Logger) (MarkResult, error) {
 	var res MarkResult
 	if req.ProjectID == "" {

@@ -34,6 +34,10 @@ var (
 )
 
 // VetoKeep reports whether content carries a deterministic KEEP signal, and
+// which pattern fired. A vetoed memory is KEEP with no harness call at all: it
+// is not classified, and it is not written into the KEEP cache either, because
+// the veto is recomputed free on every pass and a cache entry would only add a
+// stale row to reason about.
 func VetoKeep(content string) (reason string, vetoed bool) {
 	if reason, vetoed := VetoKeepImperative(content); vetoed {
 		return reason, true
@@ -52,6 +56,8 @@ func VetoKeep(content string) (reason string, vetoed bool) {
 }
 
 // VetoKeepImperative reports whether content states a standing rule or
+// instruction, and which pattern fired — the imperative half of VetoKeep, without
+// the open markers.
 func VetoKeepImperative(content string) (reason string, vetoed bool) {
 	for _, p := range keepVetoImperatives {
 		if p.re.MatchString(content) {

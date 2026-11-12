@@ -13,20 +13,28 @@ const minSelectorPrefix = 8
 const hexDigits = "0123456789abcdefABCDEF"
 
 // Scope narrows a repair pass to the memories a repair is about. The zero value
+// is the unscoped pass over the whole project, which is what every caller
+// outside a repair writes.
 type Scope struct {
 	Only []string
 }
 
 // Scoped reports whether the scope names anything. Callers use it to choose
+// between the unscoped and scoped report wording, so an unscoped run never
+// prints a scope it did not ask for.
 func (s Scope) Scoped() bool { return len(s.Only) > 0 }
 
 // ScopeMiss is one selector that named no row the pass could judge. It is a
+// report line, never an error: Spec is the selector the operator typed, verbatim,
+// so they can see which one of the ids they pasted was wrong.
 type ScopeMiss struct {
 	Spec   string
 	Reason string
 }
 
 // Select narrows pool to the scope, returning the selected rows in pool order,
+// the selectors that matched nothing, and an error for a selector that is
+// malformed or ambiguous. An empty scope returns the pool untouched.
 func (s Scope) Select(pool []memory.Memory) (scoped []memory.Memory, misses []ScopeMiss, err error) {
 	if !s.Scoped() {
 		return pool, nil, nil
