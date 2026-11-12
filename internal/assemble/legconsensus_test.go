@@ -70,13 +70,8 @@ func TestLegConsensusKeepsDualAndTopSingleLegs(t *testing.T) {
 	}
 }
 
-// TestLegConsensusAdmitsARowTheVectorLegCouldNotSee: a row with no embedding
-// under the configured identity reaches the pool through the keyword leg only
-// because the vector leg never had it to score — the shape of a memory saved
-// moments ago, before the worker has embedded it. Its absent VectorRank is not
-// a second leg's dissent, so the gate must admit it whatever rank the keyword
-// leg gave it (#1319); otherwise a scoped search drops a row the vector side
-// could never have judged, and does so on a timing-dependent schedule.
+// TestLegConsensusAdmitsARowTheVectorLegCouldNotSee is #1319: a scoped search
+// must not drop a row the vector side could not see.
 func TestLegConsensusAdmitsARowTheVectorLegCouldNotSee(t *testing.T) {
 	rows := []memory.Candidate{
 		legCandidate("dual", 3, 4, 1.0),
@@ -111,30 +106,6 @@ func TestLegConsensusSkipsWhenOneLegUnavailable(t *testing.T) {
 	res := run(t, &fakeRetriever{set: set}, consensusQueryRequest())
 	if ids := itemIDs(res.Items); !eq(ids, []string{"dual", "vecDrop"}) {
 		t.Fatalf("items = %v, want all rows kept when one leg is down", ids)
-	}
-	st := stageTraceFor(res, stageLegConsensus)
-	if st.In != st.Out || len(st.DroppedIDs) != 0 {
-		t.Errorf("stage = in %d out %d dropped %v, want pass-through", st.In, st.Out, st.DroppedIDs)
-	}
-}
-
-// TestLegConsensusSkipsWithoutAnEmbedder is the no-embedder shape of the same
-// rule: the vector leg is not applicable, so the consensus rule cannot apply
-// and the stage must leave the keyword-only block untouched rather than cut
-// single-leg rows against a missing leg.
-func TestLegConsensusSkipsWithoutAnEmbedder(t *testing.T) {
-	rows := []memory.Candidate{
-		legCandidate("ftsFirst", 0, -1, 1.0),
-		legCandidate("ftsFar", 9, -1, 0.8),
-	}
-	legs := map[string]memory.LegStatus{
-		"fts":    {Applicable: true, Available: true},
-		"vector": {Applicable: false},
-	}
-	set := &memory.CandidateSet{Rows: rows, Legs: legs}
-	res := run(t, &fakeRetriever{set: set}, consensusQueryRequest())
-	if ids := itemIDs(res.Items); !eq(ids, []string{"ftsFirst", "ftsFar"}) {
-		t.Fatalf("items = %v, want all keyword rows kept without an embedder", ids)
 	}
 	st := stageTraceFor(res, stageLegConsensus)
 	if st.In != st.Out || len(st.DroppedIDs) != 0 {

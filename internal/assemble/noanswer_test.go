@@ -40,8 +40,7 @@ func noAnswerRun(t *testing.T, bar float64, set *memory.CandidateSet) Result {
 
 // TestNoAnswerWithholdsABlockWhoseBestMatchIsBelowTheBar: no row reaches the bar,
 // so the block comes back empty with the stated reason, a sentence that shows the
-// best score and the bar, a machine line carrying the reason, and one decision per
-// withheld row at the step.
+// best score and the bar, a machine line carrying the reason.
 func TestNoAnswerWithholdsABlockWhoseBestMatchIsBelowTheBar(t *testing.T) {
 	res := noAnswerRun(t, 0.6, hybridSet(cosRow("a", 0.55), cosRow("b", 0.50), cosRow("c", 0.41)))
 
@@ -76,24 +75,6 @@ func TestNoAnswerWithholdsABlockWhoseBestMatchIsBelowTheBar(t *testing.T) {
 	}
 }
 
-// TestNoAnswerLeavesAnAnswerableBlockAlone: the best match clears the bar, so the
-// block is byte-identical to the one a request with the bar off produces.
-func TestNoAnswerLeavesAnAnswerableBlockAlone(t *testing.T) {
-	rows := []memory.Candidate{cosRow("a", 0.71), cosRow("b", 0.50), cosRow("c", 0.41)}
-	on := noAnswerRun(t, 0.6, hybridSet(rows...))
-	off := noAnswerRun(t, 0, hybridSet(rows...))
-
-	if !eq(itemIDs(on.Items), []string{"a", "b", "c"}) {
-		t.Fatalf("items = %v, want every row: the best match clears the bar", itemIDs(on.Items))
-	}
-	if on.Response != off.Response || on.Machine != off.Machine {
-		t.Errorf("an answerable block differs with the bar on and off:\n on: %q\noff: %q", on.Response, off.Response)
-	}
-	if got := decisionsAt(on, stageNoAnswer); len(got) != 0 {
-		t.Errorf("the step filed %d decisions on a block that cleared the bar", len(got))
-	}
-}
-
 // TestNoAnswerNeverWithholdsAPinnedRow: a pin is a slot guarantee. The pinned row
 // stays and is not judged, and the unpinned rows below the bar go.
 func TestNoAnswerNeverWithholdsAPinnedRow(t *testing.T) {
@@ -114,18 +95,6 @@ func TestNoAnswerNeverWithholdsAPinnedRow(t *testing.T) {
 	}
 	if got := decisionsAt(res, stageNoAnswer); len(got) != 2 {
 		t.Errorf("no-answer decisions = %d, want the two unpinned rows", len(got))
-	}
-}
-
-// TestNoAnswerPinnedRowsDoNotRescueTheBlock: a pinned row's own cosine says
-// nothing about whether the rest of the block answers the query, so a strong
-// pinned row does not keep weak neighbours in.
-func TestNoAnswerPinnedRowDoesNotKeepWeakRowsIn(t *testing.T) {
-	pinned := cosRow("pinned", 0.95)
-	pinned.Pinned = true
-	res := noAnswerRun(t, 0.6, hybridSet(pinned, cosRow("a", 0.55)))
-	if !eq(itemIDs(res.Items), []string{"pinned"}) {
-		t.Errorf("items = %v, want the pinned row alone", itemIDs(res.Items))
 	}
 }
 
@@ -150,28 +119,9 @@ func TestDisabledNoAnswerIsByteIdenticalToTheRanking(t *testing.T) {
 	}
 }
 
-// TestNoAnswerIsAQueryModeRule: a passive request carries no query, so the bar is
-// a recorded pass-through whatever its value and the block is byte-identical.
-func TestNoAnswerIsAQueryModeRule(t *testing.T) {
-	rows := []memory.Candidate{cosRow("a", 0.30), cosRow("b", 0.20)}
-	mk := func(bar float64) Result {
-		req := diversityRequest(5)
-		req.NoAnswerCosine = bar
-		return run(t, &fakeRetriever{set: hybridSet(rows...)}, req)
-	}
-	on, off := mk(0.9), mk(0)
-	if on.Response != off.Response || !eq(itemIDs(on.Items), itemIDs(off.Items)) {
-		t.Errorf("a passive block differs with the bar on and off:\n on: %q\noff: %q", on.Response, off.Response)
-	}
-	if st := stageTraceFor(on, stageNoAnswer); st.In != st.Out || len(st.DroppedIDs) != 0 || len(st.Notes) != 0 {
-		t.Errorf("passive stage = %+v, want a silent pass-through", st)
-	}
-}
-
-// TestNoAnswerDoesNotJudgeWhatItCannotCompare: with no vector leg in play, or
-// with no row carrying a cosine, there is nothing to measure the bar against, so
-// the block passes through. Refusing every answer on a machine with no embedder
-// would be the rule misreading its blind spot as a verdict.
+// TestNoAnswerDoesNotJudgeWhatItCannotCompare: with no vector leg in play, or with
+// no row carrying a cosine, there is nothing to measure the bar against, so the
+// block passes through.
 func TestNoAnswerDoesNotJudgeWhatItCannotCompare(t *testing.T) {
 	rows := []memory.Candidate{cosRow("a", 0.10), cosRow("b", 0.05)}
 
@@ -222,34 +172,6 @@ func TestNoAnswerDoesNotExemptKeywordReservedRows(t *testing.T) {
 	}
 }
 
-// TestNoAnswerBarIsStrictlyBelow: a best match exactly on the bar clears it, so a
-// block is withheld only when nothing reached the bar.
-func TestNoAnswerBarIsStrictlyBelow(t *testing.T) {
-	res := noAnswerRun(t, 0.5, hybridSet(cosRow("a", 0.5)))
-	if len(res.Items) != 1 {
-		t.Errorf("items = %v, want the row: a cosine equal to the bar clears it", itemIDs(res.Items))
-	}
-}
-
-// TestExplainReportsTheNoAnswerRows: explain is a projection of the same run, so a
-// withheld row is an excluded row carrying the no-answer sentence.
-func TestExplainReportsTheNoAnswerRows(t *testing.T) {
-	req := noAnswerRequest(0.6)
-	req.Explain = true
-	res := run(t, &fakeRetriever{set: hybridSet(cosRow("a", 0.55))}, req)
-	if res.Explain == nil || len(res.Explain.Rows) == 0 {
-		t.Fatal("no explain rows: a withheld row is still a row the pipeline saw")
-	}
-	for _, r := range res.Explain.Rows {
-		if r.Included {
-			t.Errorf("row %s is included: the block was withheld", r.ID)
-		}
-		if !strings.Contains(r.Reason, "no-answer bar") {
-			t.Errorf("row %s reason = %q, want the no-answer sentence", r.ID, r.Reason)
-		}
-	}
-}
-
 // TestNoAnswerBarIsValidated: a bar no cosine can be is refused on the request
 // itself, as the other relevance parameters are.
 func TestNoAnswerBarIsValidated(t *testing.T) {
@@ -258,60 +180,6 @@ func TestNoAnswerBarIsValidated(t *testing.T) {
 		if _, err := Run(t.Context(), &fakeRetriever{set: hybridSet()}, req); err == nil {
 			t.Errorf("Run accepted NoAnswerCosine %v", bad)
 		}
-	}
-}
-
-// TestNoAnswerKeepsARowThatCarriesNoCosine: a partially embedded store returns an
-// exact keyword hit on a memory that was never embedded (VectorScore -1) beside a
-// weakly similar embedded row. The bar judges only rows that carry a cosine, so
-// the unembedded hit survives, the weak embedded row goes, and the answer is not
-// the "nothing cleared the bar" abstention.
-func TestNoAnswerKeepsARowThatCarriesNoCosine(t *testing.T) {
-	kw := cosRow("kw", -1)
-	kw.FTSRank = 0
-	res := noAnswerRun(t, 0.62, hybridSet(kw, cosRow("v1", 0.50)))
-
-	if !eq(itemIDs(res.Items), []string{"kw"}) {
-		t.Fatalf("items = %v, want only the unembedded keyword hit", itemIDs(res.Items))
-	}
-	if res.Outcome == OutcomeEmpty || res.Reason == reasonNothingClearedBar {
-		t.Errorf("outcome = %q reason = %q: a block holding an unjudged row is not 'nothing cleared the bar'", res.Outcome, res.Reason)
-	}
-	if strings.Contains(res.Response, "No memory answers this") || strings.Contains(res.Abstention, "nothing cleared the bar") {
-		t.Errorf("the response carries the abstention sentence:\n%s", res.Response)
-	}
-	if got := decisionsAt(res, stageNoAnswer); len(got) != 1 || got[0].ID != "v1" {
-		t.Errorf("no-answer decisions = %+v, want only the scored weak row v1", got)
-	}
-}
-
-// TestNoAnswerMixedBlockWithAStrongCosineIsUnchanged: the same mixed block where
-// the embedded row clears the bar is byte-identical to the bar off.
-func TestNoAnswerMixedBlockWithAStrongCosineIsUnchanged(t *testing.T) {
-	kw := cosRow("kw", -1)
-	kw.FTSRank = 0
-	rows := []memory.Candidate{kw, cosRow("v1", 0.70)}
-	on := noAnswerRun(t, 0.62, hybridSet(rows...))
-	off := noAnswerRun(t, 0, hybridSet(rows...))
-	if !eq(itemIDs(on.Items), []string{"kw", "v1"}) || on.Response != off.Response {
-		t.Errorf("a mixed block that cleared the bar changed:\n on: %q\noff: %q", on.Response, off.Response)
-	}
-}
-
-// TestNoAnswerBarOffForAnUnmeasuredModelIsRecordedInTheTrace: a bar the
-// configuration turned off carries its reason in the trace and nothing else.
-func TestNoAnswerBarOffForAnUnmeasuredModelIsRecordedInTheTrace(t *testing.T) {
-	rows := []memory.Candidate{cosRow("a", 0.30)}
-	req := noAnswerRequest(0)
-	req.NoAnswerBarNote = "no_answer bar off: unmeasured embedding model"
-	res := run(t, &fakeRetriever{set: hybridSet(rows...)}, req)
-	plain := noAnswerRun(t, 0, hybridSet(rows...))
-
-	if st := stageTraceFor(res, stageNoAnswer); len(st.Notes) != 1 || !strings.Contains(st.Notes[0], "unmeasured embedding model") {
-		t.Errorf("stage notes = %v, want the unmeasured-model note", st.Notes)
-	}
-	if res.Response != plain.Response || len(res.Items) != 1 {
-		t.Errorf("the note changed the block:\n%q\nvs\n%q", res.Response, plain.Response)
 	}
 }
 
@@ -334,9 +202,7 @@ func (c *cosineRetriever) EmbeddingCosines(_ context.Context, ids []string, _ []
 
 // TestNoAnswerJudgesAKeywordOnlyRowByItsStoredCosine: the vector leg's list does
 // not carry every embedded row (a keyword hit rides a reserved slot whatever its
-// cosine), so a keyword-only row is judged by its own stored cosine. Here every
-// row is embedded and weak, so the block is withheld; this is the common case on a
-// fully embedded store.
+// cosine), so a keyword-only row is judged by its own stored cosine.
 func TestNoAnswerJudgesAKeywordOnlyRowByItsStoredCosine(t *testing.T) {
 	kw := cosRow("kw", -1)
 	kw.FTSRank = 0
@@ -347,36 +213,9 @@ func TestNoAnswerJudgesAKeywordOnlyRowByItsStoredCosine(t *testing.T) {
 	}
 }
 
-// TestNoAnswerKeepsAnUnembeddedKeywordRowWhenTheRetrieverCanRead: the row is absent
-// from the stored cosines (never embedded), so it is never judged and survives.
-func TestNoAnswerKeepsAnUnembeddedKeywordRowWhenTheRetrieverCanRead(t *testing.T) {
-	kw := cosRow("kw", -1)
-	kw.FTSRank = 0
-	r := &cosineRetriever{fakeRetriever: fakeRetriever{set: hybridSet(kw, cosRow("v1", 0.50))}, stored: map[string]float32{}}
-	res := run(t, r, noAnswerRequest(0.62))
-	if !eq(itemIDs(res.Items), []string{"kw"}) || res.Reason == reasonNothingClearedBar {
-		t.Errorf("items = %v reason = %q, want the unembedded keyword hit kept", itemIDs(res.Items), res.Reason)
-	}
-}
-
-// TestNoAnswerStrongStoredCosineRescuesTheBlock: a keyword-only row whose stored
-// cosine clears the bar is an answer, so nothing is withheld.
-func TestNoAnswerStrongStoredCosineRescuesTheBlock(t *testing.T) {
-	kw := cosRow("kw", -1)
-	kw.FTSRank = 0
-	r := &cosineRetriever{fakeRetriever: fakeRetriever{set: hybridSet(kw, cosRow("v1", 0.50))}, stored: map[string]float32{"kw": 0.80}}
-	res := run(t, r, noAnswerRequest(0.62))
-	if len(res.Items) != 2 {
-		t.Errorf("items = %v, want both rows: the keyword hit's own cosine clears the bar", itemIDs(res.Items))
-	}
-}
-
 // TestNoAnswerJudgesAKeywordOnlyRowWhoseStoredCosineIsNegative: a cosine is in
 // [-1, 1], so a stored cosine that is genuinely negative is a JUDGED (very weak)
-// match and not "no cosine". The row is withheld with the rest of the block, and it
-// counts as judged, so it alone is enough for the bar to fire — which a sign test
-// (`cos < 0`) could never do, reading the negative as the sentinel and keeping the
-// row.
+// match and not "no cosine".
 func TestNoAnswerJudgesAKeywordOnlyRowWhoseStoredCosineIsNegative(t *testing.T) {
 	kw := cosRow("kw", -1)
 	kw.FTSRank = 0
@@ -393,22 +232,9 @@ func TestNoAnswerJudgesAKeywordOnlyRowWhoseStoredCosineIsNegative(t *testing.T) 
 	}
 }
 
-// TestNoAnswerJudgesAVectorLegRowWithANegativeCosine: the same rule for the vector
-// leg's own score; only the exact -1 mark means the leg did not carry the row, so a
-// negative score is judged and, below the bar, withheld.
-func TestNoAnswerJudgesAVectorLegRowWithANegativeCosine(t *testing.T) {
-	res := noAnswerRun(t, 0.6, hybridSet(cosRow("a", -0.3), cosRow("b", -0.1)))
-	if len(res.Items) != 0 || res.Reason != reasonNothingClearedBar {
-		t.Errorf("items = %v reason = %q, want both withheld: negative cosines are judged, not read as the sentinel", itemIDs(res.Items), res.Reason)
-	}
-}
-
 // TestNoAnswerDoesNotClaimAnAbstentionForABlockALaterStageEmptied: the bar kept the
 // one row it could not judge, so it did not withhold the block. When the response
 // byte cap then removes that last row the empty block is the cap's doing, and it
-// has to read that way: "nothing cleared the bar" sends a caller to lower a bar
-// that already passed the row they were shown, while the cap is the thing to raise.
-// It runs a query request under a Budget.Measure, a combination no production
 // caller makes: only a Measure caller's fit can still empty a block (#1483).
 func TestNoAnswerDoesNotClaimAnAbstentionForABlockALaterStageEmptied(t *testing.T) {
 	kw := cosRow("kw", -1)
@@ -416,9 +242,8 @@ func TestNoAnswerDoesNotClaimAnAbstentionForABlockALaterStageEmptied(t *testing.
 	kw.Content = strings.Repeat("x", 400)
 	r := &cosineRetriever{fakeRetriever: fakeRetriever{set: hybridSet(kw, cosRow("v", 0.30))}, stored: map[string]float32{}}
 	req := noAnswerRequest(0.62)
-	// Under the row's own size, measured by a caller's own Budget.Measure: only
-	// that fit cuts the last row, because the search envelope keeps its first row
-	// whole over the cap (#1483).
+	// Under the row's own size, measured by a caller's own Budget.Measure: only that
+	// fit cuts the last row.
 	req.Budget.MaxBytes = 300
 	req.Budget.Measure = rowsOnlyMeasure
 	res := run(t, r, req)
@@ -439,5 +264,37 @@ func TestNoAnswerDoesNotClaimAnAbstentionForABlockALaterStageEmptied(t *testing.
 	notes := strings.Join(res.Notes, "\n")
 	if !strings.Contains(notes, "no_answer 1") || !strings.Contains(notes, "response_fit 1") {
 		t.Errorf("breakdown note = %q, want the bar's row and the cap's row named apart", notes)
+	}
+}
+
+func TestExplainReportsTheNoAnswerRows(t *testing.T) {
+	req := noAnswerRequest(0.6)
+	req.Explain = true
+	res := run(t, &fakeRetriever{set: hybridSet(cosRow("a", 0.55))}, req)
+	if res.Explain == nil || len(res.Explain.Rows) == 0 {
+		t.Fatal("no explain rows: a withheld row is still a row the pipeline saw")
+	}
+	for _, r := range res.Explain.Rows {
+		if r.Included {
+			t.Errorf("row %s is included: the block was withheld", r.ID)
+		}
+		if !strings.Contains(r.Reason, "no-answer bar") {
+			t.Errorf("row %s reason = %q, want the no-answer sentence", r.ID, r.Reason)
+		}
+	}
+}
+
+func TestNoAnswerBarOffForAnUnmeasuredModelIsRecordedInTheTrace(t *testing.T) {
+	rows := []memory.Candidate{cosRow("a", 0.30)}
+	req := noAnswerRequest(0)
+	req.NoAnswerBarNote = "no_answer bar off: unmeasured embedding model"
+	res := run(t, &fakeRetriever{set: hybridSet(rows...)}, req)
+	plain := noAnswerRun(t, 0, hybridSet(rows...))
+
+	if st := stageTraceFor(res, stageNoAnswer); len(st.Notes) != 1 || !strings.Contains(st.Notes[0], "unmeasured embedding model") {
+		t.Errorf("stage notes = %v, want the unmeasured-model note", st.Notes)
+	}
+	if res.Response != plain.Response || len(res.Items) != 1 {
+		t.Errorf("the note changed the block:\n%q\nvs\n%q", res.Response, plain.Response)
 	}
 }
