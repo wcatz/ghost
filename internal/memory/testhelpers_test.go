@@ -51,12 +51,6 @@ func resetQueryKeyCache() {
 // means. It stays nil, rather than failing, for a value it cannot decode.
 func ParseScopeJSON(raw []byte) map[string]string { return parseScopeJSON(raw) }
 
-func (c *vectorCache) setIdle(d time.Duration) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.idle = d
-}
-
 func (s *vectorScratch) allocationCount() int64 {
 	if s == nil {
 		return 0
