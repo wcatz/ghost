@@ -763,6 +763,17 @@ func RenderSessionContext(cwd string) string {
 // (Store.MemoriesAsOf), ranked by the same composite, so the two agree on what
 // the project held then.
 func RenderSessionContextAt(cwd string, asOf *time.Time) string {
+	return renderSessionContext(cwd, asOf, "")
+}
+
+// RenderSessionContextFor is RenderSessionContext for a named host: rows that
+// repeat the instruction files that host loads itself are withheld (see
+// hostInstructionCover). An empty host withholds nothing.
+func RenderSessionContextFor(cwd string, host hostevent.Source) string {
+	return renderSessionContext(cwd, nil, host)
+}
+
+func renderSessionContext(cwd string, asOf *time.Time, host hostevent.Source) string {
 	if cwd == "" {
 		cwd, _ = os.Getwd()
 	}
@@ -779,7 +790,7 @@ func RenderSessionContextAt(cwd string, asOf *time.Time) string {
 	ensureObsidianSyncRunning()
 
 	cfg := config.LoadForHook()
-	projectID, project, memories, globals, learned, tasks, decisions, interactionCount, tally := loadSessionContext(cwd, cfg)
+	projectID, project, memories, globals, learned, tasks, decisions, interactionCount, tally := loadSessionContextFor(cwd, cfg, "", hostInstructionCover(host, cwd))
 	if projectID != "" {
 		// The same fail-open as the Claude Code session start above, for
 		// opencode's equivalent render.

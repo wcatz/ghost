@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wcatz/ghost/internal/hostevent"
 	"github.com/wcatz/ghost/internal/mcpinit"
 	"github.com/wcatz/ghost/internal/memory"
 )
@@ -14,7 +15,7 @@ import (
 // contextUsage is the help for `ghost context`: stdout for -h/--help (see
 // handleHelp), so a help request never runs the SessionStart side effects the
 // context block mirrors (Obsidian sync, session-count bump).
-const contextUsage = `Usage: ghost context [--cwd <dir>] [--as-of <RFC3339>]
+const contextUsage = `Usage: ghost context [--cwd <dir>] [--as-of <RFC3339>] [--source <host>]
        ghost context --audit [--project <name-or-id>] [--since <duration>]
 
 Prints the passive session-start context block for a directory. This is what
@@ -25,11 +26,15 @@ for the project and starts the Obsidian mirror when that is configured.
   --cwd <dir>             The directory to resolve (default: your own; an
                           empty value means your own too)
   --as-of <RFC3339>       Print the block as the store stood at an instant
+  --source <host>         The host the block is for (claude-code, codex, goose,
+                          opencode): rows that repeat the instruction files
+                          that host loads itself are left out
 
-This mode takes those two flags and nothing else. Anything else is refused
+This mode takes those three flags and nothing else. Anything else is refused
 with exit 1 before the block is rendered, so a refusal counts no session:
 --project and --since (they belong to --audit), an unknown flag, a stray
-argument, --cwd with no value after it, and --cwd or --as-of given twice.
+argument, --cwd with no value after it, an unknown --source, and --cwd,
+--as-of or --source given twice. --source has no effect with --as-of.
 
 --as-of <RFC3339> prints the block as the store stood at that instant instead
 (issue #647): the wording each memory held then, including memories deleted
@@ -150,7 +155,7 @@ func contextAsOf(args []string) (*time.Time, error) {
 // shape of the command line is known to be good.
 func parseContextBlockArgs(args []string) (string, *time.Time, error) {
 	cwd := ""
-	var seenCwd, seenAsOf bool
+	var seenCwd, seenAsOf, seenSource bool
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		switch {
@@ -181,6 +186,16 @@ func parseContextBlockArgs(args []string) (string, *time.Time, error) {
 			}
 			seenAsOf = true
 			if arg == "--as-of" && i+1 < len(args) {
+				i++
+			}
+		case arg == "--source" || strings.HasPrefix(arg, "--source="):
+			// Judged by contextSource, like --as-of by contextAsOf; this clause
+			// skips the value and refuses a second occurrence.
+			if seenSource {
+				return "", nil, errors.New("--source was given twice: a block is for one host")
+			}
+			seenSource = true
+			if arg == "--source" && i+1 < len(args) {
 				i++
 			}
 		case arg == "--project" || strings.HasPrefix(arg, "--project="),
@@ -226,6 +241,33 @@ func parseContextBlockArgs(args []string) (string, *time.Time, error) {
 // The exit code is RETURNED rather than passed to os.Exit, so the dispatch can
 // hand it back to runCLI and a test can read it; that is what makes #1090's
 // contract assertable.
+// contextSource reads --source: the host the block is for, so the block can
+// leave out rows that host already loaded from its own instruction files. Empty
+// when the flag is absent, which leaves the block unchanged.
+func contextSource(args []string) (hostevent.Source, error) {
+	raw, seen := "", false
+	for i := 0; i < len(args); i++ {
+		switch {
+		case args[i] == "--source":
+			if i+1 >= len(args) {
+				return "", errors.New("--source requires a host (claude-code, codex, goose or opencode)")
+			}
+			raw, seen = args[i+1], true
+			i++
+		case strings.HasPrefix(args[i], "--source="):
+			raw, seen = strings.TrimPrefix(args[i], "--source="), true
+		}
+	}
+	if !seen {
+		return "", nil
+	}
+	src := hostevent.Source(raw)
+	if _, ok := hostevent.CapabilityFor(src); !ok {
+		return "", fmt.Errorf("--source %s is not a known host (claude-code, codex, goose or opencode)", memory.RefusalArg("source", raw))
+	}
+	return src, nil
+}
+
 func runContext() int {
 	args := os.Args[2:]
 	if contextAuditRequested(args) {
@@ -236,8 +278,13 @@ func runContext() int {
 		fmt.Fprintf(os.Stderr, "ghost context: %v\n", err)
 		return 1
 	}
+	src, err := contextSource(args)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ghost context: %v\n", err)
+		return 1
+	}
 	if asOf == nil {
-		fmt.Println(mcpinit.RenderSessionContext(cwd))
+		fmt.Println(mcpinit.RenderSessionContextFor(cwd, src))
 		return 0
 	}
 	fmt.Println(mcpinit.RenderSessionContextAt(cwd, asOf))
