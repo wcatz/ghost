@@ -17,11 +17,6 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// validCategories is the single Go-side source of truth for the memories
-// category CHECK constraint in initSQL (and migrate.go's mirrored CHECK).
-// Writers that accept caller-supplied categories (reflection parse, MCP save)
-// validate against this set so an invalid value is normalized or rejected
-// before it can fail the whole INSERT/transaction on the SQL CHECK.
 var validCategories = map[string]bool{
 	"architecture": true,
 	"decision":     true,
@@ -39,12 +34,6 @@ func IsValidCategory(cat string) bool {
 	return validCategories[cat]
 }
 
-// initSQL is the schema for the ghost database — the single source of truth.
-// Kept as a Go constant rather than go:embed because embed paths cannot use "..".
-// Note: CREATE TABLE IF NOT EXISTS never migrates an existing database — a new
-// column or CHECK value only reaches DBs created after the change. When you
-// alter an existing table here, bump schemaVersion and append a migration
-// step in migrate.go so existing databases receive it too.
 const initSQL = `
 CREATE TABLE IF NOT EXISTS projects (
     id          TEXT PRIMARY KEY,
@@ -789,16 +778,6 @@ CREATE TABLE IF NOT EXISTS maintenance_runs (
 CREATE INDEX IF NOT EXISTS idx_maintenance_runs_at ON maintenance_runs(recorded_at DESC);
 `
 
-// readOnlyDSN builds the read-only DSN OpenReadDB opens. The file: URI
-// form is required — modernc.org/sqlite honors mode=ro only on URI DSNs, and
-// a bare path opens read-write and would create a phantom empty ghost.db on
-// first read. The path is URI-escaped so a '?' or '#' in it cannot corrupt the
-// query, and no journal_mode pragma is set (a read-only connection cannot
-// write the header). WAL is persisted in the database file itself rather than
-// negotiated per connection, so this connection is in WAL mode too.
-//
-// Deliberately unexported: mcpinit builds the same URI for its own read-only
-// write-adjacent paths. This one exists for OpenReadDB.
 func readOnlyDSN(dbPath string) string {
 	u := url.URL{
 		Scheme:   "file",
@@ -810,22 +789,10 @@ func readOnlyDSN(dbPath string) string {
 
 // ErrInMemoryReadHandle means a read-only handle was asked for a private
 // in-memory database. ":memory:" is per-connection: a second connection opens
-// a second, empty database, so a read handle built on it would report an empty
-// store rather than the one the caller seeded. Callers holding only an
-// in-memory handle keep using it, and their snapshot reads run on it directly.
 var ErrInMemoryReadHandle = errors.New("read-only handle cannot open an in-memory database")
 
 // OpenReadDB opens an EXISTING database for reading only. It runs no DDL
 // and no migrations, and it refuses a path that does not exist rather than
-// creating one. It is the single read-only constructor: a Store that takes
-// snapshot reads is given one of these through NewStoreWithRead, and a CLI
-// diagnostic opens it directly.
-//
-// A diagnostic command must be able to report "there is no database" without
-// making that statement untrue: OpenDB would create the file, stamp
-// user_version and seed the builtin global rows, so the first status run on a
-// fresh install would turn the next one's missing-database line into a healthy
-// one. Callers stat first, or treat ErrNoDatabase as "nothing to report".
 func OpenReadDB(dbPath string) (*sql.DB, error) {
 	if dbPath == ":memory:" {
 		return nil, ErrInMemoryReadHandle
@@ -846,44 +813,15 @@ func OpenReadDB(dbPath string) (*sql.DB, error) {
 
 // ErrNoDatabase means the database file does not exist yet. A read-only caller
 // distinguishes it from other open failures because the correct response is to
-// report nothing, not to retry or to create one.
 var ErrNoDatabase = errors.New("no Ghost database")
 
 // OpenDB opens or creates the SQLite database and runs migrations.
 func OpenDB(dbPath string) (*sql.DB, error) {
-	// File paths go through the file: URI form with the path percent-encoded —
-	// a '?' or '#' in the data-dir path (legal in $XDG_DATA_HOME/$HOME) would
-	// otherwise be parsed as the query/fragment separator, silently opening a
-	// truncated path. ":memory:" stays bare: the file::memory: URI form has
-	// different sharing semantics.
 	dsn := dbPath
 	if dbPath != ":memory:" {
 		u := url.URL{Scheme: "file", Opaque: (&url.URL{Path: dbPath}).EscapedPath()}
 		dsn = u.String()
 	}
-	// _txlock=immediate makes BeginTx issue BEGIN IMMEDIATE, taking the write
-	// lock when the transaction starts rather than on its first write
-	// statement. The default (deferred) is only safe when the first statement
-	// is already a write: a transaction that reads first holds a WAL read
-	// snapshot, and if another process commits before that transaction's
-	// first write, the read-to-write upgrade fails with SQLITE_BUSY_SNAPSHOT
-	// (517) — which busy_timeout does NOT retry, because it is a snapshot
-	// conflict rather than a lock conflict. UpdateMemory is the case that
-	// exposed this: reads the row, then UPDATEs it, and under concurrent
-	// handles every one of those updates failed in well under a millisecond,
-	// far faster than any timeout could have been reached.
-	//
-	// Every other BeginTx here is write-first, so immediate changes nothing
-	// for them — they acquire the same lock on their first statement anyway.
-	//
-	// secure_delete(ON) is what makes a DELETE actually remove the text rather
-	// than only unlink it: without it a freed b-tree cell keeps its bytes for
-	// the next reader of the file, which is the difference a redaction turns on
-	// (#1043). It is per-connection and must precede the delete, so it belongs
-	// on the DSN rather than beside one caller. FAST is not enough here — it
-	// overwrites the deleted cell but not the free space on the page, which is
-	// where a spilled content value lives, and not the FTS5 segment blobs a
-	// rebuild has to be free to reclaim.
 	db, err := sql.Open("sqlite", dsn+"?_txlock=immediate&_pragma=journal_mode(WAL)&_pragma=foreign_keys(ON)&_pragma=busy_timeout(5000)&_pragma=secure_delete(ON)")
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
@@ -891,10 +829,6 @@ func OpenDB(dbPath string) (*sql.DB, error) {
 
 	db.SetMaxOpenConns(1) // SQLite is single-writer; prevent connection pool contention
 
-	// Distinguish a fresh database from an existing one BEFORE initSQL runs:
-	// fresh databases get the current schema from initSQL and are stamped at
-	// schemaVersion directly; existing ones must pass through migrate(), since
-	// CREATE TABLE IF NOT EXISTS never alters tables that already exist.
 	var tableCount int
 	if err := db.QueryRow(
 		`SELECT count(*) FROM sqlite_master WHERE type='table'`,
@@ -903,52 +837,20 @@ func OpenDB(dbPath string) (*sql.DB, error) {
 		return nil, fmt.Errorf("inspect schema: %w", err)
 	}
 
-	// The database file and the -wal and -shm files SQLite maintains beside it
-	// all exist now, so their modes are the ones that will be on disk from
-	// here on. This is the one place any ghost opens the database read-write,
-	// so it is the one place that can guarantee the modes. It cannot fail the
-	// open, and it does not need the schema to be current to be correct.
 	TightenPermissions(dbPath)
 
-	// Read the stamped version and refuse a newer database BEFORE running any
-	// DDL (issue #560). initSQL is CREATE ... IF NOT EXISTS, so on a database
-	// that merely has more than this build knows it is nearly a no-op — which
-	// is what hid the ordering. It is not one for every difference: an object
-	// the newer build renamed, replaced or dropped (a trigger, an index) is
-	// recreated here, in a database this call then declares unreadable. A
-	// refusal that has already written is not a refusal.
-	//
-	// A fresh database has no stamp to read, and gets the current schema plus
-	// the stamp below; there is nothing above schemaVersion to refuse.
 	var version int
 	if tableCount > 0 {
 		if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 			_ = db.Close()
 			return nil, fmt.Errorf("read schema version: %w", err)
 		}
-		// A database written by a newer ghost has columns, constraints, or tables
-		// this binary does not know about. Opening it read-write would let this
-		// binary corrupt state it cannot interpret, so refuse instead.
 		if err := refuseNewerSchema(version); err != nil {
 			_ = db.Close()
 			return nil, err
 		}
 	}
 
-	// A lagging store is decided, copied and migrated by ONE opener at a time.
-	// Two processes that start together after a schema-bumping upgrade (two
-	// editors each spawning `ghost mcp`, a server and a lifecycle child) both
-	// read the old stamp above; without this, both took a pre-migration copy —
-	// colliding on its one-second name, so one of them failed to start — and
-	// both ran the steps from that stale read. The version is therefore read
-	// AGAIN once the lock is held, and that read is the one that decides: a
-	// waiter that finds the store already current skips the copy and the
-	// migration both, and one that finds it NEWER (a newer ghost migrated while
-	// it waited) is refused exactly as the read above would have refused it.
-	//
-	// The lock is held to the end of the open, so initSQL and the guards below
-	// run against a store no other opener is migrating. A current store never
-	// takes it, so the ordinary open pays nothing and creates no file.
 	if tableCount > 0 && version < schemaVersion {
 		release, err := acquireMigrationLock(dbPath)
 		if err != nil {
@@ -966,43 +868,14 @@ func OpenDB(dbPath string) (*sql.DB, error) {
 		}
 	}
 
-	// A same-named table that is not Ghost's, refused BEFORE initSQL rather than
-	// beside the evidence check below. The difference is which error the operator
-	// gets: initSQL's own `CREATE INDEX ... ON retrieval_record(project_id)` is
-	// the statement that fails against a foreign table, and it fails with "no such
-	// column: project_id" — which names neither the table nor the way out. The
-	// evidence check sits below because initSQL's index on it cannot fail against
-	// the #664 shape (that table has memory_id, which is all it names); this index
-	// names a column, so the check has to come first.
-	//
-	// It runs before the DDL and therefore also before backupBeforeMigrate, for
-	// the reason the branch below spells out: the condition is permanent, the step
-	// rolls back, so every later open re-enters — and a refusal that has already
-	// written a copy is not the refusal we want.
 	if err := refuseForeignRetrievalRecordTable(db); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
-	// The audit table's guard, for the reason the record table's is, and it must
-	// sit here rather than only in migrateV21: initSQL's
-	// `CREATE INDEX ... ON retrieval_audit(project_id)` is the statement that
-	// fails against somebody else's table of this name, and it fails with "no such
-	// column: project_id" — which names neither the table nor the way out. Before
-	// the DDL, hence before backupBeforeMigrate, for the same reason as above: the
-	// condition is permanent, so a refusal that has already copied the database is
-	// not the refusal we want.
 	if err := refuseForeignRetrievalAuditTable(db); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
-	// The flag table's guard, for the reason the audit table's is, and it must
-	// sit here rather than only in migrateV23: initSQL's
-	// `CREATE INDEX ... ON memory_flags(project_id)` is the statement that fails
-	// against somebody else's table of this name, and it fails with "no such
-	// column: project_id" — which names neither the table nor the way out. Before
-	// the DDL, hence before backupBeforeMigrate, for the same reason as above: the
-	// condition is permanent, so a refusal that has already copied the database is
-	// not the refusal we want.
 	if err := refuseForeignMemoryFlagsTable(db); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -1026,43 +899,15 @@ func OpenDB(dbPath string) (*sql.DB, error) {
 	}
 
 	if version < schemaVersion {
-		// A schema-shape refusal, BEFORE the backup (#673's memory_provenance
-		// check, which is the one today). The ordering is the whole point: the
-		// condition is permanent — nothing converts a foreign table, the operator
-		// drops it — and it leaves user_version where it was, so every later open
-		// re-enters this branch. Refusing after the backup would write a full copy
-		// of the database on every open of a store that cannot be opened, and two
-		// opens in the same wall-clock second collide on the copy's name, so the
-		// retry an operator is certain to make reports "refusing to overwrite an
-		// existing file" and names neither the table nor the remedy. A refusal
-		// that has already written a copy is not the refusal we want (#560's rule,
-		// applied one level down).
 		if err := refuseForeignProvenanceTable(db); err != nil {
 			_ = db.Close()
 			return nil, err
 		}
-		// The retrieval record's shape refusal has already run above, before
-		// initSQL — see the note there on why it cannot be checked from here.
-		// Migration steps rebuild and DROP tables, so a bug in a step is
-		// unrecoverable without a copy. Fail closed: if the backup cannot be
-		// written, do not migrate.
 		fresh, err := backupBeforeMigrate(db, dbPath)
 		if err != nil {
 			_ = db.Close()
 			return nil, fmt.Errorf("pre-migration backup: %w", err)
 		}
-		// The copy landed, so the safety net for THIS upgrade exists and the
-		// older ones can stop accumulating (#542: a directory that has seen a
-		// dozen upgrades held a dozen full copies of the database). Only now,
-		// and only on this path — an open with nothing to migrate writes no
-		// backup and prunes nothing.
-		//
-		// The path is passed in rather than re-derived from the clock, and
-		// excluded from removal outright: the directory can hold backups
-		// stamped further ahead than this machine's own clock (a data dir
-		// restored from one that ran ahead, a corrected clock, a hand-seeded
-		// file), and deciding "the newest is mine" from the stamp could name
-		// the wrong file — deleting the copy this migrate is about to need.
 		prunePreMigrateBackups(dbPath, fresh)
 		if err := migrate(db, version); err != nil {
 			_ = db.Close()
@@ -1077,81 +922,12 @@ func OpenDB(dbPath string) (*sql.DB, error) {
 	return db, nil
 }
 
-// memoriesFTSSourceSQL is the external content of memories_fts (schema v28):
-// each memory's text keyed by its bucketed FTS rowid (the project's ordinal in
-// memories_fts_projects times 2^40 plus the memory's rowid). FTS5 reads it for
-// 'rebuild' — the purge path's and migrateV28's — and 'integrity-check'; the
-// triggers maintain the index without it.
-//
-// It is NOT part of initSQL, for the ordering reason vectorEpochSQL gives:
-// initSQL runs on every open BEFORE a lagging database is migrated, and the
-// legacy steps that rebuild memories (DROP TABLE memories, then RENAME the new
-// table to memories) fail with "error in view memories_fts_source: no such
-// table: main.memories" when a view names memories at that moment. It is
-// created where the schema is already current: for a fresh database from
-// ensurePostMigrationIndexes right after initSQL, for a migrated one by
-// migrateV28's frozen copy, and IF NOT EXISTS on every open after that.
-//
-// A future migration that rebuilds memories that way must drop this view first
-// and recreate it after, and must keep the rowid arithmetic identical to the
-// triggers', or a rebuild indexes rows under rowids no trigger deletes.
 const memoriesFTSSourceSQL = `
 CREATE VIEW IF NOT EXISTS memories_fts_source AS
     SELECT k.ord * 1099511627776 + m.rowid AS fts_rowid, m.content AS content
     FROM memories m JOIN memories_fts_projects k ON k.project_id = m.project_id;
 `
 
-// vectorEpochSQL is the vector corpus cache's counter and the triggers that bump
-// it (schema v24, #1031). It is NOT part of initSQL, and the reason is ordering:
-// initSQL runs on every open BEFORE a lagging database is migrated, and the
-// update trigger's WHEN clause names memories.scope, which a database from before
-// v12 does not have yet — SQLite re-parses every trigger on a table when a
-// migration step renames or alters it, so a trigger created too early breaks the
-// legacy steps it has no business in. This DDL therefore runs where the schema
-// is already current: for a fresh database right after initSQL, for a migrated
-// one as migrateV24's own frozen copy, and for a current one from
-// ensurePostMigrationIndexes (all IF NOT EXISTS, so a re-run writes nothing).
-//
-// One row holds a counter that moves exactly when a write changes what the
-// vector query returns, so a process can keep a copy of the vector corpus and
-// know, from one point read, whether the copy is still the database's. It lives
-// in the database rather than in the process because several Ghost processes
-// share one file, and SQLite is the only thing they share. The counter is bumped
-// by the triggers below, in the SAME transaction as the write, so a reader that
-// sees epoch E sees exactly the state E describes. The row is created by the
-// first bump (an upsert), so there is no seed write and a reader treats a missing
-// row as 0.
-//
-// The vector query joins memory_embeddings to memories and reads
-// memory_id, embedding, model from the first and scope, project_id, resolved_at
-// and (since the query path filters a row's window before the cut, #1053)
-// valid_from, valid_until from the second, so those are the writes that fire it:
-// any insert, update or delete on memory_embeddings; an UPDATE OF resolved_at,
-// scope or project_id on memories; an UPDATE OF valid_from or valid_until on
-// memories; and a delete of a memory. An update fires only when the value it
-// names actually changed (an edit rewrites resolved_at in the same statement
-// whether or not it changed it, and a vector rewritten to the same bytes is the
-// same corpus). Everything else a memory carries (access_count, last_accessed,
-// tags, importance, content, pinned) is read by other queries and deliberately
-// does NOT fire it: the retrieval write every search makes would otherwise
-// invalidate every other process's copy. TestVectorEpoch* pins both lists.
-//
-// The validity arm is a SEPARATE trigger (vector_epoch_mem_validity_au) rather
-// than a fourth column on vector_epoch_mem_au, because that trigger is frozen in
-// migrateV24 and a fresh database's spelling of it must stay byte-identical to
-// the migration's (TestMigrateV24MatchesTheFreshDatabaseSchema). It is delivered
-// to existing databases by migrateV25.
-//
-// vector_epoch_mem_ai covers the one insert that does change the query: a memory
-// whose id already has an embedding row (an orphan left by a delete made with
-// foreign keys off) joins again. An ordinary create has no embedding yet and
-// does not fire it.
-//
-// A future migration that rebuilds memories or memory_embeddings drops these
-// triggers with the table and must recreate them, and must bump the epoch if it
-// changes any vector-query input: a rebuild's implicit delete fires no trigger.
-// The counter must never decrease, be deleted or be reset, because the cache
-// matches on equality.
 const vectorEpochSQL = `
 CREATE TABLE IF NOT EXISTS vector_epoch (
     id    INTEGER PRIMARY KEY CHECK (id = 1),
@@ -1184,45 +960,17 @@ CREATE TRIGGER IF NOT EXISTS vector_epoch_mem_ai AFTER INSERT ON memories
 END;
 `
 
-// ensurePostMigrationIndexes creates the indexes whose columns a migration added,
-// which is why they are not in initSQL.
-//
-// initSQL is CREATE ... IF NOT EXISTS, so on a database that predates a column
-// every statement in it is a no-op — EXCEPT one that reads the missing column by
-// name. A partial index is exactly that statement: the repository-identity index
-// on projects.repo_remote, and the session-expiry index below on
-// memories.retention/expires_at. Running either against a store that has not
-// been migrated yet fails the whole open with SQLite's "no such column", which
-// is the shape #560 is about — a DDL that cannot be delivered to an existing
-// database run before the migration that delivers it.
-//
-// So they are created here, after migrate(), on the fresh path and the upgraded
-// path alike, and by one function so a third index cannot be added to one branch
-// only. Both are partial indexes over the rows their predicate selects, so the
-// write cost falls only on those rows: the repository one only on projects with
-// a remote, the session one only on session-tier memories, which is what makes
-// the second one free for the 99% of a corpus that is not session-scoped.
 func ensurePostMigrationIndexes(db *sql.DB) error {
 	for _, stmt := range []struct{ name, ddl string }{
 		{"repository identity index", `
 			CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_repo_remote
 			ON projects(repo_remote) WHERE repo_remote IS NOT NULL AND repo_remote <> ''
 		`},
-		// Prune's only index, and a partial one for the reason above: it describes
-		// session rows alone, so every write to a project or persistent row costs
-		// it nothing, and the read it serves is a maintenance pass over a corpus
-		// that may hold tens of thousands of rows of which a handful are
-		// candidates. idx_memories_project_cat does not help -- the predicate is
-		// on the tier and the expiry, neither of which it leads with.
 		{"session-expiry index", `
 			CREATE INDEX IF NOT EXISTS idx_memories_session_expiry
 			ON memories(expires_at) WHERE retention = 'session'
 		`},
-		// The vector corpus cache's counter and triggers (#1031); see
-		// vectorEpochSQL for why they cannot ride in initSQL.
 		{"vector epoch", vectorEpochSQL},
-		// The full-text index's content view (schema v28); see
-		// memoriesFTSSourceSQL for why it cannot ride in initSQL.
 		{"full-text content view", memoriesFTSSourceSQL},
 	} {
 		if _, err := db.Exec(stmt.ddl); err != nil {
@@ -1232,73 +980,21 @@ func ensurePostMigrationIndexes(db *sql.DB) error {
 	return nil
 }
 
-// backupBeforeMigrate writes a one-shot copy of dbPath beside it before any
-// migration step runs, named "<db>.pre-migrate-<unix>", and returns the path it
-// wrote so the caller can name it later — deciding which files are deletable by
-// re-reading the clock would race the clock this name came from. In-memory
-// databases are skipped and return an empty path. A failure aborts the open
-// rather than proceeding without a fallback — the caller decides whether an
-// un-migratable database is acceptable, and the only alternative is an
-// unrecoverable destructive migration.
-//
-// The copy itself is vacuumInto, the same VACUUM INTO that backs `ghost backup`:
-// one implementation of "put a restorable copy of this database over there", so
-// the refusal to replace an existing file, the mode the copy is created at, and
-// the permission pass cannot drift apart between the two callers. The path comes
-// back from here because the caller has to name this specific file as the one
-// prunePreMigrateBackups must not remove.
 func backupBeforeMigrate(db *sql.DB, dbPath string) (string, error) {
 	if dbPath == ":memory:" {
 		return "", nil
 	}
 	backup := fmt.Sprintf("%s.pre-migrate-%d", dbPath, time.Now().Unix())
-	// vacuumInto creates the copy at 0600 before SQLite writes a byte of it, and
-	// tightens it afterwards — the same pass the open path runs on the live
-	// files, whose comment explains why a copy needs it at all: a full copy of the
-	// memory database is shielded only by the 0700 data directory, and a database
-	// opened outside it (eval, bench) has no such shield. A chmod failure is
-	// reported, not fatal: the migration's safety net exists either way.
 	if err := vacuumInto(context.Background(), db, backup); err != nil {
 		return "", err
 	}
 	return backup, nil
 }
 
-// preMigrateBackupKeep is how many pre-migration copies of one database stay in
-// the data directory: the one just written plus the two it supersedes. Each is
-// a full copy of the database, so a set that nothing ever culls grows with
-// every upgrade (#542) while its only reader is the human deciding which
-// upgrade to roll back to — three is more hindsight than that needs.
 const preMigrateBackupKeep = 3
 
-// prunePreMigrateBackups keeps the newest preMigrateBackupKeep regular files
-// named "<db>.pre-migrate-<unix>" beside dbPath and removes the older ones,
-// where fresh — the path backupBeforeMigrate just wrote, or "" when there is
-// none — is always one of the kept slots. The prefix is built from the path
-// rather than a constant so a database called anything but ghost.db only ever
-// prunes its own copies.
-//
-// fresh is passed in rather than inferred. The directory can hold backups
-// stamped further ahead than this machine's clock — a data dir restored from a
-// machine whose clock ran ahead, a corrected clock, a file a user renamed — and
-// an implementation that picked "the newest by stamp" and kept that would
-// treat a stranger's timestamp as proof that the copy this migrate is about to
-// need is expendable. It is excluded by name before any ordering happens.
-//
-// The match is deliberately narrow: the suffix must be a bare unix timestamp
-// (numeric order, not the lexicographic order a glob would impose), the entry
-// must be a regular file as reported by Lstat — a symlink wearing the name is
-// left as the link it is, never renamed, never followed — and every other file
-// in the directory (hand-made ghost.db.backup-*, ghost.db.pre-<version>-*, the
-// database and its sidecars) is outside the match entirely.
-//
-// Best effort: a directory that cannot be read or a file that cannot be removed
-// is a warning, never an error. Losing a cleanup pass must not stand between a
-// migration and the backup it just wrote.
 func prunePreMigrateBackups(dbPath, fresh string) {
 	if dbPath == ":memory:" {
-		// Dir(":memory:") would name the working directory, which holds
-		// nothing of this database's and is not ours to walk.
 		return
 	}
 	dir := filepath.Dir(dbPath)
@@ -1321,9 +1017,6 @@ func prunePreMigrateBackups(dbPath, fresh string) {
 	for _, e := range entries {
 		name := e.Name()
 		if name == freshName {
-			// The copy this open depends on. Removed from the pool outright
-			// rather than sorted to the top, so no ordering of the remaining
-			// stamps can ever reach it.
 			continue
 		}
 		if !strings.HasPrefix(name, prefix) {
@@ -1331,25 +1024,17 @@ func prunePreMigrateBackups(dbPath, fresh string) {
 		}
 		suffix := name[len(prefix):]
 		stamp, convErr := strconv.ParseInt(suffix, 10, 64)
-		// ParseInt accepts "+7"; FormatInt never produces it, and a negative
-		// stamp is not a timestamp. Both would widen the match past what
-		// backupBeforeMigrate can write.
 		if convErr != nil || stamp < 0 || strconv.FormatInt(stamp, 10) != suffix {
 			continue
 		}
 		full := filepath.Join(dir, name)
 		fi, statErr := os.Lstat(full)
 		if statErr != nil || !fi.Mode().IsRegular() {
-			// Symlink, directory, or a file that vanished between ReadDir
-			// and here: not a backup this function wrote, so not one it may
-			// remove.
 			continue
 		}
 		found = append(found, candidate{path: full, stamp: stamp})
 	}
 
-	// One slot of the budget is already spent on the copy just written, so the
-	// rest get preMigrateBackupKeep-1 between them.
 	keep := preMigrateBackupKeep
 	if freshName != "" {
 		keep--
@@ -1357,8 +1042,6 @@ func prunePreMigrateBackups(dbPath, fresh string) {
 	if len(found) <= keep {
 		return
 	}
-	// Newest first by the numeric suffix. Sorting the names as strings would
-	// rank "999" above "1003" and prune the wrong end.
 	sort.Slice(found, func(i, j int) bool { return found[i].stamp > found[j].stamp })
 	for _, c := range found[keep:] {
 		if err := os.Remove(c.path); err != nil {

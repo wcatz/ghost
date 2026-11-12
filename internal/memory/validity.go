@@ -4,80 +4,20 @@ import (
 	"time"
 )
 
-// This is the ONE rule that names a memory's validity state. It lives here, in
-// the package that owns the columns, because every consumer of that answer now
-// reads it rather than re-deriving it:
-//
-//   - internal/assemble, at THREE call sites, which between them cover every
-//     surface a reader can see a validity state on. readValidity is stage 2, the
-//     one that DROPS a row outside its window; ValidityStateOf is what the
-//     browsing surfaces use, having run no stages; ValidityLabel renders the
-//     state onto a listing. All three are in internal/assemble/validity.go and all
-//     three call here.
-//   - the explain projection, which reports the state of every candidate it
-//     describes (internal/assemble/explain.go).
-//
-// A second copy would be a second answer to "may this row be used", free to
-// drift from the first the moment either is edited: a search that explains a row
-// as "valid" while the assembler drops it as "expired" is exactly the #571 class
-// of bug, one layer up. The two copies this had did not merely duplicate each
-// other — they disagreed, because the assembler's treated a stamp of
-// 0001-01-01 00:00:00 as unreadable (it lands on the zero time, which a failed
-// parse also produces) while this one reads it as a real boundary, and it expires
-// the row. TestValidityStateOfAgreesWithTheOneRule in internal/assemble holds the
-// three call sites to this answer, including on that value.
-//
-// ONE reader deliberately does not agree, and it is not this rule: readableStampPtr
-// in internal/memory/store.go treats the zero instant as no lower bound stated,
-// because its callers compose a SUCCESSOR's window out of a source's and inheriting
-// a year-1 start would date the successor before it existed. That is a different
-// question — "which bounds does the replacement inherit?" rather than "is this row
-// retired?" — and it is documented on that function and pinned by
-// TestReplaceNonManualDoesNotTreatTheZeroInstantAsAStatedWindow.
-//
-// The states are exported because the assembler's stage records them into its
-// trace and renders them into an answer, and those spellings are part of that
-// surface's contract.
 const (
-	// ValidityUnset is the state of a row that states nothing about its own
-	// currency: no window and no verification. It is the state of every memory
-	// written before the columns existed, and it is NOT "valid" — nothing vouched
-	// for the row, and nothing denied it either.
+	// ValidityUnset means the row states no validity window or verification.
 	ValidityUnset = "unset"
-	// ValidityValid is a readable window that contains now, and a verification
-	// someone recorded.
+	// ValidityValid means the window contains now and verification is recorded.
 	ValidityValid = "valid"
-	// ValidityFuture is a window that has not opened yet.
+	// ValidityFuture means the window has not opened yet.
 	ValidityFuture = "future"
-	// ValidityExpired is a window that has closed. It is the stronger statement
-	// of the two non-valid states, so a row that is both expired and future is
-	// reported expired.
+	// ValidityExpired means the window has closed.
 	ValidityExpired = "expired"
-	// ValidityUnverified is a readable window with no recorded verification: the
-	// row claims a period and nothing vouches for it. verified_at is a flag
-	// rather than a predicate in the assembler, so this state is reported and
-	// the row is kept.
+	// ValidityUnverified means the window is readable but not verified.
 	ValidityUnverified = "unverified"
 )
 
-// The stamp PARSER is the store's own — ParseStamp over StampLayouts, from
-// #677's validity writers — rather than a second one here. A writer judging a
-// value it did not store and a reader interpreting one have to reach the same
-// verdict on what that value means, which is the same reason this file owns the
-// STATE rule and internal/assemble delegates to it rather than keeping a copy.
-
-// ValidityState names a memory's validity against a clock, and reports any
-// stored value no layout could read.
-//
-// The order of the tests is load-bearing: a row whose window has closed is
-// expired even if it also carries an open start, because a closed window is the
-// stronger statement. A missing or unreadable boundary is unset, so the row
-// keeps its place unless a readable boundary excludes it — a row that states no
-// validity has made no claim about its own currency, which is the common case
-// and must not be read as expired.
-//
-// The returned strings are the exported constants above, so a caller that
-// compares them compares against the same values this function returns.
+// ValidityState reports a memory's validity state at now and any unreadable stamps.
 func ValidityState(validFrom, validUntil, verifiedAt *string, now time.Time) (string, []string) {
 	var unreadable []string
 	read := func(s *string) (*time.Time, bool) {
@@ -105,10 +45,7 @@ func ValidityState(validFrom, validUntil, verifiedAt *string, now time.Time) (st
 	}
 }
 
-// parseStoredStamp parses a stored stamp, reporting the instant only when a
-// layout could read it. It is ValidityState's own reader, factored out so a
-// caller that needs the readability question alone asks it the same way rather
-// than through a second parser — the same reason this file owns the state rule.
+// parseStoredStamp parses a stored validity stamp.
 func parseStoredStamp(s *string) (*time.Time, bool) {
 	if s == nil {
 		return nil, false
@@ -120,29 +57,12 @@ func parseStoredStamp(s *string) (*time.Time, bool) {
 	return &t, true
 }
 
-// ValidityWithheld reports whether a state names a row the retrieval path
-// does not return: a window that has closed or has not opened. It is the one
-// predicate stage 2 of the assembler drops on, and every as_of listing withholds
-// on it too. unverified and unset are kept, because verified_at is a flag rather
-// than a predicate.
-//
-// A search with as_of drops on nothing (#910): the window an as_of row carries
-// is the live row's, so a verdict read from it is a claim about today rather
-// than about the instant, and stage 2 records the empty state instead — which
-// this predicate is false of. That is why the two surfaces now differ on
-// purpose, and why a row a search returns at an instant is not a statement
-// about what a listing returned there.
+// ValidityWithheld reports whether state means a retrieval path must withhold the row.
 func ValidityWithheld(state string) bool {
 	return state == ValidityExpired || state == ValidityFuture
 }
 
-// ValidityAt judges a stored validity triple at the instant t and reports
-// whether the row is withheld there. It is ValidityState with the clock named:
-// an as_of read binds the assembler's Now to the requested instant, so a
-// surface that does not run the assembler passes that same instant here and
-// reaches the same verdict on the same inputs, boundaries and unreadable bounds
-// included. A bound equal to t is inside the window: a window is expired only
-// when its end is before t, and future only when its start is after t.
+// ValidityAt reports the validity state and whether the row is withheld at t.
 func ValidityAt(validFrom, validUntil, verifiedAt *string, t time.Time) (state string, withheld bool) {
 	state, _ = ValidityState(validFrom, validUntil, verifiedAt, t)
 	return state, ValidityWithheld(state)
