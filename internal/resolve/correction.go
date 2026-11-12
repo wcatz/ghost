@@ -1,13 +1,4 @@
 // Correction-aware demotion: resolve walks two deterministic, free signals —
-// existing 'supersedes' edges and explicit correction text — that single-memory
-// LLM classification cannot see, and demotes the OLDER memory those signals
-// invalidate.
-//
-// The KEEP-bias stays intact: every deterministic demotion is either the older
-// endpoint of a link supersede's LLM already judged, or a prefilter-passing
-// candidate whose content the correction's rare subject tokens tie to an
-// explicit "already fixed / withdrawn / retracted" statement by a newer memory.
-// A false resolve buries a useful memory; a missed one leaves the status quo.
 package resolve
 
 import (
@@ -18,13 +9,8 @@ import (
 )
 
 var (
-	// subjectTokenRe matches identifier-ish tokens (lowercased): bare words plus
-	// the interior punctuation (_ . / -) that survives FTS tokenization, so
-	// "ledgerstate/imported_reward_inputs.go" and "d646e680" stay single terms.
 	subjectTokenRe = regexp.MustCompile(`[a-z0-9_./-]{4,}`)
 
-	// subjectStopwords are too common across memories to carry subject identity;
-	// excluded before document-frequency counting.
 	subjectStopwords = map[string]bool{
 		"that": true, "with": true, "this": true, "from": true, "being": true,
 		"have": true, "been": true, "were": true, "will": true, "there": true,
@@ -44,31 +30,17 @@ var (
 		"how": true, "both": true,
 	}
 
-	// correctionMarkers are text signals that a memory is an explicit correction
-	// of an earlier claim about the same subject. The correction itself is
-	// authoritative and stays KEEP (a terminal conclusion); the older claims it
-	// corrects are resolved evidence.
 	correctionMarkers = []string{
 		"correction", "correction/resolution", "corrects the",
 		"is already fixed", "already fixed on main", "no pr is needed",
 		"do not open a", "withdrawn", "retracted", "supersedes the",
 	}
 
-	// correctionRareDF caps a token's document frequency across the eligible
-	// pool for it to count as carrying subject identity (df > correctionRareDF
-	// means the term is too common to distinguish subjects).
 	correctionRareDF = 4
 
-	// correctionMinSharedRare gates correction-pairing: the older memory must
-	// share at least this many rare subject tokens with the correction.
-	// Calibrated on the live dingo pool: random same-project pairs share >=3
-	// rare tokens in ~2% of cases (the demotion false-positive pool), while the
-	// evidence pair under test shares 8.
 	correctionMinSharedRare = 3
 )
 
-// subjectTermSet returns a memory's subject tokens: lowercased, stopword- and
-// length-filtered, deduplicated.
 func subjectTermSet(content string) map[string]bool {
 	s := strings.ToLower(content)
 	out := make(map[string]bool)
@@ -80,7 +52,6 @@ func subjectTermSet(content string) map[string]bool {
 	return out
 }
 
-// isCorrection reports whether content explicitly corrects an earlier memory.
 func isCorrection(content string) bool {
 	lc := strings.ToLower(content)
 	for _, m := range correctionMarkers {
@@ -91,9 +62,6 @@ func isCorrection(content string) bool {
 	return false
 }
 
-// isOlder reports whether a is older than b by updated_at (SQLite
-// 'YYYY-MM-DD HH:MM:SS' compares lexicographically), ties broken by ID — the
-// same deterministic freshness order supersede uses to orient pairs.
 func isOlder(a, b memory.Memory) bool {
 	if a.UpdatedAt != b.UpdatedAt {
 		return a.UpdatedAt < b.UpdatedAt
@@ -111,23 +79,11 @@ type Pairing struct {
 	Target     memory.Memory
 }
 
-// correctionPairingsFrom is correctionPairTargetsFrom with the corrections kept.
-// One entry per (correction, target) pair rather than per target: two
-// corrections can pair the same row, and naming only the first would send an
-// operator to check a pairing that is not the only thing holding the row.
-// Deterministic and free, for correctionPairTargets' reasons — and the ONE
-// implementation of the rare-token rule, so a caller that wants the correction
-// and one that wants only the targets cannot disagree about which pairs exist.
 func correctionPairingsFrom(loaded, cands, corrections []memory.Memory) []Pairing {
 	if len(cands) == 0 {
 		return nil
 	}
 
-	// Rare terms per memory: subject tokens with document frequency
-	// <= correctionRareDF across the frequency pool. Terms are also collected
-	// for cands and for corrections outside that pool, because both are
-	// compared against each other; only `loaded` raises a token's frequency, so
-	// Run's rare-token set is unchanged.
 	termSets := make(map[string]map[string]bool, len(loaded)+len(cands)+len(corrections))
 	for _, m := range cands {
 		termSets[m.ID] = subjectTermSet(m.Content)
@@ -158,14 +114,11 @@ func correctionPairingsFrom(loaded, cands, corrections []memory.Memory) []Pairin
 		return r
 	}
 
-	// Precompute rare sets for the candidate pool once (not per correction).
 	candRare := make(map[string]map[string]bool, len(cands))
 	for _, m := range cands {
 		candRare[m.ID] = rareFor(m.ID)
 	}
 
-	// Only an explicitly correction-marked memory demotes; the pool it came
-	// from is otherwise irrelevant to the decision.
 	var correctionMems []memory.Memory
 	for _, m := range corrections {
 		if isCorrection(m.Content) {
@@ -176,9 +129,6 @@ func correctionPairingsFrom(loaded, cands, corrections []memory.Memory) []Pairin
 		return nil
 	}
 
-	// One entry per (correction, target) pair, in correction order then candidate
-	// order. The target is not deduplicated here: which corrections pair a row is
-	// exactly the question a repair report has to answer about it.
 	var out []Pairing
 	for _, c := range correctionMems {
 		cRare := rareFor(c.ID)
@@ -186,8 +136,6 @@ func correctionPairingsFrom(loaded, cands, corrections []memory.Memory) []Pairin
 			if m.ID == c.ID {
 				continue
 			}
-			// Only demote OLDER candidates: the correction invalidates the
-			// claims that came before it.
 			if !isOlder(m, c) {
 				continue
 			}

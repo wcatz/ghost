@@ -1,21 +1,4 @@
 // Package scratch owns the temporary space Ghost's LLM-harness children use.
-//
-// Every harness spawn (claude, opencode, codex, goose) runs confined to a
-// per-invocation directory under a Ghost-owned root, with TMPDIR/TMP/TEMP and
-// its working directory pointed inside that directory. The root lives in the
-// data dir — or $GHOST_SCRATCH_DIR when that is set — rather than the shared
-// system temp because opencode, in particular, writes a hidden JIT-cache
-// shared object (~4.7 MiB) into its temp dir on every invocation, and one
-// consolidation lifecycle spawns hundreds of harness processes. Left in the
-// shared temp dir those droppings accumulate until the filesystem fills, at
-// which point every LLM-backed phase fails. Under the owned root each
-// invocation's directory is removed by its owner, and Reap collects whatever a
-// crashed owner left behind.
-//
-// Nothing here reads or writes the inherited temp-dir variables: which
-// variables a child gets is the spawn site's business (internal/ai pins them),
-// and this package must keep working when the system temp dir is broken, which
-// is the situation it exists to survive.
 package scratch
 
 import (
@@ -33,33 +16,10 @@ import (
 	"github.com/wcatz/ghost/internal/procstat"
 )
 
-// envDir names the environment variable that overrides the scratch root. An
-// empty value is treated as unset so a blank export cannot silently move the
-// root to the process's current directory.
 const envDir = "GHOST_SCRATCH_DIR"
 
-// ownerFile is the marker written inside every per-invocation directory, one
-// key=value per line:
-//
-//	pid=<creating pid>
-//	token=<random per-invocation token>
-//	start=<process creation-time token, or "none" when unavailable>
-//
-// The start line carries the same PID-reuse token internal/mcpinit records in
-// its .pid files (internal/procstat): Reap compares it against the live
-// process's token so a pid the OS recycled after the owner died is detected
-// instead of being mistaken for a live owner. The startNone sentinel is
-// distinct from a missing line: it says the platform cannot supply tokens at
-// all, so Reap still shields a live owner unconditionally. Only a marker with
-// no start line at all (written before tokens existed) falls back to Reap's
-// age backstop.
 const ownerFile = ".owner"
 
-// startNone is the ownerFile start line's sentinel for a platform (or read)
-// where procstat.StartTime cannot supply a creation-time token. Without it, a
-// marker from such a platform would be indistinguishable from a true legacy
-// marker and would lose the unconditional shield while its owner is alive —
-// exactly the shield Open's callers rely on.
 const startNone = "none"
 
 // Root returns the scratch root, creating it (0700) if needed. The root is
@@ -85,7 +45,6 @@ func Root() (string, error) {
 }
 
 // Dir is one per-invocation scratch directory. Its zero value is not usable;
-// it is returned only by Open.
 type Dir struct {
 	path string
 }
@@ -94,13 +53,6 @@ type Dir struct {
 // moment: the pid, and 16 hex characters of fresh randomness — the exact shape
 // Open names a per-invocation directory with, so this package has one naming
 // scheme rather than two.
-//
-// It is for a caller that needs a NAME NOTHING ELSE WILL TAKE, not a directory:
-// `ghost supersede --reassess --apply` writes its follow-up id list under the root
-// with a name built from the project and a whole-second timestamp, which two runs
-// of the same project in the same second would agree on. A name derived from a
-// clock is not ownership, and a shared root ($GHOST_SCRATCH_DIR) is writable by
-// whoever else shares it.
 func UniqueSuffix() (string, error) {
 	token, err := randomToken()
 	if err != nil {
@@ -109,9 +61,6 @@ func UniqueSuffix() (string, error) {
 	return strconv.Itoa(os.Getpid()) + "-" + token, nil
 }
 
-// randomToken is the 16-hex-character per-invocation token on its own. The owner
-// marker records it as its own field, so it is the random half rather than the
-// composite UniqueSuffix returns.
 func randomToken() (string, error) {
 	token, err := randomHex(8)
 	if err != nil {
@@ -127,18 +76,6 @@ func randomToken() (string, error) {
 // still running from one abandoned by a crash, and the creation-time token
 // additionally lets it tell a live owner from a pid the OS recycled after the
 // owner exited.
-//
-// When the token cannot be read — an unsupported platform, an unreadable proc
-// entry — the marker records the explicit startNone sentinel instead of
-// omitting the line. That is NOT a legacy marker: it says liveness is all
-// this process can prove, so Reap keeps shielding the directory while the pid
-// is alive and removes it once the pid is dead. (Only a marker written before
-// tokens existed has no start line, and only that form falls back to the age
-// backstop.)
-//
-// Open touches nothing in the inherited temp dir, so it succeeds even when
-// TMPDIR points at a full or nonexistent filesystem — the failure mode Ghost's
-// harnesses must survive.
 func Open() (*Dir, error) {
 	root, err := Root()
 	if err != nil {
@@ -162,10 +99,6 @@ func Open() (*Dir, error) {
 	return &Dir{path: path}, nil
 }
 
-// ownerMarkerText builds the .owner marker content. When haveStart is false
-// the start line carries the startNone sentinel rather than being omitted, so
-// Reap can tell a platform that cannot supply tokens (shield a live pid) from
-// a true pre-token legacy marker (age backstop only).
 func ownerMarkerText(pid int, token, start string, haveStart bool) string {
 	if !haveStart {
 		start = startNone
@@ -173,8 +106,6 @@ func ownerMarkerText(pid int, token, start string, haveStart bool) string {
 	return "pid=" + strconv.Itoa(pid) + "\ntoken=" + token + "\nstart=" + start + "\n"
 }
 
-// removeTree and removeFile are variables so tests can force removal to fail
-// deterministically. Production code never reassigns them.
 var removeTree = os.RemoveAll
 var removeFile = os.Remove
 
@@ -189,22 +120,6 @@ func SetRemoveTreeForTest(f func(string) error) (restore func()) {
 // Path returns the directory's absolute path.
 func (d *Dir) Path() string { return d.path }
 
-// makeRemovable restores owner read, write and execute permission on path and,
-// when path is a directory, on every directory beneath it. Module caches and
-// package managers commonly leave directories without write permission (0555)
-// or without any permission (0000); os.RemoveAll cannot remove their contents
-// until the directory is writable and traversable. It is best-effort: a path
-// that still cannot be read after the chmod is left for the caller's removal
-// to report.
-//
-// The chmod goes through an open descriptor where the directory can be opened
-// (O_NOFOLLOW refuses a symlink swapped in after the lstat), so chmod follows
-// no link. A directory mode 0000 cannot be opened at all, so that case falls
-// back to a path chmod, re-verifying the path is still the SAME non-symlink
-// directory before every path-based call — same device and inode — which
-// narrows the window for a swap to a symlink or a renamed directory but does
-// not close it: the path can still change between the check and the call. The
-// root is Ghost-owned (0700), so the window is the owner's own processes.
 func makeRemovable(path string) {
 	info, err := os.Lstat(path)
 	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
@@ -229,12 +144,6 @@ func makeRemovable(path string) {
 		}
 		return
 	}
-	// Unopenable (a mode-0000 directory): best-effort chmod by path so the
-	// listing below can run; a failure leaves the tree for RemoveAll to
-	// report. Re-verify the path is still the same real directory first: a
-	// swap for a symlink after the lstat above must not make the path
-	// callbacks follow the link, and a renamed directory must not be
-	// traversed by accident.
 	if err := sameRealDir(path, info); err != nil {
 		return
 	}
@@ -269,51 +178,6 @@ func (d *Dir) Release() {
 
 // Reap removes stale per-invocation directories from the scratch root. It
 // scans only the root's direct entries and never the root itself.
-//
-// Only entries demonstrably created by Ghost are eligible for removal: one
-// with a readable ownerFile marker, or — for a markerless entry, including one
-// whose marker is being written right now — one whose name has exactly the
-// shape Open creates. The shape is exact down to the pid segment: a name
-// carrying a pid no Ghost run can have (0, or a pid written with a leading
-// zero) is not a name Open produced, so the entry is not Ghost's and is left
-// alone however old it is. A markerless entry is removed only once its mtime
-// is older than maxAge. The one markerless REGULAR file is a follow-up id file
-// (ReassessTargetsName), which is removed once older than idFileStaleAge
-// instead of maxAge, for the reason those two ages differ: see the constant.
-// Anything else, such as a foreign file or directory that happens to live
-// under the root, is left alone: $GHOST_SCRATCH_DIR may point
-// at a shared directory, and Ghost must never delete what it did not create.
-// Symlinks are left alone entirely: the root is Ghost-owned, but a link can
-// point anywhere, and removing one must never follow it.
-//
-// A marked entry is owned and live only when its pid is alive AND, when the
-// marker carries a creation-time token, that token still matches the live
-// process's — the same pid-reuse token internal/mcpinit uses for .pid files. A
-// dead pid, or a live pid whose token differs (the OS recycled it to an
-// unrelated process), means the directory is abandoned and it is removed
-// regardless of age. A startNone sentinel means the platform cannot supply
-// tokens: liveness alone is all that marker can prove, so a live pid is still
-// shielded unconditionally and a dead one is removed. Only a marker with no
-// start line at all predates tokens: it is not shielded on liveness alone and
-// is removed once older than maxAge, so the transition cannot pin old leaks
-// forever. A genuine live owner — pid alive with a matching token, or with the
-// sentinel — is shielded unconditionally, with no age ceiling and no mtime
-// consultation, because phase timeouts can be configured to 0 (unbounded), so
-// any ceiling could delete a live invocation's scratch directory.
-//
-// The bound is therefore honest: a pid the OS recycled is detected by the
-// token mismatch and collected immediately, a directory abandoned by a dead
-// owner is collected on the next reap, and a live owner's leaked directories
-// last only as long as that owner lives — its exit turns them into the
-// dead-pid case for the next reap.
-//
-// Before removing a directory, Reap restores owner permissions on the way down
-// so a subtree left without write permission can still be removed. Entries that
-// vanish mid-scan are ignored — several Ghost processes (one MCP server per
-// client session) may reap concurrently, so races are normal. It returns the
-// number of entries removed and the number whose removal failed. A missing
-// root is not an error; an unreadable one is returned so the caller can warn,
-// but callers proceed either way.
 func Reap(maxAge time.Duration) (removed, failed int, err error) {
 	root, err := Root()
 	if err != nil {
@@ -336,14 +200,6 @@ func Reap(maxAge time.Duration) (removed, failed int, err error) {
 		if info.Mode()&os.ModeSymlink != 0 {
 			continue // never follow or remove links
 		}
-		// The follow-up id file: the one markerless regular file eligible for
-		// collection, recognised by ReassessTargetsName's exact shape and
-		// bounded by its own window rather than maxAge, because it is an
-		// operator's pending repair that has to stay readable for days rather
-		// than abandoned scratch. IsRegular is checked here rather than after
-		// Lstat already said this is not a link: a DIRECTORY wearing the name
-		// is not a file Ghost wrote and must never be removed, and the
-		// os.Remove below removes one file and never descends.
 		if info.Mode().IsRegular() && isReassessIDFile(entry.Name()) {
 			if now.Sub(info.ModTime()) > idFileStaleAge {
 				if rmErr := removeFile(path); rmErr == nil {
@@ -358,28 +214,18 @@ func Reap(maxAge time.Duration) (removed, failed int, err error) {
 		pid, start, ok := ownerMarker(path)
 		switch {
 		case !ok:
-			// No marker: only Open's exact name shape proves this is Ghost's,
-			// and only the age backstop justifies removal.
 			if !isScratchDirName(entry.Name()) || !stale {
 				continue
 			}
 		case start == startNone:
-			// The platform cannot supply creation-time tokens, so liveness is
-			// all this marker can prove. haveToken=false is IsAlive's explicit
-			// no-token mode (signal 0 / STILL_ACTIVE), not a fake token, and a
-			// live owner is shielded unconditionally.
 			if procstat.IsAlive(pid, "", false) {
 				continue
 			}
 		case start == "":
-			// True pre-token legacy marker: liveness alone does not shield it;
-			// only the age backstop does.
 			if !stale {
 				continue
 			}
 		default:
-			// Token present: alive and matching is a live owner; dead or a
-			// recycled pid (token mismatch) is abandoned.
 			if procstat.IsAlive(pid, start, true) {
 				continue
 			}
@@ -394,27 +240,9 @@ func Reap(maxAge time.Duration) (removed, failed int, err error) {
 	return removed, failed, nil
 }
 
-// ownerMarkerMaxBytes is the most bytes an owner marker can carry. A marker is a
-// handful of key=value lines, so anything larger is not a marker this package
-// wrote and is refused rather than read into memory.
 const ownerMarkerMaxBytes = 4096
 
-// ownerMarker reads dir's ownerFile marker. ok is false when the marker is
-// missing, unreadable, or has no usable pid; without one, Reap collects the
-// directory only when its name matches the Open shape and the mtime age
-// backstop has passed. start is the recorded process creation-time token, the
-// startNone sentinel when the writer could not read one, or "" for a true
-// legacy marker written before start lines existed.
 func ownerMarker(dir string) (pid int, start string, ok bool) {
-	// The marker sits inside an entry whose type Reap has already checked, but
-	// the entry (and the marker itself) is untrusted: $GHOST_SCRATCH_DIR may
-	// point at a shared directory, and any local process can place a FIFO or a
-	// symlink where the marker belongs. O_NOFOLLOW refuses a symlink swapped in
-	// between the lstat and this open, O_NONBLOCK keeps a FIFO from blocking
-	// the open until a writer appears, and the fstat on the descriptor refuses
-	// anything that is not a regular file before a byte is read. The lstat
-	// first refuses a symlink or pipe without opening it, which is the only
-	// defence before the open on Windows.
 	path := filepath.Join(dir, ownerFile)
 	if li, err := os.Lstat(path); err != nil || !li.Mode().IsRegular() {
 		return 0, "", false
@@ -454,14 +282,6 @@ func ownerMarker(dir string) (pid int, start string, ok bool) {
 	return pid, start, ok
 }
 
-// isScratchDirName reports whether name has exactly the shape Open creates:
-// <decimal pid>-<16 lowercase hex chars>. It exists because Reap must only
-// remove entries it can prove Ghost created — an override root may be shared —
-// so for a markerless entry the name is the only ownership evidence there is.
-// The match is deliberately strict (no sign, spaces, extra dashes, or
-// uppercase hex) so a foreign name cannot accidentally qualify, and the pid
-// segment must be one Open could have written (isPidSegment): a pid Ghost
-// never has is evidence the entry is not Ghost's.
 func isScratchDirName(name string) bool {
 	pid, rest, found := strings.Cut(name, "-")
 	if !found || !isPidSegment(pid) {
@@ -478,16 +298,6 @@ func isScratchDirName(name string) bool {
 	return true
 }
 
-// isPidSegment reports whether s is a pid in the spelling Open names its
-// directories with: strconv.Itoa(os.Getpid()). A pid is a positive integer, and
-// its decimal form never carries a leading zero, so "0" and "007" are spellings
-// no Ghost run can produce.
-//
-// The rule is this strict because a markerless entry is removed on the
-// strength of its name ALONE — the name is the only ownership evidence there
-// is — and a pid segment Ghost could never have written says the entry is
-// somebody else's. Ghost must never delete what it did not create, and a
-// shared root ($GHOST_SCRATCH_DIR) is writable by whoever else shares it.
 func isPidSegment(s string) bool {
 	if s == "" || s[0] < '1' || s[0] > '9' {
 		return false
@@ -500,7 +310,6 @@ func isPidSegment(s string) bool {
 	return true
 }
 
-// randomHex returns n random bytes as lowercase hex.
 func randomHex(n int) (string, error) {
 	buf := make([]byte, n)
 	if _, err := rand.Read(buf); err != nil {

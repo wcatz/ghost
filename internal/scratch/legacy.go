@@ -1,18 +1,4 @@
 // Legacy cleanup for the debris Ghost left before internal/scratch existed:
-//
-//   - ~/.cache/ghost-tmp — an old-style cache directory from the
-//     pre-scratch-root era (hundreds of megabytes of JIT-cache droppings on
-//     the machine that motivated #465/#468);
-//   - the shared system temp dir — hidden `.<hex>-00000000.so` JIT-cache
-//     droppings opencode wrote per invocation that leaked there only when a
-//     process was SIGKILLed before #465 confined TMPDIR/TMP/TEMP to the
-//     scratch root.
-//
-// Both paths are REPORT-ONLY by default: the report lists counts, bytes, and
-// exact locations; removal happens only behind an explicit --apply, only for
-// regular files matching the strict droppings signature, only after an
-// open/mmap probe says the file is closed, and never for directories (Ghost
-// did not create arbitrary directories and must not remove any).
 package scratch
 
 import (
@@ -25,16 +11,6 @@ import (
 	"regexp"
 )
 
-// legacyDropping is the strict signature of the #465-era droppings, derived
-// from the files themselves (every one of the 69 files in the observed
-// ~/.cache/ghost-tmp and every shared-temp match):
-//
-//	.<16 lowercase hex>-00000000.so
-//
-// The pattern is anchored and deliberately narrow: near-misses that exist on
-// the same machines — a counter suffix other than 00000000 (e.g.
-// .3cdffa7dbff6ef5b-00000001.so) and bun's own .bun-<pid>-<hex>.so — do NOT
-// match, and neither does any name that is not a regular file at scan time.
 var legacyDropping = regexp.MustCompile(`^\.[0-9a-f]{16}-00000000\.so$`)
 
 // LegacyFile is one candidate: an absolute path and its lstat size in bytes.
@@ -72,11 +48,6 @@ func ScanLegacy(cacheDir, tmpDir string) LegacyReport {
 	}
 }
 
-// scanLegacyDir returns the strict-signature regular files directly inside
-// dir. Entries are qualified with BOTH checks: the name must match the
-// anchored droppings signature AND lstat must say regular file — a directory
-// (or symlink) whose name mimics a dropping is never a candidate, because
-// Ghost only ever removes files it can prove are droppings, never directories.
 func scanLegacyDir(dir string) (files []LegacyFile, missing bool) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -140,17 +111,11 @@ func writeLegacyCategory(w io.Writer, label, dir string, files []LegacyFile, mis
 	return nil
 }
 
-// probe names an available open-file probe tool and its resolved path.
 type probe struct {
 	tool string // "lsof" or "fuser"
 	path string
 }
 
-// detectOpenProbe finds a tool that can tell whether a file is open or
-// mmap'd: lsof first (definitive, covers mmap), fuser as the fallback. Both
-// are looked up on PATH at runtime — no build tags — so the code compiles and
-// behaves identically on Windows, where neither exists and callers degrade to
-// "cannot verify → skip removal" by construction.
 func detectOpenProbe() (probe, bool) {
 	if p, err := exec.LookPath("lsof"); err == nil {
 		return probe{tool: "lsof", path: p}, true
@@ -161,15 +126,6 @@ func detectOpenProbe() (probe, bool) {
 	return probe{}, false
 }
 
-// inUse reports whether path is currently open/mmap'd. Three states:
-//
-//	(inUse=true,  ok=true) — some process holds the file
-//	(inUse=false, ok=true) — probe ran cleanly, nobody holds it
-//	(ok=false)             — probe failed or errored: CANNOT VERIFY
-//
-// Exit-code contract (both tools): 0 = holders found, 1 = none found,
-// anything else = error. "Cannot verify" is never treated as "safe to delete"
-// — the caller skips such files with a message instead.
 func (p probe) inUse(path string) (inUse, ok bool) {
 	cmd := exec.Command(p.path, path)
 	err := cmd.Run() // output discarded: only the exit code carries the verdict
@@ -188,22 +144,7 @@ func (p probe) inUse(path string) (inUse, ok bool) {
 // write error encountered while narrating (reporting is best-effort per line,
 // but a failed write is returned rather than dropped, matching
 // WriteLegacyReport).
-//
-// Safety rails, in order per candidate:
-//  1. no open-file probe on PATH (Windows CI, minimal containers) → remove
-//     NOTHING and say so explicitly — cannot verify must never mean delete;
-//  2. probe says the file is open/mmap'd → skip with a message;
-//  3. probe errored → skip with a message ("cannot verify");
-//  4. re-verify at removal time that the path is still a regular file with
-//     the strict signature (defense against TOCTOU swaps);
-//  5. os.Remove — a single file, never RemoveAll, never a directory.
-//
-// What it never touches: non-strict names, directories (even ones named like
-// droppings), symlinks, and nested files the top-level scan never saw.
 func CleanLegacy(w io.Writer, r LegacyReport) (removed int, removedBytes int64, skipped int, err error) {
-	// A failed write must not abort the removal loop: the removals are the
-	// point, and a broken stdout should not leave debris behind. The first
-	// error is returned after every candidate has been considered.
 	note := func(format string, args ...any) {
 		if err != nil {
 			return
@@ -226,8 +167,6 @@ func CleanLegacy(w io.Writer, r LegacyReport) (removed int, removedBytes int64, 
 
 	for _, c := range candidates {
 		name := filepath.Base(c.Path)
-		// Re-verify immediately before removal: the scan's verdict could be
-		// stale if the path was swapped between report and apply.
 		info, statErr := os.Lstat(c.Path)
 		if statErr != nil || !info.Mode().IsRegular() || !legacyDropping.MatchString(name) {
 			note("skipping %s: no longer a strict-signature regular file\n", c.Path)

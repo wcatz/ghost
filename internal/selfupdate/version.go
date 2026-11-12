@@ -11,11 +11,6 @@ import (
 // any build metadata are ignored, and prerelease identifiers are ordered by the
 // semver rules, so "0.9.0" is older than "0.10.0" and "1.0.0-rc.1" is older
 // than "1.0.0".
-//
-// It returns an error when either side is not a semantic version — a "dev"
-// build, an empty string, a tag like "vscode-pre-rewrite" — because an
-// unorderable version cannot answer the question. Callers that need a default
-// for those decide it themselves; nothing here guesses.
 func CompareVersions(a, b string) (int, error) {
 	pa, err := parseVersion(a)
 	if err != nil {
@@ -40,13 +35,6 @@ func CompareVersions(a, b string) (int, error) {
 
 // IsPrerelease reports whether a release tag names a prerelease — a candidate
 // that is not a release yet, like "0.35.0-rc.1" or "1.0.0-beta".
-//
-// It is a different question from CompareVersions, which orders two versions
-// against each other; this one looks at one tag and answers whether installing
-// it is installing something unfinished. A tag that is not a semantic version —
-// "dev", "nightly", a two-component "1.0" — is not a prerelease, because
-// nothing about it says it is one, and refusing every tag this package cannot
-// parse would block a build tagged something else entirely.
 func IsPrerelease(s string) bool {
 	v, err := parseVersion(s)
 	return err == nil && v.prerelease != ""
@@ -56,21 +44,11 @@ func IsPrerelease(s string) bool {
 // parseable semantic version with no prerelease identifier. "0.35.0",
 // "v0.35.0" and "0.35.0+dirty" are releases; "dev", "nightly", "1.0" and
 // "0.36.0-rc.1" are not.
-//
-// It is the other half of IsPrerelease and the same parser, deliberately: the
-// two must never disagree about one string, and the one case where they both
-// answer false is the one this function exists to change. A tag that is not a
-// semantic version is NOT a release, because nothing about it says it is one —
-// and that includes the `git describe` stamp a local build carries
-// ("v0.38.0-14-gabc1234"), whose "-14-gabc1234" tail parses as a prerelease
-// identifier even though nothing was ever published under it.
 func IsRelease(s string) bool {
 	v, err := parseVersion(s)
 	return err == nil && v.prerelease == ""
 }
 
-// version is a parsed semantic version. Build metadata is dropped: it never
-// takes part in precedence.
 type version struct {
 	major      int
 	minor      int
@@ -78,9 +56,6 @@ type version struct {
 	prerelease string
 }
 
-// parseVersion reads "v1.2.3", "1.2.3", "1.2.3-rc.1" and "1.2.3+build". It
-// requires all three numeric components, because a two-component version is
-// ambiguous and this runs against a release tag, not a manifest.
 func parseVersion(s string) (version, error) {
 	bad := func() (version, error) {
 		return version{}, fmt.Errorf("cannot parse %q as a semantic version", s)
@@ -113,24 +88,6 @@ func parseVersion(s string) (version, error) {
 	return version{major: nums[0], minor: nums[1], patch: nums[2], prerelease: prerelease}, nil
 }
 
-// parseNumeric reads one non-negative decimal component, rejecting signs,
-// spaces and anything strconv would happily accept but semver does not.
-//
-// A leading zero is refused too. semver says a numeric identifier must not
-// include one, and strconv reads "0.32.00" as 0.32.0, so a tag carrying a
-// zero-padded COMPONENT would compare EQUAL to the release it pads — and
-// `ghost upgrade` reads equality as already current, so the user would be
-// told they are up to date on a build that is not. A single "0" is the one
-// leading zero semver allows, so it is not a leading zero here.
-//
-// In a PRERELEASE identifier the same rule does not make the version
-// unparseable, because validPrerelease checks the identifier list and never
-// consults this function: semver's numeric production is `0 | [1-9][0-9]*`, so
-// "00" matches the ALPHANUMERIC production and "1.0.0-00" is a legal version.
-// What the leading zero changes there is the RANK, not the parse:
-// comparePrereleaseIdentifier reads a refusal as "not a number", and a numeric
-// identifier always ranks below an alphanumeric one. So "0" and "00" order,
-// where reading both as numbers said they were equal.
 func parseNumeric(s string) (int, bool) {
 	if s == "" {
 		return 0, false
@@ -150,8 +107,6 @@ func parseNumeric(s string) (int, bool) {
 	return n, true
 }
 
-// validPrerelease reports whether s is a dot-separated list of non-empty
-// alphanumeric identifiers, the only prerelease shape semver defines.
 func validPrerelease(s string) bool {
 	if s == "" {
 		return false
@@ -183,10 +138,6 @@ func compareInt(a, b int) int {
 	}
 }
 
-// comparePrerelease orders two prerelease strings by the semver rules: a final
-// release outranks any prerelease of the same core version, numeric
-// identifiers compare as numbers and rank below alphanumeric ones, and a
-// shorter identifier list wins when everything before it matches.
 func comparePrerelease(a, b string) int {
 	switch {
 	case a == "" && b == "":

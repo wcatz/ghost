@@ -1,5 +1,4 @@
 // Package selfupdate provides self-update capability for ghost binaries
-// by downloading releases from GitHub.
 package selfupdate
 
 import (
@@ -23,71 +22,23 @@ import (
 
 const repoAPI = "https://api.github.com/repos/wcatz/ghost/releases/latest"
 
-// The two request deadlines. Both are vars so a test can shorten one to
-// something shorter than a test can wait (see useTestDeadline); production
-// never reassigns them.
-//
-// The bound is a context deadline carried by the request, not a
-// http.Client.Timeout. Both would bound the same thing, but a deadline on the
-// context travels with the request: the caller can shorten it or cancel it
-// outright (a cancelled upgrade should stop waiting on a socket), and one
-// mechanism cannot drift away from the other the way two bounds can.
 var (
-	// apiTimeout bounds the release metadata lookup. It is a small JSON
-	// request: either GitHub answers in seconds or the network is broken, and
-	// an interactive command has no business waiting longer.
-	apiTimeout = 30 * time.Second
-	// downloadTimeout bounds one release-asset transfer, which is a
-	// multi-megabyte body on a link of unknown speed rather than a metadata
-	// lookup.
-	//
-	// It is an absolute deadline, not a stall deadline, so it charges the
-	// transfer for its own duration: a slow-but-progressing link is cut off at
-	// the same ten minutes as a dead one. Against maxArchiveBytes that is
-	// about 350 KB/s sustained for the whole 200 MiB the archive cap allows —
-	// comfortable on a wired connection, marginal on a weak mobile hotspot. The
-	// alternative, a deadline that resets while bytes arrive, would let a
-	// transfer that trickles one byte per interval run unbounded, so the cap
-	// would stop bounding anything. A user on a link that slow is better served
-	// by a release asset than by a wait, and nothing is lost by the refusal:
-	// the temp file never reached the rename, so the installed binary is
-	// untouched.
+	apiTimeout      = 30 * time.Second
 	downloadTimeout = 10 * time.Minute
 )
 
 const (
-	// maxReleaseJSONBytes bounds the release metadata read from GitHub. A real
-	// payload is a few KiB; 4 MiB is generous while still bounding what a
-	// stalled-but-open connection can push into memory before the deadline.
 	maxReleaseJSONBytes int64 = 4 << 20
-	// maxChecksumBytes bounds checksums.txt. A real manifest is one 64-hex
-	// digest per asset, well under a KiB.
-	maxChecksumBytes int64 = 1 << 20
-	// maxArchiveBytes bounds a release archive. Compressed ghost binaries are
-	// tens of MiB, so this leaves room to grow while keeping an endless or
-	// hostile response from exhausting memory.
-	maxArchiveBytes int64 = 200 << 20
-	// maxBinaryBytes bounds what one archive inflates into. The transfer cap
-	// above bounds what arrives, which says nothing about how far that expands:
-	// today's Windows binary is ~24 MiB inside a ~9 MiB zip, so a
-	// decompression bomb is a small download with an unbounded result. For a
-	// .tar.gz the bound covers every entry, since opening one inflates the
-	// entries ahead of the binary too; 128 MiB is several times the ~23 MiB a
-	// real release inflates to.
-	maxBinaryBytes int64 = 128 << 20
+	maxChecksumBytes    int64 = 1 << 20
+	maxArchiveBytes     int64 = 200 << 20
+	maxBinaryBytes      int64 = 128 << 20
 )
 
-// The caps are vars only so a test can lower them and prove each one holds
-// without pushing hundreds of MiB through a socket or a decompressor.
 var (
 	archiveCap = maxArchiveBytes
 	binaryCap  = maxBinaryBytes
 )
 
-// httpClient is the package's own client. It carries no Timeout: every
-// request here is built with an explicit context deadline instead (see
-// fetchRelease and Download), which is the only bound that also covers reading
-// the body once the response headers have arrived.
 var httpClient = &http.Client{}
 
 // Release represents the subset of GitHub release API we need.
@@ -110,8 +61,6 @@ func LatestRelease(ctx context.Context) (*Release, error) {
 	return fetchRelease(ctx, repoAPI)
 }
 
-// fetchRelease is LatestRelease against an explicit URL, so tests can point it
-// at a local server instead of GitHub.
 func fetchRelease(ctx context.Context, url string) (*Release, error) {
 	ctx, cancel := context.WithTimeout(ctx, apiTimeout)
 	defer cancel()
@@ -144,13 +93,7 @@ func fetchRelease(ctx context.Context, url string) (*Release, error) {
 	return &rel, nil
 }
 
-// readCapped reads r into memory and refuses anything larger than limit.
-// Exceeding the cap is an error rather than a silent truncation: a short read
-// of checksums.txt or of an archive is not a smaller valid file, it is a
-// different file that must not reach Replace.
 func readCapped(r io.Reader, limit int64, what string) ([]byte, error) {
-	// One byte past the cap is what distinguishes "exactly at the cap" from
-	// "over it".
 	data, err := io.ReadAll(io.LimitReader(r, limit+1))
 	if err != nil {
 		return nil, fmt.Errorf("reading %s: %w", what, err)
@@ -226,14 +169,9 @@ func Download(ctx context.Context, url string) (io.ReadCloser, error) {
 		cancel()
 		return nil, fmt.Errorf("download returned %d", resp.StatusCode)
 	}
-	// The deadline has to outlive this function — the caller reads the body
-	// after Download returns — so it is ended by Close rather than deferred.
 	return &deadlineBody{ReadCloser: resp.Body, cancel: cancel}, nil
 }
 
-// deadlineBody releases the request's context when the body is closed, so the
-// download deadline governs the whole transfer and nothing is left holding a
-// timer after the caller is done with it.
 type deadlineBody struct {
 	io.ReadCloser
 	cancel context.CancelFunc
@@ -283,24 +221,10 @@ func VerifyChecksum(data []byte, checksumsText, assetName string) error {
 	return fmt.Errorf("no checksum entry for %s in checksums.txt", assetName)
 }
 
-// sha256HexLen is the length of a hex-encoded SHA-256 digest.
 const sha256HexLen = 2 * sha256.Size
 
 // VerifyAssetDigest checks that data matches the digest GitHub reports for this
 // release asset.
-//
-// The digest is the one GitHub computed for the asset it actually holds, taken
-// from the releases API response rather than from a manifest uploaded next to
-// it. That distinction is the whole point: checksums.txt is a second file in
-// the same release, so whoever can replace the archive can replace the manifest
-// that vouches for it, and a checksum comparison against it proves only that
-// the two files agree.
-//
-// A missing digest is a refusal rather than a pass. An asset nothing vouched
-// for is precisely the case that must not install, and GitHub computes a digest
-// for every asset it holds — a response without one is not something this check
-// can reason about, so the install stops instead of continuing on the strength
-// of the manifest alone.
 func VerifyAssetDigest(data []byte, asset *Asset) error {
 	if asset == nil {
 		return fmt.Errorf("no release asset to verify")
@@ -312,10 +236,6 @@ func VerifyAssetDigest(data []byte, asset *Asset) error {
 	case !found:
 		return fmt.Errorf("unsupported digest %q for %s: expected an algorithm and a value, as in \"sha256:<hex>\"", asset.Digest, asset.Name)
 	case !strings.EqualFold(algorithm, "sha256"):
-		// Not "skip the check". A digest this binary cannot compute is an
-		// asset it cannot vouch for, and an algorithm it does not know is
-		// also how a downgrade of the check would arrive. Case is not that:
-		// the value compared below is the same digest either way.
 		return fmt.Errorf("unsupported digest algorithm %q for %s: only sha256 is verified", algorithm, asset.Name)
 	case len(reported) != sha256HexLen:
 		return fmt.Errorf("malformed digest %q for %s: a sha256 digest is %d hex characters", asset.Digest, asset.Name, sha256HexLen)
@@ -332,8 +252,6 @@ func VerifyAssetDigest(data []byte, asset *Asset) error {
 	return nil
 }
 
-// zipMagic is the first two bytes of any zip container — local file header,
-// central directory and end-of-archive marker all begin "PK".
 var zipMagic = []byte("PK")
 
 // ExtractBinary extracts the ghost binary from a release archive: the .tar.gz
@@ -341,15 +259,6 @@ var zipMagic = []byte("PK")
 // (goreleaser's format_overrides). Before #558 the zip was handed to a gzip
 // reader, so `ghost upgrade` failed with "gzip: invalid header" on one of the
 // two platforms ghost builds for.
-//
-// The container decides how to read the archive rather than the asset name, so
-// a mislabelled asset still reads as what it is and a renamed one cannot
-// present a different format to the parser.
-//
-// The cap bounds what the archive inflates into, not just the bytes that are
-// kept: the transfer cap limits what arrived, which says nothing about how far
-// one archive expands, and an uncapped read here was the last place a small
-// hostile archive could spend unbounded memory and CPU.
 func ExtractBinary(archive []byte) ([]byte, error) {
 	if bytes.HasPrefix(archive, zipMagic) {
 		return extractZipBinary(archive)
@@ -357,10 +266,6 @@ func ExtractBinary(archive []byte) ([]byte, error) {
 	return extractTarGzBinary(archive)
 }
 
-// extractTarGzBinary reads the binary out of a gzipped tar. The binary is at
-// the archive root, named "ghost" or "ghost.exe", and must be a regular
-// non-empty file — anything else with that name is refused rather than
-// installed.
 func extractTarGzBinary(archive []byte) ([]byte, error) {
 	gz, err := gzip.NewReader(bytes.NewReader(archive))
 	if err != nil {
@@ -368,13 +273,6 @@ func extractTarGzBinary(archive []byte) ([]byte, error) {
 	}
 	defer gz.Close() //nolint:errcheck
 
-	// Bounded on the way out, not only on what is kept. archive/tar reads an
-	// entry in full to reach the next header — a gzip stream is not seekable,
-	// so Next() copies the skipped body to io.Discard — and the entries ahead
-	// of the binary are real (LICENSE, README.md). A cap on the returned bytes
-	// alone would leave a few hundred KiB of compressible data in any other
-	// entry free to expand without limit, spending CPU that no deadline here
-	// can stop: the archive is already downloaded and in memory by now.
 	tr := tar.NewReader(&inflatedReader{r: gz, limit: binaryCap})
 	for {
 		hdr, err := tr.Next()
@@ -387,15 +285,6 @@ func extractTarGzBinary(archive []byte) ([]byte, error) {
 		if hdr.Name != "ghost" && hdr.Name != "ghost.exe" {
 			continue
 		}
-		// A regular file, and not an empty one. A directory or link entry
-		// carrying the binary's name has no body, so matching the name alone
-		// returns zero bytes with no error — and Replace would then rename an
-		// empty file over the installed executable and report an upgrade. The
-		// zip path already skipped directories through FileInfo().IsDir(); this
-		// is the same guard for tar, plus the empty case neither path could see.
-		// TypeReg is the zero value, so a header that names no type is a
-		// regular file. (tar.TypeRegA, the old spelling, is the same byte and
-		// is deprecated, so matching it would only add a lint finding.)
 		if hdr.Typeflag != tar.TypeReg {
 			return nil, fmt.Errorf("ghost in the archive is a %s, not a regular file", tarEntryKind(hdr))
 		}
@@ -411,8 +300,6 @@ func extractTarGzBinary(archive []byte) ([]byte, error) {
 	return nil, fmt.Errorf("ghost binary not found in archive")
 }
 
-// tarEntryKind names a tar entry type for a refusal message, so "not a regular
-// file" says which kind was found.
 func tarEntryKind(hdr *tar.Header) string {
 	switch hdr.Typeflag {
 	case tar.TypeDir:
@@ -428,10 +315,6 @@ func tarEntryKind(hdr *tar.Header) string {
 	}
 }
 
-// inflatedReader fails once the stream it wraps has produced more than limit
-// bytes. It is the bound on what an archive costs to open, whether or not the
-// bytes are kept: gzip expands as it is read, so the work is done before
-// anything can decide whether it wanted the result.
 type inflatedReader struct {
 	r     io.Reader
 	limit int64
@@ -442,24 +325,11 @@ func (c *inflatedReader) Read(p []byte) (int, error) {
 	n, err := c.r.Read(p)
 	c.read += int64(n)
 	if c.read > c.limit {
-		// n discarded along with the rest: the archive is being refused, so
-		// the bytes this call produced have no further reader.
 		return 0, fmt.Errorf("the release archive expands past the %d-byte cap", c.limit)
 	}
 	return n, err
 }
 
-// extractZipBinary reads the binary out of a zip. Only root entries count:
-// goreleaser puts the binary at the archive root, so an entry that could only
-// be reached by traversing out of the archive is not a file ghost published. As
-// on the tar path, what is accepted has to be a regular non-empty file.
-//
-// What an entry IS comes from the bits its own header carries rather than
-// from the reader's reading of them, because the reader translates those bits
-// only for an archive stamped Unix or macOS (see zipEntryType).
-//
-// A zip is random-access, so an entry this loop skips is never inflated at
-// all; the one entry it opens is bounded directly, by the same cap.
 func extractZipBinary(archive []byte) ([]byte, error) {
 	zr, err := zip.NewReader(bytes.NewReader(archive), int64(len(archive)))
 	if err != nil {
@@ -489,18 +359,6 @@ func extractZipBinary(archive []byte) ([]byte, error) {
 	return nil, fmt.Errorf("ghost binary not found in archive")
 }
 
-// The Unix file-type bits a zip entry's external attributes can carry, and the
-// values this check reads.
-//
-// Go's zip reader translates those bits into a file mode ONLY when the
-// archive's creator system is Unix or macOS. For FAT, NTFS or VFAT it reports
-// every non-directory entry as a regular file, whatever the bits say — so a
-// link stamped that way reads as an ordinary file, its target text comes back
-// as the binary, and Replace would install a short text file at the install
-// path. The bits are the only place the format records what an entry IS, so
-// they are read here rather than through the reader's translation of them: the
-// creator system is the archive's own claim about itself, and an entry's kind
-// must not depend on how well that claim is believed.
 const (
 	zipTypeMask      = 0o170000
 	zipTypeRegular   = 0o100000
@@ -512,21 +370,10 @@ const (
 	zipTypeBlock     = 0o060000
 )
 
-// zipEntryType reports the Unix file type the entry's external attributes
-// record, or 0 when they record none. The type is in the high half of the
-// external attributes, which is where a Unix or macOS creator puts the mode —
-// and where a FAT, NTFS or VFAT creator's bits are read as nothing at all.
 func zipEntryType(f *zip.File) uint32 {
 	return (f.ExternalAttrs >> 16) & zipTypeMask
 }
 
-// zipEntryIsRegular reports whether the entry is a regular file.
-//
-// An entry that records no type at all is one. A DOS-created archive carries
-// only an attribute byte — which says what the entry is for the operating
-// system it was made on, and nothing more — and the reader reports such an
-// entry as a regular file too, so refusing it would refuse the archive shape
-// a Windows release can carry.
 func zipEntryIsRegular(f *zip.File) bool {
 	switch zipEntryType(f) {
 	case 0, zipTypeRegular:
@@ -536,9 +383,6 @@ func zipEntryIsRegular(f *zip.File) bool {
 	}
 }
 
-// zipEntryKind names the kind of an entry for a refusal message, so "not a
-// regular file" says which kind was found. It is only asked about an entry
-// that is not a regular file.
 func zipEntryKind(f *zip.File) string {
 	switch zipEntryType(f) {
 	case zipTypeLink:
@@ -556,38 +400,20 @@ func zipEntryKind(f *zip.File) string {
 	}
 }
 
-// asideSuffix is the fixed name an aside takes when it can be cleared before the
-// move. When that name cannot be removed, the aside falls back to a unique
-// `<target>.old-<timestamp>` sibling so the locked file is not overwritten.
 const asideSuffix = ".old"
 
-// Seams over the two filesystem operations installNewBinary depends on, so a
-// test can drive the "an aside is locked and cannot be removed" path without a
-// locked file or a running client. Production never reassigns them.
 var (
 	removeFile = os.Remove
 	renameFile = os.Rename
 )
 
-// writeStaged writes the replacement binary into the staged file. It is a var
-// only so a test can interrupt a staged write part-way: that is the one failure
-// the staging file exists to survive, and no test can provoke it without a full
-// disk or a permission the fixture has to revoke first. Production never
-// reassigns it.
 var writeStaged = func(f *os.File, newBinary []byte) error {
 	_, err := f.Write(newBinary)
 	return err
 }
 
 // Replace atomically replaces the binary at targetPath.
-//
-// The replacement is staged in a temporary file beside the target and then
-// renamed into place, so the install path only ever holds one whole binary: a
-// write that is interrupted, a download that turns out to be wrong, or a disk
-// that fills all fail against the staging file, and the installed binary is
-// left exactly as it was.
 func Replace(targetPath string, newBinary []byte) (string, error) {
-	// Resolve symlinks so we replace the actual file.
 	resolved, err := resolveSymlinks(targetPath)
 	if err != nil {
 		return "", err
@@ -598,7 +424,6 @@ func Replace(targetPath string, newBinary []byte) (string, error) {
 		return "", fmt.Errorf("stat %s: %w", resolved, err)
 	}
 
-	// Write to temp file next to target, then rename.
 	dir := dirOf(resolved)
 	tmp, err := os.CreateTemp(dir, ".ghost-update-*")
 	if err != nil {
@@ -627,16 +452,6 @@ func Replace(targetPath string, newBinary []byte) (string, error) {
 	return note, nil
 }
 
-// installNewBinary puts the staged file at targetPath.
-//
-// asideFirst is the platform policy, and it is the only build-tagged decision
-// in the install path. On Windows the loader holds a running executable's
-// image open without delete sharing, so renaming over it fails with "Access is
-// denied" — the command whose whole job is repairing an install could never
-// repair a Windows one. Windows does allow renaming that image, so the old
-// binary moves aside first and the staged file then takes a path nothing holds.
-// Unix renames atomically over the target, and doing the same dance there would
-// only open a window in which the install path does not exist.
 func installNewBinary(tmpPath, targetPath string, asideFirst bool) (string, error) {
 	if !asideFirst {
 		if err := renameFile(tmpPath, targetPath); err != nil {
@@ -680,20 +495,11 @@ func installNewBinary(tmpPath, targetPath string, asideFirst bool) (string, erro
 	if lockedErr != nil {
 		notes = append(notes, fmt.Sprintf("could not remove %s: %v (a running ghost mcp client may hold the old binary, and restarting the client releases it)", fixedAside, lockedErr))
 	}
-	// The aside a successful install just created is the image the upgrading
-	// process is still running from on every platform that needed the move, so
-	// the remove here fails on every normal upgrade of that kind and warning
-	// about it would train the reader to ignore warnings. It stays
-	// best-effort and silent; only the fixed `.old` an EARLIER run left behind
-	// is reported, because nothing in this run can account for that one.
 	_ = removeFile(aside) //nolint:errcheck
 	sweepOldAsides(targetPath)
 	return strings.Join(notes, "; "), nil
 }
 
-// sweepOldAsides removes the unique `<target>.old-<suffix>` siblings of a
-// target, never the fixed `<target>.old` itself. Every removal is best effort:
-// a locked aside is left for a later run.
 func sweepOldAsides(targetPath string) {
 	dir := filepath.Dir(targetPath)
 	base := filepath.Base(targetPath)
@@ -729,26 +535,9 @@ func sweepOldAsides(targetPath string) {
 	}
 }
 
-// maxSymlinkHops bounds chain resolution so a self-referential or
-// mutually-referential symlink pair cannot spin forever.
 const maxSymlinkHops = 32
 
-// resolveSymlinks returns the real filesystem path behind path.
-//
-// os.Readlink alone is not sufficient here: it returns a *relative* target
-// verbatim, and a relative target is only meaningful relative to the
-// directory holding the symlink. Self-update runs from wherever the user
-// invoked `ghost upgrade`, so resolving against the process working directory
-// would point at a file that has nothing to do with the install. A single
-// readlink also stops at the first hop of a chain and reports a symlink
-// rather than the binary, and a broken link resolves "successfully" only to
-// fail later with an error naming a path the user never typed.
-//
-// Every path returned is absolute, so the caller's working directory can
-// never change where the update lands.
 func resolveSymlinks(path string) (string, error) {
-	// Anchor once, against the path the caller actually gave us. Everything
-	// after this is derived from that anchor rather than from cwd.
 	current, err := filepath.Abs(path)
 	if err != nil {
 		return "", fmt.Errorf("make %s absolute: %w", path, err)
@@ -768,7 +557,6 @@ func resolveSymlinks(path string) (string, error) {
 		}
 
 		if info.Mode()&os.ModeSymlink == 0 {
-			// A regular file or directory: this is the real target.
 			return current, nil
 		}
 
@@ -777,24 +565,12 @@ func resolveSymlinks(path string) (string, error) {
 			return "", fmt.Errorf("readlink %s: %w", current, err)
 		}
 		if !filepath.IsAbs(target) {
-			// Relative to the directory holding the link, never to cwd.
 			target = filepath.Join(dirOf(current), target)
 		}
 		current = target
 	}
 }
 
-// dirOf reports the directory holding path, with filepath.Dir's exact
-// semantics. A hand-rolled separator scan got a path directly under a
-// filesystem root wrong: it returned "" for "/ghost" (and "C:" for
-// "C:\ghost.exe"), where the parent is the root itself. A relative result
-// breaks resolveSymlinks' guarantee that every path it returns is absolute,
-// and makes Replace stage its temp file in os.TempDir() rather than beside the
-// target — the rename then fails with EXDEV when the two are on different
-// filesystems.
-//
-// It also treated a backslash as a separator on every platform, which on Unix
-// truncates a perfectly valid filename that contains one.
 func dirOf(path string) string {
 	return filepath.Dir(path)
 }
