@@ -1,30 +1,4 @@
-// Command locomo runs Ghost's retrieval stack against the LoCoMo benchmark
-// (snap-research/LoCoMo, locomo10.json) and reports turn- and session-level
-// retrieval metrics against the dataset's official evidence labels — no LLM
-// judge, fully deterministic given a fixed embedding cache. This is the
-// comparability layer (#340): LongMemEval-S remains Ghost's primary benchmark;
-// this exists because competitors publish on LoCoMo.
-//
-// Per conversation (sample_id), every dialogue turn is ingested as a memory
-// into a fresh in-memory store ("[Session N | date] Speaker: text"), Ghost's
-// production search ranks memories for each question, and the ranking is
-// scored against the question's evidence dia_ids at turn level plus a
-// collapsed session-level hit@5. Category 5 (adversarial) carries no evidence
-// labels and is excluded from scoring, counted separately.
-//
-// Usage:
-//
-//	go run ./bench/locomo --data .cache/locomo/locomo10.json \
-//	    --condition fts|vector|hybrid [--ollama http://localhost:11434] \
-//	    [--embed-cache ~/.cache/ghost-bench/locomo-cache.jsonl] \
-//	    [--conversations N] [--retrieval-out ranked.jsonl] [--lmeval-out ds.json] \
-//	    [--floors "r5=0.60,mrr10=0.50"]
-//
-// --retrieval-out emits the phase4-compatible shape ({question_id,
-// ranked_items:[{corpus_id, text}]}) with corpus_id = "<sample>-sNN" session
-// ids. --lmeval-out writes a LongMemEval-schema dataset so phase4's
-// merge_retrieval.py and phase4_run.py run VERBATIM against it for the judged
-// end-to-end number.
+// Command locomo runs Ghost retrieval against the LoCoMo benchmark and reports metrics.
 package main
 
 import (
@@ -52,8 +26,6 @@ type locoTurn struct {
 	Text    string `json:"text"`
 }
 
-// flexString tolerates LoCoMo answers that are numbers (temporal counts)
-// rather than strings.
 type flexString string
 
 func (f *flexString) UnmarshalJSON(b []byte) error {
@@ -86,9 +58,8 @@ type locoConversation struct {
 	Conversation map[string]json.RawMessage `json:"conversation"`
 }
 
-// locoSession is one content-bearing session of a conversation.
 type locoSession struct {
-	ID    string // "<sample>-sNN", stable across outputs
+	ID    string
 	Num   int
 	Date  string
 	Turns []locoTurn
@@ -101,9 +72,6 @@ var categoryNames = map[int]string{
 	4: "open-domain",
 }
 
-// loadConversation extracts content-bearing sessions (sorted by number) and
-// their dates from a LoCoMo conversation record. Sessions present only as a
-// date_time key with no turn list are skipped.
 func loadConversation(c locoConversation) []locoSession {
 	dateOf := map[int]string{}
 	maxNum := 0
@@ -281,10 +249,6 @@ func main() {
 	}
 }
 
-// --- store + retrieval -------------------------------------------------
-
-// openStore creates a fresh in-memory store and ingests every turn as a
-// memory, returning the memID→turn metadata the ranker maps back through.
 func openStore(ctx context.Context, project string, sessions []locoSession, condition string, embedder *cachedEmbedder) (*memory.Store, map[string]rankedTurn, func(), error) {
 	db, err := memory.OpenDB(":memory:")
 	if err != nil {
@@ -349,8 +313,6 @@ type rankedTurn struct {
 	Text      string
 }
 
-// rankTurns runs the requested search condition over the pre-ingested store
-// and returns turns in rank order.
 func rankTurns(ctx context.Context, store *memory.Store, project, question, condition string, embedder *cachedEmbedder, memMeta map[string]rankedTurn) ([]rankedTurn, error) {
 	var rankedIDs []string
 	switch condition {
@@ -396,12 +358,6 @@ func rankTurns(ctx context.Context, store *memory.Store, project, question, cond
 	return out, nil
 }
 
-// --- scoring --------------------------------------------------------------
-
-// scoreTurns scores a question's ranking against its gold dia_ids. The r*
-// returns are hit rates: 1 when any gold turn lands in the top-k, not the
-// fraction of gold items retrieved — multi-evidence questions diverge from
-// true recall. MRR/NDCG do account for every gold item.
 func scoreTurns(ranked []rankedTurn, gold map[string]bool) (r1, r5, r10, mrr, ndcg float64) {
 	hitAt := func(k int) float64 {
 		n := 0
@@ -445,8 +401,6 @@ func scoreTurns(ranked []rankedTurn, gold map[string]bool) (r1, r5, r10, mrr, nd
 	return
 }
 
-// scoreSessions reports whether any gold session appears within the top-k
-// distinct sessions of the turn ranking (a session's rank is its best turn).
 func scoreSessions(ranked []rankedTurn, goldSessions map[string]bool, k int) float64 {
 	seen := map[string]bool{}
 	n := 0
@@ -466,10 +420,6 @@ func scoreSessions(ranked []rankedTurn, goldSessions map[string]bool, k int) flo
 	return 0
 }
 
-// --- aggregation / report --------------------------------------------------
-
-// agg accumulates per-question metric sums; overallMetrics turns them into
-// means. sr5 is the session-level hit@5.
 type agg struct {
 	n                           int
 	r1, r5, r10, mrr, ndcg, sr5 float64
@@ -477,8 +427,6 @@ type agg struct {
 
 func newAgg() *agg { return &agg{} }
 
-// aggFor returns the named accumulator, creating it on first use (perCat /
-// perConv maps hold nil until a question lands in that bucket).
 func aggFor(m map[string]*agg, key string) *agg {
 	if m[key] == nil {
 		m[key] = newAgg()
@@ -591,8 +539,6 @@ func printAgg(name string, a *agg) {
 		name, a.n, m["r1"], m["r5"], m["r10"], m["mrr10"], m["ndcg10"], m["sr5"])
 }
 
-// --- output shaping --------------------------------------------------------
-
 func sessionRankedItems(ranked []rankedTurn, sessionText map[string]string) []map[string]any {
 	seen := map[string]bool{}
 	items := []map[string]any{}
@@ -627,9 +573,6 @@ func lmevalEntry(qid, qType string, q locoQA, sessions []locoSession, goldSessio
 		}
 		sessionsOut = append(sessionsOut, turns)
 	}
-	// question_date = last content-bearing session's date: LoCoMo questions
-	// are posed at the end of the conversation, and upstream prepare_prompt
-	// uses it as the prompt's "Current Date".
 	questionDate := ""
 	if len(sessions) > 0 {
 		questionDate = sessions[len(sessions)-1].Date

@@ -1,4 +1,3 @@
-// bench/memoryagentbench/main.go
 package main
 
 import (
@@ -17,12 +16,8 @@ import (
 	"github.com/wcatz/ghost/internal/supersede"
 )
 
-// defaultSources is the v1 scope: the two smallest fact_sh haystacks.
-// sh_64k/sh_262k are reachable via --sources but not run by default — see
-// README.md "Scope and cost".
 var defaultSources = []string{"factconsolidation_sh_6k", "factconsolidation_sh_32k"}
 
-// demoResult is the aggregate row printed per demo.
 type demoResult struct {
 	Source        string  `json:"source"`
 	Questions     int     `json:"questions"`
@@ -35,7 +30,6 @@ type demoResult struct {
 	Created       int     `json:"created"`
 }
 
-// perQuestionLine is one line of the --out log.
 type perQuestionLine struct {
 	Source        string `json:"source"`
 	QAPairID      string `json:"qa_pair_id"`
@@ -45,16 +39,8 @@ type perQuestionLine struct {
 	SupersedeHit5 bool   `json:"supersede_hit@5"`
 }
 
-// resultRowFormat is shared by the header and every printed row so the two
-// can never drift out of column alignment.
 const resultRowFormat = "%-28s %5d %10.3f %10.3f %12.3f %12.3f %6d %6d %6d\n"
 
-// printResultRow prints one demoResult in the table's column format. Called
-// as soon as each demo finishes — not buffered until the end — so an earlier
-// demo's numbers are never lost to stdout if a later demo aborts the run
-// (see runDemo's supersede.Run call: a single classify failure is
-// non-resumable and discards that demo's in-progress work, but never an
-// already-printed row from a prior demo).
 func printResultRow(r demoResult) {
 	fmt.Printf(resultRowFormat, r.Source, r.Questions, r.BaselineAcc1, r.BaselineAcc5,
 		r.SupersedeAcc1, r.SupersedeAcc5, r.Candidates, r.Confirmed, r.Created)
@@ -138,16 +124,6 @@ func main() {
 	}
 }
 
-// seedDemo ingests demo d's facts into store (list-order backdated timestamps)
-// and resolves every document embedding for them before any search runs,
-// returning the seeded memory IDs in fact order. It is split out of runDemo so
-// the embedding half of the harness can be driven without running the
-// supersede classifier, which makes billable LLM calls.
-//
-// The batch is the facts and nothing else: questions are embedded per search
-// through searchQuestion → EmbedQuery, and seeding them here would embed each
-// one in the document space and cache that vector under the question's own
-// text, where no search ever looks.
 func seedDemo(ctx context.Context, store *memory.Store, db *sql.DB, project string, d Demo, embedder *cachedEmbedder) ([]string, error) {
 	facts := splitFacts(d.Context)
 	ids, err := seedFacts(ctx, store, db, project, facts)
@@ -169,10 +145,6 @@ func seedDemo(ctx context.Context, store *memory.Store, db *sql.DB, project stri
 	return ids, nil
 }
 
-// runDemo seeds one demo's facts into a fresh in-memory store (list-order
-// backdated timestamps), embeds everything, runs the real supersede
-// classifier with apply=true, then scores every question under both
-// ablation conditions against that same post-supersede store.
 func runDemo(ctx context.Context, d Demo, cls *supersede.RelationClassifier, embedder *cachedEmbedder,
 	threshold float64, logger *slog.Logger, outFile *os.File) (demoResult, error) {
 	db, err := memory.OpenDB(":memory:")
@@ -180,7 +152,7 @@ func runDemo(ctx context.Context, d Demo, cls *supersede.RelationClassifier, emb
 		return demoResult{}, err
 	}
 	store := memory.NewStore(db, logger)
-	defer store.Close() //nolint:errcheck // store.Close() closes the underlying db too
+	defer store.Close() //nolint:errcheck
 
 	project := "mabench-" + d.Source
 	if err := store.EnsureProject(ctx, project, "/bench/"+project, project); err != nil {
@@ -220,7 +192,6 @@ func runDemo(ctx context.Context, d Demo, cls *supersede.RelationClassifier, emb
 	return aggregateOutcomes(d.Source, outcomes, res), nil
 }
 
-// aggregateOutcomes turns per-question outcomes into the printed summary row.
 func aggregateOutcomes(source string, outcomes []questionOutcome, res supersede.Result) demoResult {
 	r := demoResult{Source: source, Questions: len(outcomes),
 		Candidates: res.Candidates, Confirmed: res.Confirmed, Created: res.Created}

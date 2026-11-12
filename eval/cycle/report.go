@@ -10,7 +10,6 @@ import (
 	"github.com/wcatz/ghost/internal/ai"
 )
 
-// ReportData is everything the Markdown scorecard renders.
 type ReportData struct {
 	Date       string
 	CorpusPath string
@@ -24,7 +23,6 @@ type ReportData struct {
 	Reflect     ReflectReport
 }
 
-// writeReport renders the dated Markdown report under dir and returns its path.
 func writeReport(dir string, d ReportData) (string, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err

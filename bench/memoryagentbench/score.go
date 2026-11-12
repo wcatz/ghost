@@ -6,9 +6,6 @@ import (
 	"github.com/wcatz/ghost/internal/memory"
 )
 
-// answerHit reports whether content contains any of answers as a
-// case-insensitive substring — the same metric shape MemoryAgentBench's own
-// leaderboard uses (substring_exact_match).
 func answerHit(content string, answers []string) bool {
 	lc := strings.ToLower(content)
 	for _, a := range answers {
@@ -22,7 +19,6 @@ func answerHit(content string, answers []string) bool {
 	return false
 }
 
-// topKHit reports whether any of the top k results is an answerHit.
 func topKHit(results []memory.Memory, answers []string, k int) bool {
 	if k > len(results) {
 		k = len(results)

@@ -1,23 +1,4 @@
-// Command evalcycle grades Ghost's staleness pipeline end-to-end. It injects
-// an annotated memory corpus into a scratch-isolated ghost instance through
-// the real MCP save path, runs `ghost supersede`, `ghost resolve`, and
-// `ghost reflect --tier opencode` against it, grades each stage's behavior
-// against the corpus annotations, and writes a Markdown scorecard.
-//
-// Usage:
-//
-//	go run ./eval/cycle [--corpus eval/cycle/corpus/corpus.jsonl]
-//	    [--project acme-migration] [--repo .] [--keep] [--skip-reflect]
-//	    [--drain-timeout 3m] [--ollama http://localhost:11434]
-//	    [--results-dir eval/cycle/results]
-//	    [--floors "supersede_precision=0.60,..."]
-//	    [--opencode-auth-file path/to/auth.json]
-//
-// Every ghost process runs with XDG_DATA_HOME/XDG_CONFIG_HOME inside a
-// throwaway temp dir and with ANTHROPIC_API_KEY stripped, so nothing touches
-// the production DB and classify/consolidate ride the configured CLI path.
-// Set GHOST_OPENCODE_MODEL to pin the opencode subprocess model; when it is
-// empty, the client uses Ghost's explicit opencode/big-pickle default.
+// Command evalcycle grades Ghost's staleness pipeline end-to-end.
 package main
 
 import (
@@ -44,9 +25,9 @@ type config struct {
 	drainTO     time.Duration
 	ollamaURL   string
 	resultsDir  string
-	gradeOnly   string // existing scratch dir: re-grade only (no ghost processes)
-	floors      string // comma-separated metric=min floors over stage P/R
-	authFile    string // opencode auth.json to seed into the scratch data dir
+	gradeOnly   string
+	floors      string
+	authFile    string
 	floorMap    map[string]float64
 }
 
@@ -139,8 +120,6 @@ func run(cfg config) error {
 	meta := fmt.Sprintf("skip_reflect: %v\n", cfg.skipReflect)
 	_ = os.WriteFile(filepath.Join(scratch, "meta.yaml"), []byte(meta), 0o644)
 
-	// The embedding worker lives INSIDE the ghost mcp process — the session
-	// must stay open until embeddings drain or nothing will ever embed.
 	fmt.Println("waiting for embeddings to drain...")
 	if err := waitForEmbeddings(ctx, cfg.ollamaURL, dbPath, cfg.project, cfg.drainTO); err != nil {
 		return err
@@ -157,9 +136,6 @@ func run(cfg config) error {
 	}
 
 	fmt.Println("stage: supersede")
-	// Explicit deadlines: the CLI LLM clients only apply their own short
-	// default timeout when the caller's context has none — a deadline here
-	// both bounds the stage and lets classify calls run past that default.
 	supCtx, supCancel := context.WithTimeout(ctx, 8*time.Minute)
 	supOut, supErrOut, err := runGhost(supCtx, env, ghostBin, "supersede", cfg.project, "--apply")
 	supCancel()
@@ -190,8 +166,6 @@ func run(cfg config) error {
 			return fmt.Errorf("pre-reflect state: %w", ferr)
 		}
 		refCtx, refCancel := context.WithTimeout(ctx, 15*time.Minute)
-		// --allow-drops: in the scratch DB, deletions of unreferenced memories
-		// are data the reflect grader measures, not production harm.
 		refOut, refErrOut, rerr := runGhost(refCtx, env, ghostBin, "reflect", cfg.project, "--tier", "opencode", "--apply", "--allow-drops")
 		refCancel()
 		if rerr != nil && strings.Contains(rerr.Error(), "SQLITE_BUSY") {
@@ -226,7 +200,6 @@ func run(cfg config) error {
 	return failOnFloors(cfg.floorMap, rep)
 }
 
-// stageMetrics flattens the graded stages into the key map -floors checks.
 func stageMetrics(rep ReportData) map[string]float64 {
 	return map[string]float64{
 		"supersede_precision": rep.Supersede.Precision(),
@@ -236,10 +209,6 @@ func stageMetrics(rep ReportData) map[string]float64 {
 	}
 }
 
-// failOnFloors returns an error describing every floor violation so CI fails
-// AFTER the report is written — artifacts must exist for triage even when the
-// grade is bad. Floors are never exact-match assertions: LLM stages are
-// nondeterministic (observed resolve R wobble ±0.25 across identical inputs).
 func failOnFloors(floors map[string]float64, rep ReportData) error {
 	if len(floors) == 0 {
 		return nil
@@ -254,9 +223,6 @@ func failOnFloors(floors map[string]float64, rep ReportData) error {
 	return nil
 }
 
-// gradeOnlyRun re-grades a previously completed (kept) run: fetches the final
-// memory state from that scratch DB and re-parses the saved raw stage outputs,
-// then writes a fresh report. No ghost processes are started.
 func gradeOnlyRun(cfg config) error {
 	entries, err := corpus.Load(cfg.corpusPath)
 	if err != nil {
@@ -278,8 +244,6 @@ func gradeOnlyRun(cfg config) error {
 		ScratchDir:  cfg.gradeOnly,
 		SkipReflect: cfg.skipReflect,
 	}
-	// Raw outputs and run metadata are bound to the scratch dir — a regrade
-	// can never mix outputs from a different run or silently skip a stage.
 	supOut, err := os.ReadFile(filepath.Join(cfg.gradeOnly, "supersede.out.txt"))
 	if err != nil {
 		return fmt.Errorf("supersede output missing from scratch (did the stage run?): %w", err)
@@ -312,14 +276,12 @@ func gradeOnlyRun(cfg config) error {
 	return failOnFloors(cfg.floorMap, rep)
 }
 
-// writeRaw persists one stage's raw CLI output next to the report so misses
-// can be judged against exactly what the stage printed.
 func writeRaw(dir, stage, out string) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return
 	}
 	name := filepath.Join(dir, time.Now().Format("2006-01-02")+"-"+stage+".out.txt")
-	_ = os.WriteFile(name, []byte(out), 0o644) //nolint:errcheck // diagnostics only
+	_ = os.WriteFile(name, []byte(out), 0o644) //nolint:errcheck
 }
 
 func reportStage(name string, st Stage) {
@@ -340,12 +302,6 @@ func reportReflect(rr ReflectReport) {
 	}
 }
 
-// scratchEnv builds the child-process env for ghost: inherited vars minus any
-// pre-existing XDG overrides and ANTHROPIC_API_KEY, plus the scratch pair. The
-// strip prevents a direct Anthropic credential from being inherited; current
-// Ghost still routes memory management through its CLI harness. OPENCODE_API_KEY
-// remains available to the eval's opencode child, where Ghost selects it as that
-// backend's explicit auth path.
 func scratchEnv(scratch string) []string {
 	env := make([]string, 0, len(os.Environ())+2)
 	for _, kv := range os.Environ() {
@@ -362,9 +318,6 @@ func scratchEnv(scratch string) []string {
 	)
 }
 
-// runGhost runs one ghost CLI command in the scratch environment, returning
-// stdout and stderr separately — stderr carries warnings (e.g. the guarded-
-// drop audit) worth persisting even when the command succeeds.
 func runGhost(ctx context.Context, env []string, bin string, args ...string) (string, string, error) {
 	cmd := exec.CommandContext(ctx, bin, args...)
 	cmd.Env = env
@@ -377,8 +330,6 @@ func runGhost(ctx context.Context, env []string, bin string, args ...string) (st
 	return out.String(), errb.String(), nil
 }
 
-// writeIDsFile persists the corpus-key → memory-id mapping inside the kept
-// scratch dir so --grade-only can re-map CLI id prefixes to keys later.
 func writeIDsFile(scratch string, ids map[string]string) error {
 	b, err := json.MarshalIndent(ids, "", "  ")
 	if err != nil {

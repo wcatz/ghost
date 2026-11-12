@@ -18,10 +18,6 @@ import (
 const embedModel = "nomic-embed-text:v1.5"
 const embedBatchSize = 64
 
-// cachedEmbedder resolves text embeddings through an append-only JSONL cache
-// keyed by the hash of the role-prefixed input (see documentInput/queryInput),
-// batching cache misses to Ollama. Shared sessions across questions (and across
-// runs) are embedded exactly once.
 type cachedEmbedder struct {
 	ollamaURL string
 	client    *http.Client
@@ -54,7 +50,7 @@ func newCachedEmbedder(ollamaURL, cachePath string) (*cachedEmbedder, error) {
 	for sc.Scan() {
 		var line cacheLine
 		if err := json.Unmarshal(sc.Bytes(), &line); err != nil {
-			continue // torn tail line from an interrupted run; recomputed on miss
+			continue
 		}
 		e.cache[line.Hash] = line.Vector
 	}
@@ -62,12 +58,11 @@ func newCachedEmbedder(ollamaURL, cachePath string) (*cachedEmbedder, error) {
 		_ = f.Close()
 		return nil, fmt.Errorf("read embed cache: %w", err)
 	}
-	if _, err := f.Seek(0, 2); err != nil { // append from the end
+	if _, err := f.Seek(0, 2); err != nil {
 		_ = f.Close()
 		return nil, err
 	}
-	// A torn tail line (interrupted run) was skipped by the loader above;
-	// terminate it so the next append doesn't fuse into an unparseable line.
+	// Terminate a torn tail line so the next append stays parseable.
 	if st, statErr := f.Stat(); statErr == nil && st.Size() > 0 {
 		last := make([]byte, 1)
 		if _, readErr := f.ReadAt(last, st.Size()-1); readErr == nil && last[0] != '\n' {
@@ -95,24 +90,10 @@ func hashContent(s string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// documentInput and queryInput are the exact strings sent to Ollama for the
-// two roles, and therefore the text the cache is keyed on: the task prefix
-// changes every vector the model emits (embedding.VectorIdentity folds it into
-// the stored identity), so a key over the raw text would hand back a vector
-// embedded without it.
-//
-// Both go through the helpers Client.EmbedDocument and Client.EmbedQuery build
-// their requests from, rather than repeating the prefix here, so the harness
-// cannot drift into a vector space production never searches.
 func documentInput(text string) string { return embedding.PrefixedDocument(embedModel, text) }
 func queryInput(text string) string    { return embedding.PrefixedQuery(embedModel, text) }
 
-// EnsureBatch resolves every document into the cache, batching misses to
-// Ollama. texts are stored turns (or about to be stored), so each is embedded
-// in the document role. Questions must not be passed here: each is embedded
-// per search through EmbedQuery, and a question seeded into this batch would
-// be embedded as a document and cached under the query's own text — a vector
-// no search ever looks up.
+// EnsureBatch resolves every document text into the cache.
 func (e *cachedEmbedder) EnsureBatch(ctx context.Context, texts []string) error {
 	inputs := make([]string, len(texts))
 	for i, t := range texts {
@@ -121,9 +102,6 @@ func (e *cachedEmbedder) EnsureBatch(ctx context.Context, texts []string) error 
 	return e.ensure(ctx, inputs)
 }
 
-// ensure resolves inputs already in their final, role-prefixed form: the cache
-// key and the Ollama payload are the same string, so a hit means "this exact
-// text was embedded in this exact role".
 func (e *cachedEmbedder) ensure(ctx context.Context, inputs []string) error {
 	var missing []string
 	seen := make(map[string]bool)
@@ -157,16 +135,12 @@ func (e *cachedEmbedder) ensure(ctx context.Context, inputs []string) error {
 	return nil
 }
 
-// EmbedDocument returns the cached vector for text that is stored and
-// searched over, resolving it remotely on a miss. The counterpart of
-// production's Client.EmbedDocument.
+// EmbedDocument returns the document-role vector for text.
 func (e *cachedEmbedder) EmbedDocument(ctx context.Context, text string) ([]float32, error) {
 	return e.embedInput(ctx, documentInput(text))
 }
 
-// EmbedQuery returns the cached vector for a search query, resolving it
-// remotely on a miss. Only vectors from here may be compared against stored
-// ones — the counterpart of production's Client.EmbedQuery.
+// EmbedQuery returns the query-role vector for text.
 func (e *cachedEmbedder) EmbedQuery(ctx context.Context, text string) ([]float32, error) {
 	return e.embedInput(ctx, queryInput(text))
 }

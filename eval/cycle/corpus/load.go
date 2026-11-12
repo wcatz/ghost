@@ -1,7 +1,4 @@
 // Package corpus loads and validates the annotated eval-cycle memory corpus.
-// Annotations ride alongside normal save fields but are harness-only: they
-// tell the evalcycle runner what supersede/resolve/reflect SHOULD do so the
-// stages can be graded, and never reach the save path.
 package corpus
 
 import (
@@ -19,13 +16,12 @@ type Entry struct {
 	Content              string   `json:"content"`
 	Importance           float32  `json:"importance"`
 	Tags                 []string `json:"tags,omitempty"`
-	ExpectedSupersededBy string   `json:"expected_superseded_by,omitempty"` // on the OLDER member; value is the newer key
+	ExpectedSupersededBy string   `json:"expected_superseded_by,omitempty"`
 	ExpectedResolved     bool     `json:"expected_resolved,omitempty"`
 	MergeGroup           string   `json:"merge_group,omitempty"`
 }
 
-// TagsOrEmpty returns e.Tags, never nil — the MCP save tool requires a JSON
-// array for tags.
+// TagsOrEmpty returns e.Tags, never nil.
 func (e Entry) TagsOrEmpty() []string {
 	if e.Tags == nil {
 		return []string{}
@@ -38,10 +34,7 @@ var validCategories = map[string]bool{
 	"gotcha": true, "dependency": true, "preference": true, "fact": true,
 }
 
-// Load reads entries from JSONL, skipping blank and '#' comment lines.
-// Duplicate keys are rejected: keys are the grading identity. Unknown JSON
-// fields are rejected too — a typo'd annotation ("expected_resovled") would
-// otherwise silently change grading semantics.
+// Load reads entries from JSONL.
 func Load(path string) ([]Entry, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -80,8 +73,7 @@ func Load(path string) ([]Entry, error) {
 	return out, nil
 }
 
-// Validate checks cross-entry integrity so a malformed corpus fails loudly
-// before any LLM spend rather than grading garbage silently.
+// Validate checks corpus integrity.
 func Validate(entries []Entry) error {
 	keys := make(map[string]bool, len(entries))
 	for i, e := range entries {

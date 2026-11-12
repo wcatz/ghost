@@ -9,9 +9,6 @@ import (
 	"strings"
 )
 
-// floorMetricKeys are the only metric names -floors accepts, matching the
-// graded LLM stages. Reflect is count-graded, not P/R-graded, so it has no
-// floor keys.
 var floorMetricKeys = map[string]bool{
 	"supersede_precision": true,
 	"supersede_recall":    true,
@@ -19,8 +16,6 @@ var floorMetricKeys = map[string]bool{
 	"resolve_recall":      true,
 }
 
-// parseFloors parses a comma-separated "metric=min" spec over the stage
-// precision/recall metrics. Empty spec -> no floors.
 func parseFloors(spec string) (map[string]float64, error) {
 	floors := make(map[string]float64)
 	spec = strings.TrimSpace(spec)
@@ -45,10 +40,6 @@ func parseFloors(spec string) (map[string]float64, error) {
 	return floors, nil
 }
 
-// checkFloors compares stage metrics against floors and returns one
-// description per violation, in key-sorted order. Exact equality is not a
-// violation. Floors over metrics absent from the map always violate — a
-// missing metric means its stage never produced a grade.
 func checkFloors(metrics, floors map[string]float64) []string {
 	keys := make([]string, 0, len(floors))
 	for k := range floors {
@@ -78,11 +69,6 @@ func joinSortedKeys(m map[string]bool) string {
 	return strings.Join(keys, ", ")
 }
 
-// seedOpencodeAuth copies an opencode auth.json into the scratch data dir so
-// the sandboxed opencode subprocess finds credentials under its overridden
-// XDG_DATA_HOME. Empty path is a no-op so local runs can use their existing
-// OpenCode configuration unchanged. The workflow currently supplies
-// OPENCODE_API_KEY; this flag remains useful for other CI or local setups.
 func seedOpencodeAuth(scratch, authFile string) error {
 	if authFile == "" {
 		return nil

@@ -11,14 +11,11 @@ import (
 	"github.com/wcatz/ghost/internal/memory"
 )
 
-// memRow is one memory as it exists in the store, for set-level reflect
-// grading.
 type memRow struct {
 	ID      string
 	Content string
 }
 
-// fetchMemRows reads the project's current memories from the scratch DB.
 func fetchMemRows(dbPath, projectName string) ([]memRow, error) {
 	db, err := memory.OpenDB(dbPath)
 	if err != nil {
@@ -46,16 +43,10 @@ func fetchMemRows(dbPath, projectName string) ([]memRow, error) {
 
 var wsRe = regexp.MustCompile(`\s+`)
 
-// normContent canonicalizes content for matching: lowercase, whitespace
-// collapsed to single spaces.
 func normContent(s string) string {
 	return strings.TrimSpace(wsRe.ReplaceAllString(strings.ToLower(s), " "))
 }
 
-// jaccard scores token-set overlap of two contents, 0..1. Tokenization
-// mirrors memory.tokenizeContent: lowercase, split on non-alphanumerics,
-// drop single-char words — so merged rewrites that preserve substance still
-// score as survivors.
 func jaccard(a, b string) float64 {
 	set := func(s string) map[string]bool {
 		m := map[string]bool{}
@@ -83,30 +74,23 @@ func jaccard(a, b string) float64 {
 }
 
 const (
-	// descendantThreshold: a row this similar to an original cluster member is
-	// treated as that member's descendant — reflect rewrites merged content,
-	// so exact matching is impossible by design.
 	descendantThreshold = 0.55
-	// survivalThreshold: a distractor with no row at least this similar was
-	// dropped entirely.
-	survivalThreshold = 0.65
+	survivalThreshold   = 0.65
 )
 
-// MergeResult reports one merge group's post-reflect outcome.
 type MergeResult struct {
-	Group     string // group id
-	Status    string // collapsed | partial | lost
-	Survivors string // member keys with a close surviving row
+	Group     string
+	Status    string
+	Survivors string
 	Detail    string
 }
 
-// ReflectReport is the set-level grading of the reflect stage.
 type ReflectReport struct {
 	Before             int
 	After              int
 	Groups             []MergeResult
-	DroppedDistractors []string // corpus keys with no near row after reflect
-	DroppedImportant   int      // merge-group members lost with no descendant at all
+	DroppedDistractors []string
+	DroppedImportant   int
 }
 
 func bestJaccard(content string, rows []memRow) float64 {
@@ -119,9 +103,6 @@ func bestJaccard(content string, rows []memRow) float64 {
 	return best
 }
 
-// gradeReflect compares pre- and post-reflect store state against the corpus:
-// each merge group should collapse to exactly one close survivor row;
-// unannotated distractors must survive intact enough to recognize.
 func gradeReflect(entries []corpus.Entry, rowsBefore, rowsAfter []memRow) ReflectReport {
 	rep := ReflectReport{Before: len(rowsBefore), After: len(rowsAfter)}
 
@@ -145,7 +126,7 @@ func gradeReflect(entries []corpus.Entry, rowsBefore, rowsAfter []memRow) Reflec
 			matched := false
 			for _, r := range rowsAfter {
 				if jaccard(m.Content, r.Content) >= descendantThreshold {
-					groupRowIDs[r.ID] = true // same row may match several members
+					groupRowIDs[r.ID] = true
 					matched = true
 				}
 			}
@@ -171,10 +152,6 @@ func gradeReflect(entries []corpus.Entry, rowsBefore, rowsAfter []memRow) Reflec
 		})
 	}
 
-	// Distractor survival: entries with no annotation at all. Supersede-pair
-	// NEWER members are excluded — they are pipeline participants (graded by
-	// the supersede stage and reflect's old-member drop), not stability
-	// fixtures, and reflect is free to rewrite them.
 	targets := map[string]bool{}
 	for _, e := range entries {
 		if e.ExpectedSupersededBy != "" {
@@ -183,7 +160,7 @@ func gradeReflect(entries []corpus.Entry, rowsBefore, rowsAfter []memRow) Reflec
 	}
 	for _, e := range entries {
 		if e.ExpectedResolved || e.ExpectedSupersededBy != "" || e.MergeGroup != "" || targets[e.Key] {
-			continue // graded elsewhere or above
+			continue
 		}
 		if bestJaccard(e.Content, rowsAfter) < survivalThreshold {
 			rep.DroppedDistractors = append(rep.DroppedDistractors, e.Key)

@@ -9,18 +9,13 @@ import (
 	"github.com/wcatz/ghost/eval/cycle/corpus"
 )
 
-// supPair is one parsed supersede output line. The CLI prints 8-char id
-// prefixes; NewerID8 is the first id on the line (source of the arrow) and
-// OtherID8 the second.
 type supPair struct {
 	NewerID8 string
-	Relation string // "supersedes" | "causes"
+	Relation string
 	OtherID8 string
 }
 
 var (
-	// NOTE: stored ids are SQLite hex() output — UPPERCASE. Match and
-	// normalize case-insensitively everywhere.
 	supLineRe = regexp.MustCompile(`(?mi)^\s*([0-9a-f]{8})(?:[0-9a-f]+)?\s+(supersedes|causes)\s+([0-9a-f]{8})(?:[0-9a-f]+)?\s*$`)
 	resLineRe = regexp.MustCompile(`(?mi)^\s*([0-9a-f]{8})(?:[0-9a-f]+)?\s+\[[a-z]+\]`)
 )
@@ -45,16 +40,12 @@ func parseResolveIDs(out string) []string {
 	return ids
 }
 
-// Miss is one graded mismatch, listed verbatim in the report.
 type Miss struct {
-	Key    string // corpus key (or raw ids when unmappable)
-	Kind   string // e.g. "unexpected-link", "missed-link", "unexpected-resolve", "missed-resolve"
+	Key    string
+	Kind   string
 	Detail string
 }
 
-// Stage is a graded precision/recall scorecard for one pipeline stage.
-// Causes links are counted but excluded from scoring (legitimate behavior the
-// corpus does not annotate).
 type Stage struct {
 	Name   string
 	TP     int
@@ -78,8 +69,6 @@ func (s Stage) Recall() float64 {
 	return float64(s.TP) / float64(s.TP+s.FN)
 }
 
-// id8ToKey maps the lowercased first 8 hex chars of every injected memory id
-// to its corpus key. Collisions would make grading ambiguous and are fatal.
 func id8ToKey(ids map[string]string) map[string]string {
 	m := make(map[string]string, len(ids))
 	for key, full := range ids {
@@ -88,7 +77,7 @@ func id8ToKey(ids map[string]string) map[string]string {
 		}
 		prefix := strings.ToLower(full[:8])
 		if prev, ok := m[prefix]; ok && prev != key {
-			continue // collision: leave first, graders treat unknown ids as FP/FN with detail
+			continue
 		}
 		m[prefix] = key
 	}
@@ -106,9 +95,6 @@ func excerpt(s string) string {
 	return first
 }
 
-// gradeSupersede scores parsed supersedes/causes links against the corpus's
-// expected_superseded_by annotations (direction-aware: older→newer must match).
-// Pairs are deduplicated first — a repeated output line must not inflate TP.
 func gradeSupersede(ids map[string]string, entries []corpus.Entry, pairs []supPair) Stage {
 	st := Stage{Name: "supersede"}
 	k2k := id8ToKey(ids)
@@ -123,7 +109,7 @@ func gradeSupersede(ids map[string]string, entries []corpus.Entry, pairs []supPa
 	}
 
 	type exp struct{ older, newer string }
-	expected := make(map[exp]string) // pair -> corpus key of the older member
+	expected := make(map[exp]string)
 	for _, e := range entries {
 		if e.ExpectedSupersededBy != "" {
 			expected[exp{e.Key, e.ExpectedSupersededBy}] = e.Key
@@ -171,8 +157,6 @@ func gradeSupersede(ids map[string]string, entries []corpus.Entry, pairs []supPa
 	return st
 }
 
-// gradeResolve scores confirmed resolved-evidence memories against
-// expected_resolved annotations.
 func gradeResolve(entries []corpus.Entry, confirmedID8s []string, ids map[string]string) Stage {
 	st := Stage{Name: "resolve"}
 	k2k := id8ToKey(ids)

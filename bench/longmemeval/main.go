@@ -1,52 +1,4 @@
-// Command longmemeval runs Ghost's retrieval stack against the LongMemEval-S
-// benchmark (cleaned variant) and reports session-level retrieval metrics
-// against the dataset's official evidence labels — no LLM judge, fully
-// deterministic given a fixed embedding cache.
-//
-// Per question, every haystack turn is ingested as a memory into a fresh
-// in-memory store, Ghost's production search ranks memories for the question,
-// ranked memories map back to their sessions (first occurrence wins), and the
-// unique-session ranking is scored against answer_session_ids with the same
-// judge-free IR metrics `ghost bench` uses. The 30 abstention questions
-// (question_id suffix "_abs") carry no evidence labels and are excluded, per
-// the benchmark's own retrieval-evaluation protocol.
-//
-// Usage:
-//
-//	go run ./bench/longmemeval --data ~/.cache/ghost-bench/longmemeval_s_cleaned.json \
-//	    --condition fts|vector|hybrid [--questions N] [--out per-question.jsonl] \
-//	    [--retrieval-out ranked.jsonl] \
-//	    [--ollama http://localhost:11434] [--embed-cache ~/.cache/ghost-bench/nomic-cache.jsonl] \
-//	    [--embed-deadline 4h30m] [--floors "r5=0.74,ndcg10=0.72"]
-//
-// --retrieval-out emits, per scored question, the full untruncated ranked
-// session list in the official LongMemEval retrieval_results format
-// ({question_id, ranked_items:[{corpus_id, text}]}), the input the Phase 4
-// (end-to-end, leaderboard-comparable) generation stage merges into the
-// dataset. See docs/benchmarks.md.
-//
-// The fts condition needs no embeddings and runs in minutes. vector/hybrid
-// embed every turn and question through local Ollama (nomic-embed-text:v1.5),
-// memoized in an append-only content-hash cache so shared sessions across
-// questions and repeat runs cost nothing.
-//
-// --floors takes a comma-separated metric=min spec over the OVERALL
-// (all-questions) aggregate — accepted keys r1, r5, r10, mrr10, ndcg10,
-// case-insensitive. After the normal table prints, any violated floor logs a
-// "FLOOR VIOLATION: metric = got < min" line to stderr and the process exits
-// 1, for use as a CI regression gate. An unknown key or malformed spec is
-// validated before the benchmark runs and exits 1 immediately.
-//
-// --embed-deadline bounds a cold embedding pass, for the CI job whose cap would
-// otherwise kill it. When the budget is spent, the pass stops at a batch
-// boundary with every vector it did compute appended to the --embed-cache file,
-// prints "cache warmed N/M vectors … re-dispatch" INSTEAD of the metrics table,
-// and exits 3 — distinct from the floor-violation exit 1, so a caller can save
-// the cache and re-dispatch rather than read an unfinished pass as a result.
-// The budget counts only time inside remote embed calls, so a pass whose cache
-// is already complete is never cut off partway through scoring.
-//
-// See docs/benchmarks.md ("Phase 1") for methodology and reporting rules.
+// Command longmemeval runs Ghost retrieval against LongMemEval-S and reports metrics.
 package main
 
 import (
@@ -82,29 +34,16 @@ type question struct {
 	Sessions         [][]turn `json:"haystack_sessions"`
 }
 
-// rankedItem is one entry of the official LongMemEval retrieval_results format
-// (src/generation/run_generation.py reads entry['retrieval_results']
-// ['ranked_items'] as [{corpus_id, text}]). Ghost's corpus_id is the haystack
-// session id verbatim; text is unused by the flat-session reader (merge=none)
-// but kept for schema fidelity.
 type rankedItem struct {
 	CorpusID string `json:"corpus_id"`
 	Text     string `json:"text"`
 }
 
-// retrievalLine is one line of the --retrieval-out log: a question's full,
-// untruncated ranked session list in the official retrieval_results shape,
-// ready to merge into the dataset as the --in_file for the Phase 4 (end-to-end,
-// leaderboard-comparable) generation stage. Unlike perQuestion.TopSessions
-// (capped at 10 for the metrics log), this keeps every ranked session so a
-// downstream topk_context up to 50 has enough to slice.
 type retrievalLine struct {
 	QuestionID     string       `json:"question_id"`
 	RankedSessions []rankedItem `json:"ranked_items"`
 }
 
-// perQuestion is one line of the --out log, per the honest-reporting rules
-// (raw per-question results ship with any published number).
 type perQuestion struct {
 	QuestionID   string   `json:"question_id"`
 	QuestionType string   `json:"question_type"`
@@ -130,15 +69,10 @@ func (a *agg) add(r1, r5, r10, mrr, ndcg float64) {
 	a.ndcg += ndcg
 }
 
-// floorMetricKeys are the only metric names -floors accepts, matching the
-// per-question-type table's columns.
 var floorMetricKeys = map[string]bool{
 	"r1": true, "r5": true, "r10": true, "mrr10": true, "ndcg10": true,
 }
 
-// overallMetrics averages an agg's sums into the canonical, floor-key-named
-// metrics map. agg accumulates sums across questions (see add); this is the
-// only place those sums become means.
 func overallMetrics(a *agg) map[string]float64 {
 	if a.n == 0 {
 		return map[string]float64{"r1": 0, "r5": 0, "r10": 0, "mrr10": 0, "ndcg10": 0}
@@ -153,11 +87,6 @@ func overallMetrics(a *agg) map[string]float64 {
 	}
 }
 
-// parseFloors parses a comma-separated "metric=min" spec (e.g.
-// "r5=0.74,ndcg10=0.72") into a floor map. Metric keys are case-insensitive
-// and must be one of floorMetricKeys. Returns an error on any unknown key or
-// malformed pair — called before the benchmark runs, so a bad spec fails
-// fast. An empty (or all-whitespace) spec parses to an empty, non-nil map.
 func parseFloors(spec string) (map[string]float64, error) {
 	floors := make(map[string]float64)
 	spec = strings.TrimSpace(spec)
@@ -186,10 +115,6 @@ func parseFloors(spec string) (map[string]float64, error) {
 	return floors, nil
 }
 
-// checkFloors compares overall metrics against floors and returns one
-// "FLOOR VIOLATION: ..." message per breach (overall < floor), in stable
-// key-sorted order. Exact equality is not a violation. Empty floors always
-// yields no violations.
 func checkFloors(overall map[string]float64, floors map[string]float64) []string {
 	keys := make([]string, 0, len(floors))
 	for k := range floors {
@@ -208,9 +133,6 @@ func checkFloors(overall map[string]float64, floors map[string]float64) []string
 	return violations
 }
 
-// Exit statuses. A partial pass — one whose embedding pass stopped at
-// -embed-deadline — is deliberately neither success nor failure: it warmed the
-// cache and nothing else, so it gets its own status for the caller to branch on.
 const (
 	exitComplete = 0
 	exitFailure  = 1
@@ -233,8 +155,6 @@ func run() int {
 	includeAbstention := flag.Bool("include-abstention", false, "include abstention questions in Phase 1 scoring (not recommended for IR metrics)")
 	flag.Parse()
 
-	// Parse -floors before any other validation: an unknown key or malformed
-	// spec must fail fast, before the (potentially long) benchmark runs.
 	floors, err := parseFloors(*floorsSpec)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -254,7 +174,6 @@ func run() int {
 		return exitFailure
 	}
 
-	// Search diagnostics (FTS term-cap warnings etc.) would swamp the report.
 	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	start := time.Now()
@@ -272,14 +191,9 @@ func run() int {
 			return exitFailure
 		}
 		defer embedder.Close() //nolint:errcheck
-		// Bounding the embedding pass is what lets a cold CI run save its
-		// progress; the pass below turns a spent budget into a partial exit.
 		embedder.SetDeadline(*embedDeadline)
 	}
 
-	// Resolve the question set once, up front: the partial-run report needs
-	// the same set the scoring loop would have covered, or its "N/M" would
-	// measure a different pass than the one that ran.
 	selected, skippedAbstention := selectedQuestions(questions, *maxQuestions, *includeAbstention)
 
 	var outFile *os.File
@@ -364,24 +278,6 @@ func run() int {
 		}
 	}
 
-	// A partial pass leaves no result artefact behind. The -out and
-	// --retrieval-out files are half-written at this point, and a half-written
-	// JSONL is byte-shaped exactly like a complete one — the Phase 4 pipeline
-	// reads ranked.jsonl without consulting this process's exit status, so it
-	// would judge a subset of the benchmark and publish it as the result. The
-	// same rule the report follows (no metrics, no floors) has to reach the
-	// files that outlive the process.
-	// Close both handles before unlinking, and collect the outcome. Nothing
-	// here can change this pass's status: the pass warmed the cache and
-	// produced no result either way, so a failed unlink is reported by
-	// reportPass (which still returns exitPartial) rather than turned into an
-	// early exitFailure — that would make a cache-warming dispatch
-	// indistinguishable from a floor violation and skip the re-dispatch the
-	// operator needs.
-	//
-	// The `partial` flag is passed in rather than tested here, so the decision
-	// that a COMPLETE pass keeps its result files is part of the same tested
-	// function as the one that deletes them.
 	discarded, survived, discardErr := closeAndDiscardPartialOutputs(partial, []*os.File{outFile, retrievalOutFile}, *outPath, *retrievalOutPath)
 
 	return reportPass(os.Stdout, passReport{
@@ -403,26 +299,11 @@ func run() int {
 	})
 }
 
-// closeAndDiscardPartialOutputs closes the -out / --retrieval-out handles and
-// then discards a partial pass's files, in that order.
-//
-// The order is the point. os.Remove fails on a file this process still holds
-// open on Windows — Go opens without FILE_SHARE_DELETE, so DeleteFile is a
-// sharing violation — and the defers registered when the files were created
-// have not run yet, because a defer fires when run() returns, which is after
-// this call. Closing here is what makes the unlink portable, and it is why the
-// close is a function that tolerates being called again by those defers.
 func closeAndDiscardPartialOutputs(partial bool, handles []*os.File, paths ...string) (removed, survived []string, err error) {
 	closeResultFiles(handles...)
 	return discardPartialOutputs(partial, paths...)
 }
 
-// closeResultFiles closes the -out / --retrieval-out handles, tolerating nils
-// (the flags are optional) and being called twice. Both properties are needed:
-// run() closes them explicitly before discarding a partial pass's files, and the
-// defers registered at creation close them again on the way out. A second
-// os.File.Close on a closed file is harmless, but a nil handle is not, and
-// reaching one would panic rather than report.
 func closeResultFiles(files ...*os.File) {
 	for _, f := range files {
 		if f == nil {
@@ -432,17 +313,6 @@ func closeResultFiles(files ...*os.File) {
 	}
 }
 
-// discardPartialOutputs removes the result files a partial pass left half
-// written, and returns the paths it removed, the paths that survived, and every
-// failure joined. It is a no-op for a complete pass — those files are the
-// deliverable. An empty path (the flag was not passed) and an already-absent
-// file are both skipped rather than errors, so the common partial run — which
-// names no output files at all — reports nothing removed and fails nothing.
-//
-// Every path is attempted, and none of them aborts the rest. -out and
-// --retrieval-out name independent files, and the second is the Phase 4
-// generation input — the artefact this discard exists to protect — so bailing
-// out on the first failure would leave precisely that one half-written.
 func discardPartialOutputs(partial bool, paths ...string) (removed, survived []string, err error) {
 	if !partial {
 		return nil, nil, nil
@@ -465,11 +335,6 @@ func discardPartialOutputs(partial bool, paths ...string) (removed, survived []s
 	return removed, survived, errors.Join(errs...)
 }
 
-// passReport is everything a finished pass reports and needs to report it. It
-// is a struct rather than a dozen parameters because the reporting decision —
-// in particular whether a partial pass is allowed to print a metrics table at
-// all — is the invariant the harness exists to keep, and it has to be
-// reachable by a test that can drive both branches.
 type passReport struct {
 	condition         string
 	overall           *agg
@@ -483,24 +348,11 @@ type passReport struct {
 	partial           bool
 	budget            time.Duration
 	elapsed           time.Duration
-	// discarded names the -out / --retrieval-out files a partial pass removed;
-	// survived and discardErr describe the cleanup failures, if any, whose files
-	// outlived the pass. They are reported but do not change the status.
-	discarded  []string
-	survived   []string
-	discardErr error
+	discarded         []string
+	survived          []string
+	discardErr        error
 }
 
-// reportPass writes a finished pass's report to out and returns its process
-// status.
-//
-// A partial pass — one whose embedding pass stopped at -embed-deadline —
-// prints cache progress and NOTHING else: no table, no per-type rows, no
-// overall row, no floor verdict. It covered a subset of the questions, so
-// every number it could print is a subset average, and a table is the one
-// output a reader (or a log scraper) would take as a benchmark result. The
-// partial branch therefore returns before the table is reached rather than
-// printing it and qualifying it.
 func reportPass(out io.Writer, r passReport) int {
 	if r.partial {
 		// embedder is non-nil on this path: the deadline is only consulted
@@ -557,13 +409,6 @@ func reportPass(out io.Writer, r passReport) int {
 	return exitCode(r.partial, violations)
 }
 
-// selectedQuestions returns the questions a pass actually scores, in dataset
-// order, and how many abstention questions were dropped to get there.
-// Abstention questions carry no evidence labels, so they are excluded unless
-// includeAbstention is set, and maxQuestions (0 = all) caps the count AFTER
-// that exclusion — a cap of 2 means two scored questions, not the first two
-// rows of the file. The scoring loop and the partial-run report both read this,
-// so the "N/M" a partial pass prints describes the pass that actually ran.
 func selectedQuestions(questions []question, maxQuestions int, includeAbstention bool) (selected []question, skippedAbstention int) {
 	for _, q := range questions {
 		if isAbstention(q.QuestionID) && !includeAbstention {
@@ -578,12 +423,6 @@ func selectedQuestions(questions []question, maxQuestions int, includeAbstention
 	return selected, skippedAbstention
 }
 
-// exitCode maps a finished pass to a process status. A partial pass is decided
-// FIRST and unconditionally: it scored some questions and may well sit below
-// every floor, but it never covered the whole set, so those numbers are not a
-// result and must not be reported as one. Returning exitPartial rather than
-// exitFailure is what lets the workflow save the cache and re-dispatch instead
-// of reading a half-finished pass as a regression.
 func exitCode(partial bool, violations []string) int {
 	switch {
 	case partial:
@@ -595,17 +434,7 @@ func exitCode(partial bool, violations []string) int {
 	}
 }
 
-// partialMessage is the whole report of a pass that stopped at its
-// -embed-deadline: how much of the cache this dispatch warmed, and what to do
-// about it. It deliberately reads as progress, never as a score — no metric
-// names, no table, no floor verdict.
 func partialMessage(got, want int, budget, elapsed time.Duration) string {
-	// The budget is echoed as the exact Duration the flag parsed to, at its own
-	// precision: rounding a 500ms budget to "1s" would name a deadline this
-	// pass was not given. A budget is therefore reported in the Duration's own
-	// spelling rather than the flag's — -embed-deadline 300m prints "5h0m0s"
-	// here and "300m" in the workflow's own warning, which are the same
-	// deadline said twice.
 	return fmt.Sprintf("Embedding pass stopped at its %s budget after %s: cache warmed %d/%d vectors. "+
 		"No metrics, no floor check — re-dispatch to continue from this cache.",
 		budget, elapsed.Round(time.Second), got, want)
@@ -642,15 +471,8 @@ func isAbstention(questionID string) bool {
 	return len(questionID) > 4 && questionID[len(questionID)-4:] == "_abs"
 }
 
-// memoryRetrievalLimit is how many memories are retrieved before collapsing to
-// unique sessions — deep enough that 10 distinct sessions are always reachable
-// (haystack turns per session average ~15, so 10 sessions of consecutive hits
-// would need at most ~150).
 const memoryRetrievalLimit = 150
 
-// rankSessionsForQuestion ingests one question's haystack into a fresh store,
-// runs the requested search condition, and returns unique session IDs in
-// retrieval-rank order (a session's rank is its best-ranked turn).
 func rankSessionsForQuestion(ctx context.Context, q question, condition string, embedder *cachedEmbedder) ([]string, error) {
 	db, err := memory.OpenDB(":memory:")
 	if err != nil {
@@ -664,13 +486,6 @@ func rankSessionsForQuestion(ctx context.Context, q question, condition string, 
 		return nil, err
 	}
 
-	// Batch-resolve every embedding this question needs before ingestion, so a
-	// cold cache costs a handful of batched Ollama calls instead of one round
-	// trip per turn. The question is deliberately not in the batch: it is
-	// embedded per search through EmbedQuery, and seeding it here would embed
-	// it in the document space and cache that vector under the question's own
-	// text — a vector no search ever looks up — while the query embed paid for
-	// a second one anyway.
 	if condition != "fts" {
 		var texts []string
 		for _, session := range q.Sessions {
@@ -750,8 +565,6 @@ func rankSessionsForQuestion(ctx context.Context, q question, condition string, 
 	return sessionsInRankOrder(rankedMemoryIDs, memToSession), nil
 }
 
-// sessionsInRankOrder collapses a ranked memory list to unique session IDs,
-// preserving first-occurrence order.
 func sessionsInRankOrder(rankedMemoryIDs []string, memToSession map[string]string) []string {
 	seen := make(map[string]bool)
 	var out []string
