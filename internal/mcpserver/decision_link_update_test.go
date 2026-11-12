@@ -5,16 +5,6 @@ import (
 	"testing"
 )
 
-// The reproduction from the board: a decision is recorded, its companion memory
-// is edited with a source_ref of the caller's own, and the next decision
-// supersedes the first.
-//
-// The edit used to REPLACE the link the companion carried, so the decision had
-// no companion left: the supersede found nothing, answered a plain success with
-// an empty Retirement, and the reversed decision kept ranking with a NULL
-// resolved_at.
-//
-// The link is Ghost's to manage, so an edit that writes a reference keeps it.
 func TestAMemoryUpdateKeepsTheDecisionLinkOnTheCompanion(t *testing.T) {
 	db, _, srv := newStoreWithDB(t)
 	session := connectedClient(t, srv)
@@ -31,7 +21,6 @@ func TestAMemoryUpdateKeepsTheDecisionLinkOnTheCompanion(t *testing.T) {
 	decisionID := labeledID(t, resultText(recorded), "decision_id: ")
 	companionID := labeledID(t, resultText(recorded), "memory_id: ")
 
-	// The edit the decision tool itself points the caller at.
 	updated := callTool(t, session, "ghost_memory_update", map[string]any{
 		"project_id": "abc123",
 		"memory_id":  companionID,
@@ -49,8 +38,6 @@ func TestAMemoryUpdateKeepsTheDecisionLinkOnTheCompanion(t *testing.T) {
 		t.Fatalf("the companion's source_ref is %q, which carries no decision link: the edit dropped it", ref)
 	}
 
-	// The supersede that follows must retire the companion, not answer a clean
-	// success while the reversed decision keeps ranking.
 	superseded := callTool(t, session, "ghost_decision_record", map[string]any{
 		"project_id": "abc123",
 		"title":      "Reverse: use Postgres for the job queue",

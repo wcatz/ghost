@@ -3,20 +3,15 @@ package mcpserver
 import (
 	"context"
 	"fmt"
+	"github.com/wcatz/ghost/internal/memory"
+	"github.com/wcatz/ghost/internal/repo"
 	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
-
-	"github.com/wcatz/ghost/internal/memory"
-	"github.com/wcatz/ghost/internal/repo"
 )
 
-// physTemp is a temporary directory spelled as its physical path. The store
-// records physical paths, so a test that compares what it recorded against what
-// it created must create it that way: on a host whose temp dir sits behind a
-// symlink the two spellings differ.
 func physTemp(t *testing.T) string {
 	t.Helper()
 	dir, err := filepath.EvalSymlinks(t.TempDir())
@@ -25,8 +20,6 @@ func physTemp(t *testing.T) string {
 	}
 	return dir
 }
-
-// physRepoDir is repoDir with the physical spelling of the checkout.
 func physRepoDir(t *testing.T, name, origin string) string {
 	t.Helper()
 	dir, err := filepath.EvalSymlinks(repoDir(t, name, origin))
@@ -35,8 +28,6 @@ func physRepoDir(t *testing.T, name, origin string) string {
 	}
 	return dir
 }
-
-// gitInit makes dir a git checkout with no remote.
 func gitInit(t *testing.T, dir string) {
 	t.Helper()
 	if _, err := exec.LookPath("git"); err != nil {
@@ -51,11 +42,6 @@ func gitInit(t *testing.T, dir string) {
 		t.Fatalf("git init: %v\n%s", err, out)
 	}
 }
-
-// checkoutServer is a server whose working directory is dir, on a shared store.
-// workingDir is captured once at construction from the process directory, so a
-// test sets it the way New would have found it rather than changing the
-// directory of a process that other tests share.
 func checkoutServer(t *testing.T, store *memory.Store, dir string) *Server {
 	t.Helper()
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
@@ -63,7 +49,6 @@ func checkoutServer(t *testing.T, store *memory.Store, dir string) *Server {
 	srv.workingDir = dir
 	return srv
 }
-
 func projectPath(t *testing.T, store *memory.Store, id string) (string, bool) {
 	t.Helper()
 	projects, err := store.ListProjects(context.Background())
@@ -77,7 +62,6 @@ func projectPath(t *testing.T, store *memory.Store, id string) (string, bool) {
 	}
 	return "", false
 }
-
 func saveUnder(t *testing.T, srv *Server, tool, projectID string) string {
 	t.Helper()
 	session := connectedClient(t, srv)
@@ -100,20 +84,15 @@ func saveUnder(t *testing.T, srv *Server, tool, projectID string) string {
 }
 
 // TestNameShapedSaveBindsProjectToCheckout is the #957 regression: a project a
-// save creates from a name must be recorded against the checkout, path and
-// remote, so the session-start resolver finds it from that directory. Both tools
-// open projects through ensureProjectFor.
 func TestNameShapedSaveBindsProjectToCheckout(t *testing.T) {
 	memory.SetDetectRemote(repo.DetectRemote)
 	t.Cleanup(func() { memory.SetDetectRemote(nil) })
 	const origin = "https://github.com/wcatz/notifier.git"
-
 	for _, tool := range []string{"ghost_memory_save", "ghost_decision_record"} {
 		t.Run(tool, func(t *testing.T) {
 			store := testStore(t)
 			checkout := physRepoDir(t, "checkout", origin)
 			saveUnder(t, checkoutServer(t, store, checkout), tool, "notifier")
-
 			if got, ok := projectPath(t, store, "notifier"); !ok || got != checkout {
 				t.Fatalf("notifier path = %q (found %v), want the checkout %q", got, ok, checkout)
 			}
@@ -121,8 +100,6 @@ func TestNameShapedSaveBindsProjectToCheckout(t *testing.T) {
 			if id, _, err := store.ResolveProject(ctx, checkout); err != nil || id != "notifier" {
 				t.Fatalf("resolve from the checkout = %q, %v; want notifier", id, err)
 			}
-			// The remote is bound too: a second checkout of the same repository
-			// resolves to the project through repository identity alone.
 			other := physRepoDir(t, "elsewhere", origin)
 			if id, _, err := store.ResolveProject(ctx, other); err != nil || id != "notifier" {
 				t.Fatalf("resolve from a second checkout = %q, %v; want notifier", id, err)
@@ -130,9 +107,6 @@ func TestNameShapedSaveBindsProjectToCheckout(t *testing.T) {
 		})
 	}
 }
-
-// TestNameShapedSaveBindsPathWithoutARemote pins the other half of the issue: a
-// checkout with no remote still gets its physical path recorded.
 func TestNameShapedSaveBindsPathWithoutARemote(t *testing.T) {
 	store := testStore(t)
 	dir := filepath.Join(physTemp(t), "plain")
@@ -142,9 +116,6 @@ func TestNameShapedSaveBindsPathWithoutARemote(t *testing.T) {
 		t.Fatalf("notifier path = %q (found %v), want %q", got, ok, dir)
 	}
 }
-
-// TestSaveFromAnotherDirectoryDoesNotMoveTheBinding: an existing project is
-// never rebound, whichever directory a later server runs in.
 func TestSaveFromAnotherDirectoryDoesNotMoveTheBinding(t *testing.T) {
 	store := testStore(t)
 	first := filepath.Join(physTemp(t), "first")
@@ -154,7 +125,6 @@ func TestSaveFromAnotherDirectoryDoesNotMoveTheBinding(t *testing.T) {
 	saveUnder(t, checkoutServer(t, store, first), "ghost_memory_save", "notifier")
 	saveUnder(t, checkoutServer(t, store, second), "ghost_memory_save", "notifier")
 	saveUnder(t, checkoutServer(t, store, second), "ghost_decision_record", "notifier")
-
 	if got, _ := projectPath(t, store, "notifier"); got != first {
 		t.Fatalf("notifier path = %q after saves from elsewhere, want %q", got, first)
 	}
@@ -162,20 +132,14 @@ func TestSaveFromAnotherDirectoryDoesNotMoveTheBinding(t *testing.T) {
 		t.Fatal("notifier missing")
 	}
 }
-
-// TestSecondNewNameFromAClaimedCheckoutOpensItsOwnProject: a save for a different
-// new project made from a checkout that already belongs to one must not be folded
-// into it, by path or by remote.
 func TestSecondNewNameFromAClaimedCheckoutOpensItsOwnProject(t *testing.T) {
 	memory.SetDetectRemote(repo.DetectRemote)
 	t.Cleanup(func() { memory.SetDetectRemote(nil) })
 	store := testStore(t)
 	checkout := physRepoDir(t, "checkout", "https://github.com/wcatz/notifier.git")
 	srv := checkoutServer(t, store, checkout)
-
 	saveUnder(t, srv, "ghost_memory_save", "notifier")
 	saveUnder(t, srv, "ghost_memory_save", "billing")
-
 	if got, _ := projectPath(t, store, "notifier"); got != checkout {
 		t.Fatalf("notifier path = %q, want %q", got, checkout)
 	}
@@ -191,13 +155,9 @@ func TestSecondNewNameFromAClaimedCheckoutOpensItsOwnProject(t *testing.T) {
 		t.Fatalf("the checkout resolves to %q, %v; want notifier", id, err)
 	}
 }
-
-// TestNoBindingFromAClaimedRemoteOrAHostileDirectory: the save still succeeds and
-// opens the project the way it always did when the directory cannot be recorded.
 func TestNoBindingFromAClaimedRemoteOrAHostileDirectory(t *testing.T) {
 	memory.SetDetectRemote(repo.DetectRemote)
 	t.Cleanup(func() { memory.SetDetectRemote(nil) })
-
 	t.Run("remote claimed by another project", func(t *testing.T) {
 		store := testStore(t)
 		const origin = "https://github.com/wcatz/notifier.git"
@@ -212,7 +172,6 @@ func TestNoBindingFromAClaimedRemoteOrAHostileDirectory(t *testing.T) {
 			t.Fatalf("notifier path moved to %q", got)
 		}
 	})
-
 	t.Run("directory the project-shape rule refuses", func(t *testing.T) {
 		store := testStore(t)
 		dir := filepath.Join(physTemp(t), "odd«dir")
@@ -223,14 +182,10 @@ func TestNoBindingFromAClaimedRemoteOrAHostileDirectory(t *testing.T) {
 		}
 	})
 }
-
-// TestWorkingDirNeverTheHomeDirectoryOrRoot: neither is a checkout, so neither is
-// ever bound.
 func TestWorkingDirNeverTheHomeDirectoryOrRoot(t *testing.T) {
 	home := physTemp(t)
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
-
 	t.Run("home", func(t *testing.T) {
 		t.Chdir(home)
 		if got := workingDirFromEnv(); got != "" {
@@ -258,11 +213,6 @@ func TestWorkingDirNeverTheHomeDirectoryOrRoot(t *testing.T) {
 		}
 	})
 }
-
-// TestBindNewProjectToCheckoutNeverMerges: the claim test and the insert are one
-// store transaction, so two first saves that both saw the directory unclaimed
-// cannot fold the second project away. The loser is told bound=false and writes
-// nothing; a project a save is about to write under always keeps its row.
 func TestBindNewProjectToCheckoutNeverMerges(t *testing.T) {
 	store := testStore(t)
 	ctx := context.Background()
@@ -271,16 +221,10 @@ func TestBindNewProjectToCheckoutNeverMerges(t *testing.T) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	// A regular file is not a checkout, and the path is owned by the test so the
-	// case cannot depend on what a host happens to have at a fixed location: the
-	// test used to spell this as "/tmp/x", which passes only while nothing is
-	// there. EvalSymlinks resolves a file exactly as it resolves a directory, so
-	// the bind has to ask the filesystem rather than the resolved string.
 	file := filepath.Join(root, "not-a-directory")
 	if err := os.WriteFile(file, []byte("file"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-
 	first, err := store.BindNewProjectToCheckout(ctx, "notifier", dir, "notifier", "")
 	if err != nil || !first {
 		t.Fatalf("first bind = %v, %v; want true", first, err)
@@ -305,11 +249,6 @@ func TestBindNewProjectToCheckoutNeverMerges(t *testing.T) {
 		t.Fatalf("notifier path = %q, want %q", got, dir)
 	}
 }
-
-// TestSaveKeepsItsProjectRowWhenTheDirectoryRecordsAnotherRemote: a project that
-// records this directory with a remote the checkout no longer reports is
-// invisible to the resolver but still owns the path. The save must open its own
-// project, with a row, and leave the owner alone.
 func TestSaveKeepsItsProjectRowWhenTheDirectoryRecordsAnotherRemote(t *testing.T) {
 	memory.SetDetectRemote(repo.DetectRemote)
 	t.Cleanup(func() { memory.SetDetectRemote(nil) })
@@ -320,7 +259,6 @@ func TestSaveKeepsItsProjectRowWhenTheDirectoryRecordsAnotherRemote(t *testing.T
 	if err := store.EnsureProjectWithRepo(ctx, "owner", dir, "owner", "https://github.com/acme/old.git"); err != nil {
 		t.Fatal(err)
 	}
-
 	for _, tool := range []string{"ghost_memory_save", "ghost_decision_record"} {
 		saveUnder(t, checkoutServer(t, store, dir), tool, "notifier")
 	}
@@ -331,11 +269,6 @@ func TestSaveKeepsItsProjectRowWhenTheDirectoryRecordsAnotherRemote(t *testing.T
 		t.Fatalf("owner path = %q, want %q", got, dir)
 	}
 }
-
-// TestBindNewProjectToCheckoutDeclinesAnOverlappingClaim: the containment guards
-// `ghost project bind` applies. A directory holding another project's checkout
-// would claim every clone beneath it, and a directory inside a project that
-// records no remote is already answered for by that project.
 func TestBindNewProjectToCheckoutDeclinesAnOverlappingClaim(t *testing.T) {
 	store := testStore(t)
 	ctx := context.Background()
@@ -344,14 +277,12 @@ func TestBindNewProjectToCheckoutDeclinesAnOverlappingClaim(t *testing.T) {
 	if err := os.MkdirAll(child, 0o755); err != nil {
 		t.Fatal(err)
 	}
-
 	if err := store.EnsureProjectWithRepo(ctx, "infra", child, "infra", ""); err != nil {
 		t.Fatal(err)
 	}
 	if ok, err := store.BindNewProjectToCheckout(ctx, "infra2", parent, "infra2", ""); err != nil || ok {
 		t.Fatalf("bind of a directory holding another project = %v, %v; want false", ok, err)
 	}
-
 	nested := filepath.Join(child, "sub", "dir-longer-than-ten")
 	if err := os.MkdirAll(nested, 0o755); err != nil {
 		t.Fatal(err)
@@ -365,9 +296,6 @@ func TestBindNewProjectToCheckoutDeclinesAnOverlappingClaim(t *testing.T) {
 		}
 	}
 }
-
-// TestBindNewProjectToCheckoutJudgesThePhysicalPath: the guards compare physical
-// paths, so a symlinked spelling of a claimed directory is the same claim.
 func TestBindNewProjectToCheckoutJudgesThePhysicalPath(t *testing.T) {
 	store := testStore(t)
 	ctx := context.Background()
@@ -390,12 +318,6 @@ func TestBindNewProjectToCheckoutJudgesThePhysicalPath(t *testing.T) {
 		t.Fatalf("bind of a symlinked spelling of a claimed directory = %v, %v; want false", ok, err)
 	}
 }
-
-// TestSaveBindsOnlyAGitCheckoutsTopLevel: the server's directory is bound only
-// when it is inside a git checkout, and then as that checkout's top level. A
-// plain directory, a directory that merely holds checkouts, the home directory
-// and every ancestor of it are declined: a project with no remote recorded there
-// would answer for the whole subtree. A save is never refused for it.
 func TestSaveBindsOnlyAGitCheckoutsTopLevel(t *testing.T) {
 	t.Run("a directory inside a checkout binds the top level", func(t *testing.T) {
 		store := testStore(t)
@@ -439,13 +361,11 @@ func TestSaveBindsOnlyAGitCheckoutsTopLevel(t *testing.T) {
 		}
 		t.Setenv("HOME", home)
 		t.Setenv("USERPROFILE", home)
-		// The checkout is an ancestor of home.
 		store := testStore(t)
 		saveUnder(t, checkoutServer(t, store, top), "ghost_memory_save", "notifier")
 		if got, ok := projectPath(t, store, "notifier"); !ok || got == top {
 			t.Fatalf("notifier path = %q (found %v); an ancestor of home must not be recorded", got, ok)
 		}
-		// The checkout is home itself.
 		gitInit(t, home)
 		store = testStore(t)
 		saveUnder(t, checkoutServer(t, store, home), "ghost_memory_save", "notifier")
@@ -454,11 +374,6 @@ func TestSaveBindsOnlyAGitCheckoutsTopLevel(t *testing.T) {
 		}
 	})
 }
-
-// TestBindNewProjectToCheckoutDeclinesARemoteOnlyClaim pins the claim query's
-// remote arm directly: another project records the remote at a different path,
-// so the directory is unclaimed by path and the bind still declines, with no
-// error and no row.
 func TestBindNewProjectToCheckoutDeclinesARemoteOnlyClaim(t *testing.T) {
 	store := testStore(t)
 	ctx := context.Background()
@@ -481,10 +396,6 @@ func TestBindNewProjectToCheckoutDeclinesARemoteOnlyClaim(t *testing.T) {
 		t.Fatal("a declined bind wrote a row")
 	}
 }
-
-// TestBindNewProjectToCheckoutHasOneWinner: two store handles on one database,
-// each binding a different new project to the same checkout at the same moment.
-// Exactly one binds; the other is told bound=false and is not an error.
 func TestBindNewProjectToCheckoutHasOneWinner(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "shared.sqlite")
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
@@ -502,7 +413,6 @@ func TestBindNewProjectToCheckoutHasOneWinner(t *testing.T) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-
 	type result struct {
 		bound bool
 		err   error
@@ -544,9 +454,6 @@ func TestBindNewProjectToCheckoutHasOneWinner(t *testing.T) {
 		t.Fatalf("%d projects record the checkout, want 1", bound)
 	}
 }
-
-// TestContainsOrIsComparesAcrossSeparators: git prints C:/Users/x/repo while the
-// home directory is C:\Users\x, and the guard must see through that.
 func TestContainsOrIsComparesAcrossSeparators(t *testing.T) {
 	for _, c := range []struct {
 		dir, path string
@@ -565,9 +472,6 @@ func TestContainsOrIsComparesAcrossSeparators(t *testing.T) {
 		}
 	}
 }
-
-// TestDriveRelativeIdIsNotBoundAsAName: "C:notifier" carries no separator but the
-// reader calls it a path, so the writer must not bind a checkout to it as a name.
 func TestDriveRelativeIdIsNotBoundAsAName(t *testing.T) {
 	store := testStore(t)
 	top := physTemp(t)

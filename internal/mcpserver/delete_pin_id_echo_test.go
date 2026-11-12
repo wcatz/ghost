@@ -10,10 +10,6 @@ import (
 	"github.com/wcatz/ghost/internal/memory"
 )
 
-// vanishedRowStore reports a row in the project for any id the handler looks
-// up, though none is stored: the row another session deleted between the
-// handler's ownership read and its write. The write then reaches the store's
-// own "not found", which is the text under test.
 type vanishedRowStore struct {
 	*memory.Store
 	projectID string
@@ -27,11 +23,6 @@ func (s *vanishedRowStore) GetByIDs(_ context.Context, ids []string) ([]memory.M
 	return out, nil
 }
 
-// TestMemoryDeleteAndPinNotFoundNeverEchoTheID: a memory_id that is token-shaped
-// or longer than the refusal bound is not repeated when ghost_memory_delete or
-// ghost_memory_pin reports it not found, whether the handler's own read or the
-// store's write is what finds it missing. The call is still an error and still
-// says not found.
 func TestMemoryDeleteAndPinNotFoundNeverEchoTheID(t *testing.T) {
 	ids := map[string]string{
 		"token-shaped": echoToken,

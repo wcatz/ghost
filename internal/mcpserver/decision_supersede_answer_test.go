@@ -5,8 +5,6 @@ import (
 	"testing"
 )
 
-// The superseded decision's id reaches the answer only as a token, and a
-// decision_log memory cannot be forged through the writer tools.
 func TestDecisionRecordAnswerTokenisesTheSupersededID(t *testing.T) {
 	db, _, srv := newStoreWithDB(t)
 	session := connectedClient(t, srv)
@@ -49,8 +47,6 @@ func TestDecisionRecordAnswerWarnsWhenTheOldMemoryIsAmbiguous(t *testing.T) {
 	if first.IsError {
 		t.Fatal(resultText(first))
 	}
-	// Strip the link so the old decision is found by text, then add a second
-	// decision with identical text: two claimants, nothing may be retired.
 	if _, err := db.Exec(`UPDATE memories SET source_ref = NULL WHERE source = 'decision_log'`); err != nil {
 		t.Fatal(err)
 	}
@@ -71,8 +67,6 @@ func TestDecisionRecordAnswerWarnsWhenTheOldMemoryIsAmbiguous(t *testing.T) {
 	}
 }
 
-// A decision token anywhere in the reference is refused by every writer tool,
-// because the decision lookup reads every comma-separated token.
 func TestWriterToolsRefuseAnEmbeddedDecisionRef(t *testing.T) {
 	_, _, srv := newStoreWithDB(t)
 	session := connectedClient(t, srv)
@@ -100,10 +94,6 @@ func TestWriterToolsRefuseAnEmbeddedDecisionRef(t *testing.T) {
 	}
 }
 
-// A merged memory that holds the reversed decision together with another one is
-// not an extra claimant. The answer still reports a partial failure (the reversed
-// text keeps ranking), but it must not tell the agent to delete that memory: it
-// is the only memory of a decision that is still live.
 func TestDecisionRecordAnswerReportsASharedSuccessorWithoutDeleteAdvice(t *testing.T) {
 	db, _, srv := newStoreWithDB(t)
 	session := connectedClient(t, srv)
@@ -118,8 +108,6 @@ func TestDecisionRecordAnswerReportsASharedSuccessorWithoutDeleteAdvice(t *testi
 	}
 	aDec, aMem := record("backend")
 	bDec, bMem := record("retries")
-	// What a consolidation leaves behind after folding both companions: one
-	// reflection row carrying both links, and neither original.
 	if _, err := db.Exec(`UPDATE memories SET source = 'reflection', source_ref = ? WHERE id = ?`,
 		"decision:"+aDec+",decision:"+bDec, aMem); err != nil {
 		t.Fatal(err)
@@ -142,12 +130,6 @@ func TestDecisionRecordAnswerReportsASharedSuccessorWithoutDeleteAdvice(t *testi
 	}
 }
 
-// Two live memories claim the reversed decision: the companion the decision
-// tool wrote and a consolidation merge that also holds another memory's
-// content. The answer must not tell the agent to delete "the extras" — the
-// merge is the only copy of the fact it folded in — nor to supersede again,
-// which the tool refuses once the decision is marked superseded. Following the
-// advice it does give leaves no live memory stating the reversed decision.
 func TestDecisionRecordAnswerGivesAmbiguousClaimantsAdviceThatWorks(t *testing.T) {
 	db, _, srv := newStoreWithDB(t)
 	session := connectedClient(t, srv)
@@ -167,8 +149,6 @@ func TestDecisionRecordAnswerGivesAmbiguousClaimantsAdviceThatWorks(t *testing.T
 		t.Fatal(resultText(saved))
 	}
 	merge := labeledID(t, resultText(saved), "(id: ")
-	// What a reflect merge of the companion and the fact leaves when the
-	// companion's row is also kept live: the merge carries the link too.
 	if _, err := db.Exec(`UPDATE memories SET source = 'reflection', category = 'decision', source_ref = ? WHERE id = ?`,
 		"decision:"+oldDec, merge); err != nil {
 		t.Fatal(err)
@@ -192,7 +172,6 @@ func TestDecisionRecordAnswerGivesAmbiguousClaimantsAdviceThatWorks(t *testing.T
 		}
 	}
 
-	// The advice says there is no second supersede to run: the tool refuses one.
 	again := callTool(t, session, "ghost_decision_record", map[string]any{
 		"project_id": "abc123", "title": "queue v3", "decision": "we use kafka", "rationale": "again", "supersedes": oldDec,
 	})
@@ -200,8 +179,6 @@ func TestDecisionRecordAnswerGivesAmbiguousClaimantsAdviceThatWorks(t *testing.T
 		t.Errorf("a second supersede of the same decision was not refused:\n%s", resultText(again))
 	}
 
-	// Following the advice: the merge holds the fact, so it is rewritten; the
-	// companion holds nothing else, so it is deleted.
 	if upd := callTool(t, session, "ghost_memory_update", map[string]any{
 		"project_id": "abc123", "memory_id": merge, "content": "the event queue consumer restarts in place",
 	}); upd.IsError {
