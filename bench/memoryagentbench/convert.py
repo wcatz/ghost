@@ -2,7 +2,7 @@
 """Convert MemoryAgentBench's Conflict_Resolution parquet into the JSONL
 format bench/memoryagentbench's Go harness reads: one demo per line,
 single-hop (fact_sh) rows only. See
-docs/superpowers/specs/2026-08-20-memoryagentbench-supersede-benchmark-design.md.
+2026-08-20-memoryagentbench-supersede-benchmark-design.md (archived design, in git history at 374ac54e7865).
 
 Usage:
     pip install pyarrow

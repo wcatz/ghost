@@ -19,4 +19,4 @@ GhostMem's documentation is split by audience. Start with the page that matches 
 
 ## Historical project records
 
-The [`superpowers/`](superpowers/) tree contains archived plans, design specifications, evaluation reports, and audit records. It is intentionally historical: those documents explain why a decision was made at the time and are not the canonical source for current behavior. Use the pages above and the repository source for current documentation.
+Archived plans, design specifications, evaluation reports and audit records were removed from the tree; they remain in git history at 374ac54e7865. Use the pages above and the repository source for current documentation.
