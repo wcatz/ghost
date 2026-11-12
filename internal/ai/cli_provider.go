@@ -19,11 +19,6 @@ type CLIProvider struct {
 	name    string
 }
 
-// NewCLIProvider returns a CLIProvider using the best available backend on PATH.
-func NewCLIProvider() *CLIProvider {
-	return NewCLIProviderWithBinaries("", "", "", "")
-}
-
 // NewCLIProviderWithBinaries returns a CLIProvider using explicit binaries when available.
 func NewCLIProviderWithBinaries(claudeBinary, opencodeBinary, codexBinary, gooseBinary string) *CLIProvider {
 	if claudeBinary != "" {
