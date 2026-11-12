@@ -11,35 +11,13 @@ import (
 	"github.com/wcatz/ghost/internal/memory"
 )
 
-// Every graded metric in this package is undefined for a query nothing answers:
-// recall has no denominator, NDCG has no ideal ranking, and runCondition skips
-// such queries entirely. That is correct for those ratios and it is also how a
-// retrieval system gets to be confidently wrong — a plausible wrong memory
-// counts as a hit for whatever it displaced, so a leak is invisible to a
-// recall-only suite (the reasoning behind #537's negative retrieval fixtures,
-// which assert that a named memory must not surface but still give every query a
-// positive answer).
-//
-// This file measures the missing half directly: queries with NO relevant memory,
-// run through the production search path, reporting how many results come back
-// and how strongly the best of them scores. The score is the vector leg's
-// cosine — the only calibrated number in the pipeline, since an RRF score is a
-// function of a row's rank rather than of its match, and the keyword-only
-// fallback's synthesized 1/(K+rank+1) is a position, not a confidence.
-
-// NegativeQuery is a no-answer query: the graded query shape with an empty rel
-// map, plus the flavor that records how it was built. Off-domain questions share
-// no vocabulary with the corpus and measure the floor; near-misses reuse corpus
-// vocabulary while asking about something never recorded, which is where a
-// score-based abstain rule has to earn its keep.
+// NegativeQuery is a no-answer query.
 type NegativeQuery struct {
 	QuerySpec
 	Flavor string `json:"flavor"`
 }
 
-// LoadNegatives reads the no-answer queries. An empty rel map is what makes a
-// query negative, so a non-empty one is a hard error rather than a silently
-// dropped entry: a mislabelled positive would inflate the false-positive count.
+// LoadNegatives reads the no-answer queries.
 func LoadNegatives(r io.Reader) ([]NegativeQuery, error) {
 	var out []NegativeQuery
 	if err := decodeJSONL(r, func(raw json.RawMessage) error {
@@ -66,8 +44,6 @@ func LoadNegatives(r io.Reader) ([]NegativeQuery, error) {
 }
 
 // NegativeQueries returns the dataset's no-answer queries as runnable Queries.
-// Their relevance map is empty, which is what the graded metrics already skip,
-// and each needs a committed embedding like any other query.
 func NegativeQueries(ds Dataset, vecs Vectors) ([]Query, error) {
 	queries := make([]Query, 0, len(ds.Negatives))
 	for _, nq := range ds.Negatives {
@@ -82,36 +58,9 @@ func NegativeQueries(ds Dataset, vecs Vectors) ([]Query, error) {
 	return queries, nil
 }
 
-// FalsePositiveFloors are the cosines the report counts results against. There
-// is no configured floor to inherit — search.min_similarity ships 0, dropping
-// only non-positive cosines — so the report sweeps the band a floor would have to
-// live in instead of asserting one.
-//
-// "Above a floor" means strictly above, which is the rule production itself
-// applies: memory.filterVectorFloor keeps a candidate when score > floor and
-// drops the rest, so a result sitting exactly on a floor would be refused by it.
-// Every count in the report follows that one convention, which is also what makes
-// NoAnswerMax/Unseparable coherent: a floor set at the no-answer maximum already
-// refuses that query, and therefore already refuses any answerable query whose
-// best score ties it.
+// FalsePositiveFloors are the cosines the report counts results against.
 var FalsePositiveFloors = []float32{0.3, 0.4, 0.5}
 
-// resultCosines returns the cosine similarity between queryVec and each of ids,
-// keyed by ID.
-//
-// The scores come from each row's own stored vector rather than from a vector-leg
-// list, because a hybrid result can arrive on the keyword leg alone: the keyword
-// reservation guarantees the top keyword hits a place in the window while their
-// cosines put them below any fetched vector list. Reading those scores out of a
-// truncated list yields zero, and a result scored zero counts below every floor —
-// so a short list undercounts precisely the rows that came from the leg with no
-// score of its own, and the top result of a keyword-led window is one of them.
-//
-// A row absent from the result has no embedding, was embedded under a
-// different model than this query, or has dimensions that do not match the
-// query's — none of which gives it a comparable score — and is reported here
-// as 0: below every floor this report counts, which is the right answer for a
-// row with no score to report.
 func resultCosines(ctx context.Context, store *memory.Store, queryVec []float32, ids []string) (map[string]float32, error) {
 	scored, err := store.EmbeddingCosines(ctx, ids, queryVec)
 	if err != nil {
@@ -119,51 +68,29 @@ func resultCosines(ctx context.Context, store *memory.Store, queryVec []float32,
 	}
 	cosines := make(map[string]float32, len(ids))
 	for _, id := range ids {
-		cosines[id] = scored[id] // absent reads as 0; see above
+		cosines[id] = scored[id]
 	}
 	return cosines, nil
 }
 
 // FloorCount is what one candidate floor would mean for the no-answer set.
 type FloorCount struct {
-	Floor float32
-	// Results is the mean number of returned results clearing the floor.
+	Floor   float32
 	Results float64
-	// Queries is how many no-answer queries returned at least one result
-	// clearing it — an abstention rule at this floor would have to refuse
-	// Queries of the Queries measured to be right every time.
 	Queries int
-	// Rate is Queries as a fraction of the queries measured, which is the
-	// number the report prints: the false-positive rate AT THIS FLOOR. A count
-	// is not comparable across conditions with different query counts, and
-	// Rate beside Queries is what says so out loud.
-	Rate float64
+	Rate    float64
 }
 
-// NoAnswerSummary is one condition's no-answer measurement, aggregated.
+// NoAnswerSummary is one condition's no-answer measurement.
 type NoAnswerSummary struct {
-	Condition string
-	Queries   int // no-answer queries measured
-	// MeanResults is the mean number of results returned per query, at scoreK
-	// with no similarity floor configured — today always a full window.
+	Condition   string
+	Queries     int
 	MeanResults float64
-	// MeanTop is the mean best returned cosine. It is the score-graded half of
-	// the rate: with the floor at 0 every query is a false positive, so the
-	// rate alone says only that Ghost never abstains, and the mean says how
-	// confident the answers it returned anyway were.
-	MeanTop float64
-	// MaxTop is the highest cosine any no-answer query produced, so it is the floor
-	// that would refuse every one of them. Printed per condition because the legs do
-	// not agree on it, and it is the only per-condition number that can be read as an
-	// abstention threshold rather than as a distribution.
-	MaxTop float64
-	// Floors is one row per configured floor, in FalsePositiveFloors order.
-	Floors []FloorCount
+	MeanTop     float64
+	MaxTop      float64
+	Floors      []FloorCount
 }
 
-// measureNoAnswer runs one no-answer query through a condition and scores every
-// row it returns with that row's own cosine (see resultCosines for why the score
-// has to come from the stored vector rather than from the leg's own list).
 func measureNoAnswer(ctx context.Context, store *memory.Store, q Query, rank rankFn) (NoAnswerQuery, error) {
 	ranked, err := rank(q)
 	if err != nil {
@@ -185,9 +112,7 @@ func measureNoAnswer(ctx context.Context, store *memory.Store, q Query, rank ran
 	}, nil
 }
 
-// SummarizeNoAnswer aggregates one condition's no-answer measurements. Every
-// returned row is scored from its own vector, so the floor rows are counts over
-// real scores rather than over a position.
+// SummarizeNoAnswer aggregates one condition's no-answer measurements.
 func SummarizeNoAnswer(condition string, measured []NoAnswerQuery) NoAnswerSummary {
 	sum := NoAnswerSummary{Condition: condition, Queries: len(measured)}
 	if len(measured) == 0 {
@@ -222,11 +147,6 @@ func SummarizeNoAnswer(condition string, measured []NoAnswerQuery) NoAnswerSumma
 	return sum
 }
 
-// countHitsAboveFloor is how many of a query's returned rows clear floor. It is
-// a named function because the same rule is counted two ways in this package —
-// per floor for the rate (does the query leak at all at this floor) and per row
-// for the results-per-query count — and both must use the same strict
-// comparison or the two tables disagree.
 func countHitsAboveFloor(cosines map[string]float32, floor float32) int {
 	hits := 0
 	for _, c := range cosines {
@@ -237,13 +157,7 @@ func countHitsAboveFloor(cosines map[string]float32, floor float32) int {
 	return hits
 }
 
-// FormatNoAnswer renders the per-condition false-positive table, printed
-// directly under the graded table. The rate columns are per FLOOR, not per
-// shipped setting: `search.min_similarity` ships 0, which refuses nothing, so a
-// single "rate at the shipped floor" column would read 1.000 everywhere and say
-// only that Ghost never abstains. The floors are what make the column graded —
-// they are the band a floor would have to live in — and the mean top cosine is
-// what says how wrong the rows actually were.
+// FormatNoAnswer renders the per-condition false-positive table.
 func FormatNoAnswer(summaries []NoAnswerSummary) string {
 	measured := make([]NoAnswerSummary, 0, len(summaries))
 	for _, s := range summaries {
@@ -267,9 +181,6 @@ func FormatNoAnswer(summaries []NoAnswerSummary) string {
 	}
 	b.WriteString("\n")
 	for _, s := range measured {
-		// Each row prints its OWN floor set and its own query count, so a
-		// condition that measured a different number of queries cannot inherit
-		// the first row's column headers.
 		fmt.Fprintf(&b, "  %-14s %8.1f %11.3f %8.3f", s.Condition, s.MeanResults, s.MeanTop, s.MaxTop)
 		for _, f := range s.Floors {
 			fmt.Fprintf(&b, " %11.3f", f.Rate)
@@ -279,11 +190,7 @@ func FormatNoAnswer(summaries []NoAnswerSummary) string {
 	return b.String()
 }
 
-// NoAnswerFor returns one condition's no-answer measurement from a completed
-// run, or nil when that condition measured none. It is the seam between the
-// runner (which measured all three conditions) and the deeper report (which is
-// about the shipped hybrid path), so the two tables cannot describe two
-// different searches.
+// NoAnswerFor returns one condition's no-answer measurement from a completed run.
 func NoAnswerFor(results []Result, condition string) []NoAnswerQuery {
 	for _, r := range results {
 		if r.Condition == condition {
@@ -293,11 +200,7 @@ func NoAnswerFor(results []Result, condition string) []NoAnswerQuery {
 	return nil
 }
 
-// PerQueryFor returns one condition's per-query scores from a completed run, or
-// nil when that condition scored nothing. It is the answerable half of the same
-// seam NoAnswerFor is the no-answer half of: the abstention report's answerable
-// contrast reads the shipped path's best returned cosine out of here rather than
-// searching for it a second time.
+// PerQueryFor returns one condition's per-query scores from a completed run.
 func PerQueryFor(results []Result, condition string) []QueryScore {
 	for _, r := range results {
 		if r.Condition == condition {
@@ -307,10 +210,7 @@ func PerQueryFor(results []Result, condition string) []QueryScore {
 	return nil
 }
 
-// FlavorStat is one flavor of no-answer query, kept apart because the two are
-// not interchangeable: the off-domain set is the floor, and the near-miss set is
-// the case an abstain rule actually has to survive. Reporting only their pooled
-// mean would let the easy flavor flatter the hard one.
+// FlavorStat is one flavor of no-answer query.
 type FlavorStat struct {
 	Flavor      string
 	Queries     int
@@ -318,56 +218,20 @@ type FlavorStat struct {
 	MeanTop     float64
 }
 
-// FalsePositiveReport is the abstention baseline: what the production search path
-// returns for queries nothing in the corpus answers, and how that compares with
-// what it returns for queries something does answer.
+// FalsePositiveReport is the abstention baseline.
 type FalsePositiveReport struct {
-	Queries    int // no-answer queries measured
-	Answerable int // answerable queries measured, for contrast
-	// MeanResults is the mean number of results returned per no-answer query
-	// (at scoreK, with no floor configured — today always a full window).
-	MeanResults float64
-	// MeanTop is the mean best returned cosine over no-answer queries, and
-	// AnswerableTop the same over answerable ones. The gap between them is the
-	// headroom a score threshold has to work with.
+	Queries       int
+	Answerable    int
+	MeanResults   float64
 	MeanTop       float64
 	AnswerableTop float64
-	// NoAnswerMax is the highest returned cosine any no-answer query produced, so
-	// it is the floor that would refuse every one of them. Unseparable is what
-	// that floor costs: the answerable queries scoring at or below it, which a
-	// floor that high refuses as well — a tie included, because the production
-	// floor keeps a candidate only when its score is strictly above it. A mean
-	// alone would hide this: the means separate cleanly while the two
-	// distributions still overlap.
-	NoAnswerMax float64
-	Unseparable int
-	// Flavors splits the set by how each query was built, sorted by name.
-	Flavors []FlavorStat
-	Floors  []FloorCount
+	NoAnswerMax   float64
+	Unseparable   int
+	Flavors       []FlavorStat
+	Floors        []FloorCount
 }
 
-// FalsePositives is the deeper half of the no-answer report: the answerable
-// contrast, the per-flavor split, the maximum a floor would have to clear, and
-// what that floor costs. The no-answer half it reports is taken from the runner's
-// own measurement of the shipped hybrid path (Result.NoAnswer) rather than
-// searched a second time, so the two tables cannot describe two different runs.
-//
-// Each returned row was scored with its own true cosine (see resultCosines), so
-// a row that reached the window on the keyword leg alone is measured rather than
-// assumed to be a non-match.
-//
-// answerable must be the per-query record of a run over GRADED queries
-// (Result.PerQuery via PerQueryFor): the runner only records a query it scored,
-// and a query with an empty relevance map is a no-answer measurement instead. The
-// committed corpus's answerable set is graded, so the two arguments come from one
-// Run.
-//
-// One caveat worth stating, because it is the difference between this report and
-// the shipped flag: production applies a configured floor to the vector leg
-// *before* fusion, so a keyword-only result is exempt from it entirely. The
-// "results above a floor" rows here score every returned row against the floor
-// anyway, which is a stricter diagnostic reading — it answers "how strong are the
-// results a caller actually receives", not "what would the flag do".
+// FalsePositives computes the abstention baseline from measured results.
 func FalsePositives(noAnswer []NoAnswerQuery, answerable []QueryScore) (FalsePositiveReport, error) {
 	rep := FalsePositiveReport{Queries: len(noAnswer), Answerable: len(answerable)}
 	if len(noAnswer) == 0 {
@@ -404,19 +268,10 @@ func FalsePositives(noAnswer []NoAnswerQuery, answerable []QueryScore) (FalsePos
 	rep.MeanTop = sumTop / n
 	rep.Flavors = flavorStats(byFlavor)
 	for i := range rep.Floors {
-		// Results is a MEAN (results per query), not a sum, and Rate is a
-		// fraction — the same two numbers SummarizeNoAnswer reports, so the deep
-		// table and the per-condition table cannot disagree about one condition.
 		rep.Floors[i].Results /= n
 		rep.Floors[i].Rate = float64(rep.Floors[i].Queries) / n
 	}
 
-	// The answerable contrast measures the same thing the no-answer set does —
-	// the best cosine among the rows production would return — so the two
-	// distributions differ only in whether the corpus has an answer. It is read
-	// off the runner's own per-query scores (QueryScore.TopCosine, taken from the
-	// shipped hybrid condition) rather than searched for a second time: same
-	// search, same definition, and one fewer full pass over the corpus.
 	answerableTops := make([]float64, 0, len(answerable))
 	for _, q := range answerable {
 		answerableTops = append(answerableTops, q.TopCosine)
@@ -433,8 +288,6 @@ func FalsePositives(noAnswer []NoAnswerQuery, answerable []QueryScore) (FalsePos
 	return rep, nil
 }
 
-// flavorStats converts the per-flavor accumulators into their reported means,
-// sorted by flavor name so the table order does not depend on map iteration.
 func flavorStats(byFlavor map[string]*FlavorStat) []FlavorStat {
 	out := make([]FlavorStat, 0, len(byFlavor))
 	for _, s := range byFlavor {
@@ -448,11 +301,6 @@ func flavorStats(byFlavor map[string]*FlavorStat) []FlavorStat {
 	return out
 }
 
-// floorRow returns the accumulator for one floor, appending it on first sight so
-// the report's row order follows FalsePositiveFloors rather than the order the
-// queries happened to clear a floor in. It takes the slice by pointer because
-// appending inside the callee would otherwise grow a copy and leave the caller's
-// header empty.
 func floorRow(rows *[]FloorCount, floor float32) *FloorCount {
 	for i := range *rows {
 		if (*rows)[i].Floor == floor {
@@ -463,15 +311,7 @@ func floorRow(rows *[]FloorCount, floor float32) *FloorCount {
 	return &(*rows)[len(*rows)-1]
 }
 
-// FormatFalsePositives renders the abstention baseline for one condition. The
-// header names the condition because the per-condition false-positive table above
-// it reports all three, and a reader must not take the numbers here for a
-// property of the legs as well as of the shipped path.
-//
-// A report with nothing measured returns nothing rather than a table of zeros: a
-// caller whose no-answer set came back empty (a run with no negatives in it) would
-// otherwise get "mean top cosine 0.000 vs 0.741" and "costs 0/220", which reads as
-// a perfect abstention result rather than as a missing measurement.
+// FormatFalsePositives renders the abstention baseline for one condition.
 func FormatFalsePositives(rep FalsePositiveReport, condition string) string {
 	if rep.Queries == 0 {
 		return fmt.Sprintf("\nabstention baseline (%s path): not measured, no no-answer queries in this run\n", condition)
