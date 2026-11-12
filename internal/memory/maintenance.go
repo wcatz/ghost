@@ -6,16 +6,7 @@ import (
 	"fmt"
 )
 
-// MaintenanceRun is one recorded maintenance-hygiene event: today a scratch
-// budget check (kind "scratch-budget") that fired before a harness spawn —
-// over budget, so stale entries were reaped and possibly a loud warning was
-// emitted. The row is what `ghost maintenance status` prints.
-//
-// RecordedAt is a single point-in-time timestamp rather than a started/finished
-// pair: a budget check is instantaneous (measure → maybe reap → maybe warn),
-// and scratch hygiene events have no meaningful duration. Kind is a free
-// string so future hygiene kinds (reaps from other call sites, legacy cleanup)
-// reuse the same table without another migration.
+// MaintenanceRun records one maintenance-hygiene event.
 type MaintenanceRun struct {
 	ID                 string `json:"id"`
 	Kind               string `json:"kind"`
@@ -26,9 +17,7 @@ type MaintenanceRun struct {
 	Note               string `json:"note"`
 }
 
-// RecordMaintenanceRun inserts one hygiene event. The id and recorded_at
-// timestamp come from the schema defaults (hex(randomblob(16)) /
-// datetime('now')), so callers need only fill the payload fields.
+// RecordMaintenanceRun inserts one maintenance-hygiene event.
 func RecordMaintenanceRun(ctx context.Context, db *sql.DB, run MaintenanceRun) error {
 	_, err := db.ExecContext(ctx,
 		`INSERT INTO maintenance_runs
@@ -42,9 +31,7 @@ func RecordMaintenanceRun(ctx context.Context, db *sql.DB, run MaintenanceRun) e
 	return nil
 }
 
-// RecentMaintenanceRuns returns the most recent limit hygiene events,
-// newest first — the order `ghost maintenance status` prints. A non-positive
-// limit selects the default page.
+// RecentMaintenanceRuns returns the most recent maintenance-hygiene events, newest first.
 func RecentMaintenanceRuns(ctx context.Context, db *sql.DB, limit int) ([]MaintenanceRun, error) {
 	if limit <= 0 {
 		limit = 20
