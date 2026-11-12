@@ -1,12 +1,6 @@
 // Package config provides layered configuration for Ghost.
 //
 // Loading order (later layers override earlier):
-//  1. Compiled defaults
-//  2. /etc/ghost/config.yaml          (system-wide)
-//  3. user config path (platform default; for example
-//     ~/.config/ghost/config.yaml on Linux)
-//  4. GHOST_* environment variables
-//  5. CLI flag overrides (applied by caller after Load)
 package config
 
 import (
@@ -48,48 +42,19 @@ type Config struct {
 	Scratch    ScratchConfig    `koanf:"scratch"`
 }
 
-// The lifecycle cooldown (#541). Kept as a duration STRING in Config — the key
-// is written by a human in YAML — and resolved to a time.Duration at the point
-// of use, exactly as obsidian.interval is.
 const (
-	// defaultLifecycleMinInterval is the compiled value of
-	// lifecycle.min_interval. It is the string literal, because the defaults map
-	// and defaultConfig's hand-written mirror are compared by
-	// TestDefaultConfig_MatchesTheDefaultsMap and must carry the same text.
 	defaultLifecycleMinInterval = "30m"
-	// DefaultLifecycleMinInterval is that default as a duration, for callers
-	// that need the number rather than the key. TestDefaultLifecycleMinInterval_
-	// MatchesItsLiteral fails if the two ever disagree.
 	DefaultLifecycleMinInterval = 30 * time.Minute
 )
 
 // LifecycleConfig controls when the Stop hook may spawn the auto-consolidation
 // chain. It is a separate section from reflection.* on purpose: reflection.*
-// says WHICH phases run, this says HOW OFTEN.
 type LifecycleConfig struct {
-	// MinInterval is the shortest gap between two lifecycle STARTS for one
-	// project. The Stop hook fires after every turn, so without a cooldown each
-	// turn paid for a full reflect→resolve→supersede chain — issue #541 counted
-	// 543 runs in one lifecycle.log — even though reflect's input signature
-	// skipped the unchanged set most of the time.
-	//
-	// A Go duration string ("30m", "1h30m"); "0" (or any non-positive value)
-	// disables the cooldown and restores the old every-turn behavior. The
-	// compiled default is 30m: long enough that a chatty session consolidates
-	// about hourly, short enough that a project that saves memories in bursts
-	// still consolidates while it is being worked on.
 	MinInterval string `koanf:"min_interval"`
 }
 
 // MinIntervalDuration resolves MinInterval to the cooldown to enforce, for a
 // caller that has a Config value in hand.
-//
-// A value that cannot be read falls back to the compiled default, NOT to zero.
-// The distinction is the whole reason this lives in config rather than in the
-// hook: zero means "no cooldown", so guessing it for a typo would silently switch
-// off the guard the user asked for — the same near-zero-Config trap
-// defaultConfig exists to prevent. A blank value is unset, not a mistake, and is
-// silent. A non-positive interval means "off", matching scratch.max_bytes.
 func (c LifecycleConfig) MinIntervalDuration() time.Duration {
 	raw := strings.TrimSpace(c.MinInterval)
 	if raw == "" {
@@ -109,62 +74,26 @@ func (c LifecycleConfig) MinIntervalDuration() time.Duration {
 
 // DefaultScratchMaxBytes is the compiled per-root scratch budget: 512 MiB.
 // It is the value scratch.max_bytes takes when the key is unset, and the
-// fallback when config loading itself fails.
 const DefaultScratchMaxBytes int64 = 512 * 1024 * 1024
 
 // DefaultRelevanceCutoff is the compiled value of context.relevance_cutoff, the
 // assembler's relative-to-top cutoff on query-mode blocks (#954). It lives here
-// rather than as a bare literal in the defaults map so the bench that measures
-// the cutoff (`ghost bench --context`, via ContextRequest) and the config layer
-// that ships it read ONE number and cannot drift. A value of 0 is off; see
-// ContextConfig.RelevanceCutoff.
-//
-// The number is chosen from the `ghost bench --cutoff-sweep` table in
-// docs/benchmarks.md, and the trade it makes is explicit rather than tuned: at
-// the 10-item budget that shipped when it was chosen, on the graded corpus it
-// admitted 308 of the 310 baseline graded-relevant rows (the ship floor is 304),
-// held the answerable result rate at 1.000, raised context precision from 0.141
-// to 0.148 and lowered the estimated token cost per answer from about 297 to
-// about 280. 0.64 (306 relevant) and 0.65 (305) also cleared the floor but left
-// a margin of two rows and one; the floor is the hard constraint and a ship that
-// cleared it barely is a ship one corpus edit from failing it, so the default
-// kept the four-row margin rather than the last few points of precision. At the
-// current 5-item budget the item cap already removes the low-Base tail the
-// cutoff was tuned to cut, so it binds nothing on that corpus (the sweep is
-// flat); the default is unchanged and still applies to a caller who raises
-// `limit`.
 const DefaultRelevanceCutoff float64 = 0.63
 
 // DefaultNoAnswerCosine is the compiled value of context.no_answer_cosine, the
 // assembler's absolute no-answer bar on query-mode blocks (#955): a block whose
-// best vector cosine is below it is withheld and the answer says nothing cleared
-// the bar. Like DefaultRelevanceCutoff it lives here so the bench that measures
-// the bar (`ghost bench --no-answer-sweep`, via ContextRequest) and the config
-// layer that ships it read ONE number. 0 is off.
-//
-// The number is chosen from the `ghost bench --no-answer-sweep` table in
-// docs/benchmarks.md, which also shows the two rules that were not built.
-//
-// It was measured on ONE embedding model, DefaultEmbeddingModel, and a cosine
-// is a property of the model that produced it. So the default applies only while
-// embedding.model is that model: with any other model and no explicit
-// context.no_answer_cosine (file or environment), the effective bar is 0 and the
-// retrieval trace says so. An explicit value is always honoured.
 const DefaultNoAnswerCosine float64 = 0.62
 
 // DefaultEmbeddingModel is the compiled value of embedding.model, and the model
 // DefaultNoAnswerCosine was measured against.
 const DefaultEmbeddingModel = "nomic-embed-text:v1.5"
 
-// noAnswerKey is the config key whose explicitness decides the model tie.
 const noAnswerKey = "context.no_answer_cosine"
 
 // NoAnswerBarOffUnmeasured is the note carried when the model tie turned the bar
 // off, so the retrieval trace can say why a bar that ships on is not applied.
 const NoAnswerBarOffUnmeasured = "no_answer bar off: unmeasured embedding model"
 
-// resolveNoAnswerBar applies the model tie. explicit says the user set the key in
-// a config file or the environment.
 func resolveNoAnswerBar(cfg *Config, explicit bool) {
 	if explicit || cfg.Embedding.Model == DefaultEmbeddingModel {
 		return
@@ -176,105 +105,36 @@ func resolveNoAnswerBar(cfg *Config, explicit bool) {
 // ScratchConfig bounds the scratch root every harness spawn is confined to
 // (internal/scratch: $GHOST_SCRATCH_DIR or <dataDir>/scratch).
 type ScratchConfig struct {
-	// MaxBytes is the per-root size budget enforced before each harness
-	// spawn: over budget → stale entries are reaped first; still over budget
-	// after the reap → a loud warning naming the root and the bytes-over, and
-	// the spawn proceeds anyway (hygiene never blocks maintenance, but is
-	// never quiet).
-	//
-	// 0 disables enforcement entirely — the explicit opt-out, distinct from
-	// leaving the key unset, which keeps the 512 MiB default. A negative
-	// value behaves as 0 (the check treats any non-positive budget as off).
 	MaxBytes int64 `koanf:"max_bytes"`
 }
 
 // SearchConfig controls hybrid-search ranking behavior.
 type SearchConfig struct {
-	// MinSimilarity is the cosine floor applied to vector-leg candidates
-	// before RRF fusion. 0 (default) preserves historical behavior of only
-	// dropping non-positive cosines; raise to stop weak semantic matches from
-	// padding the fused window. FTS candidates are exempt.
 	MinSimilarity float64 `koanf:"min_similarity"`
 }
 
 // ContextConfig controls how the assembler reports an assembled block's
 // relevance verdict.
 type ContextConfig struct {
-	// AbstainCosine is Arm B of the assembler's relevance floor (#580): a row
-	// satisfies it when the vector leg's cosine is at least this value. 0
-	// (default) leaves the arm OFF, which is the only honest default today —
-	// the bench no-answer report shows the answerable and no-answer cosine
-	// distributions overlap, so no constant separates them and a threshold set
-	// here is a decision a user makes, not one Ghost infers. search.
-	// min_similarity is a different floor and does not feed this: it is applied
-	// inside the vector leg before fusion and therefore never sees a keyword-only
-	// result, which is exactly the case arm B is here to judge.
-	AbstainCosine float32 `koanf:"abstain_cosine"`
-	// RelevanceCutoff is the relative cutoff applied in the assembler to
-	// QUERY-mode blocks only (#954): once a row's fused score falls below this
-	// fraction of the top row's, the answer stops there, so a caller gets fewer,
-	// better rows instead of a window that always fills. It is a share of the
-	// top row's score, so 1.0 keeps only rows that tie the top and a smaller
-	// value keeps a longer tail; 0 (default) leaves the cutoff OFF, which is the
-	// state every caller runs in until a measured default is chosen.
-	//
-	// It can only ever SHORTEN an answer: `limit` remains the maximum, the top
-	// row is always kept (a result rate below 1.000 would be a regression) and a
-	// pinned row is never cut. PASSIVE surfaces are a digest and keep their
-	// slices, so the cutoff never touches them whatever this is set to.
-	//
-	// It is one rule and its parameter is this share, chosen from the
-	// `ghost bench --context` sweep in docs/benchmarks.md. search.min_similarity
-	// and AbstainCosine are different floors and neither feeds this: both judge a
-	// row's absolute score, and this judges it against the best row in the same
-	// block.
+	AbstainCosine   float32 `koanf:"abstain_cosine"`
 	RelevanceCutoff float64 `koanf:"relevance_cutoff"`
-	// NoAnswerCosine is the absolute no-answer bar applied in the assembler to
-	// QUERY-mode blocks only (#955): when the BEST vector cosine among the rows a
-	// block would carry is strictly below this value, the block is withheld and
-	// the answer says nothing cleared the bar, with the score shown, instead of
-	// ten plausible rows for a question the store cannot answer. 0 leaves the
-	// rule OFF (the pre-#955 block, byte-identical).
-	//
-	// One rule, one parameter. A pinned row is never withheld, a block with no
-	// comparable cosine (no embedder, or the vector leg failed) is never judged,
-	// and passive surfaces never see it. It is a cosine, not a share:
-	// relevance_cutoff compares a row with the best row in its own block, this
-	// compares the best row with an absolute bar, and abstain_cosine only labels
-	// a block weak while still showing it. It is a float64 (not abstain_cosine's
-	// float32) so the generic float parser lands on the field's own type.
-	NoAnswerCosine float64 `koanf:"no_answer_cosine"`
-	// NoAnswerBarNote is not a setting: it is set by Load when the bar was turned
-	// off because embedding.model is not the model the default was measured on and
-	// the user set no explicit bar. The assembler records it in the trace.
-	NoAnswerBarNote string `koanf:"-"`
+	NoAnswerCosine  float64 `koanf:"no_answer_cosine"`
+	NoAnswerBarNote string  `koanf:"-"`
 }
 
 // RoutingConfig steers sessions whose cwd matches no known project.
 type RoutingConfig struct {
-	// DefaultProject is the project (name or id, resolved at use time) that
-	// home-dir and filesystem-root sessions fall back to for memory context.
-	// Empty disables the fallback entirely — the historical default.
 	DefaultProject string `koanf:"default_project"`
 }
 
 // CLIConfig holds explicit paths to the subprocess LLM binaries backing
 // classification and consolidation. An empty value means "resolve from PATH";
-// a set path overrides PATH lookup. This matters for auto_reflect: the Stop
-// hook process's PATH is often not the interactive shell's, so a binary
-// installed under ~/.opencode/bin (or similar) is invisible to exec.LookPath
-// unless its path is configured explicitly here.
 type CLIConfig struct {
 	ClaudeBinary   string `koanf:"claude_binary"`
 	OpenCodeBinary string `koanf:"opencode_binary"`
 	CodexBinary    string `koanf:"codex_binary"`
 	GooseBinary    string `koanf:"goose_binary"`
 
-	// Per-phase harness model pins for the opencode backend (e.g.
-	// "opencode/big-pickle"). Empty means "use the explicit Big Pickle default
-	// in ai.OpenCodeClient". Each lifecycle phase runs as its own process, so a
-	// pin cannot leak between phases. Ignored by the claude/codex/goose clients,
-	// which have no model flag.
 	ModelReflect   string `koanf:"model_reflect"`
 	ModelResolve   string `koanf:"model_resolve"`
 	ModelSupersede string `koanf:"model_supersede"`
@@ -282,95 +142,23 @@ type CLIConfig struct {
 
 // ReflectionConfig holds memory consolidation settings.
 type ReflectionConfig struct {
-	AutoResolve   bool `koanf:"auto_resolve"`
-	AutoSupersede bool `koanf:"auto_supersede"`
-	AutoReflect   bool `koanf:"auto_reflect"`
-	// SupersedeConsensus is how many classification passes the AUTOMATIC
-	// supersede phase must agree on before it writes an edge (#779). It is read
-	// ONLY when auto_supersede is true, because the phase that would use it does
-	// not otherwise run — a key that silently affected a hand-run
-	// `ghost supersede` would make the automatic and manual paths differ for a
-	// reason no command line shows.
-	//
-	// 1 means no gate, which is the ungated historical pass. The default is 3,
-	// the number #779's measurement used: edges the classifier proposed in all
-	// three of three dry runs scored 0.79 precision against 0.55 over distinct
-	// proposals and 0.33 for one proposed in a single run, so unanimity across
-	// three is the only subset that cleared a bar worth automating. A lower
-	// default would be a gate chosen for costing less than the evidence supports,
-	// and 2 is accepted because an operator who wants two is entitled to it.
-	//
-	// A value below supersede.MinConsensus is CLAMPED to the ungated pass rather
-	// than refused, and that is a deliberate difference from the CLI flag. A typo
-	// in a config file should not fail a lifecycle phase at 2am with a message
-	// about quorum arithmetic; it should run the pass the operator already had.
-	//
-	// The clamp is NOT visible on the phase's own report — an ungated run prints
-	// no gate line at all, so a clamped phase's stdout is byte-identical to one
-	// with no key. It is visible on `ghost lifecycle`'s own stderr, beside the
-	// reflect-skip notice and in the same voice, which on the unattended path is
-	// the phase tail and the lifecycle.log beneath it. The boundary is
-	// MinConsensus rather than 1: below it there is no gate, not a smaller one.
-	//
-	// It does NOT scale LifecycleTimeoutMinutes, and that is a decision rather
-	// than an oversight. That bound catches a HUNG phase, so multiplying it by
-	// the work factor makes it N times longer to notice a model that never
-	// answers — which is how a hang detector stops being one — and there is no
-	// principled factor to multiply by anyway, since the per-pass cost depends
-	// on the corpus and the model. So N lands on the operator: a gated phase
-	// multiplies its wall time against an unchanged deadline, and an expired one
-	// can SIGTERM inside the apply block, whose per-pair writes are separate
-	// transactions, leaving a PARTIAL WRITE, no report at all, and a
-	// lifecycle-last-failure marker. The cost is documented in
-	// config.example.yaml, docs/configuration.md and docs/cli.md rather than
-	// absorbed silently.
-	SupersedeConsensus int `koanf:"supersede_consensus"`
-	// ConsolidationTimeoutMinutes bounds a single `ghost reflect`
-	// consolidation call. It was hardcoded at 3 minutes, which the LLM tier
-	// hits on a large project: a ~190-memory prompt takes about that long on
-	// the opencode backend, so runs were killed mid-flight ("opencode run:
-	// signal: killed") and — because the autonomous path passes --require-llm —
-	// the whole reflect then failed with no fallback. 0 disables the bound; a
-	// negative value keeps the default, with a warning (ConsolidationTimeout).
-	// It covers the whole consolidation, harness calls included: the LLM tier's
-	// one repair turn (#689) spends what is left rather than getting a budget of
-	// its own. Keep it below reflection.lifecycle_timeout_minutes, which bounds
-	// the outer lifecycle phase that runs this command.
-	ConsolidationTimeoutMinutes int `koanf:"consolidation_timeout_minutes"`
+	AutoResolve                 bool `koanf:"auto_resolve"`
+	AutoSupersede               bool `koanf:"auto_supersede"`
+	AutoReflect                 bool `koanf:"auto_reflect"`
+	SupersedeConsensus          int  `koanf:"supersede_consensus"`
+	ConsolidationTimeoutMinutes int  `koanf:"consolidation_timeout_minutes"`
 
-	// LifecycleTimeoutMinutes bounds each phase of the auto-consolidation
-	// chain (reflect, resolve, supersede). The default is generous but finite
-	// (see defaults): the stop hook guards the chain with one per-project PID
-	// file keyed to the detached parent's liveness, so a phase that hung with
-	// no bound would wedge auto-consolidation for that project until the
-	// process was killed by hand. A bound lets a stuck run expire and be
-	// retried next session. Set 0 to disable the bound entirely; a negative
-	// value keeps the default, with a warning (LifecycleTimeout). The timeout
-	// is a graceful SIGTERM to the phase's process group first, escalating
-	// only if the grace period expires.
 	LifecycleTimeoutMinutes int `koanf:"lifecycle_timeout_minutes"`
 }
 
 // ClearsConsolidatableSet reports whether any enabled lifecycle phase
 // removes rows from the consolidatable set the overdue list counts.
-// Reflect rewrites that set, and resolve stamps resolved_at on its
-// candidates, which the count's `resolved_at IS NULL` predicate drops,
-// so either phase can clear it. Supersede only links rows: it neither
-// rewrites nor stamps them, so it leaves the count where it was. The
-// overdue list is gated on this, because a phase that cannot clear the
-// count makes the retry it offers useless.
 func (c ReflectionConfig) ClearsConsolidatableSet() bool {
 	return c.AutoReflect || c.AutoResolve
 }
 
 const (
-	// DefaultLifecycleTimeoutMinutes is the compiled value of
-	// reflection.lifecycle_timeout_minutes, and what a negative value falls
-	// back to.
-	DefaultLifecycleTimeoutMinutes = 60
-	// DefaultConsolidationTimeoutMinutes is the compiled value of
-	// reflection.consolidation_timeout_minutes, and what a negative value
-	// falls back to.
+	DefaultLifecycleTimeoutMinutes     = 60
 	DefaultConsolidationTimeoutMinutes = 10
 )
 
@@ -386,17 +174,8 @@ func (c ReflectionConfig) ConsolidationTimeout() time.Duration {
 	return timeoutMinutes("reflection.consolidation_timeout_minutes", c.ConsolidationTimeoutMinutes, DefaultConsolidationTimeoutMinutes)
 }
 
-// maxTimeoutMinutes is the largest minute count a time.Duration can hold.
 const maxTimeoutMinutes = int64(math.MaxInt64 / int64(time.Minute))
 
-// timeoutMinutes resolves a minutes key to the bound it asks for. Only an
-// explicit 0 removes the bound. A negative value falls back to the compiled
-// default def with a warning, NOT to "no bound": an unbounded phase can wedge
-// auto-consolidation for the project until the process is killed by hand, so
-// guessing it for a typo would switch off the guard the key exists for. A value
-// too large for a time.Duration is clamped to the largest one with a warning,
-// because the multiplication would otherwise wrap into a negative duration
-// that every caller reads as "no bound".
 func timeoutMinutes(key string, minutes, def int) time.Duration {
 	if minutes < 0 {
 		warnf("%s: %d is negative; using the default %d (set it to 0 to remove the bound)", key, minutes, def)
@@ -427,33 +206,16 @@ type LinkingConfig struct {
 
 // InjectionConfig controls how the SessionStart hook selects which project
 // memories to inject. It biases the limited slot budget toward high-signal,
-// hard-to-derive categories (gotcha/convention/preference/decision) without
-// growing the total footprint. behavior_floor of 0 disables the bias entirely
-// (pure DecayRankingSQL selection, the historical behavior). category_caps
-// bounds how many pass-1 reserved slots a single behavioral category may take,
-// so a gotcha-heavy corpus cannot fill every guaranteed slot with gotchas
-// (a 46% gotcha share would otherwise dominate the floor).
 type InjectionConfig struct {
 	BehaviorFloor      int                `koanf:"behavior_floor"`
 	BehaviorCategories []string           `koanf:"behavior_categories"`
 	CategoryWeights    map[string]float64 `koanf:"category_weights"`
 	CategoryCaps       map[string]int     `koanf:"category_caps"`
-	// SessionScope is the scope the injected block is selected under
-	// (injection.session_scope). It is empty by default and deliberately has no
-	// compiled default: unset means the session-start surface applies no scope
-	// predicate and shows every scoped row it would otherwise have shown. A
-	// non-empty value is a request scope, and is matched with memory.ScopeMatches
-	// — the rule search applies, through assemble.ScopeContradicts — so a memory
-	// that does not mention a requested key still applies. The linker and the
-	// dedup folds ask the two-row question instead, memory.ScopesConflict, which
-	// is the same rule read the other way round.
-	SessionScope map[string]string `koanf:"session_scope"`
+	SessionScope       map[string]string  `koanf:"session_scope"`
 }
 
 // DefaultInjectionConfig returns the compiled injection defaults. It mirrors the
 // injection.* entries in the defaults map so callers that need a fallback when
-// Load() fails (e.g. the SessionStart hook's read-only path) never diverge from
-// the layered defaults.
 func DefaultInjectionConfig() InjectionConfig {
 	return InjectionConfig{
 		BehaviorFloor:      8,
@@ -469,7 +231,6 @@ type ObsidianConfig struct {
 	AutoSync bool   `koanf:"auto_sync"` // if true, session-start spawns `ghost obsidian sync` automatically
 }
 
-// defaults is the base layer — always loaded first.
 var defaults = map[string]interface{}{
 	"embedding.enabled":                        true,
 	"embedding.ollama_url":                     "http://localhost:11434",
@@ -503,53 +264,31 @@ var defaults = map[string]interface{}{
 	"scratch.max_bytes":                        DefaultScratchMaxBytes,
 }
 
-// systemConfigPath is the system-wide config layer. Named so the load path and
-// the errors it produces say the same file.
 const systemConfigPath = "/etc/ghost/config.yaml"
 
 // Load reads configuration with layered precedence.
 // After Load returns, the caller may apply CLI flag overrides by mutating
-// fields directly.
-//
-// A config file that exists but does not parse is an error, not a silent
-// fallback to the compiled defaults: one typo used to leave every key at its
-// default with nothing to explain why. Callers that must not fail — the
-// host-session hooks — use LoadForHook instead, which reports the same problem
-// as a warning and keeps the defaults. A file that exists but cannot be read is
-// only a warning; see loadFileIfExists for why the two differ.
-//
-// Unknown keys in a config file are reported the same way but do not fail the
-// load, because a key Ghost does not bind is harmless to everything that does.
 func Load() (*Config, error) {
 	k := koanf.New(".")
 
-	// Layer 1: compiled defaults.
 	if err := k.Load(confmap.Provider(defaults, "."), nil); err != nil {
 		return nil, err
 	}
 
-	// The bar's default is applied after the layers load, because whether it
-	// applies depends on the embedding model, and "the user set it" must be told
-	// apart from "the default is there". Drop it here so an explicit file or
-	// environment value is the only way the key can exist afterwards.
 	k.Delete(noAnswerKey)
 
 	parser := yaml.Parser()
 
-	// Layer 2: /etc/ghost/config.yaml (system-wide).
 	if err := loadConfigFile(k, systemConfigPath, parser); err != nil {
 		return nil, err
 	}
 
-	// Layer 3: the platform's user config path (user-global).
 	if configDir, err := userConfigDir(); err == nil {
 		if err := loadConfigFile(k, filepath.Join(configDir, "ghost", "config.yaml"), parser); err != nil {
 			return nil, err
 		}
 	}
 
-	// Layer 4: GHOST_* environment variables.
-	// e.g. GHOST_CLI_CLAUDE_BINARY → cli.claude_binary (see envOverrides below).
 	if err := loadEnvLayer(k); err != nil {
 		return nil, err
 	}
@@ -575,16 +314,6 @@ func Load() (*Config, error) {
 	return cfg, nil
 }
 
-// checkEmbeddingValues refuses an embedding.dimensions no model produces.
-//
-// The width is read twice downstream and both readings break at zero or less:
-// embedding.VectorIdentity leaves the width stamp out, so every vector already
-// stored stops matching the configured identity and reads as stale, and the
-// client refuses every vector whose length is not the configured width, so
-// none of them can be rewritten. The index is retired and cannot be rebuilt
-// until the value is fixed. It is refused whether or not embedding is enabled,
-// because the identity is declared unconditionally and a disabled worker
-// switched back on would meet the same wedge.
 func checkEmbeddingValues(cfg *Config) error {
 	if d := cfg.Embedding.Dimensions; d <= 0 {
 		return fmt.Errorf("embedding.dimensions: the width of the model's vectors, a positive number (768 for %s), got %d", DefaultEmbeddingModel, d)
@@ -592,21 +321,6 @@ func checkEmbeddingValues(cfg *Config) error {
 	return nil
 }
 
-// checkValueChecks refuses a float key documented as a value in [0, 1] that
-// holds something else, on the FILE path as well as the environment one.
-//
-// The environment parsers for the context floors refuse these for themselves,
-// and koanf's YAML parser resolves the same spellings — `.inf`, `-.inf`,
-// `.nan` — into the float field without complaint, so the env check alone would
-// leave the worst of it unguarded on the path a hand-edited config actually
-// takes. They are worth refusing for what they do downstream rather than for
-// being unreadable: an infinite floor is a verdict no row's cosine can clear, so
-// every answer outside the keyword arm would come back `weak` with nothing in it
-// to tell that from a measured verdict, and the vector-leg floor would keep no
-// candidate at all and leave hybrid search answering from the keyword arm alone;
-// NaN compares false against 0 and so reads as no threshold at all, telling a
-// user who set a floor that there is none; and a negative value is satisfied by
-// the worst row in the corpus, which is the opposite of a floor.
 func checkValueChecks(cfg *Config) error {
 	for _, check := range valueChecks {
 		if err := check.check(cfg); err != nil {
@@ -616,13 +330,6 @@ func checkValueChecks(cfg *Config) error {
 	return nil
 }
 
-// valueChecks is checkValueChecks one key at a time, in the order Load reports
-// them. decodeFallback walks it too, so a bad value in the environment is
-// replaced key by key rather than only the first one the check reaches. Each
-// entry carries the reset that writes its key's compiled default back and
-// returns the value it wrote, so a key added here cannot be checked by the
-// fallback without also being reset by it
-// (TestValueChecksEachResetToAValueTheirCheckAccepts).
 var valueChecks = []struct {
 	key   string
 	check func(*Config) error
@@ -637,12 +344,6 @@ var valueChecks = []struct {
 		cfg.Context.AbstainCosine = defaultConfig().Context.AbstainCosine
 		return cfg.Context.AbstainCosine
 	}},
-	// The cutoff is a share of the top row's fused Base, so it is the same
-	// (0,1] range a fraction can be in: 0 leaves it off, and a value above 1
-	// would keep every row (a threshold above the top score admits nothing it
-	// would not already have). NaN compares false against both bounds and reads
-	// as off, which would tell a user who set a cutoff that there is none — the
-	// same reason abstain_cosine refuses it.
 	{"context.relevance_cutoff", func(cfg *Config) error {
 		if v := cfg.Context.RelevanceCutoff; math.IsNaN(v) || math.IsInf(v, 0) || v < 0 || v > 1 {
 			return fmt.Errorf("context.relevance_cutoff: a cutoff is a fraction in [0,1] where 0 is off, got %v", cfg.Context.RelevanceCutoff)
@@ -652,27 +353,15 @@ var valueChecks = []struct {
 		cfg.Context.RelevanceCutoff = defaultConfig().Context.RelevanceCutoff
 		return cfg.Context.RelevanceCutoff
 	}},
-	// The no-answer bar is a cosine in [0,1] where 0 is off. NaN compares false
-	// against both bounds and would read as off, telling a user who set a bar
-	// that there is none; a value above 1 would withhold every answer.
 	{noAnswerKey, func(cfg *Config) error {
 		if v := cfg.Context.NoAnswerCosine; math.IsNaN(v) || math.IsInf(v, 0) || v < 0 || v > 1 {
 			return fmt.Errorf("context.no_answer_cosine: a cosine is in [0,1] where 0 is off, got %v", cfg.Context.NoAnswerCosine)
 		}
 		return nil
 	}, func(cfg *Config) any {
-		// The default for the default model; decodeFallback then treats the
-		// bar as unset, so the model tie can still turn it off.
 		cfg.Context.NoAnswerCosine = defaultConfig().Context.NoAnswerCosine
 		return cfg.Context.NoAnswerCosine
 	}},
-	// The vector-leg floor is a cosine in [0,1] where 0 preserves the
-	// historical behavior of dropping only non-positive cosines. It is applied
-	// INSIDE the leg, before fusion, so a floor no cosine can clear drops every
-	// vector candidate and hybrid search answers from the keyword arm alone —
-	// the search surface still answers, so nothing tells the caller the vector
-	// leg is gone. NaN compares false against 0 and would read as no floor at
-	// all, telling a user who set one that there is none.
 	{"search.min_similarity", func(cfg *Config) error {
 		if v := cfg.Search.MinSimilarity; math.IsNaN(v) || math.IsInf(v, 0) || v < 0 || v > 1 {
 			return fmt.Errorf("search.min_similarity: a cosine floor is in [0,1] where 0 is off, got %v", cfg.Search.MinSimilarity)
@@ -682,11 +371,6 @@ var valueChecks = []struct {
 		cfg.Search.MinSimilarity = defaultConfig().Search.MinSimilarity
 		return cfg.Search.MinSimilarity
 	}},
-	// linking.threshold is the cosine a `related` edge requires, so the same
-	// [0,1] range applies. The MCP server's linking worker reads it
-	// (cmd/ghost/mcp.go passes it to linking.NewWorker), and a link is created
-	// only when a candidate's score clears it, so refusing a NaN, infinite or
-	// out-of-range value here keeps it out of link creation.
 	{"linking.threshold", func(cfg *Config) error {
 		if v := cfg.Linking.Threshold; math.IsNaN(v) || math.IsInf(v, 0) || v < 0 || v > 1 {
 			return fmt.Errorf("linking.threshold: a cosine is in [0,1], got %v", cfg.Linking.Threshold)
@@ -698,20 +382,6 @@ var valueChecks = []struct {
 	}},
 }
 
-// checkScopeValues refuses an injection.session_scope key whose value is empty
-// or only whitespace, the way the env form does (stringMap, which trims through
-// commaPairs). An empty value is not a no-op: it is a filter that excludes every
-// row naming that key with any other value.
-//
-// Refusing is chosen for being loud and consistent with the env form, not for
-// keeping rows out: it is not a narrowing guarantee. The CLI subcommands fail on
-// it, but LoadForHook falls back to the compiled defaults plus GHOST_*. The
-// defaults carry no session_scope, so the session-start block for that session
-// is not scope-filtered at all. A GHOST_INJECTION_SESSION_SCOPE replaces the
-// file's whole session_scope map before this check, so that file is not refused
-// and the env scope applies (both cases pinned by TestLoadForHook_EmptySessionScopeValueFallsBackUnscoped). Dropping
-// only the bad key would have kept the others filtering, but silently, and left
-// the file and env forms disagreeing about the same input.
 func checkScopeValues(cfg *Config) error {
 	keys := make([]string, 0, len(cfg.Injection.SessionScope))
 	for key, value := range cfg.Injection.SessionScope {
@@ -726,23 +396,9 @@ func checkScopeValues(cfg *Config) error {
 	return fmt.Errorf("injection.session_scope: empty value for %s", strings.Join(keys, ", "))
 }
 
-// loadEnvLayer applies the GHOST_* environment variables to k: the generic
-// GHOST_ prefix + "_"→"." mapping first, then the explicit envOverrides
-// shortcuts for the keys that transformer cannot reach.
-//
-// Both passes skip an unreadable value and keep going, collecting every failure
-// into one error. Returning at the first bad value hid the rest behind it — the
-// one behind it was a good value, silently dropped — and, in the generic pass,
-// discarding the whole layer: the bulk env provider loads every variable as a
-// string, so a single value koanf cannot convert surfaces much later as a decode
-// error naming no variable at all, and took GHOST_EMBEDDING_ENABLED=false down
-// with it. Each error names the variable that carried it.
 func loadEnvLayer(k *koanf.Koanf) error {
 	var errs []error
 
-	// Pass 1: the generic mapping, built one variable at a time. A value bound
-	// to a Config field is converted here, so an unconvertible one can be
-	// skipped and named rather than failing the decode of everything else.
 	generic := make(map[string]interface{})
 	for _, kv := range os.Environ() {
 		name, value, ok := strings.Cut(kv, "=")
@@ -750,9 +406,6 @@ func loadEnvLayer(k *koanf.Koanf) error {
 			continue
 		}
 		key := strings.ToLower(strings.ReplaceAll(strings.TrimPrefix(name, envPrefix), "_", "."))
-		// An empty value is left as the string it has always been: the generic
-		// mapping has no empty-value guard, and adding one would silently change
-		// what `GHOST_EMBEDDING_ENABLED=` means.
 		if t, bound := boundKeyTypes[key]; bound && value != "" {
 			parsed, err := parseEnvValue(t, value)
 			if err != nil {
@@ -770,7 +423,6 @@ func loadEnvLayer(k *koanf.Koanf) error {
 		}
 	}
 
-	// Pass 2: the explicit shortcuts, which win over the generic mapping.
 	for _, ov := range envOverrides {
 		raw := os.Getenv(ov.env)
 		if raw == "" {
@@ -790,13 +442,8 @@ func loadEnvLayer(k *koanf.Koanf) error {
 	return errors.Join(errs...)
 }
 
-// envPrefix is the namespace the generic GHOST_ mapping claims.
 const envPrefix = "GHOST_"
 
-// parseEnvValue converts one GHOST_* value to the type its Config field decodes
-// into. A field that is not a scalar (a slice or a map) cannot come from the
-// environment at all — that is what the envOverrides parsers are for — so it is
-// reported rather than guessed at.
 func parseEnvValue(t reflect.Type, s string) (interface{}, error) {
 	switch t.Kind() {
 	case reflect.String:
@@ -814,12 +461,6 @@ func parseEnvValue(t reflect.Type, s string) (interface{}, error) {
 
 // LoadForHook loads configuration for a hook running inside someone else's
 // editor session (SessionStart injection, obsidian auto-sync, stop-hook
-// reflection, session routing). A broken config must not fail the host's
-// session, so the error is reported on stderr and FallbackConfig is returned:
-// the session still gets its context, and the user still finds out why their
-// settings are not taking effect.
-//
-// CLI subcommands use Load instead, and fail with the same error.
 func LoadForHook() *Config {
 	cfg, err := Load()
 	if err == nil {
@@ -831,39 +472,10 @@ func LoadForHook() *Config {
 
 // FallbackConfig returns the Config for callers that must not fail on a broken
 // config file (LoadForHook, and the MCP server via cmd/ghost's bootstrap), so
-// one broken file can never change which values those paths use.
-//
-// It is every layer that does not read a config file: the compiled defaults
-// plus the GHOST_* environment. Keeping the env layer is not a nicety — before
-// the parse error was surfaced at all, a malformed file was skipped and the load
-// carried on to the environment, so returning the defaults alone would
-// silently undo an operator's opt-out (GHOST_EMBEDDING_ENABLED=false,
-// GHOST_SCRATCH_MAX_BYTES=0) and hand it back to them as the opposite.
-//
-// A GHOST_* value that cannot be read is reported and skipped rather than
-// returned as an error, because this path has no way to fail. Every such
-// variable is skipped, not only the first: loadEnvLayer collects them all, so
-// one bad value no longer costs the operator the rest of their environment.
-//
-// It never returns a near-zero Config. Merging the environment in makes the
-// unmarshal step reachable for a reason the defaults-only version did not have:
-// koanf's generic env provider stores every value as a string, so one that
-// cannot be weakly converted to its field's type (GHOST_EMBEDDING_DIMENSIONS=abc)
-// fails the whole decode. Returning that partial Config would start the server
-// with embeddings and linking off, a zero demotion threshold, and — worst —
-// reflection.lifecycle_timeout_minutes=0, the unbounded lifecycle the compiled
-// defaults exist to avoid. So a decode failure drops the environment and keeps
-// the defaults, loudly, down to the last resort: even if the defaults layer
-// itself cannot be decoded, the result is defaultConfig() — the same values,
-// written out — never a struct of Go zero values.
 func FallbackConfig() *Config {
 	if cfg, ok := decodeFallback(loadEnvLayer); ok {
 		return cfg
 	}
-	// The defaults map is a literal that always decodes, so this retry cannot
-	// fail in practice. It is still checked: decodeFallback reports failure with
-	// a nil *Config*, and a panic in the one function that exists to absorb a
-	// broken config is precisely the failure mode that must not be reachable.
 	cfg, ok := decodeFallback(func(*koanf.Koanf) error { return nil })
 	if !ok || cfg == nil {
 		return defaultConfig()
@@ -871,11 +483,6 @@ func FallbackConfig() *Config {
 	return cfg
 }
 
-// defaultConfig is the last resort: the compiled defaults written out, for the
-// case where even the defaults layer will not decode. It mirrors the defaults
-// map the way DefaultInjectionConfig mirrors its injection.* entries, and
-// TestDefaultConfig_MatchesTheDefaultsMap fails if the two drift, so adding a
-// key to one without the other cannot reach a machine that needs this.
 func defaultConfig() *Config {
 	return &Config{
 		Embedding: EmbeddingConfig{
@@ -902,10 +509,6 @@ func defaultConfig() *Config {
 	}
 }
 
-// decodeFallback builds the Config from the compiled defaults with env applied
-// through applyEnv, reporting whether the result decoded. applyEnv is a
-// parameter so the env-free retry does not have to undo anything koanf already
-// merged.
 func decodeFallback(applyEnv func(*koanf.Koanf) error) (*Config, bool) {
 	k := koanf.New(".")
 	if err := k.Load(confmap.Provider(defaults, "."), nil); err != nil {
@@ -922,12 +525,6 @@ func decodeFallback(applyEnv func(*koanf.Koanf) error) (*Config, bool) {
 		return nil, false
 	}
 	explicitBar := k.Exists(noAnswerKey)
-	// The environment survives into this path, and its parsers for the
-	// environment-settable float keys read any float, so a value Load refuses
-	// would reach the store or the assembler, which refuses every search
-	// request that carries it. Each bad value is replaced with its compiled
-	// default. A rejected bar counts as unset, so the model tie below decides
-	// its default as it does for a bar nobody set.
 	for _, c := range valueChecks {
 		err := c.check(cfg)
 		if err == nil {
@@ -942,9 +539,6 @@ func decodeFallback(applyEnv func(*koanf.Koanf) error) (*Config, bool) {
 		cfg.Context.NoAnswerCosine = DefaultNoAnswerCosine
 	}
 	resolveNoAnswerBar(cfg, explicitBar)
-	// The environment survives into this path, so a width Load refuses would
-	// otherwise reach the server and every hook anyway. It is replaced with the
-	// compiled default, the way an unreadable GHOST_* value is skipped.
 	if err := checkEmbeddingValues(cfg); err != nil {
 		def := defaultConfig().Embedding.Dimensions
 		warnf("%v — using the built-in default %d", err, def)
@@ -953,9 +547,6 @@ func decodeFallback(applyEnv func(*koanf.Koanf) error) (*Config, bool) {
 	return cfg, true
 }
 
-// warnSink is where configuration warnings go. It is atomic because the sink is
-// replaced at MCP-server startup while other goroutines are already running, and
-// a two-word io.Writer read racing a write can tear.
 var warnSink = newWarnSink(os.Stderr)
 
 func newWarnSink(w io.Writer) *atomic.Pointer[io.Writer] {
@@ -966,16 +557,6 @@ func newWarnSink(w io.Writer) *atomic.Pointer[io.Writer] {
 
 // SetWarningWriter redirects configuration warnings to w, and returns a function
 // that restores the previous sink. A nil w keeps the current one.
-//
-// It exists for the MCP server, whose stderr belongs to the client protocol:
-// cmd/ghost points the sink at the same writer mcpLogConfig returns, so setting
-// GHOST_LOG_FILE keeps config warnings out of the client's face. That is not
-// cosmetic here — the hook-path warnings are not once per process. Every
-// harness spawn goes through scratch.EnforceBudget → LoadForHook inside the
-// server, so an unredirected sink would emit one protocol-noise line per spawn.
-//
-// Safe to call concurrently with in-flight warnings; nothing here needs a
-// "call it before starting goroutines" precondition.
 func SetWarningWriter(w io.Writer) (restore func()) {
 	if w == nil {
 		return func() {}
@@ -986,28 +567,17 @@ func SetWarningWriter(w io.Writer) (restore func()) {
 	return func() { warnSink.Store(prev) }
 }
 
-// warned records the messages already reported. Configuration is loaded more
-// than once per process — a SessionStart hook and a status check in one session,
-// and once per harness spawn on the spawn path — so an un-deduped warning
-// repeats a line the user has already read, which trains them to skip it.
 var warned = struct {
 	sync.Mutex
 	seen map[string]struct{}
 }{seen: map[string]struct{}{}}
 
-// resetWarned clears the dedup set. For tests: one process asserting the same
-// warning twice would otherwise see it once.
 func resetWarned() {
 	warned.Lock()
 	defer warned.Unlock()
 	warned.seen = map[string]struct{}{}
 }
 
-// warnf reports a non-fatal configuration problem, once per distinct message per
-// process. Layered config is loaded from inside host-session hooks that must
-// not fail, so the problems that must not stop the caller are reported here
-// rather than returned. A different problem is still reported, so the dedup
-// cannot hide a second problem behind the first.
 func warnf(format string, args ...interface{}) {
 	msg := fmt.Sprintf("ghost: config: "+format, args...)
 
@@ -1022,16 +592,10 @@ func warnf(format string, args ...interface{}) {
 	_, _ = fmt.Fprintln(*warnSink.Load(), msg)
 }
 
-// knownKeys is every koanf key the Config struct binds, derived once from its
-// struct tags so it cannot drift as fields are added.
 var knownKeys = collectKeys(reflect.TypeFor[Config]())
 
-// boundKeyTypes is the type each bound key decodes into, so a GHOST_* value can
-// be converted — and an unconvertible one caught and named — before it reaches
-// the decode of the whole config.
 var boundKeyTypes = collectKeyTypes(reflect.TypeFor[Config]())
 
-// collectKeyTypes is collectKeys keeping the field type, for the leaves.
 func collectKeyTypes(t reflect.Type) map[string]reflect.Type {
 	out := make(map[string]reflect.Type)
 	var walk func(reflect.Type, string)
@@ -1057,10 +621,6 @@ func collectKeyTypes(t reflect.Type) map[string]reflect.Type {
 	return out
 }
 
-// collectKeys walks a config struct's koanf tags into the flat key set koanf
-// itself uses. Only a nested struct keeps descending; maps, slices and scalars
-// are leaves as far as the key set is concerned, because koanf addresses them
-// by the key that holds the collection.
 func collectKeys(t reflect.Type) map[string]struct{} {
 	out := make(map[string]struct{})
 	var walk func(reflect.Type, string)
@@ -1086,16 +646,6 @@ func collectKeys(t reflect.Type) map[string]struct{} {
 	return out
 }
 
-// warnUnknownKeys reports the leaf keys a config file sets that no Config field
-// binds, so a typo is never a silent no-op.
-//
-// It walks the file's own tree rather than koanf's flat key set, because a
-// section is not a candidate: `injection:` binds no field of its own — only its
-// children do — so reporting one would call every ordinary section header a
-// typo. Walking through sections is also what makes an ancestor of a known key
-// known, which is the rule that stops a bare `injection:` (pruned as null before
-// it got here, but reachable through a header that also has a child) from being
-// reported, while leaving a genuine typo under the same section visible.
 func warnUnknownKeys(file map[string]interface{}, path string) {
 	var unknown []string
 	var walk func(map[string]interface{}, string)
@@ -1123,15 +673,6 @@ func warnUnknownKeys(file map[string]interface{}, path string) {
 	warnf("%s: unknown key(s) ignored: %s", path, strings.Join(unknown, ", "))
 }
 
-// isKnownKey reports whether key is one Config binds, or a child of one. The
-// walk is what makes a map value's entries count as known: koanf flattens
-// injection.category_weights into one key per entry
-// (injection.category_weights.gotcha), and a typo in the parent
-// (…category_weight.gotcha) still walks up to nothing that is bound.
-//
-// Note what it deliberately does NOT do: walk DOWN to a known section. Treating
-// every ancestor as known would make `linking.thresholdd` a non-typo for the
-// same reason `linking` is, which is the whole job of the check.
 func isKnownKey(key string) bool {
 	for {
 		if _, ok := knownKeys[key]; ok {
@@ -1145,31 +686,14 @@ func isKnownKey(key string) bool {
 	}
 }
 
-// envOverride names a GHOST_* variable the generic GHOST_ prefix plus "_"→"."
-// transformer cannot map onto a config key, together with the parser that turns
-// its raw string into the Go type the Config field needs.
-//
-// Two distinct gaps are covered:
-//
-//   - a koanf tag that itself contains "_" (obsidian.vault_dir), which the
-//     transformer would split into obsidian.vault.dir; and
-//   - a non-scalar field (injection.behavior_categories and the injection maps),
-//     which koanf's weakly-typed decode cannot build from a bare string:
-//     "gotcha,decision" would arrive as the single element ["gotcha,decision"],
-//     and a string never becomes a map at all.
 type envOverride struct {
 	env   string
 	key   string
 	parse func(string) (interface{}, error)
 }
 
-// stringValue passes a string through untouched. Every parser below names the
-// type it produces, so a value that cannot be read as its key's type is
-// reported against the variable that carried it instead of surfacing much later
-// as an unmarshal error that only names the key.
 func stringValue(s string) (interface{}, error) { return s, nil }
 
-// boolValue parses a Go boolean ("true", "1", "off").
 func boolValue(s string) (interface{}, error) {
 	v, err := strconv.ParseBool(s)
 	if err != nil {
@@ -1178,7 +702,6 @@ func boolValue(s string) (interface{}, error) {
 	return v, nil
 }
 
-// intValue parses a base-10 integer.
 func intValue(s string) (interface{}, error) {
 	v, err := strconv.Atoi(s)
 	if err != nil {
@@ -1187,7 +710,6 @@ func intValue(s string) (interface{}, error) {
 	return v, nil
 }
 
-// floatValue parses a 64-bit float.
 func floatValue(s string) (interface{}, error) {
 	v, err := strconv.ParseFloat(s, 64)
 	if err != nil {
@@ -1196,21 +718,6 @@ func floatValue(s string) (interface{}, error) {
 	return v, nil
 }
 
-// cosineValue parses a 32-bit cosine in [0, 1], for the one key that holds one
-// (context.abstain_cosine). Its own parser because the parse has to land on the
-// field's own type: a float64 handed to a float32 field through confmap decodes as
-// zero, so a cosine set in the environment would read as no threshold at all
-// while the key looked like it had been accepted.
-//
-// It also refuses what ParseFloat accepts and a cosine cannot be, which is the
-// whole reason this is not the generic float parser. An infinite floor is a
-// relevance verdict no row's cosine can clear, so every result outside the
-// keyword arm would come back `weak` with nothing in the answer to distinguish
-// that verdict from a measured one; NaN compares false against 0, so it reads as
-// OFF and a user who set a floor is told there is none; a negative value is
-// satisfied by every row including the worst, which is the opposite of a floor.
-// All three are typos, and a typo has to be the load error every other unreadable
-// GHOST_* value produces rather than a silently accepted setting.
 func cosineValue(s string) (interface{}, error) {
 	v, err := strconv.ParseFloat(s, 32)
 	if err != nil {
@@ -1225,7 +732,6 @@ func cosineValue(s string) (interface{}, error) {
 	return float32(v), nil
 }
 
-// commaList parses "a,b,c" into the []string a config key expects.
 func commaList(s string) (interface{}, error) {
 	parts := strings.Split(s, ",")
 	out := make([]string, 0, len(parts))
@@ -1237,8 +743,6 @@ func commaList(s string) (interface{}, error) {
 	return out, nil
 }
 
-// commaPairs splits "key=value,key=value" on commas, then on the first "=" of
-// each pair.
 func commaPairs(s string) ([][2]string, error) {
 	var out [][2]string
 	for _, p := range strings.Split(s, ",") {
@@ -1255,8 +759,6 @@ func commaPairs(s string) ([][2]string, error) {
 	return out, nil
 }
 
-// floatMap parses "key=value,..." into the map[string]float64 a config key
-// expects, naming the offending key when a value is not a number.
 func floatMap(s string) (interface{}, error) {
 	pairs, err := commaPairs(s)
 	if err != nil {
@@ -1273,7 +775,6 @@ func floatMap(s string) (interface{}, error) {
 	return out, nil
 }
 
-// intMap parses "key=value,..." into the map[string]int a config key expects.
 func intMap(s string) (interface{}, error) {
 	pairs, err := commaPairs(s)
 	if err != nil {
@@ -1290,17 +791,6 @@ func intMap(s string) (interface{}, error) {
 	return out, nil
 }
 
-// stringMap parses "key=value,..." into the map[string]string a config key
-// expects. A scope is a set of strings, so nothing here can fail to convert and
-// the only checks available are the pair syntax commaPairs names and the value.
-//
-// An empty value is an error, as it is in the two numeric maps above — where
-// ParseFloat and Atoi reject it by failing — and for the same reason: nothing
-// else here can reject it, and a request key whose value is the empty string is
-// a filter rather than a no-op. It excludes every row that names the key with
-// any other value, so a trailing "=" would quietly leave a session with an
-// unexplained subset of its store. The YAML form decodes an empty value rather
-// than failing, so Load refuses it after decoding (checkScopeValues).
 func stringMap(s string) (interface{}, error) {
 	pairs, err := commaPairs(s)
 	if err != nil {
@@ -1316,8 +806,6 @@ func stringMap(s string) (interface{}, error) {
 	return out, nil
 }
 
-// envOverrides is a slice rather than a map so the order the variables are
-// applied in is fixed instead of randomized by map iteration.
 var envOverrides = []envOverride{
 	{"GHOST_OBSIDIAN_VAULT_DIR", "obsidian.vault_dir", stringValue},
 	{"GHOST_CLI_CLAUDE_BINARY", "cli.claude_binary", stringValue},
@@ -1333,30 +821,17 @@ var envOverrides = []envOverride{
 	{"GHOST_REFLECTION_SUPERSEDE_CONSENSUS", "reflection.supersede_consensus", intValue},
 	{"GHOST_REFLECTION_LIFECYCLE_TIMEOUT_MINUTES", "reflection.lifecycle_timeout_minutes", intValue},
 	{"GHOST_REFLECTION_CONSOLIDATION_TIMEOUT_MINUTES", "reflection.consolidation_timeout_minutes", intValue},
-	// GHOST_LIFECYCLE_MIN_INTERVAL: the generic transformer replaces every
-	// underscore with a dot, so it would produce lifecycle.min.interval and miss
-	// the key entirely.
 	{"GHOST_LIFECYCLE_MIN_INTERVAL", "lifecycle.min_interval", stringValue},
 	{"GHOST_OLLAMA_URL", "embedding.ollama_url", stringValue},
 	{"GHOST_ROUTING_DEFAULT_PROJECT", "routing.default_project", stringValue},
 	{"GHOST_SEARCH_MIN_SIMILARITY", "search.min_similarity", floatValue},
-	// GHOST_CONTEXT_ABSTAIN_COSINE: the generic _→. transformer would produce
-	// context.abstain.cosine, missing the abstain_cosine key entirely.
 	{"GHOST_CONTEXT_ABSTAIN_COSINE", "context.abstain_cosine", cosineValue},
-	// GHOST_CONTEXT_RELEVANCE_CUTOFF: the same reason — the generic transformer
-	// would produce context.relevance.cutoff, missing the relevance_cutoff key.
 	{"GHOST_CONTEXT_RELEVANCE_CUTOFF", "context.relevance_cutoff", floatValue},
-	// GHOST_CONTEXT_NO_ANSWER_COSINE: the same reason — the generic transformer
-	// would produce context.no.answer.cosine, missing the no_answer_cosine key.
 	{"GHOST_CONTEXT_NO_ANSWER_COSINE", "context.no_answer_cosine", floatValue},
-	// GHOST_SCRATCH_MAX_BYTES: the generic _→. transformer would produce
-	// scratch.max.bytes, missing the max_bytes key entirely.
 	{"GHOST_SCRATCH_MAX_BYTES", "scratch.max_bytes", intValue},
 	{"GHOST_LINKING_DEMOTION_THRESHOLD", "linking.demotion_threshold", floatValue},
 	{"GHOST_OBSIDIAN_AUTO_SYNC", "obsidian.auto_sync", boolValue},
 	{"GHOST_INJECTION_BEHAVIOR_FLOOR", "injection.behavior_floor", intValue},
-	// The list and the two maps need parsing, not just remapping — see
-	// envOverride's doc comment.
 	{"GHOST_INJECTION_BEHAVIOR_CATEGORIES", "injection.behavior_categories", commaList},
 	{"GHOST_INJECTION_CATEGORY_WEIGHTS", "injection.category_weights", floatMap},
 	{"GHOST_INJECTION_CATEGORY_CAPS", "injection.category_caps", intMap},
@@ -1365,23 +840,6 @@ var envOverrides = []envOverride{
 
 // DataDirPath returns the ghost data directory path WITHOUT creating it, so
 // callers that must not leave a phantom directory behind (the stop hook's
-// no-LLM skip, marker reads) can still locate the store.
-//
-// It is also where the GHOST_DEV_FORBID_DATA_DIR refusal happens (#721), and
-// that placement is the whole mechanism rather than a convenience: EVERY path
-// into the data directory goes through this function or through DataDir, so
-// putting the check here is what makes "no path can reach the forbidden
-// directory" a property of the tree instead of a rule each caller has to
-// remember. A first version guarded the store-opening entry points and missed
-// four paths that resolve the directory without opening a store — scratch
-// Reap's root, the lifecycle failure marker's write and clear, and the marker
-// read on every session start — and three of those wrote or deleted a file named
-// after a project the code had been told it cannot resolve.
-//
-// So the callers' obligation is the ordinary one: handle the error. The
-// fail-open paths (the hook and the marker bookkeeping) already returned on a
-// data-dir error of any kind, which is why a refusal needs no new handling
-// there at all.
 func DataDirPath() (string, error) {
 	dataHome := os.Getenv("XDG_DATA_HOME")
 	if dataHome == "" {
@@ -1392,25 +850,12 @@ func DataDirPath() (string, error) {
 		dataHome = filepath.Join(home, ".local", "share")
 	}
 	dir := filepath.Join(dataHome, "ghost")
-	// Before any creation: DataDir MkdirAll's this path, and a refusal that
-	// arrived afterwards would leave the phantom directory the variable exists
-	// to protect.
 	if err := CheckDevDataDir(buildVersion, dir); err != nil {
 		return "", err
 	}
 	return dir, nil
 }
 
-// buildVersion is this binary's version — the string the release ldflags stamp
-// into main.version, and "dev" for a plain `go build`. DataDirPath needs it and
-// config cannot import cmd, so cmd/ghost hands it over once from its dispatch
-// (SetBuildVersion), the same route memory.SetDetectRemote takes.
-//
-// The default is "dev" because that is the guarded side: a caller that has not
-// wired the version yet is a development build, and is refused rather than
-// allowed. It is read from a single goroutine (the process start) and by the
-// hook paths, which are one process per fire, so it is a plain var rather than
-// an atomic.
 var buildVersion = "dev"
 
 // SetBuildVersion tells the config package which build it is part of, so the
@@ -1419,7 +864,6 @@ func SetBuildVersion(v string) { buildVersion = v }
 
 // BuildVersion returns the version the data-directory check judges this build
 // by. It exists for the tests that need the guarded side without going through
-// a dispatch, and for a caller that wants to report which build answered.
 func BuildVersion() string { return buildVersion }
 
 // DataDir returns the ghost data directory, creating it if needed.
@@ -1446,7 +890,6 @@ func ConfigFilePath() (string, error) {
 
 // EnsureConfigFile creates the platform's user config path from the embedded
 // example if it doesn't already exist. Returns the path and whether a new file
-// was created.
 func EnsureConfigFile() (path string, created bool, err error) {
 	path, err = ConfigFilePath()
 	if err != nil {
@@ -1466,20 +909,6 @@ func EnsureConfigFile() (path string, created bool, err error) {
 	return path, true, nil
 }
 
-// loadConfigFile loads a config file into koanf and reports the keys in it
-// that Config does not bind. A file that is not there is
-// not an error — the layer is optional — and neither is one that cannot be
-// READ: a root-owned /etc/ghost/config.yaml, or a user file with the wrong
-// mode, is not a configuration mistake worth failing every command over, and
-// the main branch behaved that way. It is warned about and skipped.
-//
-// A file that is readable but does not PARSE is an error naming the path, and
-// that is the distinction worth stopping for: the user wrote a typo, and will
-// keep not getting the settings they asked for until someone says so.
-//
-// A layer that is not a regular file — a FIFO, a device, a directory — is
-// skipped with the same warning, and its bytes are never read: see
-// readConfigLayer.
 func loadConfigFile(k *koanf.Koanf, path string, parser koanf.Parser) error {
 	raw, err := readConfigLayer(path)
 	if err != nil {
@@ -1501,14 +930,6 @@ func loadConfigFile(k *koanf.Koanf, path string, parser koanf.Parser) error {
 	return nil
 }
 
-// readConfigLayer returns the bytes of the config file at path, refusing one
-// that is not a regular file. A FIFO opened for reading blocks until a writer
-// appears, which stopped every command that loads config and left a lifecycle
-// run deaf to SIGTERM while it waited; a device such as /dev/zero would be read
-// without end. configOpenFlags carry O_NONBLOCK on unix, so the open of a FIFO
-// returns at once, and the fstat on the open descriptor refuses it before a
-// byte is read. Symlinks are followed on purpose: a config.yaml linked from a
-// dotfiles checkout is ordinary, and the check is made on what the link names.
 func readConfigLayer(path string) ([]byte, error) {
 	f, err := os.OpenFile(path, configOpenFlags, 0) // #nosec G304 -- the system and user config paths, not caller input
 	if err != nil {
@@ -1525,12 +946,6 @@ func readConfigLayer(path string) ([]byte, error) {
 	return io.ReadAll(f)
 }
 
-// pruneNulls drops the keys whose YAML value is null, in place. A section
-// header with no children — `injection:` on a line of its own — parses to null,
-// and koanf merges that null over the defaults map, erasing the whole subtree:
-// a user who opened their config to change one setting and left the header bare
-// would silently lose every other value under it. Dropping the key leaves the
-// defaults standing, which is what an absent section has always meant.
 func pruneNulls(m map[string]interface{}) map[string]interface{} {
 	for key, val := range m {
 		if val == nil {
@@ -1544,10 +959,6 @@ func pruneNulls(m map[string]interface{}) map[string]interface{} {
 	return m
 }
 
-// userConfigDir returns the base user config directory, honoring XDG_CONFIG_HOME
-// when set. Unlike os.UserConfigDir — which ignores XDG_CONFIG_HOME on macOS —
-// this keeps the config path consistent with DataDir's XDG_DATA_HOME handling
-// and lets tests point XDG_CONFIG_HOME at a temp dir on every platform.
 func userConfigDir() (string, error) {
 	if dir := os.Getenv("XDG_CONFIG_HOME"); dir != "" {
 		return dir, nil
