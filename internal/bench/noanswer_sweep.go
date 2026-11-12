@@ -11,34 +11,6 @@ import (
 	"github.com/wcatz/ghost/internal/memory"
 )
 
-// This file measures the no-answer rule (#955): should ghost_memory_search say
-// "nothing here answers this" when the best match is weak, and at what bar.
-//
-// Three rule families are measured, because the choice between them is the
-// finding and not a premise:
-//
-//   - cosine: an absolute floor on the BEST vector cosine in the block. This is
-//     the rule the assembler ships (context.no_answer_cosine), so each of its
-//     rows is the real Store.Candidates -> assemble.Run path with the bar set.
-//   - fused: a floor on the top row's fused Base. Measured, not built.
-//   - combined: refuse only when the best cosine is below the bar AND no row in
-//     the block is a strong keyword match. Measured, not built.
-//
-// The last two are judged from the block the assembler produced at the same
-// shipped cutoff, with the rule applied afterwards, and every row says which
-// rows are real and which are measured that way. They exist so the table shows
-// why the shipped rule is the cosine one, not so a second implementation of a
-// rule can drift from the first.
-//
-// Every row reports the five numbers the ship gate is about: the no-answer
-// false-positive rate (no-answer queries that still got rows), the answerable
-// queries refused, the graded-relevant rows still admitted, context precision
-// and the estimated tokens per answer. The off row (bar 0) is the baseline every
-// other row reads as a change from.
-
-// The no-answer ship gate, from the issue that introduced the rule: at most half
-// the no-answer queries may still get rows, and at most 3% of the answerable
-// ones (7 of 220) may be refused.
 const (
 	// NoAnswerGateFalsePositive is the largest false-positive rate the gate allows.
 	NoAnswerGateFalsePositive = 0.5
@@ -46,12 +18,9 @@ const (
 	NoAnswerGateRefused = 7
 )
 
-// noAnswerKeywordRank is the keyword rank within which a row counts as a strong
-// keyword match for the combined rule. It is the same value as the assembler's
-// keyword arm of the verdict floor (rank 0..3).
 const noAnswerKeywordRank = 3
 
-// Rule names, as the table prints them.
+// Rule names.
 const (
 	RuleCosine   = "cosine"
 	RuleFused    = "fused"
@@ -60,18 +29,12 @@ const (
 
 // NoAnswerSweepPoint is one rule at one setting.
 type NoAnswerSweepPoint struct {
-	Rule    string
-	Setting float64
-	// Built says the rule is the one the assembler ships (real path) as opposed
-	// to one judged from the block afterwards.
-	Built bool
-	// NoAnswer is the false-positive rate: no-answer queries that still came back
-	// with at least one row, out of the no-answer queries measured.
+	Rule     string
+	Setting  float64
+	Built    bool
 	NoAnswer Ratio
-	// Refused is the answerable queries that came back with no row.
-	Refused Ratio
-	// Report is the block over the answerable queries at this setting.
-	Report ContextReport
+	Refused  Ratio
+	Report   ContextReport
 }
 
 // Gate reports whether this point meets the ship gate.
@@ -83,28 +46,21 @@ func (p NoAnswerSweepPoint) Gate() bool {
 		p.Refused.Num <= NoAnswerGateRefused
 }
 
-// NoAnswerCosineGrid is the bars the built rule is measured at. 0 is off, the
-// baseline; the rest span the band between the no-answer and answerable cosine
-// distributions, and the shipped default is in it.
+// NoAnswerCosineGrid is the bars the built rule is measured at.
 func NoAnswerCosineGrid() []float64 {
 	return []float64{0.0, 0.50, 0.55, 0.58, 0.60, 0.62, 0.64, 0.66, 0.70}
 }
 
-// NoAnswerFusedGrid is the top-row fused Base floors the fused rule is measured
-// at. The fused score is a reciprocal-rank sum, so its scale is a function of the
-// retrieval depth and not of how close a match is; the grid sits where it
-// actually varies.
+// NoAnswerFusedGrid is the fused rule settings.
 func NoAnswerFusedGrid() []float64 {
 	return []float64{0.0150, 0.0155, 0.0160, 0.0162}
 }
 
-// NoAnswerCombinedGrid is the cosine bars the combined rule is measured at.
+// NoAnswerCombinedGrid is the combined rule settings.
 func NoAnswerCombinedGrid() []float64 {
 	return []float64{0.60, 0.62, 0.64, 0.70}
 }
 
-// bestCosine is the best vector cosine among the admitted rows, or -1 when no
-// row carries one.
 func bestCosine(res assemble.Result) float64 {
 	best := -1.0
 	for _, it := range res.Items {
@@ -115,8 +71,6 @@ func bestCosine(res assemble.Result) float64 {
 	return best
 }
 
-// fusedRefuses is the fused rule: the top admitted row's fused Base is below the
-// floor.
 func fusedRefuses(floor float64) func(assemble.Result) bool {
 	return func(res assemble.Result) bool {
 		if len(res.Items) == 0 || res.Trace == nil {
@@ -127,8 +81,6 @@ func fusedRefuses(floor float64) func(assemble.Result) bool {
 	}
 }
 
-// combinedRefuses is the combined rule: the best cosine is below the bar AND no
-// admitted row is a strong keyword match.
 func combinedRefuses(bar float64) func(assemble.Result) bool {
 	return func(res assemble.Result) bool {
 		if len(res.Items) == 0 || res.Trace == nil {
@@ -147,10 +99,7 @@ func combinedRefuses(bar float64) func(assemble.Result) bool {
 	}
 }
 
-// NoAnswerSweep measures every rule at every setting over an already-seeded
-// store: the graded queries for the answerable half and the no-answer queries for
-// the false-positive half. All rows run at the shipped relevance cutoff, so the
-// numbers are the block the tool would return. An error at any point is refused.
+// NoAnswerSweep measures every rule at every setting.
 func NoAnswerSweep(ctx context.Context, store *memory.Store, graded, noAnswer []Query, at time.Time) ([]NoAnswerSweepPoint, error) {
 	cutoff := config.DefaultRelevanceCutoff
 	var points []NoAnswerSweepPoint
@@ -199,8 +148,7 @@ func NoAnswerSweep(ctx context.Context, store *memory.Store, graded, noAnswer []
 	return points, nil
 }
 
-// FormatNoAnswerSweep renders the sweep as an aligned table, the shipped default
-// marked and the gate verdict beside every row.
+// FormatNoAnswerSweep renders the sweep table.
 func FormatNoAnswerSweep(points []NoAnswerSweepPoint) string {
 	var b bytes.Buffer
 	graded, noAnswer := 0, 0
