@@ -15,7 +15,6 @@ import (
 // TestStatusReportsGlobal seeds a sandbox store with _global near-duplicate
 // rows and asserts `ghost mcp status` (via reportGlobalConsolidation) renders
 // the _global section with the right counts and the consolidate-global pointer.
-// It also asserts the pointer is absent when _global has nothing to consolidate.
 func TestStatusReportsGlobal(t *testing.T) {
 	t.Run("reports consolidatable _global rows and clusters", func(t *testing.T) {
 		statusEnv(t)

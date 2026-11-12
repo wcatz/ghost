@@ -23,10 +23,6 @@ func stopInputIn(t *testing.T, cwd, transcriptPath, format string) string {
 
 // captureLifecycleChild replaces the spawn with a recorder for the duration of
 // one test and returns the argv it was handed.
-//
-// The executable is this test binary, so a real Start would run the whole suite
-// again — and a suite that spawns a suite. Replacing the one call that starts
-// the child is what makes the argv assertable at all.
 func captureLifecycleChild(t *testing.T) *[][]string {
 	t.Helper()
 	real := startLifecycleChild
@@ -54,14 +50,6 @@ func auditHookRun(t *testing.T) (dataHome, projDir string) {
 }
 
 // seedRetrievalKey writes an install key where a real install has one.
-//
-// The FILE is written directly rather than through memory.WarmQueryKey, and the
-// reason is the key cache: it is a package-level one-key-per-process cache, so in
-// a suite where each test gets its own sandbox the first test to warm it poisons
-// every later one — WarmQueryKey would report the first sandbox's key and write
-// no file here at all. The writer's contract is to read this file, so writing it
-// is the fixture that matches the contract. The format is the real one (32 bytes,
-// lower-case hex, 0600) because the reader classifies it.
 func seedRetrievalKey(t *testing.T, dataHome string) {
 	t.Helper()
 	dir := filepath.Join(dataHome, "ghost")
