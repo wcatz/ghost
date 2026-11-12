@@ -596,12 +596,6 @@ var warned = struct {
 	seen map[string]struct{}
 }{seen: map[string]struct{}{}}
 
-func resetWarned() {
-	warned.Lock()
-	defer warned.Unlock()
-	warned.seen = map[string]struct{}{}
-}
-
 func warnf(format string, args ...interface{}) {
 	msg := fmt.Sprintf("ghost: config: "+format, args...)
 
