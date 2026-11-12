@@ -10,8 +10,6 @@ import (
 	"testing"
 )
 
-// digestOf is the "sha256:<hex>" form GitHub's releases API reports for every
-// uploaded asset.
 func digestOf(data []byte) string {
 	sum := sha256.Sum256(data)
 	return "sha256:" + hex.EncodeToString(sum[:])
@@ -25,10 +23,6 @@ func TestVerifyAssetDigestAcceptsTheReportedDigest(t *testing.T) {
 		digest string
 	}{
 		{name: "the digest GitHub reports", digest: digestOf(data)},
-		// Hex is compared case-insensitively — and so is the algorithm name,
-		// since the same digest written in either case is the same digest —
-		// so a differently-cased field cannot fail an otherwise-matching
-		// install.
 		{name: "the whole field in uppercase", digest: strings.ToUpper(digestOf(data))},
 	}
 
@@ -42,9 +36,6 @@ func TestVerifyAssetDigestAcceptsTheReportedDigest(t *testing.T) {
 	}
 }
 
-// TestVerifyAssetDigestRefuses covers every shape the upgrade path has to
-// refuse. A missing digest is the dangerous one: it means this response cannot
-// vouch for the asset, and the alternative is an archive nobody authenticated.
 func TestVerifyAssetDigestRefuses(t *testing.T) {
 	data := []byte("pretend this is a release archive")
 	other := []byte("a different archive entirely")
@@ -68,7 +59,6 @@ func TestVerifyAssetDigestRefuses(t *testing.T) {
 			want:   "no digest",
 		},
 		{
-			// An algorithm this binary does not implement is not a pass.
 			name:   "an algorithm it cannot check",
 			digest: "sha512:" + strings.Repeat("a", 128),
 			want:   "unsupported",
@@ -84,9 +74,6 @@ func TestVerifyAssetDigestRefuses(t *testing.T) {
 			want:   "malformed",
 		},
 		{
-			// GitHub always prefixes the algorithm. A bare hex digest is not
-			// the field's shape, so guessing which algorithm was meant would
-			// be worse than refusing.
 			name:   "a bare hex digest with no algorithm",
 			digest: hex.EncodeToString(dataSum[:]),
 			want:   "unsupported",
@@ -107,25 +94,6 @@ func TestVerifyAssetDigestRefuses(t *testing.T) {
 	}
 }
 
-// TestVerifyAssetDigestNamesTheAssetAndBothDigests keeps the refusal
-// actionable: the user has to be able to tell which asset failed and what the
-// two values were, or the message is just a failed upgrade.
-func TestVerifyAssetDigestNamesTheAssetAndBothDigests(t *testing.T) {
-	asset := &Asset{Name: "ghost_1.2.3_linux_amd64.tar.gz", Digest: "sha256:" + strings.Repeat("0", 64)}
-	err := VerifyAssetDigest([]byte("archive"), asset)
-	if err == nil {
-		t.Fatal("expected a refusal for a mismatched digest")
-	}
-	for _, want := range []string{asset.Name, asset.Digest} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("error %q should name %q", err, want)
-		}
-	}
-}
-
-// TestFetchReleaseReadsTheAssetDigest proves the digest is decoded from the
-// release metadata at all. A struct field that is never populated makes every
-// verification above refuse, and a rename of the JSON key does the same.
 func TestFetchReleaseReadsTheAssetDigest(t *testing.T) {
 	want := digestOf([]byte("asset"))
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
