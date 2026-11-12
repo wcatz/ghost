@@ -14,67 +14,34 @@ import (
 	sqlite "modernc.org/sqlite"
 )
 
-// The write paths that append history, as the phase vocabulary of
-// memory_history.phase. The CHECK in initSQL (mirrored by migrateV17) is the
-// authority; these constants exist so a writer cannot spell one wrong.
-//
-// They are deliberately about WHICH WRITE PATH CHANGED a row, not about what
-// the row now says. `reflect` covers a consolidation rewrite, a reuse that
-// restated a field and a fresh insert alike, because "which reflection run
-// changed this" is the question the history exists to answer and the row's own
-// source column already records the outcome. A re-emission that changed nothing
-// writes no row at all (#727), so the question it cannot answer — which run last
-// merely LOOKED at this memory — is deliberately not asked.
 const (
-	// phaseSave: a new memories row was inserted.
 	phaseSave = "save"
-	// phaseUpdate: an existing row was edited (UpdateMemory).
+
 	phaseUpdate = "update"
-	// phaseReflect: a consolidation CHANGED the row — a rewrite, a reuse that
-	// restated at least one field, or a fresh insert. A verbatim re-emission
-	// appends nothing (#727): it wrote nothing, and a version row records the
-	// state a write left behind.
+
 	phaseReflect = "reflect"
-	// phaseMerge: a near-duplicate fold strengthened an existing row.
+
 	phaseMerge = "merge"
-	// phaseResolve: a resolve pass stamped resolved_at.
+
 	phaseResolve = "resolve"
-	// phaseUnresolve: resolved_at was cleared again.
+
 	phaseUnresolve = "unresolve"
-	// phaseSupersede: an active supersedes edge now points at this memory.
+
 	phaseSupersede = "supersede"
-	// phaseUnsupersede: that edge was invalidated, so the claim is withdrawn.
-	// Its own phase rather than a flag on the supersede row: a memory can be
-	// superseded, un-superseded and superseded again, and only the sequence
-	// says which claim is currently live.
+
 	phaseUnsupersede = "unsupersede"
-	// phaseRestore: a snapshot restore put the row back.
+
 	phaseRestore = "restore"
-	// phaseImport: a portable artifact inserted the row.
+
 	phaseImport = "import"
-	// phaseDelete: the row is being removed. Recorded from the state the row
-	// held immediately before the DELETE, which is the only chance to record
-	// it — unless the delete was asked to PURGE, which takes the history with
-	// the row.
+
 	phaseDelete = "delete"
-	// phaseBaseline: what the memory said before this build ever recorded a
-	// history row for it. See recordBaselineHistoryTx.
+
 	phaseBaseline = "baseline"
-	// phaseMove: the memory was moved between projects. The row records the
-	// destination project's state and names the source and destination projects.
+
 	phaseMove = "move"
 )
 
-// allHistoryPhases is every phase the schema knows about, in the order the
-// constants are declared.
-//
-// It exists for the two classifiers that are claims about CODE rather than rules
-// about rows, and they need the full set to be checkable at all: `compactablePhases`
-// says which phases the compaction may remove, and `stampMovingPhases` says which
-// writers move a live memory's updated_at. Both are asked "what is not in here?",
-// and a hand-written list of the remainder cannot answer it — a phase added to the
-// schema and to neither list would simply be unclassified, which is the failure the
-// compaction's allowlist exists to make impossible.
 func allHistoryPhases() []string {
 	return []string{
 		phaseSave, phaseUpdate, phaseReflect, phaseMerge, phaseResolve, phaseUnresolve,
@@ -83,96 +50,22 @@ func allHistoryPhases() []string {
 	}
 }
 
-// The growth policy for memory_history, applied inside the same transaction
-// as the append (see pruneHistoryForIDsTx and pruneHistoryTableTx). They are vars
-// rather than consts only so the policy tests can lower them; nothing in
-// production assigns to them.
 var (
-	// historyVersionsPerMemory is how many versions of ONE memory survive. A
-	// memory that is edited or folded thousands of times is a single row in
-	// memories and would otherwise be thousands of rows here. The newest go
-	// last: the recent past is what an audit and an as_of read (issue #647) are
-	// for. The trim ranks by rowid, so a memory always keeps its newest row —
-	// the one statement of what it says now — and a memory under the cap keeps
-	// everything, which is why a rarely-changed memory never loses the baseline
-	// its first write recorded.
 	historyVersionsPerMemory = 50
-	// historyRowsCap bounds the table as a whole. The per-memory cap cannot:
-	// every created-then-dropped memory is a distinct memory_id with a couple
-	// of rows of its own, and a reflection replace churns them by the hundred.
+
 	historyRowsCap = 20000
 )
 
-// historyBatchSize is how many ids one history statement covers, well under
-// SQLite's SQLITE_MAX_VARIABLE_NUMBER (32766) for the same reason the resolve
-// batches are (setResolvedBatchSize). Each id costs six bound parameters (the
-// event's five scalars and the id itself), so a batch is deliberately far below
-// the limit rather than near it.
 const historyBatchSize = 500
 
-// errHistoryNoMemory reports that an id named no live memories row, so there was
-// no state to record. It is a sentinel rather than a plain error because one
-// caller legitimately expects it — Delete is handed an id that may name nothing,
-// and reports "memory not found" in its own words — while every other caller
-// treats it as its own bug and must not swallow it.
 var errHistoryNoMemory = errors.New("no live memory row")
 
-// redactHistoryContent rewrites content on its way into a history row, and is the
-// seam a credential detector plugs into.
-//
-// The history is the one place Ghost keeps text it no longer holds anywhere else:
-// a memory row is overwritten by the next edit and gone by the next delete,
-// while its earlier versions sit in this table and are printed by
-// `ghost history`. A credential redacted by an edit or a delete therefore has to
-// be redacted here too, or the redaction leaves a longer-lived copy of the
-// secret than the row it was made to remove.
-//
-// It was the identity function while internal/secret (#656) — the value-SHAPE
-// detector every Ghost writer consults before it stores caller-supplied text —
-// was still open, under a TODO naming that issue as the change that would
-// install it. #656 has since landed, and history_redactor.go's init installs
-// redactHistoryContent through setHistoryRedactor. The replacement, not a
-// refusal, because refusing would fail the user's own write over something only
-// the history can see.
-//
-// The cost is real and was measured rather than assumed, because the comment above
-// this seam is right that crossing into Go per appended row lands on the write
-// path's critical section: secret.Detect on a 2 KB memory is ~1.1 ms and at the
-// 8 KB content cap ~3.6 ms, per row, inside the transaction. A batched append pays
-// it once per id. It is paid on EVERY row whether or not anything is redacted,
-// because the only sound way to know is to look. The obvious optimisation — a
-// keyword pre-check that skips the detector — is the same trap #656's detector
-// already documented once: a prefilter with a false negative is a silent leak, and
-// LiteralPrefix returns empty for the \b-initial patterns these rules use, so a
-// hand-written one cannot be made sound by inspection either.
-//
-// It is installed through setHistoryRedactor, never assigned directly, and the
-// append statement asks THAT whether to call the SQL function — a second bool
-// would be a second source of truth, and the wiring below would then have to set
-// both or the filter would silently not apply.
-//
-// filter is nil until a redactor is installed, and the append path's gate is
-// derived from it rather than kept beside it, so the two cannot disagree.
 var historyRedactor struct {
 	filter func(string) string
 }
 
 func historyRedactorInstalled() bool { return historyRedactor.filter != nil }
 
-// historyContentExpr is the SQL expression a history row's content column reads:
-// the filter when one is installed, the column itself when none is.
-//
-// Every statement that writes a history row reaches the content through here, and
-// there are two of them (the batched append and the baseline's NOT EXISTS
-// insert). They cannot each decide for themselves: one of them forgetting is
-// exactly how an unredacted credential gets into the table while the append path
-// claims to redact it.
-//
-// Calling the function when nothing is installed would cross into Go through the
-// driver for every appended row to do nothing — measurable on the write path's
-// critical section. Reading the gate instead is not defensive: it is the state
-// #656's seam started in, with redactHistoryContent still the identity function
-// and no redactor installed, and the state setHistoryRedactor(nil) still creates.
 func historyContentExpr() string {
 	if historyRedactorInstalled() {
 		return historyContentFunc + "(content)"
@@ -180,19 +73,10 @@ func historyContentExpr() string {
 	return "content"
 }
 
-// historyContentFunc is the SQL name the append statement calls to reach that Go
-// function, so redaction happens INSIDE the one statement that copies the state
-// out of memories. A second pass over the rows just written would work too, and
-// would be worse: it would open a window in which an unredacted copy of a
-// credential sits in the table, inside a transaction whose failure mode is "roll
-// the whole thing back".
 const historyContentFunc = "ghost_history_content"
 
 func init() {
-	// Registered per process rather than per connection: modernc.org/sqlite keeps
-	// one global function table, and the callback reads the current filter through
-	// the package var instead of capturing it, so a filter installed after this
-	// runs still applies.
+
 	if err := sqlite.RegisterDeterministicScalarFunction(historyContentFunc, 1,
 		func(_ *sqlite.FunctionContext, args []driver.Value) (driver.Value, error) {
 			content, ok := args[0].(string)
@@ -204,30 +88,17 @@ func init() {
 			}
 			return historyRedactor.filter(content), nil
 		}); err != nil {
-		// The only realistic failure is a duplicate name, which happens when a
-		// second registration reaches the same process — harmless, because the
-		// first already points at the same var. Warned rather than fatal: a store
-		// that cannot redact is still a working store, and the alternative is
-		// refusing to open the database at all.
+
 		slog.Warn("register history content filter", "function", historyContentFunc, "error", err)
 	}
 }
 
-// setHistoryRedactor installs the filter history rows are written through and
-// returns a function that restores the previous one. It is the ONLY way to
-// install one, which is what keeps the append path's gate and the function it
-// calls in step. The seam's own tests use it to swap a filter out (or install
-// none), and history_redactor.go's init is the production call that installed the
-// real one; the filter field itself has no other writer.
 func setHistoryRedactor(fn func(string) string) func() {
 	prev := historyRedactor.filter
 	historyRedactor.filter = fn
 	return func() { historyRedactor.filter = prev }
 }
 
-// selectIDs runs a single-column id query in tx and returns its rows. args is
-// read, never appended to, so a caller may go on reusing the same slice for the
-// write the read decides.
 func selectIDs(ctx context.Context, tx *sql.Tx, query string, args ...any) ([]string, error) {
 	rows, err := tx.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -246,16 +117,7 @@ func selectIDs(ctx context.Context, tx *sql.Tx, query string, args ...any) ([]st
 }
 
 // HistoryEntry is one recorded event in a memory's history: the state the
-// memory held once the write named by Phase landed, plus who performed that
-// write when the write path knew.
-//
-// Agent and SessionID are the PERFORMER, not the memory's stored provenance.
-// That is the difference the audit needs: `merge` and `save` carry the caller's
-// Provenance, while the lifecycle passes (reflect, resolve, supersede) and Delete
-// know no session and leave both empty — an empty field is an admission, not a
-// claim that nobody acted. The state columns are read back from the memories row
-// inside the appending transaction rather than passed in by the caller, so a
-// history row cannot describe a state its memory never held.
+
 type HistoryEntry struct {
 	ID         string  `json:"id"`
 	MemoryID   string  `json:"memory_id"`
@@ -270,60 +132,31 @@ type HistoryEntry struct {
 	ResolvedAt *string `json:"resolved_at,omitempty"`
 	Source     string  `json:"source"`
 
-	// RelatedID is the other memory this event is about, when there is one: on
-	// a delete, the id that replaced this row (a consolidation rewrite or merge
-	// that gave the row a new id), and on a supersede or unsupersede, the memory
-	// whose edge makes or withdraws the claim. It is what lets a reader follow
-	// one memory's history into its successor's instead of stopping at the
-	// rewrite (#648).
 	RelatedID string `json:"related_id,omitempty"`
-	// MergedContent is the incoming near-duplicate text a merge folded in, and
-	// is set only when the fold did not keep it as a row of its own — the
-	// FoldOnly path, where the wording is deliberately dropped. The default fold
-	// stores that text as a linked copy with its own save row, so it is empty
-	// there and this is not a second copy of that copy.
+
 	MergedContent string `json:"merged_content,omitempty"`
-	// FromProjectID and ToProjectID record a move between projects (phaseMove).
+
 	FromProjectID string `json:"from_project_id,omitempty"`
 	ToProjectID   string `json:"to_project_id,omitempty"`
 }
 
-// historyEvent is one event to record. The zero value records a state snapshot
-// with no performer and no other end, which is most events.
 type historyEvent struct {
-	// phase is the event's phase; required.
 	phase string
-	// prov is the performing agent, when the write path knows one.
+
 	prov Provenance
-	// relatedID is the other memory the event is about, if any.
+
 	relatedID string
-	// mergedContent is the folded-in text a merge did not keep as a row.
+
 	mergedContent string
-	// fromProjectID and toProjectID record a move between projects (phaseMove).
+
 	fromProjectID string
 	toProjectID   string
 }
 
-// appendHistoryTx records one event for memoryID in the caller's transaction.
-//
-// The state is copied out of the memories row by the INSERT ... SELECT itself,
-// so there is no window between "the write landed" and "the state was read" — and
-// a caller that forgot to make the row live yet gets an error naming the count
-// it expected, rather than a silently empty history.
-//
-// Callers decide the ordering. A write that records the state it changed appends
-// after its statement; a delete appends BEFORE its DELETE, because afterwards
-// there is nothing left to read.
 func appendHistoryTx(ctx context.Context, tx *sql.Tx, memoryID, phase string, prov Provenance) error {
 	return appendHistoryEventsTx(ctx, tx, []historyEvent{{phase: phase, prov: prov}}, []string{memoryID})
 }
 
-// appendHistoryForIDsTx is appendHistoryTx over a set of ids with no other end,
-// in one statement and one prune. Every caller that has a batch of ids already
-// selected them from memories inside the same transaction, so a row that is not
-// there is a caller's bug rather than a race — and it is reported as one, because
-// a silently dropped history row is exactly the failure this table exists to
-// prevent.
 func appendHistoryForIDsTx(ctx context.Context, tx *sql.Tx, ids []string, phase string, prov Provenance) error {
 	events := make([]historyEvent, len(ids))
 	for i := range events {
@@ -332,13 +165,6 @@ func appendHistoryForIDsTx(ctx context.Context, tx *sql.Tx, ids []string, phase 
 	return appendHistoryEventsTx(ctx, tx, events, ids)
 }
 
-// appendHistoryEventsTx appends one event per id, in one statement per batch.
-// events[i] describes ids[i].
-//
-// One statement per batch is deliberate on both sides: the whole batch is one
-// transaction, so a per-id loop would multiply the statements of a reflection
-// replace by three, and the batch is also the granularity the per-memory trim
-// runs at.
 func appendHistoryEventsTx(ctx context.Context, tx *sql.Tx, events []historyEvent, ids []string) error {
 	for len(ids) > 0 {
 		batch := ids
@@ -349,12 +175,6 @@ func appendHistoryEventsTx(ctx context.Context, tx *sql.Tx, events []historyEven
 		batchEvents := events[:len(batch)]
 		events = events[len(batch):]
 
-		// One statement per DISTINCT event in the batch, and the batch has one
-		// event in every real caller — a phase, an agent and a folded text are
-		// the same for every row a resolve pass or a replace touches. The grouping
-		// is what makes that true without assuming it: a statement carries its
-		// event's scalars once, so a batch that did mix events takes one statement
-		// per event rather than binding the wrong scalars to a row.
 		for start := 0; start < len(batch); {
 			end := start + 1
 			for end < len(batch) && batchEvents[end] == batchEvents[start] {
@@ -372,10 +192,6 @@ func appendHistoryEventsTx(ctx context.Context, tx *sql.Tx, events []historyEven
 	return nil
 }
 
-// appendHistoryGroupTx appends one event for every id in the group, in a single
-// INSERT ... SELECT so the state each row records is that row's own — read by the
-// statement, at the moment it runs, rather than passed in by a caller that could
-// disagree with it.
 func appendHistoryGroupTx(ctx context.Context, tx *sql.Tx, e historyEvent, ids []string) error {
 	placeholders := make([]string, 0, len(ids))
 	args := make([]interface{}, 0, len(ids)+7)
@@ -386,12 +202,7 @@ func appendHistoryGroupTx(ctx context.Context, tx *sql.Tx, e historyEvent, ids [
 		placeholders = append(placeholders, "?")
 		args = append(args, id)
 	}
-	// A stamp-moving phase's version carries the updated_at its writer left on the
-	// row, read by this same statement. The column default would read the clock
-	// again, and SQLite evaluates datetime('now') once per statement, so a second
-	// boundary between the writer's UPDATE and this INSERT filed the version one
-	// second after the row it records. Every other phase keeps the clock: it did
-	// not move the stamp, so there is nothing to agree with.
+
 	recordedAt := "datetime('now')"
 	if slices.Contains(stampMovingPhases, e.phase) {
 		recordedAt = "updated_at"
@@ -418,36 +229,8 @@ func appendHistoryGroupTx(ctx context.Context, tx *sql.Tx, e historyEvent, ids [
 	return nil
 }
 
-// recordBaselineHistoryTx records what a memory held BEFORE a write that
-// destroys its text, but only when the memory has no history row yet.
-//
-// That condition is the whole point. migrateV17 records no starting row for the
-// memories that already exist, so every pre-v17 memory reaches this build with
-// no history at all — and an edit is the one write that overwrites text nothing
-// else keeps. Without a baseline, the first UpdateMemory of a v16 memory files
-// the NEW text and the old wording is gone: unrecoverable from the database, and
-// just as unrecoverable for #647's as_of read, which would have no version to
-// read before the edit.
-//
-// It reads the live row rather than a value the caller passed in, which is only
-// correct because every caller runs it BEFORE its own write — at which point the
-// row still holds exactly the state being replaced. A caller that moved its
-// statement would get the new text stamped as the baseline, so the ordering is
-// part of this function's contract rather than an incidental detail.
-//
-// It is a no-op for every memory that already has history, which is every memory
-// written by this build: one indexed existence check on the edit path, nothing
-// elsewhere.
 func recordBaselineHistoryTx(ctx context.Context, tx *sql.Tx, memoryID, phase string, prov Provenance) error {
-	// The check and the append are ONE statement, `WHERE NOT EXISTS`, rather than
-	// a count followed by an insert. Two reasons, and the second is the load
-	// bearing: the pair is atomic without relying on anything else in this
-	// transaction, and it is one statement on the edit path instead of two —
-	// which matters because every statement here runs while the write lock is
-	// held, and the edit path is one of the busiest.
-	//
-	// A statement that inserts nothing reports zero rows affected, which is the
-	// answer, not a failure: a memory this build wrote has history and keeps it.
+
 	res, err := tx.ExecContext(ctx, `
 		INSERT INTO memory_history
 			(memory_id, project_id, phase, agent, session_id, content, category,
@@ -467,54 +250,6 @@ func recordBaselineHistoryTx(ctx context.Context, tx *sql.Tx, memoryID, phase st
 	return nil
 }
 
-// purgeHistoryTx erases the text this database recorded about a memory, and
-// reports how many history rows it removed.
-//
-// It is the redaction path, and it reaches further than the history table alone
-// because the history is not the only place the text was kept:
-//
-//   - memory_snapshots. Every applied reflection copies each non-manual memory's
-//     full content into a snapshot, and memory_snapshots.memory_id deliberately
-//     has no foreign key, so deleting the memory row leaves the snapshot — and
-//     `ghost reflect --restore` re-inserts the row from it under the memory's
-//     ORIGINAL id, text and all, with no history to show it came back. A purge
-//     that left that behind would report success on a secret that is one
-//     `ghost reflect --restore` away from being readable again.
-//   - another memory's merge row. A FoldOnly fold records the wording it
-//     discarded in `merged_content` on the TARGET's row, so this memory's text
-//     can sit on a history row that names a different memory. Those cells are
-//     redacted rather than their rows deleted: the event (which memory, when,
-//     which agent) is worth keeping, and the text is what the purge is for.
-//     The match set for that redaction includes this memory's OWN
-//     `merged_content`, not only its content columns: wording a fold brought INTO
-//     this memory is absent from every content column of this one, so a list drawn
-//     from those columns alone could never reach the copy another row kept. It is
-//     gathered into a slice of its own rather than added to the content list,
-//     because that list also keys the snapshot delete — and a snapshot is the
-//     rollback point for a whole project, so folding this wording into it would
-//     delete an unrelated memory's snapshot whose content happens to equal the
-//     wording this one let go.
-//   - memory_provenance and memory_snapshot_evidence. The evidence records are
-//     deleted outright rather than kept as a record: they carry no text of the
-//     memory, but they name the agents, sessions and references that reported it,
-//     and the reason a purge was asked for is this memory, not the row that quotes
-//     it. The second table is the same columns a second time, held beside the
-//     snapshot a restore would read, and a snapshot outlives the purge by being the
-//     rollback point for every OTHER memory in the project.
-//
-// The texts are collected before anything is deleted, because afterwards there
-// is nothing left to search for. The caller runs this in the same transaction as
-// the memory DELETE, so a memory and every copy of it commit or roll back
-// together.
-//
-// An empty memoryID is REFUSED here rather than at the exported entry point, and
-// here rather than there because there are two callers (PurgeMemoryHistory and
-// the delete-time purge) and only this body is both of them. The reason is the
-// substring search the retrieval-record delete below performs: SQLite's instr
-// returns 1 for an EMPTY needle — measured, not assumed — so an empty id matches
-// every row in that table and the purge would delete the whole audit trail while
-// the equality-keyed deletes around it matched nothing and reported success. A
-// refusal costs a caller a check; the alternative costs an operator the evidence.
 func purgeHistoryTx(ctx context.Context, tx *sql.Tx, memoryID string) (int64, error) {
 	if memoryID == "" {
 		return 0, errPurgeNoMemoryID
@@ -531,12 +266,6 @@ func purgeHistoryTx(ctx context.Context, tx *sql.Tx, memoryID string) (int64, er
 		return 0, fmt.Errorf("collect texts to purge: %w", err)
 	}
 
-	// The folded-in wording recorded on this memory's own merge rows is absent
-	// from every content column gathered above, so it is collected separately. It
-	// is deliberately kept OUT of texts: texts also keys the snapshot delete
-	// below, and a snapshot is the rollback point for a whole project — folding
-	// this wording into that list would delete an unrelated memory's snapshot
-	// whose content merely equals the wording this one let go.
 	foldedTexts, err := selectIDs(ctx, tx, `
 		SELECT merged_content FROM memory_history WHERE memory_id = ? AND merged_content IS NOT NULL`,
 		memoryID)
@@ -544,15 +273,6 @@ func purgeHistoryTx(ctx context.Context, tx *sql.Tx, memoryID string) (int64, er
 		return 0, fmt.Errorf("collect folded-in texts to purge: %w", err)
 	}
 
-	// The snapshots first: they are the copies that can bring the row back, so
-	// they are the ones whose survival would make the purge's own report a lie.
-	//
-	// By CONTENT as well as by id, because a pre-v13 snapshot recorded no id and
-	// `ghost reflect --restore` matches those by content — so an id-keyed delete
-	// would leave the one snapshot that can resurrect the row, and this purge
-	// would report success on a secret one restore away. The content list is the
-	// memory's own, so this cannot reach an unrelated row that merely shares a
-	// word: it is an exact match on text this memory is being erased for.
 	const snapshotPurgeBatch = 25
 	for start := 0; start < len(texts); start += snapshotPurgeBatch {
 		batch := texts[start:min(start+snapshotPurgeBatch, len(texts))]
@@ -582,101 +302,16 @@ func purgeHistoryTx(ctx context.Context, tx *sql.Tx, memoryID string) (int64, er
 		return 0, fmt.Errorf("purge memory snapshots: %w", err)
 	}
 
-	// The evidence records go with the history, and the delete is explicit rather
-	// than left to the foreign key. The cascade covers the delete-time purge, but
-	// PurgeMemoryHistory leaves the memory in place, so no cascade fires there —
-	// and a purge whose completeness depended on a connection's foreign_keys
-	// pragma would be a purge that can report success over rows still in the
-	// table. These rows name the agents and sessions that reported a fact about a
-	// memory whose text is being erased; keeping them would leave the erased
-	// memory's story behind with the memory itself gone.
 	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM memory_provenance WHERE memory_id = ?`, memoryID); err != nil {
 		return 0, fmt.Errorf("purge memory evidence: %w", err)
 	}
-	// And the copy a snapshot holds. The snapshot row itself goes above, by id and
-	// by content, but a snapshot is the rollback point for a whole PROJECT's
-	// corpus, so the evidence rows are keyed on the memory alone and would outlive
-	// the purge by however many reflects it takes to prune that snapshot — or
-	// forever if none runs. A redaction that leaves the agent, the session and the
-	// reference behind has not erased the thing it was asked to erase, whatever it
-	// reports.
+
 	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM memory_snapshot_evidence WHERE memory_id = ?`, memoryID); err != nil {
 		return 0, fmt.Errorf("purge snapshot evidence: %w", err)
 	}
 
-	// And the retrieval records that NAME the memory (#646). It holds no text of
-	// it, but a name is exactly what a redaction is asked to remove when the id
-	// itself is the sensitive thing — a memory named for a customer, a
-	// credential's identifier, an incident ticket. Leaving the row would report
-	// success on a redaction that the audit can still read the id back out of.
-	//
-	// There is no foreign key to cascade: a record outlives the memory by
-	// construction (it is evidence about calls, and a purge deletes history, not
-	// memories), so this reach has to be written out, exactly as the two above
-	// are.
-	//
-	// TWO predicates, because one of them cannot see every row. The parsed arm
-	// goes through readableVerdicts and matches every WELL-FORMED record EXACTLY,
-	// by the id the stages actually recorded. The textual arm is the reach the
-	// parsed one does not have: a row whose verdicts column cannot be read at all
-	// may still name the memory, and a name inside it is still a name.
-	//
-	// SCOPED to exactly those rows, and the scope is what makes the arm defensible
-	// rather than merely cautious. verdictsUnreadable is the same expression
-	// readableVerdicts substitutes on, so "the parsed arm could not see this row"
-	// and "this column is unreadable" are one statement in one place. An UNSCOPED
-	// OR also fuzzy-matches every well-formed row: purging the id `A_1` would
-	// delete a record whose verdict names `A_1%done`, which the parsed arm — which
-	// knows the exact ids — correctly left alone. Having the exact answer and then
-	// searching for it approximately is strictly worse than not having it, so the
-	// arm is gated on the very rows that need it.
-	//
-	// instr, NOT LIKE: LIKE reads % and _ in the BOUND VALUE as wildcards, and
-	// `ghost import` writes an artifact's ids verbatim, so a real id can contain
-	// one — the id `A_1%done` would match the unrelated `Ax1%done` row. instr is a
-	// literal substring search (measured on this build's SQLite: it finds `A_1` in
-	// `[{"id":"A_1"}]` and does NOT find it in `[{"id":"Ax1"}]`, which LIKE does).
-	//
-	// Matched in the VALUE position, and that is the whole fix. A bare
-	// `instr(verdicts, ?)` searches the SERIALIZED DOCUMENT, which contains the
-	// schema's own field names and vocabulary — "id", "kept", "stage", "reason",
-	// "valid", "expired" — so an imported id equal to or contained in any of those
-	// matched nearly every row and `ghost history purge` deleted the audit trail
-	// while reporting that it erased one memory. Requiring the id to sit behind
-	// its own key, and quoting it the way the column quotes it, makes a field name
-	// unable to match: no document contains `"id":"id"` unless a verdict's id is
-	// literally the string "id", which is a real memory being purged.
-	//
-	// The residual, stated rather than hidden: json_quote and Go's encoder escape
-	// differently for `<`, `>` and `&` (Go writes \u003c by default), so an
-	// UNREADABLE row whose id contains one of those is not reached by this arm. It
-	// is a gap in a best-effort arm for malformed rows, not in the parsed one,
-	// which compares ids exactly and covers every row Ghost wrote.
-	//
-	// TWO statements, ONE predicate (#852). The verdicts filed against the calls
-	// this removes go WITH them, so the purge is keyed on the CALL that is going
-	// away rather than on the memory that named it. A call that admitted MEM1 and
-	// MEM2 loses its whole record row when MEM1 is purged, and its (call, MEM2)
-	// verdict is that call's own: the `memory_id = ?` arm below reaches MEM1's
-	// verdict and nothing else, so the rest survived pointing at a row that no
-	// longer existed — and retrieval_record has no AUTOINCREMENT, so the freed
-	// rowid was handed to the NEXT call, which inherited a verdict about a memory
-	// it never admitted. So the sweep SELECTs the doomed rowids with exactly the
-	// predicate the record delete uses; retrievalRecordNamingMemory is one function
-	// for both, because two copies of this text could drift into removing the
-	// record rows and keeping their verdicts, which is the orphan the pairing
-	// exists to prevent.
-	//
-	// The sweep comes FIRST, and that order is load-bearing rather than a style
-	// choice: its predicate is a subquery over retrieval_record, so once those rows
-	// are gone it can no longer see them and would silently match nothing.
-	//
-	// retrieval_audit is a legacy table: nothing reads it and nothing writes it
-	// any more, so this is only a purge of whatever an older build left behind.
-	// It carries one index, on project_id, and none on record_rowid, so the sweep
-	// is a scan of the rows that are still stored.
 	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM retrieval_audit WHERE record_rowid IN (
 			SELECT rowid FROM retrieval_record WHERE `+retrievalRecordNamingMemory()+`)`,
@@ -689,29 +324,11 @@ func purgeHistoryTx(ctx context.Context, tx *sql.Tx, memoryID string) (int64, er
 		return 0, fmt.Errorf("purge retrieval records: %w", err)
 	}
 
-	// The legacy verdicts are removed, not left behind: a verdict's subject is a
-	// memory ID, and a purge that kept them would leave rows naming a memory that
-	// has been redacted.
-	//
-	// This arm is not redundant with the sweep above: the sweep reaches the
-	// verdicts of calls that are going away, this one reaches the verdicts whose
-	// call survives — every unattributed row (record_rowid 0) and any row whose
-	// call judged the memory without naming it.
 	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM retrieval_audit WHERE memory_id = ?`, memoryID); err != nil {
 		return 0, fmt.Errorf("purge retrieval audits: %w", err)
 	}
 
-	// The flags go too, and this arm is NOT redundant the way a cascade would be:
-	// a purge keeps the memory row (that is what makes it a purge rather than a
-	// delete), so memory_flags' ON DELETE CASCADE never fires. A flag left behind
-	// would survive its own memory's redaction — an agent's objection, with its
-	// reason, still naming a memory whose recorded past the caller just paid to
-	// erase, and still counting as evidence against content that may be exactly
-	// what was purged. The delete is by memory_id because that is the id this
-	// transaction is purging, and it runs in the same transaction for the reason
-	// every statement here does: a purge that took the history and left the flags
-	// would report success over the rows it was asked to remove.
 	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM memory_flags WHERE memory_id = ?`, memoryID); err != nil {
 		return 0, fmt.Errorf("purge memory flags: %w", err)
@@ -727,12 +344,6 @@ func purgeHistoryTx(ctx context.Context, tx *sql.Tx, memoryID string) (int64, er
 		return 0, fmt.Errorf("count purged history rows: %w", err)
 	}
 
-	// Another memory's discarded wording, in batches small enough that the
-	// statement's text stays sane: a text is up to MaxContentLen bytes, and a
-	// memory's history is bounded but not by this. The match set is this
-	// memory's content columns AND its own folded-in wording — the latter is the
-	// only way to reach the copy a second row kept when the wording lived in no
-	// content column of this one.
 	const redactionBatch = 25
 	redactTexts := make([]string, 0, len(texts)+len(foldedTexts))
 	redactTexts = append(redactTexts, texts...)
@@ -762,27 +373,8 @@ func purgeHistoryTx(ctx context.Context, tx *sql.Tx, memoryID string) (int64, er
 	return removed, nil
 }
 
-// errPurgeNoMemoryID reports a purge asked for with no memory to purge. See
-// purgeHistoryTx: the retrieval-record delete reaches an unreadable verdicts
-// column by substring, and an empty id is a substring of everything.
 var errPurgeNoMemoryID = errors.New("purge history: a memory id is required")
 
-// rebuildFTSAfterPurgeTx replaces the whole full-text index from the surviving
-// content table, inside the purge's own transaction.
-//
-// A DELETE on memories fires memories_ad, which writes FTS5 a 'delete'
-// tombstone — but a tombstone only marks the row deleted; the token stays in
-// the segment blobs the index already holds until a merge rewrites them, and
-// no merge is guaranteed to run. So a purge that stopped at the DELETE left the
-// purged wording readable in memories_fts's shadow tables, which is what the
-// byte scan in the redaction test found (#1043). 'rebuild' wipes the index and
-// re-derives it from the content table, which no longer holds the row, and the
-// connection's secure_delete zeroes the freed segment blobs as they go.
-//
-// For an external-content table this is the index's own command, not a schema
-// change: memories_fts's content is the view memories_fts_source (schema v28),
-// which reads memories, so the rebuild needs no argument. It runs in the purge transaction so the row and the index
-// can never come apart.
 func rebuildFTSAfterPurgeTx(ctx context.Context, tx *sql.Tx) error {
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO memories_fts(memories_fts) VALUES('rebuild')`); err != nil {
@@ -792,62 +384,17 @@ func rebuildFTSAfterPurgeTx(ctx context.Context, tx *sql.Tx) error {
 }
 
 // PurgeOutcome reports what a purge reached.
-//
-// Rows is the number of history versions the purge removed. CheckpointComplete
-// is whether the write-ahead log was truncated once the purge committed: when it
-// is false another connection held a read snapshot for the whole busy_timeout, so
-// the frames the purge's own writes produced — the DELETE and the index rebuild —
-// are still in the -wal, and a caller must say the text stays there rather than
-// that it is gone from the file. It says nothing about bytes an OLDER build freed
-// before this connection ran secure_delete, or about a copy outside this
-// database: the store cannot measure either, so a caller must not report the
-// purge as reaching them.
+
 type PurgeOutcome struct {
 	Rows               int64
 	CheckpointComplete bool
 }
 
-// checkpointAfterPurge folds the WAL back into the main database file so the
-// pages the purge just zeroed are the pages on disk, and reports whether it got
-// all the way.
-//
-// It runs after the purge's transaction commits — a WAL checkpoint cannot run
-// inside a transaction — and it is TRUNCATE rather than PASSIVE so the -wal file
-// is emptied rather than merely bounded: the purged text was written to WAL when
-// the memory was saved, and those older frames are dropped only when the log is
-// truncated. A no-op on an in-memory database, which is not in WAL mode.
-//
-// The result row is READ, not discarded: wal_checkpoint does not raise an error
-// when it cannot finish — it returns (busy, log, checkpointed), and busy != 0 or
-// a log the run did not fold means another connection held a read snapshot for
-// the whole busy_timeout, so the purge's frames are still in the log. Returning
-// that up rather than an error is what lets the caller report the erase as
-// incomplete instead of either claiming it is done or rolling back a delete that
-// has already committed.
-//
-// It stays inside the caller's s.mu rather than being moved out, and that is an
-// explicit decision with a cost, not a free consequence of the connection pool.
-//
-// Every writer queues on the store's one pinned connection (SetMaxOpenConns(1)),
-// whether it waits on s.mu or on the pool: releasing the mutex would only move
-// that queue from one to the other, and holding it keeps the checkpoint from
-// interleaving with a second transaction on the one connection. What the lock
-// also does is stall in-process READS that do not compete for that connection at
-// all: the production store carries a separate read handle (NewStoreWithRead,
-// wired in cmd/ghost/bootstrap.go), so a snapshot read runs on readDB and never
-// touches the write connection — but it still takes s.mu.RLock(), so it waits
-// behind this s.mu.Lock() for as long as the checkpoint's busy wait lasts.
-//
-// The window is narrow — only while a reader holds a snapshot old enough to stop
-// the checkpoint, usually sub-second and up to the 5s busy_timeout under
-// sustained contention — and it is accepted because a purge is not a hot path
-// and the lock keeps the checkpoint atomic against the store's writers.
 func (s *Store) checkpointAfterPurge(ctx context.Context) (bool, error) {
 	var busy, walFrames, folded int
 	err := s.db.QueryRowContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`).Scan(&busy, &walFrames, &folded)
 	if errors.Is(err, sql.ErrNoRows) {
-		// journal_mode is not WAL (an in-memory store): there is no log to
-		// truncate, so nothing is left unerased by this step.
+
 		return true, nil
 	}
 	if err != nil {
@@ -856,20 +403,6 @@ func (s *Store) checkpointAfterPurge(ctx context.Context) (bool, error) {
 	return busy == 0 && walFrames == folded, nil
 }
 
-// checkpointAfterPurgeUncancelled runs the post-commit checkpoint and reports
-// whether it finished, and it never returns an error.
-//
-// The purge has already committed by the time this runs, so a checkpoint that
-// cannot finish is a warning about the file, not a failure of the delete: the
-// caller must not tell the operator "delete failed" about a row that is gone.
-// A real SQL error is logged and folded into the outcome as CheckpointComplete
-// false, the same report a held reader produces.
-//
-// The context is stripped of cancellation because the busy wait is not
-// interruptible: SQLite's busy handler runs to its timeout whatever the context
-// says, so an expiring deadline would only make the driver surface an error
-// after the wait has already happened — turning a slow truncation into a
-// reported failure of a delete that already occurred.
 func (s *Store) checkpointAfterPurgeUncancelled(ctx context.Context) bool {
 	complete, err := s.checkpointAfterPurge(context.WithoutCancel(ctx))
 	if err != nil {
@@ -879,51 +412,12 @@ func (s *Store) checkpointAfterPurgeUncancelled(ctx context.Context) bool {
 	return complete
 }
 
-// purgedTextMarker replaces a folded-in text a purge has erased. It is a marker
-// rather than an empty string so a reader can tell "this fold discarded text that
-// has since been purged" from "this fold discarded nothing", which an empty
-// string cannot say.
 const purgedTextMarker = "[purged]"
 
-// PurgeMemoryHistory erases a memory's recorded history without touching the
-// memory row, and reports what the purge reached in a PurgeOutcome: the rows it
-// removed and whether the checkpoint truncated the write-ahead log.
-//
-// It is the second stage of the redaction path, and it exists because a purge
-// asked for at DELETE time cannot cover a memory that is already gone. The
-// tombstone is the point: a memory deleted an hour ago still has its text here,
-// so "erase that secret" asked an hour later needs this rather than a delete
-// that reports the memory as not found and leaves the text where it is. It is
-// also what makes a memory id reusable — `ghost import` refuses an id that still
-// has history, and this is how an operator frees one.
-//
-// It erases recorded text only, which is what distinguishes it from
-// DeleteWithOptions(PurgeHistory: true) — that one is a delete and takes the row
-// with it. A live memory row here is left exactly as it was,
-// because "erase the history of this memory" and "delete this memory" are
-// different requests and conflating them would destroy knowledge nobody asked to
-// lose. What it does reach is every copy of the text the database kept, so
-// nothing is left that a restore or a reader can bring back; see purgeHistoryTx.
-//
-// It names the memory by id alone and decides nothing about the row; a caller
-// that read the memory as deleted — ghost_memory_delete and `ghost history purge`
-// both do — uses PurgeDeletedMemoryHistoryInProject, which re-decides that inside
-// the purge.
 func (s *Store) PurgeMemoryHistory(ctx context.Context, memoryID string) (PurgeOutcome, error) {
 	return s.purgeMemoryHistory(ctx, "", memoryID)
 }
 
-// PurgeDeletedMemoryHistoryInProject is PurgeMemoryHistory for a memory the
-// caller holds to be deleted and its project's, and both are decided inside the
-// purge's own transaction rather than taken from the caller's earlier read.
-// Read before it, they left a window (#1191): a deleted row is not gone for
-// good — `ghost reflect --restore` reinstates it under its own id, and a promote
-// can then move it to _global — so a purge that checked the tombstone on the
-// pool erased the history of a live row while reporting it already deleted, and
-// a project-scoped call could erase a _global memory's history. It refuses, and
-// writes nothing, when the id has a live row (as "not found in project" when
-// that row is another project's) and when the newest history row was filed
-// under another project. Ids are rendered through RefusalArg.
 func (s *Store) PurgeDeletedMemoryHistoryInProject(ctx context.Context, projectID, memoryID string) (PurgeOutcome, error) {
 	if projectID == "" {
 		return PurgeOutcome{}, fmt.Errorf("purge history: project_id is required")
@@ -931,9 +425,6 @@ func (s *Store) PurgeDeletedMemoryHistoryInProject(ctx context.Context, projectI
 	return s.purgeMemoryHistory(ctx, projectID, memoryID)
 }
 
-// purgeDeletedOwnerTx is the scoped purge's decision, read through the purge's
-// transaction: the id must have no live row, and its newest history row — the
-// tombstone — must be projectID's.
 func purgeDeletedOwnerTx(ctx context.Context, tx *sql.Tx, projectID, memoryID string) error {
 	var owner string
 	err := tx.QueryRowContext(ctx, `SELECT project_id FROM memories WHERE id = ?`, memoryID).Scan(&owner)
@@ -980,34 +471,17 @@ func (s *Store) purgeMemoryHistory(ctx context.Context, projectID, memoryID stri
 	if err != nil {
 		return PurgeOutcome{}, err
 	}
-	// The history table is not FTS-indexed, but the memory's own row may have
-	// been deleted by an earlier plain delete — whose trigger left the token in
-	// a segment the tombstone does not rewrite. Rebuilding from the surviving
-	// content table removes any such token, and is a no-op index-wise for a row
-	// that is still live. See rebuildFTSAfterPurgeTx and #1043.
+
 	if err := rebuildFTSAfterPurgeTx(ctx, tx); err != nil {
 		return PurgeOutcome{}, err
 	}
 	if err := tx.Commit(); err != nil {
 		return PurgeOutcome{}, fmt.Errorf("commit purge history: %w", err)
 	}
-	// From here the purge has committed: the checkpoint can only add a warning
-	// about the file, never a failure of a delete that already happened.
+
 	return PurgeOutcome{Rows: n, CheckpointComplete: s.checkpointAfterPurgeUncancelled(ctx)}, nil
 }
 
-// linkSuccessorTx records, on the delete row of a memory a consolidation
-// replaced, which row now holds its content.
-//
-// The chain breaks without it. A rewrite or a merge gives the row a NEW id — the
-// new text is not byte-identical, so ReplaceNonManual cannot reuse the old row —
-// so the old id's history simply stops. A reader following one memory's record
-// (a reader of a flag or a record) would have no way to learn that
-// the memory it holds a verdict about is now a different row.
-//
-// Only a delete row with no successor yet is stamped: one that already names a
-// successor was written by a later pass, and overwriting it would move the older
-// claim onto the newer successor.
 func linkSuccessorTx(ctx context.Context, tx *sql.Tx, oldID, successorID string) error {
 	if oldID == "" || successorID == "" || oldID == successorID {
 		return nil
@@ -1022,22 +496,6 @@ func linkSuccessorTx(ctx context.Context, tx *sql.Tx, oldID, successorID string)
 	return nil
 }
 
-// pruneHistoryTx applies the growth policy in the caller's transaction: the
-// per-memory cap for the ids just appended, and the table-wide cap.
-//
-// Both bounds are asked about in ONE statement, because this runs inside the
-// caller's write transaction and everything it adds is time the write lock is
-// held. The write lock is the single resource concurrent writers queue for, so a
-// per-upsert statement that looks free in a one-process test is what tips a
-// busy_timeout under contention — which is exactly how this landed: the
-// multi-process test in multiproc_concurrency_test.go began failing with
-// SQLITE_BUSY at BEGIN IMMEDIATE once each write carried three extra statements.
-//
-// The probe therefore reports the two questions in one union (which of these
-// memories are over the per-memory cap, and the newest rowid in the table), and
-// the DELETEs behind those answers are skipped entirely in the common case: a
-// memory under the cap and a table under the global cap are the normal state, and
-// then nothing is deleted.
 func pruneHistoryTx(ctx context.Context, tx *sql.Tx, ids []string) error {
 	for len(ids) > 0 {
 		batch := ids
@@ -1054,9 +512,6 @@ func pruneHistoryTx(ctx context.Context, tx *sql.Tx, ids []string) error {
 		}
 		args = append(args, historyVersionsPerMemory)
 
-		// kind 'over' carries the memory ids past the per-memory cap; kind 'max'
-		// carries the newest rowid as text, since the two answers have different
-		// types and one result set carries both.
 		rows, err := tx.QueryContext(ctx, `
 			SELECT 'over', memory_id FROM memory_history
 			WHERE memory_id IN (`+strings.Join(placeholders, ",")+`)
@@ -1097,12 +552,6 @@ func pruneHistoryTx(ctx context.Context, tx *sql.Tx, ids []string) error {
 		}
 		rows.Close() //nolint:errcheck
 
-		// Per memory: everything past the newest historyVersionsPerMemory rows,
-		// ranked by rowid. rowid rather than recorded_at because recorded_at is
-		// second-precision — every write one reflection makes in a pass shares a
-		// timestamp, and the newest rows would then be chosen by a tie-break.
-		// Ranking by rowid DESC also means the predicate can never take a memory's
-		// newest row: it is rank 1.
 		if len(over) > 0 {
 			overPlaceholders := make([]string, 0, len(over))
 			overArgs := make([]interface{}, 0, len(over)+1)
@@ -1126,13 +575,6 @@ func pruneHistoryTx(ctx context.Context, tx *sql.Tx, ids []string) error {
 			}
 		}
 
-		// Across the store: a rowid window rather than an ORDER BY over every row.
-		// An implicit rowid is max(rowid)+1 and is never reused, so rowid order IS
-		// insertion order, and after `rowid <= newest - cap` every surviving rowid
-		// lies in a window of cap integer values — at most cap rows, whatever the
-		// gaps. The per-memory cap cannot do this job: every created-then-dropped
-		// memory is its own memory_id with a couple of rows, and one applied
-		// reflection can churn the whole non-manual corpus.
 		if sawMax && newest > int64(historyRowsCap) {
 			if _, err := tx.ExecContext(ctx,
 				`DELETE FROM memory_history WHERE rowid <= ?`, newest-int64(historyRowsCap),
@@ -1144,18 +586,6 @@ func pruneHistoryTx(ctx context.Context, tx *sql.Tx, ids []string) error {
 	return nil
 }
 
-// MemoryHistory returns one memory's recorded history, oldest first — a
-// changelog, not a log tail, because the question it answers ("what did this
-// memory say, and who changed it?") is read forwards.
-//
-// A limit of zero or less returns the newest historyVersionsPerMemory rows,
-// which by the growth policy is everything one memory is expected to have.
-// Otherwise the newest `limit` rows are returned, still oldest first, so a limit
-// never shows the beginning of a recent run of writes and hides the rest.
-//
-// An id with no history returns an empty slice and no error: "this memory was
-// never written since the table existed" is an answer, and a reader should not
-// have to tell it apart from a database failure.
 func (s *Store) MemoryHistory(ctx context.Context, memoryID string, limit int) ([]HistoryEntry, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -1164,10 +594,6 @@ func (s *Store) MemoryHistory(ctx context.Context, memoryID string, limit int) (
 		limit = historyVersionsPerMemory
 	}
 
-	// The pool is safe here: no transaction is open on this handle. The order is
-	// by rowid rather than recorded_at, because recorded_at is second-precision
-	// and several writes in one reflection share a timestamp: ordering by it
-	// would make the changelog a coin toss among them.
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, memory_id, project_id, recorded_at, phase, agent, session_id, related_id,
 		       merged_content, from_project_id, to_project_id,
