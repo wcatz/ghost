@@ -48,7 +48,7 @@ ghost context --as-of <RFC3339>   Render it as the store stood at an instant
 ghost history <memory-id>         Print one memory's append-only history
 ghost history purge <memory-id>   Erase a memory and every recorded version of it
 ghost history compact [--apply]   Remove history versions that changed nothing (bounded by --before)
-ghost bench [--sweep|--context|--passive|--audit]   Run the built-in benchmark
+ghost bench [--sweep|--context|--passive]   Run the built-in benchmark
 ghost upgrade                     Update a standalone binary
 ghost version                     Print the version
 ```
@@ -158,7 +158,7 @@ host UserPromptSubmit / PostToolUse (Edit|Write|MultiEdit)
   → record the delivery in the retrieval record
 ```
 
-The record write has its own short deadline and runs after the output is printed. Under a held write lock the delivery still happens, but the record is dropped with one WARN line on stderr, so the audit misses that row; the silent path prints nothing on stderr.
+The record write has its own short deadline and runs after the output is printed. Under a held write lock the delivery still happens, but the record is dropped with one WARN line on stderr, so that row is missing; the silent path prints nothing on stderr.
 
 The block is a push for the moment of work: the session-start block is chosen without a query, and a gotcha about a file is rarely in view when that file is edited. Claude Code is the only host whose hooks are documented to add `additionalContext` beside a user message and beside a tool result, so it is the only source with the `WorkingMoment` capability; the other hosts get a silent no-op.
 
@@ -573,7 +573,7 @@ answering it with the current ranking would be a payload that cannot be told fro
 historical one. It is refused without a query for the same reason (a passive
 retrieval scores no candidate). An explain call writes **no retrieval record**: the
 record counts answers delivered to a caller, and an explanation is a diagnostic of
-one, which also keeps the audit's denominator what it was before explain went
+one, so the record's count of calls is unchanged by explain going
 through `Run`. A retrieval leg that failed while another answered is reported in the payload's
 notes rather than converted to an error, because the caller asked for the diagnosis
 of this run; a run in which every applicable leg failed is still the retrieval error
@@ -708,8 +708,8 @@ The main schema tables are:
 | `memory_history` | Append-only per-memory CHANGE LOG (schema v17, [#578](https://github.com/wcatz/ghost/issues/578)) — one row per write, each holding the content, category, importance, `resolved_at` and source the memory had once that write landed, plus the other memory the event is about (`related_id`) and the text a merge folded in (`merged_content`). Its `memory_id` deliberately has no foreign key. A version row that changed nothing is removable by `ghost history compact` ([#730](https://github.com/wcatz/ghost/issues/730)); see [Memory history](#memory-history) |
 | `memory_provenance` | Append-only per-memory EVIDENCE records (schema v18, [#673](https://github.com/wcatz/ghost/issues/673)) — SEVERAL rows per memory, one per observation, each naming the agent, session, reference and confidence that supported it, with `observed_at`/`verified_at`, and `carried_from` when a consolidation carried the record off the memory it was consolidated from. A different question from the change log, and the name `memory_history` deliberately did not take. Its `memory_id` cascades, and the table is in the migration's derived-row whitelist so an orphan cannot brick a newer build |
 | `memory_snapshot_evidence` | The evidence a reflection snapshot carries, so a restore brings the support back with the row (schema v18). Pruned with the snapshots themselves — by `ReplaceNonManual`'s prune, and by `ghost project delete`'s own prune since a project delete also takes its snapshots through the projects cascade ([#1046](https://github.com/wcatz/ghost/issues/1046)) |
-| `retrieval_record` | One row per retrieval CALL (schema v20, [#646](https://github.com/wcatz/ghost/issues/646)) — the query as an HMAC-SHA256 digest under a per-install key kept OUTSIDE the database, the surface, the session, `as_of`, the outcome/reason, and a JSON array of the per-memory kept/dropped verdicts with the stage and reason. The grain is the call and not the (call, memory) pair, because the audit's denominator is calls. **Written by every retrieval surface, not only by search** ([#850](https://github.com/wcatz/ghost/issues/850)): `ghost_memory_search` under `search`, the session-start block under `session_start`, and the project-context surfaces under `project_context`, which since [#581](https://github.com/wcatz/ghost/issues/581) includes the standalone `ghost://memories/global` resource. Two things about those rows are the rule rather than a list of shapes, and the rule is what a reader computing a per-source figure needs: attribution follows the read, so a row carries the `ProjectID` its own request carried, and a read that named the `_global` bucket carries `project_id=_global` rather than the requesting project — a project-keyed read is a statement about that PROJECT's retrievals, and attributing another bucket's window to it would compute that project's precision over rows it never held. And the grain is per CALL, so one call can write more than one row: the `ghost://project/{id}/context` resource and the `recall_project` prompt cap each SECTION, so their `## Global` is a read and a row of its own rather than a slice of the window above it, which is why a resolved-project read of theirs is two rows where the tool's is one — the tool renders its Global section out of the window it already read. A count of calls is therefore not a count of rows. WHICH shapes make which read — the tool at the caller's `limit`, the resource and prompt at `projectContextMemoriesCap`, and the shapes that skip the project-keyed read or the second one — is per-shape detail belonging to the surfaces, and it is stated once, in [docs/mcp.md](mcp.md#project-context), rather than here: this cell's grain is the table, and a list of branches duplicated into a schema row is a list that goes stale without failing anything. `query_hash` is empty on both passive surfaces (they carry no question, so the per-install key is never resolved for them), and `session_id` is the host's session id where the host names one (Claude Code's `CLAUDE_CODE_SESSION_ID` for the MCP server, the hook payload's `session_id` for the session-start block; see [Retrieval audit: which session a verdict is about](#retrieval-audit-which-session-a-verdict-is-about)) and empty otherwise, which leaves the call unjudged. No text, and `query_hash` is CHECK-constrained to a 64-character hex digest or empty, so the column cannot hold a question. The digest is keyed, not a bare hash: a short question is confirmable against the store's own memories by anyone holding it, so the key is a sibling 0600 file in the data directory, which is also why `ghost backup` (a `VACUUM INTO` of the database) carries the records without the key — and a restore on another machine re-keys every row it brings with it. Oldest-first 5000-ROW cap, so a call that writes two rows spends two of them and the retained window is a few weeks of searching in ROWS rather than in calls; `ghost history purge` removes the rows naming a purged memory |
-| `retrieval_audit` | One row per (call, KEPT memory) (schema v21, [#646](https://github.com/wcatz/ghost/issues/646); `content_hash` added in schema v22, [#879](https://github.com/wcatz/ghost/issues/879)) — the verdict the comparison reached (`used`, `ignored`, `superseded_in_session`, `contradicted`), the signal that proved a positive one, the scanner's degradation reason, and the hash of the CONTENT that verdict judged, so `UsefulnessByMemory` can tell a real rewrite (withdraw the verdict) from a retag, a re-weight or a `verified` flip (keep it): `updated_at` cannot tell them apart, because metadata-only writes move it too. The grain is the pair, so a second pass over the same call REPLACES exactly that call's verdicts, which is what lets a hook that fires after every turn keep this table proportional to calls. `record_rowid` is the `retrieval_record` rowid it belongs to, read rather than inferred because `recorded_at` is second-precision. IDs, outcomes, signals and reasons only: `signal` names the arm that proved a positive verdict, and since [#930](https://github.com/wcatz/ghost/issues/930) the reports read it to split `used` into cited-by-id and `restated by wording`; no transcript text, no query, no memory content — what went in is read, compared against fingerprints and dropped. `content_hash` is a 64-character hex DIGEST of the memory's text and never that text: it fingerprints what was judged, is `''` on every row written before v22, and nothing is backfilled onto those rows (nobody holds the text they judged, and hashing against today's text would make a stale row look current) — they are read by the NAMED LEGACY RULE instead, `recorded_at >= updated_at`, the pre-v22 rule verbatim, which `TestAVerdictWithNoHashFollowsTheLegacyStampRule` pins. Oldest-first 50000-row cap; `ghost history purge` removes the rows naming a purged memory AND the verdicts filed against the calls it removes, in the same transaction and by the record delete's own predicate rather than by memory id — a freed `record_rowid` is reused (the record table has no AUTOINCREMENT), so a verdict left behind would be re-attributed to a call that never admitted its memory — and the pairing is TWO-SIDED, so the write refuses it too: a verdict naming a call that has since been purged is DROPPED (a hole in the report, which is a lost pair) rather than filed against the rowid the purge freed, because a re-filed verdict is a WRONG pair and is indistinguishable from a real one afterwards; the check is on the call's CONTENT — did it KEPT that memory — and not on the rowid, since a freed rowid can be re-let by the next call before the late write lands, and it RETURNS the rows it refused so `audit.Run` can take them out of the figures it already counted and print the loss beside them (`Summary.Unfiled`) rather than print a number the table does not hold; the same guard also gates the batch's replace-DELETE, so a refused row cannot wipe the verdicts a successor holding the freed rowid already filed; the same pairing rides with the record cap's eviction, which takes them by its rowid bound and leaves `record_rowid = 0` alone; a project MERGE reassigns them and `ghost project delete` removes them (and counts them in its dry run), like every other `project_id`-bearing child table; a PROMOTION deliberately does not move them, because a verdict's project is the project of the CALL it was filed against — moving it would detach the verdict from the call its `record_rowid` still names — so a promoted memory's verdict goes with that call |
+| `retrieval_record` | One row per retrieval CALL (schema v20, [#646](https://github.com/wcatz/ghost/issues/646)) — the query as an HMAC-SHA256 digest under a per-install key kept OUTSIDE the database, the surface, the session, `as_of`, the outcome/reason, and a JSON array of the per-memory kept/dropped verdicts with the stage and reason. The grain is the call and not the (call, memory) pair, because a report over these rows counts calls. **Written by every retrieval surface, not only by search** ([#850](https://github.com/wcatz/ghost/issues/850)): `ghost_memory_search` under `search`, the session-start block under `session_start`, and the project-context surfaces under `project_context`, which since [#581](https://github.com/wcatz/ghost/issues/581) includes the standalone `ghost://memories/global` resource. Two things about those rows are the rule rather than a list of shapes, and the rule is what a reader computing a per-source figure needs: attribution follows the read, so a row carries the `ProjectID` its own request carried, and a read that named the `_global` bucket carries `project_id=_global` rather than the requesting project — a project-keyed read is a statement about that PROJECT's retrievals, and attributing another bucket's window to it would compute that project's precision over rows it never held. And the grain is per CALL, so one call can write more than one row: the `ghost://project/{id}/context` resource and the `recall_project` prompt cap each SECTION, so their `## Global` is a read and a row of its own rather than a slice of the window above it, which is why a resolved-project read of theirs is two rows where the tool's is one — the tool renders its Global section out of the window it already read. A count of calls is therefore not a count of rows. WHICH shapes make which read — the tool at the caller's `limit`, the resource and prompt at `projectContextMemoriesCap`, and the shapes that skip the project-keyed read or the second one — is per-shape detail belonging to the surfaces, and it is stated once, in [docs/mcp.md](mcp.md#project-context), rather than here: this cell's grain is the table, and a list of branches duplicated into a schema row is a list that goes stale without failing anything. `query_hash` is empty on both passive surfaces (they carry no question, so the per-install key is never resolved for them), and `session_id` is the host's session id where the host names one (Claude Code's `CLAUDE_CODE_SESSION_ID` for the MCP server, the hook payload's `session_id` for the session-start block) and empty otherwise. No text, and `query_hash` is CHECK-constrained to a 64-character hex digest or empty, so the column cannot hold a question. The digest is keyed, not a bare hash: a short question is confirmable against the store's own memories by anyone holding it, so the key is a sibling 0600 file in the data directory, which is also why `ghost backup` (a `VACUUM INTO` of the database) carries the records without the key — and a restore on another machine re-keys every row it brings with it. Oldest-first 5000-ROW cap, so a call that writes two rows spends two of them and the retained window is a few weeks of searching in ROWS rather than in calls; `ghost history purge` removes the rows naming a purged memory |
+| `retrieval_audit` | One row per (call, KEPT memory) (schema v21, [#646](https://github.com/wcatz/ghost/issues/646); `content_hash` added in schema v22, [#879](https://github.com/wcatz/ghost/issues/879)) — retained for compatibility but written by nothing and read by nothing since the retrieval-audit usage judge was removed: no product code writes or reads this table any more. Only `DeleteProject`, project rename and history cleanup touch it. Oldest-first 50000-row cap remains. |
 | `token_usage` | Reserved schema for future harness usage and cost records; current CLI adapters report zero token counts |
 | `audit_log` | Destructive and consolidation operations |
 | `vector_epoch` | One row, one counter (schema v24, [#1031](https://github.com/wcatz/ghost/issues/1031)) — bumped by triggers, in the writing transaction, on exactly the writes that change what the vector query returns, so a process can tell from one point read whether its cached copy of the vector corpus is still the database's. See [the vector corpus cache](#the-vector-corpus-cache) |
@@ -729,91 +729,6 @@ Without Ollama, the same API remains available with FTS5-only results. Search me
 A search may also read a past instant instead of the present (`as_of`); that path
 retrieves from `memory_history` and runs no vector leg. See
 [Historical retrieval](#historical-retrieval-as_of).
-
-### Retrieval audit: which session a verdict is about
-
-A verdict says "this session did or did not use this memory", so it can only be filed
-for a call and a session that belong together. Four pieces make that hold
-([#648](https://github.com/wcatz/ghost/issues/648)).
-
-- **The call names its session.** `retrieval_record.session_id` (no schema change; the
-  column and `retrieval_audit.session_id` already existed, and were empty on every row written before this change) is
-  the host's id for the session. The MCP server over stdio has no transport id, so it
-  decides once at startup, in `New`, whether to use `CLAUDE_CODE_SESSION_ID` from its own
-  environment: on Linux only when this process is the session root (the parent's initial
-  `/proc/<ppid>/environ` lacks the variable), with every failure to tell falling toward
-  `""`; elsewhere the environment's id is used as before. It is the
-  id Claude Code also sends in every hook payload as `session_id` and names its session
-  record after; the session-start hook records its payload's id directly. Hosts whose
-  server environment names no session (codex, opencode, goose, a bridge such as `mcpo`),
-  and servers that inherited the variable from a parent that already had it, record `""`.
-- **The scan names its session.** The stop hook stamps the payload's `session_id` on the
-  signals and the sidecar (a `session` line; header v4 for the order below, v5 since the turns were grouped, older files refused by name). `audit.Run` judges only what
-  `RetrievalRecordsForSession` returns for that id, with the predicate in the SQL ahead of
-  the `CallWindow` limit, and an empty id judges nothing. When that read finds nothing it
-  makes one more bounded, project-wide read, only to count the recent calls that carry no
-  session id (`Summary.UnscopedCalls`) and say so, without asserting why; it never judges
-  from it. A call with no session id is
-  unjudged, never guessed.
-- **Old verdicts are set aside, not deleted.** Every verdict filed before this change
-  has an empty session and was judged against whichever session the hook had scanned.
-  `UsefulnessByMemory` skips audit rows with no session; the reports count them as
-  `Unscoped` (named, in no figure). Nothing is removed from the store.
-
-- **A call is judged only against text written after it.** Every scanner stamps what it
-  reads with the line's own instant (Claude and codex `timestamp`, opencode part or
-  message `time`), the signals keep the latest instant of each fingerprint and id, and the
-  sidecar (header v5) carries them, one `turn` line per instant; v4, v3, v2 and v1 are refused by name. `Run` takes a
-  call's `recorded_at` as the end of its second (the store stamps to the second, a line to
-  the millisecond, so a same-second line may predate the call) and judges it against
-  `Signals.Since(that instant)`, for all four arms. Within that view the token arm is
-  asked ONE TURN AT A TIME (#932): `matches` looks for a single turn whose own words clear
-  the bar, so domain wording the session spread over forty turns is not a use of anything,
-  and the `turn` lines are what carries the grouping across the gap to the detached child.
-  Anything unplaced can never make a
-  memory `used`: an entry with no instant never counts, a scan with none judges nothing
-  (`Summary.NoOrder`), a call with an empty or unreadable `recorded_at` is skipped
-  (`Summary.UnorderedCalls`), and a scan that carried unplaced lines is marked degraded.
-  `SweepSidecars` removes stale sidecars of any version.
-
-What this does not fix: the bodies of Edit, Write and Bash tool arguments are still in the
-token set, which clears the token bar (three shared distinctive words and half of the
-memory's words) on ordinary development text; a turn of 150 or more distinct tokens is
-skipped, a word in a quarter of the session's turns does not count toward a match, and the
-id in the arguments of an update that rewrites a memory's text is not a citation (an update with no text, such as tags-only, is one; so is an id in a save's text or source_ref, since #1010, unless a negation cue is bound to it, in which case it is a denial, as in prose). It is measured by `ghost bench --audit`
-([benchmarks.md](benchmarks.md#retrieval-audit-ghost-bench---audit)), which judges a
-labelled offline session (forty memories, twenty of them in the session's own domain, a
-long scripted session of narrative and file bodies with hand-written labels) through
-`audit.Run` and scores the verdicts against the labels. The numbers are the bench's golden
-(`internal/bench/testdata/audit_report.golden`), not a table kept here, so they cannot go
-stale. At the time of writing, same-domain memories no turn restates are judged `used` in
-3 of 11 cases for a call before turn 0 of 40 (a session-start injection), 3 of 15 for a
-call before turn 20 (10 of 11 and 10 of 15 before the half bar, the outlier line and the generic-word rule), and 0 for a call after the last turn, while every labelled cite and
-restatement is caught. The residual narrowed when the token arm was restricted to ONE
-turn (#932): the bar has to be cleared by the words that arrived together, so the four
-memories the corpus spreads across turns went from judged `used` 4 of 4 to 0 of 4, the
-session-start `used/token` false positives went 15 → 10 and `used` precision 0.318 →
-0.412, with recall 1.000 unchanged. What is left is a single turn that happens to repeat
-half of an own-domain memory in words the session does not repeat everywhere, which is the
-shape the floor and the fraction were chosen for.
-
-Ordering helps only for a call made late; a session-start injection still sees the whole
-session. Excluding the bodies changes little on the older fixture (`TestSameDomainResidualWithTheOrderInPlace` logs that variant, 7 of 20 against 10 of 20 at session start; the bench always feeds the bodies, so it cannot), because its narrative turns
-are themselves in the memories' domain, so the evidence does not support removing them
-from the token arm. Known limits that all fail toward unjudged: a session id that changes
-inside one long-lived server process keeps the old id, and subagent calls are attributed
-to whatever session id their server process carries (not verified either way).
-
-What a positive verdict is for. `used` and `ignored` change no decision and by design
-never will: `UsefulnessByMemory` reads only `contradicted` and `superseded_in_session`,
-so a popularity loop over what the agent happened to restate cannot form. The one thing a
-positive verdict feeds is the operator-facing figure in `ghost context --audit`,
-`ghost_health` and the lifecycle summary, and that figure is split by `retrieval_audit.signal`
-([#930](https://github.com/wcatz/ghost/issues/930)): the precision is the share of scored
-verdicts proved by a cited id (`signal = identifier`), and a `used` proved by wording
-overlap is printed beside it as `restated by wording (heuristic)`. The bench's golden shows
-why (its `used/token` rows against its `used/identifier` rows): the same-domain residual is entirely the wording arm. An unknown or empty signal on a
-`used` row is counted as wording, the weaker claim. No schema change.
 
 ### Memory history
 
@@ -1034,9 +949,8 @@ Three properties are deliberate:
   nobody acted.
 - **A `delete` row names its successor.** A consolidation rewrite or merge gives
   the row a new id, so without a pointer the old id's history simply stops, and a
-  reader following one memory — what [#648](https://github.com/wcatz/ghost/issues/648)
-  will do with a usefulness verdict — never learns the memory it holds a verdict
-  about is now a different row. `ReplaceNonManual` stamps it from
+  reader following one memory never learns that the memory it is following
+  is now a different row. `ReplaceNonManual` stamps it from
   `Memory.ReplacesIDs`, which the reflection operations (#659) fill in; a row
   deleted for any other reason is left without one rather than given a fabricated
   successor. A **supersession's successor** is one of those successors, even when
@@ -1176,11 +1090,9 @@ per-project evidence read no longer reaches. `MergeProject` reaches all three by
 `project_id` (it moves a whole corpus), and `PromoteToGlobal` reaches the ones
 that name the moved memory by that memory: `memory_history` already did, and
 since #1046 `memory_flags` by `memory_id` and `supersede_checked` by either
-endpoint. `retrieval_audit` is deliberately NOT carried, and the exception is the
-point: a verdict's `project_id` is the project of the CALL it was filed against,
-not the memory it names, so a promotion leaves it where the call put it — moving
-it would detach the verdict from the call its `record_rowid` still names, and the
-next audit pass would re-file it under that call's project anyway. Without the
+endpoint. `retrieval_audit` is deliberately NOT carried: its `project_id` is the
+project of the CALL a row was filed against, not the memory it names, and nothing
+reads or writes the table any more. Without the
 carry, deleting the project a memory was promoted out of takes the recorded past
 of a memory that is still live in `_global`, and `ghost history <id>` reports
 that it was never written.
@@ -2606,7 +2518,7 @@ The interesting failures were all silent ones, which is why each of these is a f
 - **A reader that does not agree with its writer.** `fm` writes `ghost_id` through `yamlScalar`, which quotes any value a YAML reader would not take as a plain scalar; `hasGhostID` read the line back raw, so it returned the *quoted* text for every id that needed quoting. Prune then looked that quoted text up in a keep-set keyed by the real id, did not find it, and deleted the note it had just written — on every export, for good. Only the double-quoted form `yamlScalar` emits is now unquoted: this function reports which files are Ghost's to prune, so a single-quoted value in a hand-written note must keep reading as its own text.
 - **A key that has to be recoverable, chosen so it does not have to be.** The same failure has a second and quieter form, and it is why the keep-set is a set of canonical note PATHS relative to the vault root (`keepSet`, keyed by `keepKey`) rather than a map from `ghost_id` to path, and why it is not keyed on the bare basename either — the same slug occurs in two project folders, and a memory and a task with the same title can share an id fragment, so a basename keyed on the live note in one place would keep a stale copy alive in another. This is only the retention half of prune's decision and the other half is unchanged: the closed front-matter block is what makes a file Ghost's to touch at all, so a note without one is never removed, whatever it is called. What moved is the second question — *which* note this is — from the id parsed out of the note to the path the system wrote it at. `yamlScalar` flattens a tab, a newline and a carriage return to a space, which is what keeps every key on one line, and it is lossy: `tab<TAB>id`, `tab<CR><LF>id` and `tab id` are three records and one `ghost_id` line. Keyed on that line the three notes collide on one key, the other two match nothing, and prune deletes them: the export writes three notes and leaves one, silently, every run. Keyed on the path the system wrote, there is nothing to collide, because that path names one location and one record. The general rule this follows: a renderer and its reader have to agree on an encoding, and a key that decides a *delete* should be one the system holds rather than one it has to parse back out of a file it wrote for someone else to read.
 
-Two properties are the opposite of a filter, and the fixtures say so explicitly. A planted payload must still be **retrievable**: dropping it would hide the tampering from the user, which is worse than returning it as data, and quotation into the data block happens on the way out (`quoteData`, #538) rather than on the way in. And `hostevent` **fails open** on all of it — oversized, deeply nested, invalid UTF-8, a NUL, an unknown event name — because "allow the stop" is the only response the hook contract emits. A ceiling (`maxPayloadBytes`) was the one thing missing there, because nothing on the path bounded the read: the hook read stdin with an unbounded `io.ReadAll` and `Parse` retains the payload twice. The hook now reads through `hostevent.ReadPayload`, which stops one byte past the ceiling, so the ceiling bounds the allocation as well as the parse. A path the payload NAMES is opened through `mcpinit.openTranscript`, which `stat`s it and refuses anything but a regular file before the open: opening a FIFO blocks until a writer appears, which is a hang where the contract emits only "allow the stop", and a directory, device or socket is refused unopened for the same reason, so the transcript open on that path (`scanAuditSignals`'s audit scan, reached from `runStop`) fails open with one line rather than blocking the hook. The Claude memory import applies the same stat-before-open rule and refuses links as well: `importFromDir` refuses an entry whose `ReadDir` type is not regular and names it in its own `notRegular` group, and `ParseMemoryFile` `Lstat`s the path, opens it with `O_NOFOLLOW|O_NONBLOCK` and refuses a descriptor that is not a regular file, so neither a FIFO nor a link to one, nor a link to a file outside the memory directory, is ever read.
+Two properties are the opposite of a filter, and the fixtures say so explicitly. A planted payload must still be **retrievable**: dropping it would hide the tampering from the user, which is worse than returning it as data, and quotation into the data block happens on the way out (`quoteData`, #538) rather than on the way in. And `hostevent` **fails open** on all of it — oversized, deeply nested, invalid UTF-8, a NUL, an unknown event name — because "allow the stop" is the only response the hook contract emits. A ceiling (`maxPayloadBytes`) was the one thing missing there, because nothing on the path bounded the read: the hook read stdin with an unbounded `io.ReadAll` and `Parse` retains the payload twice. The hook now reads through `hostevent.ReadPayload`, which stops one byte past the ceiling, so the ceiling bounds the allocation as well as the parse. The Claude memory import applies the same stat-before-open rule and refuses links as well: `importFromDir` refuses an entry whose `ReadDir` type is not regular and names it in its own `notRegular` group, and `ParseMemoryFile` `Lstat`s the path, opens it with `O_NOFOLLOW|O_NONBLOCK` and refuses a descriptor that is not a regular file, so neither a FIFO nor a link to one, nor a link to a file outside the memory directory, is ever read.
 
 ## Configuration and filesystem layout
 

@@ -19,6 +19,17 @@ import (
 	"strings"
 )
 
+// Transcript formats known to the contract. An adapter names the shape of the
+// transcript it points a hook at with one of these values, by format, never by
+// source.
+const (
+	FormatNone               = "none"
+	FormatClaudeJSONL        = "claude-jsonl"
+	FormatOpencodeMessages   = "opencode-messages"
+	FormatOpencodeV2Messages = "opencode-v2-messages"
+	FormatCodexRollout       = "codex-rollout"
+)
+
 // ContractVersion is the current envelope version. Adapters must send
 // contract.version == ContractVersion; anything else fails open.
 const ContractVersion = 1

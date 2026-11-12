@@ -377,9 +377,9 @@ func TestAFlagIsWithdrawnWhenTheContentChangesButSurvivesAMetadataEdit(t *testin
 		t.Fatalf("UpdateMemory (retag): %v", err)
 	}
 
-	got, err := s.UsefulnessByMemory(ctx, testProject)
+	got, err := s.FlagsByMemory(ctx, testProject)
 	if err != nil {
-		t.Fatalf("UsefulnessByMemory: %v", err)
+		t.Fatalf("FlagsByMemory: %v", err)
 	}
 	if ev, ok := got[rewritten]; ok {
 		t.Errorf("the rewritten memory still carries flag evidence %+v: the flag was stamped over text the "+
@@ -412,9 +412,9 @@ func TestTheFlaggedCountReachesTheEvidenceLineWithoutTheReason(t *testing.T) {
 		t.Fatalf("FlagMemory: %v", err)
 	}
 
-	got, err := s.UsefulnessByMemory(ctx, testProject)
+	got, err := s.FlagsByMemory(ctx, testProject)
 	if err != nil {
-		t.Fatalf("UsefulnessByMemory: %v", err)
+		t.Fatalf("FlagsByMemory: %v", err)
 	}
 	ev, ok := got[id]
 	if !ok {
@@ -437,45 +437,6 @@ func TestTheFlaggedCountReachesTheEvidenceLineWithoutTheReason(t *testing.T) {
 	}
 }
 
-// TestAFlagDoesNotWinTheLatestVerdictTuple: the flag is not a verdict, and the
-// one place the difference is observable is "latest session / latest verdict".
-//
-// Rowids do not compare across two tables, and a flag must never be reported as
-// the moment this memory was last DOUBTED by a retrieval — a retrieval is what
-// the stamp is a stamp of. So the tuple stays audit-only while the flag still
-// counts.
-func TestAFlagDoesNotWinTheLatestVerdictTuple(t *testing.T) {
-	s := testStore(t)
-	ctx := context.Background()
-	const content = "the retry budget is three attempts"
-	id := seedFlaggable(t, s, content)
-
-	// The verdict is stamped OLD and the flag is stamped now, so a reader that
-	// let flags into the tuple would report the flag's instant instead.
-	usefulnessVerdictHashed(t, s.db, testProject, id, VerdictOutcomeContradicted,
-		"ses_verdict", "2026-09-24 10:00:00", ContentHash(content))
-	if err := s.FlagMemory(ctx, FlagMemoryRequest{
-		ProjectID: testProject, MemoryID: id, Kind: FlagKindStale, Reason: flagReasonMarker,
-		Agent: "codex", SessionID: "ses_flag_later",
-	}); err != nil {
-		t.Fatalf("FlagMemory: %v", err)
-	}
-
-	got, err := s.UsefulnessByMemory(ctx, testProject)
-	if err != nil {
-		t.Fatalf("UsefulnessByMemory: %v", err)
-	}
-	ev := got[id]
-	if ev.Flagged != 1 || ev.Contradicted != 1 {
-		t.Fatalf("evidence = %+v, want one contradiction and one flag", ev)
-	}
-	if ev.LastSession != "ses_verdict" || ev.LastAt != "2026-09-24 10:00:00" {
-		t.Errorf("latest = session %q at %q, want the VERDICT's (ses_verdict at 2026-09-24 10:00:00): a flag "+
-			"is not a retrieval verdict and must not be reported as the moment this memory was last doubted",
-			ev.LastSession, ev.LastAt)
-	}
-}
-
 // TestAPureFlagStillRendersALine: the flag-only case, which is the one that
 // decides whether a flag is negative evidence AT ALL rather than a footnote
 // attached to a contradiction. There is no verdict here, so there is no latest
@@ -490,9 +451,9 @@ func TestAPureFlagStillRendersALine(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("FlagMemory: %v", err)
 	}
-	got, err := s.UsefulnessByMemory(ctx, testProject)
+	got, err := s.FlagsByMemory(ctx, testProject)
 	if err != nil {
-		t.Fatalf("UsefulnessByMemory: %v", err)
+		t.Fatalf("FlagsByMemory: %v", err)
 	}
 	line := got[id].Line()
 	if line != "audit: verdicts flagged=1" {
@@ -567,9 +528,9 @@ func TestMergeProjectReassignsTheFlags(t *testing.T) {
 	// And the reader still finds it, which is what the reassignment is for: the
 	// evidence is read per project, so an orphan here is invisible rather than
 	// merely misattributed.
-	got, err := s.UsefulnessByMemory(ctx, testProject)
+	got, err := s.FlagsByMemory(ctx, testProject)
 	if err != nil {
-		t.Fatalf("UsefulnessByMemory: %v", err)
+		t.Fatalf("FlagsByMemory: %v", err)
 	}
 	if ev := got[id]; ev.Flagged != 1 {
 		t.Errorf("the merged project's evidence for the flagged memory = %+v, want Flagged 1", ev)
@@ -653,9 +614,9 @@ func TestPromoteToGlobalReassignsTheFlags(t *testing.T) {
 	// And the reader reaches it, which is what the reassignment is for: the
 	// evidence is read per project, so an orphan here is invisible rather than
 	// merely misattributed.
-	got, err := s.UsefulnessByMemory(ctx, GlobalProjectID)
+	got, err := s.FlagsByMemory(ctx, GlobalProjectID)
 	if err != nil {
-		t.Fatalf("UsefulnessByMemory: %v", err)
+		t.Fatalf("FlagsByMemory: %v", err)
 	}
 	if ev := got[id]; ev.Flagged != 1 {
 		t.Errorf("the global project's evidence for the promoted memory = %+v, want Flagged 1", ev)

@@ -5,7 +5,7 @@ package reflection
 //
 // The docstring says any field rendered for ExistingMemories must be mirrored in
 // InputSignature, which fingerprints the corpus for the --skip-unchanged gate.
-// The slice adds Usefulness, which is rendered for ExistingMemories and is
+// The slice adds Flags, which is rendered for ExistingMemories and is
 // deliberately NOT mirrored — mirroring it would stop the gate skipping on any
 // store that records verdicts, which is most of them, on every stop hook.
 //
@@ -13,7 +13,7 @@ package reflection
 // prompt.go was left stating the opposite, unchanged, in the function that
 // renders the field. A rule stated there with no exception recorded is a rule the
 // next reader will enforce: the obvious "fix" for the perceived asymmetry is to
-// mirror Usefulness, and that silently breaks --skip-unchanged for every audited
+// mirror Flags, and that silently breaks --skip-unchanged for every audited
 // project. So the exception is recorded in the docstring, and THIS test is what
 // keeps it recorded.
 //
@@ -34,7 +34,7 @@ import (
 )
 
 // TestThePromptDocstringRecordsTheInputSignatureException: the mirroring rule and
-// both of its exceptions are stated in the same doc comment, and the Usefulness
+// both of its exceptions are stated in the same doc comment, and the Flags
 // one names the field and the gate it would break.
 //
 // The phrases are required rather than paraphrased because each carries a fact
@@ -72,12 +72,12 @@ func TestThePromptDocstringRecordsTheInputSignatureException(t *testing.T) {
 		why    string
 	}{
 		{"InputSignature", "the docstring must name what the rule requires, so a reader who finds " +
-			"Usefulness rendered and not mirrored can see which rule to read before enforcing it"},
+			"Flags rendered and not mirrored can see which rule to read before enforcing it"},
 		{"--skip-unchanged", "the rule must say what the mirroring is FOR, or \"must be mirrored\" " +
 			"reads as style rather than as the gate"},
 		{"access count", "the pre-existing exception must still be stated: the rule now says it has " +
 			"exceptions, and losing this one would make it the only rule left"},
-		{"Usefulness", "the exception this slice adds must name the FIELD it is about, since the " +
+		{"Flags", "the exception this slice adds must name the FIELD it is about, since the " +
 			"field is what a reader sees rendered and unmirrored"},
 		{"NOT mirrored", "the exception must be stated as an exception and not merely implied — a " +
 			"reader who does not see it denied will read the rule as mandatory"},
@@ -96,7 +96,7 @@ func TestThePromptDocstringRecordsTheInputSignatureException(t *testing.T) {
 // — so this test pins only that the doc comment carries the exception at all.
 //
 // The negative case is what makes it worth having: a comment that named
-// --skip-unchanged and Usefulness in DIFFERENT doc comments, or in a comment on
+// --skip-unchanged and Flags in DIFFERENT doc comments, or in a comment on
 // some other function, would leave the rule in prompt.go unqualified while every
 // phrase-based check still passed.
 func TestTheDocstringExceptionSitsBesideTheRule(t *testing.T) {
@@ -118,20 +118,20 @@ func TestTheDocstringExceptionSitsBesideTheRule(t *testing.T) {
 	if fn == nil || fn.Doc == nil {
 		t.Fatal("BuildReflectionPrompt's doc comment is missing")
 	}
-	// One comment, both halves: the rule sentence and the Usefulness exception
+	// One comment, both halves: the rule sentence and the Flags exception
 	// must be separated by at most one blank comment line. A comment that put the
 	// exception in its own trailing paragraph after a blank line, a page away in
 	// a long comment, is still readable here — this bound is the cheap form of
 	// "the reader meets both", and the phrases above are what carry the content.
 	text := fn.Doc.Text()
 	rule := strings.Index(text, "InputSignature")
-	useful := strings.Index(text, "Usefulness")
+	useful := strings.Index(text, "Flags")
 	if rule < 0 || useful < 0 {
 		t.Fatalf("the doc comment must carry both the rule and the exception to be a place "+
 			"they can be read together; rule at %d, exception at %d\n\ncomment:\n%s", rule, useful, text)
 	}
 	if useful > rule+400 {
-		t.Errorf("the Usefulness exception is %d bytes after the rule it qualifies, so a reader "+
+		t.Errorf("the Flags exception is %d bytes after the rule it qualifies, so a reader "+
 			"who stops at the rule never meets it:\n%s", useful-rule, text)
 	}
 }

@@ -41,12 +41,6 @@ func contractInput(t *testing.T, inner string) string {
 	return contractInputFor(t, "Stop", "claude-code", "claude-jsonl", inner)
 }
 
-// nativeStopInput is the exact JSON Claude Code sends on Stop — no contract
-// object. Envelope completion in hostevent.Parse must make it dispatch.
-func nativeStopInput(transcriptPath string) string {
-	return fmt.Sprintf(`{"hook_event_name":"Stop","session_id":"s1","transcript_path":%q,"cwd":"/repo","stop_hook_active":false,"source":"startup"}`, transcriptPath)
-}
-
 // contractInputFor is contractInput with every envelope field selectable.
 func contractInputFor(t *testing.T, eventName, source, format, inner string) string {
 	t.Helper()
@@ -394,7 +388,7 @@ func TestSpawnLifecycleIfConfigured_NoOpWhenDisabled(t *testing.T) {
 	// lifecycle.log.
 	dataHome := isolatedHome(t)
 
-	spawnLifecycleIfConfigured("/tmp/does-not-matter", "", nil, io.Discard)
+	spawnLifecycleIfConfigured("/tmp/does-not-matter", "", io.Discard)
 
 	if _, err := os.Stat(filepath.Join(dataHome, "ghost")); !os.IsNotExist(err) {
 		t.Errorf("expected ghost data dir to never be created when every phase is disabled, stat err = %v", err)
@@ -417,7 +411,7 @@ func TestSpawnLifecycleIfConfigured_NoOpWithoutLLM(t *testing.T) {
 	}
 	t.Setenv("PATH", t.TempDir()) // no claude, no opencode
 
-	spawnLifecycleIfConfigured("/tmp/does-not-matter", "", nil, io.Discard)
+	spawnLifecycleIfConfigured("/tmp/does-not-matter", "", io.Discard)
 
 	if _, err := os.Stat(filepath.Join(dataHome, "ghost")); !os.IsNotExist(err) {
 		t.Errorf("expected no ghost data dir when no LLM is available, stat err = %v", err)
@@ -470,7 +464,7 @@ func TestSpawnLifecycle_CooldownSkipWithholdsATokenShapedProjectID(t *testing.T)
 		// the only writer of the line, and the only path that writes nothing
 		// else (the spawn log and the pid file are both past it).
 		writeStamp(t, dataDir, p.id, now, time.Minute)
-		spawnLifecycleIfConfigured(canonical, "", nil, io.Discard)
+		spawnLifecycleIfConfigured(canonical, "", io.Discard)
 	}
 
 	b, err := os.ReadFile(filepath.Join(dataDir, "lifecycle.log"))
@@ -509,7 +503,7 @@ func TestSpawnLifecycleIfConfigured_ProceedsWhenResolveEnabledWithoutLLM(t *test
 	}
 	t.Setenv("PATH", t.TempDir())
 
-	spawnLifecycleIfConfigured("/tmp/does-not-matter", "", nil, io.Discard)
+	spawnLifecycleIfConfigured("/tmp/does-not-matter", "", io.Discard)
 
 	if _, err := os.Stat(filepath.Join(dataHome, "ghost")); err != nil {
 		t.Errorf("expected the resolve phase to reach config.DataDir, stat err = %v", err)
@@ -541,7 +535,7 @@ func TestSpawnLifecycle_ReflectOnlyNoLLMWritesMarker(t *testing.T) {
 	}
 	seedProject(t, dataHome, "p1", canonical, "myproj")
 
-	spawnLifecycleIfConfigured(canonical, "", nil, io.Discard)
+	spawnLifecycleIfConfigured(canonical, "", io.Discard)
 
 	// Per-project marker: the seed above registers p1, and the spawn resolves
 	// the session directory to it, so that is the file written.

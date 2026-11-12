@@ -105,7 +105,7 @@ type FlagMemoryRequest struct {
 //
 // The content hash is read inside the same transaction and stamped from the
 // content as it stands NOW, so the flag is bound to the text the agent was
-// reading when it filed the objection. UsefulnessByMemory then keeps the row
+// reading when it filed the objection. FlagsByMemory then keeps the row
 // only while the stored content still hashes to it (#879's rule, applied here):
 // a rewrite withdraws the flag, a retag leaves it standing.
 //

@@ -471,8 +471,8 @@ func boundedScopePart(s string, max int) string {
 // start a line, close the construct it sits in, or open a data block of its own.
 //
 // The rule itself is memory.SafeToken and this is a delegation, not a copy. It
-// MOVED there rather than being duplicated because the audit's usefulness line
-// renders a session id into a prompt from internal/memory, and the dependency runs
+// MOVED there rather than being duplicated because the flag-evidence reader
+// renders an id into a prompt from internal/memory, and the dependency runs
 // assemble -> memory: a reader in internal/memory cannot reach a function in the
 // package that imports it. That is the same arrangement the stamp parsers already
 // use (memory.ParseStamp, memory.StampLayouts, memory.ValidityState), and for the

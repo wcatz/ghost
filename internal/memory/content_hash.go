@@ -1,10 +1,9 @@
 package memory
 
 // The ONE content hash Ghost stamps and compares, and the reason it lives here
-// rather than in internal/resolve: a retrieval verdict is judged by
-// internal/audit and read by this package, and the reader has to compare the
-// stamp against the text it reads from `memories` — so the algorithm belongs to
-// the package that owns both ends. internal/resolve delegates to it (its own
+// rather than in internal/resolve: a stamp is compared against the text
+// read from `memories`, so the algorithm belongs to the package that owns that
+// table. internal/resolve delegates to it (its own
 // KEEP-cache key is the same digest over the same bytes), which keeps one
 // implementation instead of two that drift.
 
@@ -29,7 +28,7 @@ const ContentHashVersion = "v3"
 // leaves it standing while a rewrite moves it.
 //
 // It is what makes a retrieval verdict answerable after the fact: a stamped row
-// says "I judged THIS text", and UsefulnessByMemory keeps the verdict only while
+// says "I judged THIS text", and FlagsByMemory keeps the verdict only while
 // the stored content still hashes to it (#879). An empty stamp means the row
 // predates that column, and the reader falls back to its named legacy rule
 // rather than guessing at a hash.

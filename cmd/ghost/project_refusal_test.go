@@ -44,18 +44,6 @@ func TestDuplicateScopeRefusalsWithholdACredential(t *testing.T) {
 		args  []string
 	}{
 		{
-			name:  "ghost context --audit --project",
-			field: "project",
-			parse: func(args []string) error { _, err := parseContextAuditArgs(args); return err },
-			args:  []string{"--audit", "--project=" + key, "--project=ghost"},
-		},
-		{
-			name:  "ghost context --audit --cwd",
-			field: "cwd",
-			parse: func(args []string) error { _, err := parseContextAuditArgs(args); return err },
-			args:  []string{"--audit", "--cwd=" + key, "--cwd=/tmp"},
-		},
-		{
 			// prune has no --cwd, so it is a case of its own rather than a flag
 			// column on the audit parser's. Both parsers count occurrences and ask
 			// the duplicate before the empty — the two questions in order are
@@ -97,12 +85,6 @@ func TestDuplicateScopeRefusalsWithholdACredential(t *testing.T) {
 		args  []string
 		want  string
 	}{
-		{
-			name:  "ghost context --audit --project",
-			parse: func(args []string) error { _, err := parseContextAuditArgs(args); return err },
-			args:  []string{"--audit", "--project", "ghost", "--project", "other"},
-			want:  `--project was given twice ("ghost" and "other")`,
-		},
 		{
 			name:  "ghost prune --project",
 			parse: func(args []string) error { _, err := parsePruneArgs(args); return err },

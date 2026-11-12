@@ -230,7 +230,7 @@ func itoa(n int) string {
 }
 
 // TestReadOnlyTransferStoreNamesTheOperationItWasAskedFor: the refusal ends with what
-// the user was trying to do, and `ghost context --audit` is not "exporting it or
+// the user was trying to do, and `ghost maintenance consolidate-global` is not "exporting it or
 // previewing an import into it" — those are two commands the user did not run, in a
 // sentence whose only job is to tell them what to do next.
 //
@@ -249,22 +249,6 @@ func TestReadOnlyTransferStoreNamesTheOperationItWasAskedFor(t *testing.T) {
 	}
 	if err := db.Close(); err != nil {
 		t.Fatalf("close: %v", err)
-	}
-
-	// The audit's own wording, through the same seam buildContextAudit opens.
-	_, err = openReadOnlyTransferStore(dir, auditOperation)
-	if err == nil {
-		t.Fatal("a v15 store was accepted by the read-only opener")
-	}
-	for _, want := range []string{"ghost context --audit", "migrate it"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("the audit's refusal does not mention %q, so a user who ran the audit is told what to do next in terms of two commands they did not run: %v", want, err)
-		}
-	}
-	for _, unwanted := range []string{"exporting it", "previewing an import"} {
-		if strings.Contains(err.Error(), unwanted) {
-			t.Errorf("the audit's refusal still names %q: %v", unwanted, err)
-		}
 	}
 
 	// And the export's wording is unchanged, to the character.

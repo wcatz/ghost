@@ -42,9 +42,6 @@ const (
 	// exportOrImportOperation is the same clause for the two callers that move a copy
 	// in or out: the export, and an import's dry run.
 	exportOrImportOperation = exportOperation
-	// auditOperation is the clause `ghost context --audit` gets. It names the command
-	// the user actually ran rather than the two they did not.
-	auditOperation = "reporting on it with `ghost context --audit`"
 )
 
 // openReadOnlyTransferStore opens the database at dataDir for reading only,
@@ -118,11 +115,12 @@ func openReadOnlyTransferStoreUnchecked(dataDir string) (*memory.Store, *sql.DB,
 //
 // The sentence also names the OPERATION, because "read-only" is a property of the
 // command family, not of the command the user typed: `ghost export`,
-// `ghost import` (dry run) and `ghost context --audit` share this check, and a user
-// who ran the audit was told to "export it or preview an import into it" — two
-// commands they did not run, which reads as though the wrong command was picked. The
-// operation is a parameter rather than a second copy of the sentence, so the three
-// callers cannot drift into three slightly different wordings of one remedy.
+// `ghost import` (dry run) and the dry run of `ghost maintenance consolidate-global`
+// share this check, and a user who ran the fold preview would otherwise be told to
+// "export it or preview an import into it" — two commands they did not run, which
+// reads as though the wrong command was picked. The operation is a parameter rather
+// than a second copy of the sentence, so the callers cannot drift into slightly
+// different wordings of one remedy.
 //
 // Strict on both sides — equal and only equal passes. A floor is defensible on
 // the numbers (the only post-v10 columns these readers select are

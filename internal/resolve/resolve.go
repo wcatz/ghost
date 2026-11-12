@@ -12,7 +12,7 @@
 // SetResolvedJudged, which refuses a row whose content changed while it was
 // being classified and reports those rows as stale (#1052), while newly-judged
 // KEEP verdicts are stamped into memories.resolve_kept_hash
-// (KeepStamp: the content hash when the verdict saw no negative audit evidence,
+// (KeepStamp: the content hash when the verdict saw no flag,
 // that hash combined with the evidence when it did) so a converged project makes
 // no classifier calls at all — while still paying the one bounded evidence read
 // (#880) that lets a contradiction recorded after a KEEP re-ask it exactly once.
@@ -107,15 +107,15 @@ type Classifier interface {
 // evidence a stamp carries is in the STAMP (KeepStamp), not in the version, so
 // the bare content hash an existing entry holds is still exactly what
 // KeepStamp(content, no evidence) produces — every stored hash stays a valid
-// cache hit for content the audit has never doubted, which is most of every
-// corpus. Content the audit HAS contradicted does not match its entry and is
+// cache hit for content nobody has flagged, which is most of every
+// corpus. Content that HAS been flagged does not match its entry and is
 // re-asked once and re-stamped, which is the behaviour #880 wants and which a
 // prefix bump would also produce only by re-asking the whole un-doubted corpus
 // first.
 //
 // The value itself now lives in memory.ContentHashVersion, because Ghost stamps
-// one hash and this cache is one of its two readers: retrieval_audit's
-// content_hash carries the same digest, so the two can never be renamed apart.
+// one hash and this cache is one of its readers, so the name of the
+// version cannot drift from the digest the rest of the store compares.
 const keepCacheHashVersion = memory.ContentHashVersion
 
 // ContentHash is the KEEP-cache key: resolve's question is content-only, so a
@@ -123,8 +123,8 @@ const keepCacheHashVersion = memory.ContentHashVersion
 // prefix is hashed in with the content (see keepCacheHashVersion).
 //
 // It delegates to memory.ContentHash, the single implementation both this cache
-// and retrieval_audit's content_hash are stamped with; resolve keeps the name
-// because its callers ask for a keep-cache key, not for an audit stamp.
+// and memory_flags.content_hash are stamped with; resolve keeps the name
+// because its callers ask for a keep-cache key.
 func ContentHash(content string) string {
 	return memory.ContentHash(content)
 }
@@ -133,69 +133,37 @@ func ContentHash(content string) string {
 // halves of the question the gate asks (#880): has this content been judged,
 // and has anything doubted it since?
 //
-// With no negative verdict it is memory.ContentHash(content) BYTE FOR BYTE —
-// so every hash written before #880 is still a hash this function produces, an
-// un-doubted corpus keeps its existing cache entries, and keepCacheHashVersion
-// needed no bump for this change. That is the whole reason the evidence rides
-// in the stamp rather than replacing the key: the content hash alone answers
-// "was this judged", and only the suffix says "with what in front of it".
+// With no flag it is memory.ContentHash(content) BYTE FOR BYTE — so every hash
+// written before #880 is still a hash this function produces, an un-doubted
+// corpus keeps its existing cache entries, and keepCacheHashVersion needed no
+// bump for this change. That is the whole reason the evidence rides in the
+// stamp rather than replacing the key: the content hash alone answers "was this
+// judged", and only the suffix says "with what in front of it".
 //
-// With evidence the suffix is a fixed fingerprint of the negative counts
-// and the latest negative verdict's stamp. There are two spellings, and the
-// difference between them is #648 slice 2's flag count:
-//
-//	`%s:%d:%d:%s`   (hash, contradicted, superseded_in_session, LastAt) — no
-//	                flags, byte-identical to what every build wrote before
-//	                flags existed, so a corpus an agent has never flagged keeps
-//	                every cache entry it already holds;
-//	`%s:%d:%d:%d:%s` (the same, plus flagged) — only when Flagged > 0, which is
-//	                what makes "a new flag re-asks a cached KEEP once" a
-//	                property of this function rather than of a counter somebody
-//	                has to remember to compare: the entry the KEEP gate holds no
-//	                longer matches, the note is asked about again with its count
-//	                attached, and the KEEP comes back stamped over that count so
-//	                the next pass is quiet.
-//
-// LastAt rather than the reader's rowid
-// tie-break because that rowid is not exposed past UsefulnessEvidence — the
-// counts alone would not move when a second verdict lands inside the same
-// second as the first, and the stamp is the only thing that can. An empty
-// LastAt is a real value (a verdict recorded without a stamp) and is stored
-// as the empty suffix it is. A flag never contributes a LastAt of its own:
-// the tuple is a retrieval's, and a flag is not a retrieval.
-//
-// The verdict figures here can only come from the two NEGATIVE buckets,
-// because that
-// is all UsefulnessByMemory returns: `used` and `ignored` are filtered in SQL
-// before the reader sees them, so a memory that is merely retrieved often can
-// never move its own stamp — the #284 popularity loop closed at the reader
-// rather than at this function, which would otherwise have to be trusted to
-// exclude it.
+// With a flag the suffix is the flag count: `%s:%d` (hash, flagged). A flag
+// moves the stamp, which is what makes "a new flag re-asks a cached KEEP once"
+// a property of this function rather than of a counter somebody has to
+// remember to compare: the entry the KEEP gate holds no longer matches, the
+// note is asked about again with its count attached, and the KEEP comes back
+// stamped over that count so the next pass is quiet.
 //
 // It is deterministic over (content, evidence), which is what makes "one
-// re-ask per new verdict or flag" a promise rather than a hope: the same pair always
+// re-ask per new flag" a promise rather than a hope: the same pair always
 // produces the same key, so a KEEP re-stamped over the evidence it was judged
 // with is skipped until the evidence actually changes. The format is never
 // parsed — only compared — and the only place a value is stored is
 // memories.resolve_kept_hash.
-func KeepStamp(content string, ev memory.UsefulnessEvidence) string {
+func KeepStamp(content string, ev memory.FlagEvidence) string {
 	base := ContentHash(content)
-	// The flag-bearing spelling first, so a flag moves the stamp even when it is
-	// the only evidence there is — a pure flag with no verdict must re-ask just
-	// as a contradiction does, and falling through to the two-count forms would
-	// collapse it to the bare hash the moment both verdict counts were zero.
 	if ev.Flagged > 0 {
-		return fmt.Sprintf("%s:%d:%d:%d:%s", base, ev.Contradicted, ev.SupersededInSession, ev.Flagged, ev.LastAt)
+		return fmt.Sprintf("%s:%d", base, ev.Flagged)
 	}
-	if ev.Contradicted == 0 && ev.SupersededInSession == 0 {
-		return base
-	}
-	return fmt.Sprintf("%s:%d:%d:%s", base, ev.Contradicted, ev.SupersededInSession, ev.LastAt)
+	return base
 }
 
 // askedWithEvidence renders the batch the classifier sees: each memory's own
-// content, and that memory's negative audit verdict as ONE evidence line when
-// the audit holds one (#880). A nil map — an empty audit, or a read that failed
+// content, and that memory's flag count as ONE evidence line when
+// a flag is filed (#880). A nil map — no flags, or a read that failed
 // and the caller failed open — carries no evidence, so those notes reach the
 // model with exactly the content they carried before this existed.
 //
@@ -207,7 +175,7 @@ func KeepStamp(content string, ev memory.UsefulnessEvidence) string {
 // a stamp that says a verdict was judged with the evidence in front of it is
 // only true when the ask actually carried it. One renderer, so the two passes
 // cannot drift into stamping evidence the judge never saw.
-func askedWithEvidence(mems []memory.Memory, evidence map[string]memory.UsefulnessEvidence) []Note {
+func askedWithEvidence(mems []memory.Memory, evidence map[string]memory.FlagEvidence) []Note {
 	out := make([]Note, len(mems))
 	for i, m := range mems {
 		out[i] = Note{Content: m.Content, Evidence: evidence[m.ID].Line()}
@@ -237,15 +205,15 @@ type resolveStore interface {
 	LinksByRelationSource(ctx context.Context, projectID, relation, source string) ([]memory.Link, error)
 	ResolveKeptHashes(ctx context.Context, projectID string) (map[string]string, error)
 	MarkResolveKept(ctx context.Context, projectID string, hashes map[string]string) error
-	// UsefulnessByMemory is #648's negative evidence: what the retrieval audit has
-	// recorded about each memory. It is on BOTH stores — this one and
+	// FlagsByMemory is the negative evidence: the flags agents have filed
+	// against each memory. It is on BOTH stores — this one and
 	// reassessStore — and #880 review finding 1 is what put it there.
 	//
 	// The exemption this comment used to record (the repair pass reading no
 	// evidence and comparing the BARE content hash) read the evidence as an
 	// argument: the repair exists to UNDO resolutions, so a note contradicted
 	// three times seemed like a note to leave alone. That is not what the map
-	// decides, and never was — a negative verdict RE-ASKS a note and the
+	// decides, and never was — a flag RE-ASKS a note and the
 	// classifier decides, with the evidence attached, exactly as it decides
 	// everything else (#880's decision 1). What the exemption did decide was
 	// which key each pass wrote, and the two passes write ONE key: the repair
@@ -256,11 +224,11 @@ type resolveStore interface {
 	// above their own gate, both append it to the ask through
 	// askedWithEvidence, and both stamp KeepStamp over it.
 	//
-	// The read still decides nothing on its own: an empty audit, a nil map
+	// The read still decides nothing on its own: no flags, a nil map
 	// from a failed read, or no evidence for a memory all leave the stamp as
 	// the plain content hash, so the evidence can only ever cost a re-ask,
 	// never buy a skip.
-	UsefulnessByMemory(ctx context.Context, projectID string) (map[string]memory.UsefulnessEvidence, error)
+	FlagsByMemory(ctx context.Context, projectID string) (map[string]memory.FlagEvidence, error)
 }
 
 // linkScopeReader is the one method scopeCompatibleSupersedes needs. Both
@@ -550,12 +518,12 @@ func Run(ctx context.Context, store resolveStore, cls Classifier, projectID stri
 	// folded «...» block on its own line, never inside it. askedWithEvidence
 	// builds the ask for both passes, so the ask and the stamp below cannot
 	// drift apart.
-	var evidence map[string]memory.UsefulnessEvidence
+	var evidence map[string]memory.FlagEvidence
 	if len(gated) > 0 {
-		read, evErr := store.UsefulnessByMemory(ctx, projectID)
+		read, evErr := store.FlagsByMemory(ctx, projectID)
 		if evErr != nil {
 			if logger != nil {
-				logger.Warn("resolve usefulness evidence unavailable", "error", evErr)
+				logger.Warn("resolve flag evidence unavailable", "error", evErr)
 			}
 			read = nil
 		}

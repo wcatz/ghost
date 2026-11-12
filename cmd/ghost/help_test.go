@@ -124,7 +124,7 @@ var helpCases = []struct {
 	{name: "opencode", path: []string{"opencode"}, want: "ghost opencode cleanup-sessions [--grace <duration>]"},
 	{name: "opencode cleanup-sessions", path: []string{"opencode", "cleanup-sessions"}, want: "ghost opencode cleanup-sessions [--grace <duration>]"},
 	{name: "opencode cleanup-sessions with grace", path: []string{"opencode", "cleanup-sessions"}, pre: []string{"--grace", "24h"}, want: "ghost opencode cleanup-sessions [--grace <duration>]"},
-	{name: "bench", path: []string{"bench"}, want: "ghost bench [--sweep | --context | --passive | --audit | --cutoff-sweep | --no-answer-sweep]"},
+	{name: "bench", path: []string{"bench"}, want: "ghost bench [--sweep | --context | --passive | --cutoff-sweep | --no-answer-sweep]"},
 	{name: "upgrade", path: []string{"upgrade"}, want: "ghost upgrade"},
 	{name: "context", path: []string{"context"}, want: "ghost context [--cwd <dir>] [--as-of <RFC3339>]"},
 	{name: "maintenance", path: []string{"maintenance"}, want: "ghost maintenance status"},
@@ -891,36 +891,4 @@ func isPositiveInt(n ast.Node) bool {
 	}
 	v, err := strconv.Atoi(lit.Value)
 	return err == nil && v > 0
-}
-
-// TestTopLevelHelpNamesTheAuditMode: `ghost context` is a command with two modes and
-// the top-level summary listed only one, so `ghost --help` told a user the whole of
-// what a command does and was wrong.
-//
-// The assertion is that the summary names --audit, not that it matches a string: the
-// summary is prose, and a byte comparison here would make every reword of a line
-// neighbouring it a test failure. What has to stay true is that the flag is
-// discoverable from the command list, because the command list is where someone
-// looking for it looks.
-func TestTopLevelHelpNamesTheAuditMode(t *testing.T) {
-	restoreDetectRemote := func(t *testing.T) {
-		t.Helper()
-		t.Cleanup(func() { memory.SetDetectRemote(nil) })
-	}
-	restoreDetectRemote(t)
-	stdout, stderr := captureStreams(t, func() { dispatchCommand(nil) })
-
-	out := stdout + stderr
-	if !strings.Contains(out, "[--audit]") {
-		t.Errorf("the top-level command list does not offer `ghost context --audit`, so the mode is discoverable only from `ghost help context`:\n%s", out)
-	}
-	// And it must not be a second command line: the summary's shape is "one line per
-	// command", and an extra bare `context` entry would read as a command that takes
-	// no flags at all.
-	// One entry per command, and the audit mode folded into it rather than listed as a
-	// second command: a second `  context ` line in this list reads as a command that
-	// takes no flags, which is the opposite of the change.
-	if got := strings.Count(out, "\n  context "); got != 1 {
-		t.Errorf("the top-level command list carries %d `  context ` entries, want 1 — the audit mode belongs on the one entry, not as a second command:\n%s", got, out)
-	}
 }

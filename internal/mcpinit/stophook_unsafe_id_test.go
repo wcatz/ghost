@@ -44,7 +44,7 @@ func TestSpawnLifecycle_UnsafeProjectIDWarningWithholdsATokenShapedID(t *testing
 			t.Fatalf("test setup: %q must be unsafe for a path", id)
 		}
 		logs := captureLogOutput(t)
-		spawnLifecycleIfConfigured(canonical, "", nil, io.Discard)
+		spawnLifecycleIfConfigured(canonical, "", io.Discard)
 		return logs.String()
 	}
 
@@ -101,7 +101,7 @@ func TestSpawnLifecycle_UnsafeProjectIDLeavesDurableFailure(t *testing.T) {
 		t.Fatalf("test setup: %q must be unsafe for a path", id)
 	}
 
-	spawnLifecycleIfConfigured(canonical, "", nil, io.Discard)
+	spawnLifecycleIfConfigured(canonical, "", io.Discard)
 
 	b, err := os.ReadFile(filepath.Join(dataHome, "ghost", projectMarkerFile(id)))
 	if err != nil {

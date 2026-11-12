@@ -673,12 +673,10 @@ func purgeHistoryTx(ctx context.Context, tx *sql.Tx, memoryID string) (int64, er
 	// choice: its predicate is a subquery over retrieval_record, so once those rows
 	// are gone it can no longer see them and would silently match nothing.
 	//
-	// Cost, since there is no index here to hide it behind: one scan of
-	// retrieval_audit — what the report's own read costs anyway, on a table
-	// bounded at retrievalAuditRowsCap. TestRetrievalAuditsCarryOneIndex forbids an
-	// index on record_rowid because every insert would pay for it inside the write
-	// lock and nothing reads it but these sweeps, so the alternative of collecting
-	// the doomed rowids in Go costs the same scan plus a statement per batch.
+	// retrieval_audit is a legacy table: nothing reads it and nothing writes it
+	// any more, so this is only a purge of whatever an older build left behind.
+	// It carries one index, on project_id, and none on record_rowid, so the sweep
+	// is a scan of the rows that are still stored.
 	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM retrieval_audit WHERE record_rowid IN (
 			SELECT rowid FROM retrieval_record WHERE `+retrievalRecordNamingMemory()+`)`,
@@ -691,18 +689,14 @@ func purgeHistoryTx(ctx context.Context, tx *sql.Tx, memoryID string) (int64, er
 		return 0, fmt.Errorf("purge retrieval records: %w", err)
 	}
 
-	// The audit's rows are REDACTED, not left behind, and for the same reason the
-	// record arm above deletes rather than redacts: a verdict's subject is a memory
-	// ID, and a purge that removed the memory while its verdicts kept naming it
-	// would leave a report counting judgments about a memory that no longer exists.
+	// The legacy verdicts are removed, not left behind: a verdict's subject is a
+	// memory ID, and a purge that kept them would leave rows naming a memory that
+	// has been redacted.
 	//
-	// This arm is not redundant with the sweep above, and the difference is what
-	// each is for: the sweep reaches the verdicts of calls that are going away,
-	// this one reaches the verdicts whose CALL SURVIVES — every unattributed row
-	// (record_rowid 0, which the replacement refuses to treat as a key) and any
-	// row whose call judged the memory without naming it. A plain equality on a
-	// real column rather than a scan of a JSON document, which is the same cost the
-	// table's cap makes free: a redaction is rare and the table is bounded.
+	// This arm is not redundant with the sweep above: the sweep reaches the
+	// verdicts of calls that are going away, this one reaches the verdicts whose
+	// call survives — every unattributed row (record_rowid 0) and any row whose
+	// call judged the memory without naming it.
 	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM retrieval_audit WHERE memory_id = ?`, memoryID); err != nil {
 		return 0, fmt.Errorf("purge retrieval audits: %w", err)
@@ -1008,7 +1002,7 @@ func (s *Store) purgeMemoryHistory(ctx context.Context, projectID, memoryID stri
 // The chain breaks without it. A rewrite or a merge gives the row a NEW id — the
 // new text is not byte-identical, so ReplaceNonManual cannot reuse the old row —
 // so the old id's history simply stops. A reader following one memory's record
-// (what #648 will do with a usefulness verdict) would have no way to learn that
+// (a reader of a flag or a record) would have no way to learn that
 // the memory it holds a verdict about is now a different row.
 //
 // Only a delete row with no successor yet is stamped: one that already names a

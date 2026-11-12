@@ -2974,9 +2974,6 @@ func TestGhostProjectDelete_DryRunByDefault(t *testing.T) {
 	if !strings.Contains(text.Text, "retrievals:   0") {
 		t.Errorf("expected summary line %q in response, got %q", "retrievals:   0", text.Text)
 	}
-	if !strings.Contains(text.Text, "audits:       0") {
-		t.Errorf("expected summary line %q in response, got %q", "audits:       0", text.Text)
-	}
 
 	all, err := store.GetAll(ctx, "abc123", 100)
 	if err != nil {

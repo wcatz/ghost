@@ -24,7 +24,10 @@ package memory
 // sample is the shape of the bug, since the failures are all in the 1100-odd
 // characters nobody thought of.
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // TestTheBareTokenAllowlistIsExactlyTheDocumentedSet: membership is exactly ASCII
 // letters, ASCII digits and the seven separators Ghost's own id and scope shapes
@@ -172,4 +175,92 @@ func hexU(r rune) string {
 		out = append([]byte{'0'}, out...)
 	}
 	return "U+" + string(out)
+}
+
+// TestTheAstralCeilingIsTheRealOne: SafeToken's worst-case expansion is ten
+// characters for any rune above U+FFFF — more than the six for a BMP rune and more
+// than the one for a bare one. So the per-rune cost is monotone in the escaping
+// class and the astral case is the top of it.
+//
+// A caller that bounds a stored value by runes sizes its output by that ceiling, so
+// the claim is about the maximum expansion and is tested as one: a change that made
+// the renderer charge twelve for an astral rune would otherwise go unnoticed.
+func TestTheAstralCeilingIsTheRealOne(t *testing.T) {
+	// Six for a BMP rune, ten for an astral one, measured from the renderer rather
+	// than from the source of strconv.
+	for _, tc := range []struct {
+		name       string
+		r          string
+		wantEscape int
+	}{
+		{"a bare rune", "s", 1},
+		{"a BMP escaping rune", "\u202e", 6},
+		{"an astral escaping rune", "\U000e0001", 10},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := SafeToken(tc.r)
+			if tc.wantEscape == 1 {
+				// The bare case is the one that costs nothing, and it is here so the
+				// comparison has its floor: a renderer that began quoting honest ids
+				// would change the ceiling for every real row, not only for a hostile one.
+				if got != tc.r {
+					t.Errorf("SafeToken(%q) = %q, want it written bare; every id Ghost mints and "+
+						"every session id an operator types must stay byte-identical", tc.r, got)
+				}
+				return
+			}
+			if got == tc.r {
+				t.Fatalf("SafeToken(%q) wrote it bare, so this case measures no escaping", tc.r)
+			}
+			if len(got) != tc.wantEscape+2 {
+				t.Errorf("SafeToken(%q) = %q, %d bytes; expected %d characters escaped plus the "+
+					"two quotes", tc.r, got, len(got), tc.wantEscape)
+			}
+		})
+	}
+}
+
+// TestSafeTokenWritesARealNameBareAndQuotesEverythingElse: the renderer is the
+// definition now that three call sites share it, so it is tested where it lives
+// rather than only through the one caller that prompted the move.
+//
+// The bare cases are the ones every real row takes, and they are pinned to be
+// byte-identical to the input: a renderer that started quoting honest ids would
+// make every listing ugly and would hide all of this escaping on the common case.
+// The quoted cases each name a character class rather than a single instance, for
+// the reason the allowlist exists.
+func TestSafeTokenWritesARealNameBareAndQuotesEverythingElse(t *testing.T) {
+	for _, bare := range []string{
+		"a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4", // the id shape Ghost mints
+		"ses_2", "0", "a.b-c_d:e/f@g+h",
+	} {
+		if got := SafeToken(bare); got != bare {
+			t.Errorf("SafeToken(%q) = %q, want it written bare and unchanged", bare, got)
+		}
+	}
+	if got := SafeToken(""); got != `""` {
+		t.Errorf("SafeToken(\"\") = %q, want %q — an empty field must still print something, or a "+
+			"reader cannot tell an empty value from a truncated line", got, `""`)
+	}
+	for _, tc := range []struct {
+		name string
+		in   string
+	}{
+		{"a space", "my session"},
+		{"a newline", "a\nb"},
+		{"a « that opens a data block", "a«b"},
+		{"a non-ASCII name", "メモ"},
+		{"a JSON fragment", `{"a":1}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := SafeToken(tc.in)
+			if got == tc.in {
+				t.Errorf("SafeToken(%q) wrote it bare, so a stored value reached a line outside "+
+					"the «...» delimiters unquoted", tc.in)
+			}
+			if strings.ContainsAny(got, "\n\r") {
+				t.Errorf("SafeToken(%q) = %q, which still carries a line break", tc.in, got)
+			}
+		})
+	}
 }

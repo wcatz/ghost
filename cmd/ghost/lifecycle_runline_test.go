@@ -12,6 +12,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"os"
 	"regexp"
 	"strings"
 	"testing"
@@ -40,6 +41,15 @@ func checkRunLine(t *testing.T, line, want string) string {
 		t.Errorf("coordinator line project = %s, want %s\n%q", m[2], want, line)
 	}
 	return line[len(m[0]):]
+}
+
+// runLifecycleWithArgs runs the coordinator in-process with the given argv.
+func runLifecycleWithArgs(t *testing.T, argv ...string) {
+	t.Helper()
+	orig := os.Args
+	t.Cleanup(func() { os.Args = orig })
+	os.Args = append([]string{orig[0], "lifecycle"}, argv...)
+	runLifecycle()
 }
 
 // runLifecycleLines runs the coordinator in-process for project and returns
@@ -75,7 +85,7 @@ func TestRunLifecycleEveryLineNamesItsRun(t *testing.T) {
 		bodies = append(bodies, checkRunLine(t, l, `"alpha"`))
 	}
 	joined := strings.Join(bodies, "\n")
-	for _, want := range []string{"scratch reap removed=", "audit sidecar sweep removed=", "skipping reflect"} {
+	for _, want := range []string{"scratch reap removed=", "skipping reflect"} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("no attributed %q line among:\n%s", want, strings.Join(lines, "\n"))
 		}
@@ -162,15 +172,15 @@ func TestLifecycleLineRendersTheProjectAsAToken(t *testing.T) {
 // outcome lines ("completed in", "failed after", "interrupted") sit in a loop
 // that only runs a child, so this holds every stderr print in the coordinator
 // to the run's renderer. The two allowed exceptions are the argument error,
-// written before any project is known, and the audit report, a multi-line
-// report from internal/audit whose header already names the project.
+// written before any project is known, and the multi-line report, whose
+// header already names the project.
 func TestRunLifecycleWritesNoUnattributedLine(t *testing.T) {
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, "lifecycle.go", nil, 0)
 	if err != nil {
 		t.Fatalf("parse lifecycle.go: %v", err)
 	}
-	coordinator := map[string]bool{"runLifecycle": true, "runAuditPhase": true}
+	coordinator := map[string]bool{"runLifecycle": true}
 	found := 0
 	for _, decl := range f.Decls {
 		fn, ok := decl.(*ast.FuncDecl)

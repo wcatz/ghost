@@ -7,10 +7,11 @@ import (
 	"github.com/wcatz/ghost/internal/bench"
 )
 
-// TestBenchModeOfReadsTheThreeReports pins the flag table `ghost bench` has: the
-// default metric table, --sweep's ranked grid, and --context's context-assembly
-// table. runBench is not reachable from a test (it prints to stdout and exits), so
-// the parsing is a named function with a test of its own.
+// TestBenchModeOfReadsTheReports pins the flag table `ghost bench` has: the
+// default metric table, --sweep's ranked grid, --context's context-assembly
+// table, --passive's passive-block table and the two sweeps. runBench is not
+// reachable from a test (it prints to stdout and exits), so the parsing is a
+// named function with a test of its own.
 //
 // The two things a flag table rots into are both here: a flag the parser accepts
 // and the runner ignores (a mode that silently prints the wrong table while
@@ -28,7 +29,6 @@ func TestBenchModeOfReadsTheThreeReports(t *testing.T) {
 		{"sweep", []string{"--sweep"}, benchModeSweep},
 		{"context", []string{"--context"}, benchModeContext},
 		{"passive", []string{"--passive"}, benchModePassive},
-		{"audit", []string{"--audit"}, benchModeAudit},
 		{"cutoff sweep", []string{"--cutoff-sweep"}, benchModeCutoff},
 		{"no-answer sweep", []string{"--no-answer-sweep"}, benchModeNoAnswer},
 	} {
@@ -52,14 +52,13 @@ func TestBenchModeOfReadsTheThreeReports(t *testing.T) {
 	// to drop one of them silently.
 	for _, args := range [][]string{{"--sweep", "--context"}, {"--context", "--sweep"},
 		{"--passive", "--context"}, {"--sweep", "--passive"}, {"--passive", "--sweep"},
-		{"--audit", "--passive"}, {"--passive", "--audit"}, {"--audit", "--sweep"}, {"--context", "--audit"},
 		{"--no-answer-sweep", "--cutoff-sweep"}, {"--no-answer-sweep", "--context"}, {"--passive", "--no-answer-sweep"}} {
 		if _, err := benchModeOf(args); err == nil {
 			t.Errorf("benchModeOf(%v) was accepted, so one of the two reports is dropped without saying so", args)
 		}
 	}
 
-	for _, flag := range []string{"--sweep", "--context", "--passive", "--audit", "--cutoff-sweep", "--no-answer-sweep"} {
+	for _, flag := range []string{"--sweep", "--context", "--passive", "--cutoff-sweep", "--no-answer-sweep"} {
 		if !strings.Contains(benchUsage, flag) {
 			t.Errorf("benchUsage does not mention %s, so the mode is undiscoverable", flag)
 		}

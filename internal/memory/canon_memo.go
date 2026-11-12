@@ -112,7 +112,7 @@ var opsThatLeaveProjectsAlone = map[string]bool{
 	"mark-supersede-neither": true, "create-link": true, "create-link-autocommit": true,
 	"invalidate-link": true, "mark-link-scanned": true,
 	"create-task": true, "complete-task": true, "update-task": true,
-	"decision-record": true, "supersede-decision": true, "record-retrieval-audits": true,
+	"decision-record": true, "supersede-decision": true,
 	"update-learned-context": true, "set-reflect-signature": true,
 	"history-compact": true, "history-compact-stamp": true, "prune batch": true,
 	"purge-history": true, "fold-rows": true,

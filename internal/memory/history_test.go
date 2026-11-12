@@ -1187,8 +1187,8 @@ func TestHistoryTrimKeepsTheNewestRowOfAMemoryOverTheCap(t *testing.T) {
 // TestReplaceNonManualNamesTheSuccessorOfEveryReplacedRow: the chain. A rewrite
 // or a merge gives the row a NEW id — the new text is not byte-identical, so the
 // old row cannot be reused — which means the old id's history simply stops. A
-// reader following one memory (what #648 will do with a usefulness verdict)
-// would never learn that the memory it holds a verdict about is now a different
+// reader following one memory (what a flag reader does)
+// would never learn that the memory it holds a flag about is now a different
 // row, so the delete row has to name it.
 func TestReplaceNonManualNamesTheSuccessorOfEveryReplacedRow(t *testing.T) {
 	s := testStore(t)

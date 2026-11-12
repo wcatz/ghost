@@ -146,8 +146,8 @@ var errKeyNotRegular = errors.New("the retrieval key path is not a regular file"
 
 // readKeyFile reads the retrieval key file and only ever opens a regular file.
 // The data directory is writable by every local process, so a FIFO at the key's
-// path used to block os.ReadFile's open until a writer appeared (wedging the
-// stop hook's audit scan and the coordinator's audit phase), and a symlink was
+// path used to block os.ReadFile's open until a writer appeared (wedging
+// the stop hook and the coordinator), and a symlink was
 // followed to whatever it named. A missing file still reports os.ErrNotExist so
 // the callers' "no key yet" branches keep working; every other refusal is an
 // error that is never read as "no key", so a planted entry is not silently
@@ -407,8 +407,8 @@ func digestWith(key []byte, query string) string {
 }
 
 // ReadRetrievalKey returns the per-install key for a caller that must not create
-// it — the retrieval AUDIT's stop hook, which runs synchronously on a path an
-// agent is waiting on and may read a file but writes nothing.
+// it — a hook-side reader, which runs synchronously on a path an agent is
+// waiting on and may read a file but writes nothing.
 //
 // It resolves the same path loadOrCreateQueryKey does, through
 // config.DataDirPath, so GHOST_DEV_FORBID_DATA_DIR is honoured rather than
@@ -418,11 +418,11 @@ func digestWith(key []byte, query string) string {
 // It NEVER creates the key, and a missing one is an error rather than an empty
 // one. That is the whole point of the difference from queryKey: a hook that
 // created the key would be writing to a user's data directory on a synchronous
-// path, and a hook handed an empty key would write a sidecar whose tokens are
-// reproducible by anyone holding a word list — which is the property the audit's
+// path, and a hook handed an empty key would write tokens that are are
+// reproducible by anyone holding a word list — which is the property the keyed
 // fingerprints exist to deny. So a store that has never searched (and therefore
-// never created the key) yields no sidecar at all, and the turn's audit is lost
-// rather than filed in the clear.
+// never created the key) yields an error here rather than a fingerprint in the
+// clear.
 //
 // The caller degrades on this error. Nothing here fails open on its own because
 // "fail open" here would mean writing something unprotected.
@@ -436,7 +436,7 @@ func ReadRetrievalKey() ([]byte, error) {
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, fmt.Errorf("the retrieval key at %s does not exist yet (a store that has "+
-				"never recorded a retrieval has no key, and the audit will not create one)", path)
+				"never recorded a retrieval has no key, and this reader will not create one)", path)
 		}
 		return nil, fmt.Errorf("read the retrieval key at %s: %w", path, err)
 	}

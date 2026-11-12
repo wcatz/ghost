@@ -15,7 +15,7 @@ import (
 // benchUsage is the help for `ghost bench`: stderr after an unknown flag (a
 // usage error, exit 1), stdout for -h/--help (see handleHelp). One text for
 // both, so the two can never drift.
-const benchUsage = `Usage: ghost bench [--sweep | --context | --passive | --audit | --cutoff-sweep | --no-answer-sweep]
+const benchUsage = `Usage: ghost bench [--sweep | --context | --passive | --cutoff-sweep | --no-answer-sweep]
 
 Runs the built-in retrieval-quality benchmark (judge-free, deterministic, no
 network) over the embedded dataset and prints the metric table. --sweep
@@ -31,12 +31,7 @@ false-positive rate, the answerable queries refused, the graded-relevant rows
 admitted, context precision and estimated tokens. --passive measures the passive blocks instead
 — session start, ghost context and ghost_project_context — over a synthetic
 multi-project store with resolved, expired, out-of-scope and duplicate rows, and
-reports withheld leakage, recall, contamination and header honesty. --audit scores
-the retrieval audit instead: a scripted offline session with hand-written labels
-(ids cited, memories restated, denied or saved) is judged by the audit's own
-comparison, and the verdicts are scored against the labels per outcome — twice,
-over the synthetic session and over a hand-labelled set built from real working
-sessions, so a judge change that helps one and not the other is visible. See
+reports withheld leakage, recall, contamination and header honesty. See
 docs/benchmarks.md.
 `
 
@@ -49,7 +44,6 @@ const (
 	benchModeSweep    = "sweep"
 	benchModeContext  = "context"
 	benchModePassive  = "passive"
-	benchModeAudit    = "audit"
 	benchModeCutoff   = "cutoff-sweep"
 	benchModeNoAnswer = "no-answer-sweep"
 )
@@ -77,8 +71,6 @@ func benchModeOf(args []string) (string, error) {
 			err = set(benchModeContext, "context")
 		case "--passive":
 			err = set(benchModePassive, "passive")
-		case "--audit":
-			err = set(benchModeAudit, "audit")
 		case "--cutoff-sweep":
 			err = set(benchModeCutoff, "cutoff-sweep")
 		case "--no-answer-sweep":
@@ -118,29 +110,6 @@ func runBench() {
 			os.Exit(1)
 		}
 		fmt.Print(bench.FormatPassive(rep))
-		return
-	}
-
-	// The audit mode has its own corpora and its own scratch stores, so it returns
-	// before the graded dataset is loaded too. Both corpora run in one invocation
-	// and print one after the other: the synthetic session's figures and the
-	// hand-labelled real-work set's are the two halves of one question, and a judge
-	// that improves on the first while the second stays flat is the failure the
-	// second set exists to expose.
-	if mode == benchModeAudit {
-		slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
-		synth, err := bench.RunAuditTemp(context.Background())
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			os.Exit(1)
-		}
-		real, err := bench.RunRealAuditTemp(context.Background())
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			os.Exit(1)
-		}
-		fmt.Print(bench.FormatAudit(synth))
-		fmt.Print(bench.FormatAudit(real))
 		return
 	}
 

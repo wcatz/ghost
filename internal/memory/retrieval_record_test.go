@@ -316,9 +316,8 @@ func TestRecordRetrievalIsRefusedOnAStoreANewerGhostOwns(t *testing.T) {
 // name is exactly what a redaction is asked to remove when the id itself is
 // sensitive (a memory named for a customer, a credential's identifier, an
 // incident ticket). Leaving the row would report success on a redaction that the
-// record still holds: Store.RetrievalRecords reads the id back out of it today,
-// and `ghost context --audit` — the report this issue's next part adds — will
-// read it out of a store the operator believed they had redacted.
+// record still holds: Store.RetrievalRecords would read the id back out of a store
+// the operator believed they had redacted.
 func TestPurgeRemovesTheRetrievalRecordsNamingTheMemory(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()

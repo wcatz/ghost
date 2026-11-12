@@ -43,12 +43,12 @@ import (
 // project named "-h".
 var helpValueFlagsByCommand = map[string]map[string]bool{
 	"backup":                    {"--out": true},
-	"context":                   {"--cwd": true, "--as-of": true, "--source": true, "--project": true, "--since": true},
+	"context":                   {"--cwd": true, "--as-of": true, "--source": true},
 	"export":                    {"--out": true, "--project": true},
 	"history":                   {"--limit": true, "--project": true, "--before": true},
 	"prune":                     {"--grace": true, "--project": true},
 	"hook":                      {"--source": true},
-	"lifecycle":                 {"--project": true, "--source": true, "--signals": true},
+	"lifecycle":                 {"--project": true, "--source": true},
 	"mcp init":                  {"--client": true},
 	"mcp status":                {"--client": true},
 	"memory move":               {"--project": true, "--to": true},

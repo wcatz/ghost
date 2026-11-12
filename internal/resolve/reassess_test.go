@@ -120,19 +120,18 @@ func TestReassessSkipsCachedKeepVerdicts(t *testing.T) {
 // TestReassessSkipsAStoredStampThatAlreadyCoversTheEvidence: the other half of
 // #880 review finding 1. The repair does not only WRITE the ordinary pass's
 // key, it READS it — so a row whose stored stamp already carries the evidence
-// the audit holds is skipped here exactly as the ordinary gate skips it, with no
+// the store holds is skipped here exactly as the ordinary gate skips it, with no
 // classifier call, rather than re-asked for evidence it was already judged
 // under. Reverted to comparing the bare content hash, the two passes disagree
 // again: this row's stamp is not a bare hash, so the repair re-asks a note the
-// audit has already had its say about.
+// flag has already had its say about.
 func TestReassessSkipsAStoredStampThatAlreadyCoversTheEvidence(t *testing.T) {
 	content := "kill experiment: the graph bonus is gone, PR #210 landed it"
-	ev := memory.UsefulnessEvidence{Contradicted: 2, SupersededInSession: 1,
-		LastSession: "ses_2", LastAt: "2026-09-24 10:00:00"}
+	ev := memory.FlagEvidence{Flagged: 1}
 	store := &fakeStore{
 		alreadyResolved: []memory.Memory{{ID: "M1", Content: content}},
 		kept:            map[string]string{"M1": KeepStamp(content, ev)},
-		usefulness:      map[string]memory.UsefulnessEvidence{"M1": ev},
+		usefulness:      map[string]memory.FlagEvidence{"M1": ev},
 	}
 	cls := &fakeClassifier{}
 
@@ -184,14 +183,14 @@ func TestReassessLeavesUnknownAlone(t *testing.T) {
 
 // TestReassessStampsTheEvidenceItJudgedTheNoteUnder: the repair pass and the
 // ordinary pass must write and read ONE key (#880 review finding 1). The repair
-// reads the same audit evidence the ordinary gate reads, so it can compare the
+// reads the same flag evidence the ordinary gate reads, so it can compare the
 // stamp it is about to overwrite — and it asks the classifier with that
 // evidence appended, because a stamp claiming a verdict was judged under
 // evidence is only honest when the verdict really was.
 func TestReassessStampsTheEvidenceItJudgedTheNoteUnder(t *testing.T) {
 	content := "kill experiment: the graph bonus is gone, PR #210 landed it"
-	evidence := map[string]memory.UsefulnessEvidence{
-		"M1": {Contradicted: 2, SupersededInSession: 1, LastSession: "ses_2", LastAt: "2026-09-24 10:00:00"},
+	evidence := map[string]memory.FlagEvidence{
+		"M1": {Flagged: 1},
 	}
 	store := &fakeStore{
 		alreadyResolved: []memory.Memory{{ID: "M1", Content: content}},
@@ -233,7 +232,7 @@ func TestReassessReadsTheEvidenceOnceForThePool(t *testing.T) {
 			{ID: "M1", Content: "kill experiment: the graph bonus is gone, PR #210 landed it"},
 			{ID: "M2", Content: "postmortem concluded: the deploy failure was a stale hash"},
 		},
-		usefulness: map[string]memory.UsefulnessEvidence{"M1": {Contradicted: 1, LastAt: "2026-09-24 10:00:00"}},
+		usefulness: map[string]memory.FlagEvidence{"M1": {Flagged: 1}},
 	}
 	if _, _, err := Reassess(context.Background(), store, cls, "proj", true, Scope{}, nil); err != nil {
 		t.Fatalf("Reassess: %v", err)
@@ -272,7 +271,7 @@ func TestReassessFailsOpenWhenTheEvidenceCannotBeRead(t *testing.T) {
 	if len(cls.askedFor) != 1 || cls.askedFor[0] != content {
 		t.Errorf("asked about %q, want the note alone: an unreadable audit appends nothing", cls.askedFor)
 	}
-	if !strings.Contains(buf.String(), "usefulness evidence unavailable") {
+	if !strings.Contains(buf.String(), "flag evidence unavailable") {
 		t.Errorf("expected the evidence read failure to be logged, log:\n%s", buf.String())
 	}
 }

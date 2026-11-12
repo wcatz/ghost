@@ -464,16 +464,12 @@ type assembleCapableStore interface {
 }
 
 // flagCapableStore narrows provider.MemoryStore's concrete backing store to
-// the two methods ghost_memory_flag needs: the append-only write, and the
-// evidence read the result quotes. Neither is on provider.MemoryStore — the
-// capability surface is what the tools expose, and flagging is a storage
-// detail — so s.store is type-asserted to this interface at call time;
-// *memory.Store satisfies it. The read sits beside the write on purpose: the
-// number this tool prints has to be the one figure resolve and reflect are
-// given, or the two would be free to disagree.
+// the one method ghost_memory_flag needs: the append-only write. It is not on
+// provider.MemoryStore — the capability surface is what the tools expose, and
+// flagging is a storage detail — so s.store is type-asserted to this interface
+// at call time; *memory.Store satisfies it.
 type flagCapableStore interface {
 	FlagMemory(ctx context.Context, req memory.FlagMemoryRequest) error
-	UsefulnessByMemory(ctx context.Context, projectID string) (map[string]memory.UsefulnessEvidence, error)
 }
 
 // resolveCapableStore narrows provider.MemoryStore's concrete backing store to
@@ -489,9 +485,9 @@ type resolveCapableStore interface {
 	LinksByRelationSource(ctx context.Context, projectID, relation, source string) ([]memory.Link, error)
 	ResolveKeptHashes(ctx context.Context, projectID string) (map[string]string, error)
 	MarkResolveKept(ctx context.Context, projectID string, hashes map[string]string) error
-	// UsefulnessByMemory is #648's negative evidence, read once per pass by
+	// FlagsByMemory is #648's negative evidence, read once per pass by
 	// resolve.Run through this interface, so the assertion below has to offer it.
-	UsefulnessByMemory(ctx context.Context, projectID string) (map[string]memory.UsefulnessEvidence, error)
+	FlagsByMemory(ctx context.Context, projectID string) (map[string]memory.FlagEvidence, error)
 }
 
 // linkCapableStore narrows provider.MemoryStore's concrete backing store to what
@@ -3272,7 +3268,7 @@ func (s *Server) registerTools() {
 	mcp.AddTool(s.mcp, &mcp.Tool{
 		Name:        "ghost_memory_move",
 		Title:       "Move Memory",
-		Description: "Move a memory between projects, or between a project and _global, while keeping its ID, links, history, flags, evidence, provenance and embeddings. Use ghost_memory_promote instead when the destination is specifically _global and you only need promote semantics. A pinned or persistent memory requires confirm=true. dry_run=true previews the move without writing. retrieval_audit rows stay with the call that produced them.",
+		Description: "Move a memory between projects, or between a project and _global, while keeping its ID, links, history, flags, evidence, provenance and embeddings. Use ghost_memory_promote instead when the destination is specifically _global and you only need promote semantics. A pinned or persistent memory requires confirm=true. dry_run=true previews the move without writing.",
 		Annotations: &mcp.ToolAnnotations{
 			DestructiveHint: boolPtr(false),
 			IdempotentHint:  false,
@@ -4462,12 +4458,6 @@ func (s *Server) registerTools() {
 			sb.WriteString(op)
 		}
 
-		// Retrieval figures (#646), additive like the block above: what was
-		// retrieved, and what the agent did with it. It goes LAST because every
-		// line above it is already something an agent or a script reads by name,
-		// and a block inserted above them would move their anchor.
-		s.writeRetrievalAuditBlock(ctx, &sb, read.store)
-
 		// The store's statements are done, so the read handle's one connection
 		// goes back now: a search that needs it does not wait for the rest of
 		// this answer, which is string building.
@@ -4619,10 +4609,6 @@ func (s *Server) registerTools() {
 		// reads before deciding to delete, and a line missing from one surface is
 		// a count the caller cannot see.
 		fmt.Fprintf(&sb, "  retrievals:   %d\n", summary.RetrievalRecords)
-		// And this feature's verdicts, for the reason the line above gives: an
-		// agent reading this before it deletes needs to see the whole of what the
-		// call removes.
-		fmt.Fprintf(&sb, "  audits:       %d\n", summary.RetrievalAudits)
 		// And this feature's flags, last for the reason the CLI's own line gives:
 		// an agent reading this before it deletes needs the whole of what the call
 		// removes, and an agent's objection to a memory that is about to go is part
@@ -4668,10 +4654,10 @@ func (s *Server) registerTools() {
 		if resolvedProjectID == "" {
 			return nil, nil, fmt.Errorf("project %s not found", memory.RefusalArg("project_id", args.ProjectID))
 		}
-		// FlagMemory and the evidence read are not on provider.MemoryStore: the
-		// capability surface is what the tools expose, and this is a storage
-		// detail — the same narrowing assembleCapableStore and resolveCapableStore
-		// do, for the same reason.
+		// FlagMemory is not on provider.MemoryStore: the capability surface is
+		// what the tools expose, and flagging is a storage detail — the same
+		// narrowing assembleCapableStore and resolveCapableStore do, for the same
+		// reason.
 		flagStore, ok := s.store.(flagCapableStore)
 		if !ok {
 			return nil, nil, fmt.Errorf("ghost_memory_flag: store does not support flags")
@@ -4694,29 +4680,17 @@ func (s *Server) registerTools() {
 			// the tool name that tells an agent which call to change.
 			return nil, nil, fmt.Errorf("ghost_memory_flag: %w", err)
 		}
-		// The count is read back through UsefulnessByMemory rather than counted
-		// from the write, because that is the figure resolve and reflect will
-		// actually be given: a second source of the same number would be free to
-		// disagree with the first, and the caller is being told what the next pass
-		// will see.
-		ev, err := flagStore.UsefulnessByMemory(ctx, resolvedProjectID)
-		if err != nil {
-			// The flag IS recorded. Saying "failed" would send an agent to retry,
-			// and a retry appends a SECOND objection — so the refusal states both
-			// halves: what happened, and what not to do about it.
-			return nil, nil, fmt.Errorf("ghost_memory_flag: memory %s was flagged, but the count could not be read back — do NOT retry, a retry appends a second flag: %w",
-				assemble.Token(args.MemoryID), err)
-		}
-		// Count and id only. The reason deliberately does not come back: this
-		// result lands in the same agent context the reason came from, and echoing
-		// it would put it there twice — while the count is the whole of what the
-		// feature lets leave the store.
+		// The reason deliberately does not come back: this result lands in the
+		// same agent context the reason came from, and echoing it would put it
+		// there twice — while the count is the whole of what the feature lets
+		// leave the store. The count is not read back here: the flag is recorded,
+		// and resolve and reflect count it as negative evidence beside the note.
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf(
-				"Flagged memory %s as %s. It now carries %d flag(s): resolve and reflect count this as "+
+				"Flagged memory %s as %s. Resolve and reflect count this as "+
 					"negative evidence beside the note, and the classifier decides. The reason is stored for an "+
 					"operator to read and is not returned.",
-				assemble.Token(args.MemoryID), args.Kind, ev[args.MemoryID].Flagged)}},
+				assemble.Token(args.MemoryID), args.Kind)}},
 		}, nil, nil
 	})
 

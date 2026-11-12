@@ -414,8 +414,7 @@ func ownerMarker(dir string) (pid int, start string, ok bool) {
 	// the open until a writer appears, and the fstat on the descriptor refuses
 	// anything that is not a regular file before a byte is read. The lstat
 	// first refuses a symlink or pipe without opening it, which is the only
-	// defence before the open on Windows. This mirrors internal/audit's
-	// openSidecar for the same reason.
+	// defence before the open on Windows.
 	path := filepath.Join(dir, ownerFile)
 	if li, err := os.Lstat(path); err != nil || !li.Mode().IsRegular() {
 		return 0, "", false

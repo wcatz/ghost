@@ -59,7 +59,7 @@ type reassessStore interface {
 	ResolveKeptHashes(ctx context.Context, projectID string) (map[string]string, error)
 	ClearResolved(ctx context.Context, projectID string, ids []string) (int, error)
 	MarkResolveKept(ctx context.Context, projectID string, hashes map[string]string) error
-	// UsefulnessByMemory is the same #648 negative evidence the ordinary pass
+	// FlagsByMemory is the same #648 negative evidence the ordinary pass
 	// reads, and #880 review finding 1 is why it is here at all. The old
 	// exemption — the repair comparing the BARE content hash because it read
 	// no evidence — made the two passes write and read different keys, and the
@@ -68,7 +68,7 @@ type reassessStore interface {
 	// attached, where a RESOLVED answer re-buries what the operator just
 	// undid. It reads the map ONCE for the pool, above the gate, and fails
 	// open (resolve.go states the read's cost and its failure direction).
-	UsefulnessByMemory(ctx context.Context, projectID string) (map[string]memory.UsefulnessEvidence, error)
+	FlagsByMemory(ctx context.Context, projectID string) (map[string]memory.FlagEvidence, error)
 }
 
 // ReassessResult summarizes a reassess pass. Unlike Result it has no "would
@@ -169,8 +169,8 @@ func (h HeldMemory) Reason() string {
 // Reassess re-runs the vetoes and the classifier over the memories resolve has
 // ALREADY stamped resolved_at, and returns the ones that now come back KEEP (in
 // load order). With apply it clears resolved_at on exactly those rows and
-// records the classifier's KEEP verdicts under KeepStamp over the same audit
-// evidence the ordinary pass reads, so the ordinary pass does not re-ask a note
+// records the classifier's KEEP verdicts under KeepStamp over the same flag
+// count the ordinary pass reads, so the ordinary pass does not re-ask a note
 // that was just repaired. Dry-run (apply=false) writes nothing.
 //
 // A classifier error on any batch is fatal and clears nothing: a partial repair
@@ -232,12 +232,12 @@ func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectI
 	// and the stamp written below is the bare content hash, so this pass claims
 	// only what it could read and errs toward asking rather than toward
 	// trusting a verdict made with evidence it never saw.
-	var evidence map[string]memory.UsefulnessEvidence
+	var evidence map[string]memory.FlagEvidence
 	if len(loaded) > 0 {
-		read, evErr := store.UsefulnessByMemory(ctx, projectID)
+		read, evErr := store.FlagsByMemory(ctx, projectID)
 		if evErr != nil {
 			if logger != nil {
-				logger.Warn("resolve usefulness evidence unavailable", "error", evErr)
+				logger.Warn("resolve flag evidence unavailable", "error", evErr)
 			}
 			read = nil
 		}
@@ -278,10 +278,10 @@ func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectI
 			}
 		}
 		// ONE key with the ordinary pass (#880 review finding 1): the stored
-		// stamp is compared against KeepStamp over the evidence the audit
+		// stamp is compared against KeepStamp over the flags the memory
 		// holds right now, not against the bare content hash. A cached KEEP
-		// the audit has never doubted IS that bare hash byte for byte and
-		// skips exactly as it always did; one a contradiction has moved does
+		// on a memory nobody has flagged IS that bare hash byte for byte and
+		// skips exactly as it always did; one a new flag has moved does
 		// not match, is put back in pending, and is asked HERE with that
 		// evidence appended (askedWithEvidence), because a stamp claiming a
 		// verdict was judged under evidence is only honest when the verdict
@@ -289,7 +289,7 @@ func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectI
 		// decides with the evidence in front of it, as it decides everything
 		// else. The stamp written for a KEEP this pass returns is built from
 		// the same evidence, so one new verdict costs one re-ask — until the
-		// audit records another, which moves the stamp once more. The
+		// flag is recorded, which moves the stamp once more. The
 		// exception is a verdict that comes back UNKNOWN: nothing is written,
 		// the stored stamp stands, and the note is asked again (and billed
 		// again) on the next repair run — resolved_at still stands, so the
