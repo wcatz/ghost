@@ -39,6 +39,11 @@ const (
 
 // Classifier decides the relationship for candidate pairs: a same-fact
 // replacement (SUPERSEDES), a decision citing supporting evidence that stays
+// valid (CAUSES), a replacement that runs against the pair's orientation
+// (REVERSED), or neither. It returns one verdict per pair, in the same
+// order; Relation("") marks a pair whose verdict could not be parsed. The LLM
+// implementation (RelationClassifier) batches pairs across as few harness
+// calls as possible; tests inject a deterministic mock.
 type Classifier interface {
 	ClassifyBatch(ctx context.Context, pairs []Candidate) ([]Relation, error)
 }
@@ -63,6 +68,9 @@ type vectorStore interface {
 
 // Selection is what one candidate scan read: the ordered pairs it proposes, and
 // how many of the project's memories it could not score at all. Both are needed
+// by a caller that reports the pass, because "0 candidate pairs" means two very
+// different things over a fully indexed corpus and a partly indexed one, and
+// only the scan can tell them apart.
 type Selection struct {
 	Candidates      []Candidate
 	Unscored        int
@@ -72,6 +80,10 @@ type Selection struct {
 
 // SelectCandidates returns the deduped ordered candidate pairs for a project:
 // memories whose cosine similarity is at least threshold, oriented newer→older
+// by updated_at. A pair is emitted once regardless of which endpoint surfaced
+// it. Memories without embeddings are skipped (no similarity signal) and counted
+// in Selection.Unscored, so the caller can say that part of the project was not
+// read rather than reporting a smaller corpus as if it were the whole one.
 func SelectCandidates(ctx context.Context, store vectorStore, projectID string, threshold float32) (Selection, error) {
 	var sel Selection
 	mems, err := store.GetAll(ctx, projectID, 100000)
@@ -328,6 +340,7 @@ func sweepCausesBothWays(ctx context.Context, store vectorStore, claims map[pair
 
 // Classified pairs a Candidate with the verdict Run() reached for it — used
 // by callers (the CLI) to report the actual relation written, not just that
+// "something" was confirmed.
 type Classified struct {
 	Candidate
 	Relation           Relation
@@ -652,6 +665,10 @@ func judgedAt(snapshot map[string]memory.Memory, c Candidate) string {
 
 // WouldWriteLinks reports whether an --apply pass would put a NEW link in the
 // graph, which is what the CLI's dry-run hint promises. A confirmed pair and a
+// CAUSES pair are written; a reclassify pair is re-linked by a CAUSES verdict
+// and only invalidated by NEITHER or a reversal. Subtracting the no-write
+// reclassifications matters because a pass whose whole effect is deleting a
+// link should not tell the operator that --apply will write links for it.
 func (r Result) WouldWriteLinks() bool {
 	return r.Confirmed > 0 || r.CausesCreated > 0 || r.Reclassified > r.ReclassifiedNoWrite
 }
@@ -675,6 +692,8 @@ func endpointsExist(ctx context.Context, store vectorStore, ids ...string) (bool
 
 // Run selects fresh candidates, unions them with previously-created llm
 // 'supersedes' links (so a pair's classification can be revisited as memory
+// content evolves), classifies every pair once, and — when apply is true —
+// writes or invalidates links per verdict:
 func Run(ctx context.Context, store vectorStore, cls Classifier, projectID string, threshold float32, apply bool, logger *slog.Logger) (Result, []Classified, error) {
 	return RunWith(ctx, store, cls, projectID, Options{Threshold: threshold, Apply: apply}, logger)
 }
@@ -684,6 +703,9 @@ const MinConsensus = 2
 
 // Options are Run's per-call decisions. They are one struct rather than a
 // seventh and eighth positional argument because every one of them is a THRESHOLD
+// on how willing the pass is to act, and a caller that reaches for
+// RunWith(ctx, store, cls, project, 0.8, true, 3, nil) cannot tell which is
+// which. The zero value is the ordinary single-pass run.
 type Options struct {
 	Threshold float32
 	Apply     bool
@@ -692,6 +714,9 @@ type Options struct {
 
 // RunWith is Run with the per-call decisions in one value: see Options, whose
 // fields carry the reasoning. A Consensus below MinConsensus is treated as 1
+// (the ungated pass) rather than refused, so a config key an operator set to 0
+// degrades to today's behaviour instead of failing a lifecycle phase at 2am —
+// the refusal, with its reason, belongs at the flag and the config boundary.
 func RunWith(ctx context.Context, store vectorStore, cls Classifier, projectID string, opts Options, logger *slog.Logger) (Result, []Classified, error) {
 	passes := opts.Consensus
 	if passes < 1 {

@@ -122,14 +122,19 @@ func (h *RelationClassifier) call(ctx context.Context, systemPrompt, userContent
 
 // SetRetryDelay sets the wait before a failed call's single retry. Non-positive
 // means no wait. Production never calls it; it exists so a test exercises the
+// retry without paying classifyRetryDelay.
 func (h *RelationClassifier) SetRetryDelay(d time.Duration) { h.retryDelay = d }
 
 // Retries reports how many classify calls this classifier repeated after a
 // failure — the retries themselves, whether or not the repeat answered. It is
+// counted separately from Calls because a pass that needed a retry is a
+// different fact from a pass that made the calls it planned, and a harness that
+// is flapping shows up here first.
 func (h *RelationClassifier) Retries() int { return h.retries }
 
 // Classify asks the classifier to judge the relationship between the pair's
 // newer and older note. Every call goes through one CLI-harness provider, so
+// there is no fallback distinction for callers to withhold.
 func (h *RelationClassifier) Classify(ctx context.Context, pair Candidate) (Relation, error) {
 	content := "OLDER " + createdLabel(pair.OlderCreatedAt) + ": " + quoteData(pair.OlderContent) +
 		"\nNEWER " + createdLabel(pair.NewerCreatedAt) + ": " + quoteData(pair.NewerContent)
@@ -386,6 +391,9 @@ func splitNumberedLine(line string) (int, string, bool) {
 
 // Calls reports how many provider classify calls this classifier has made,
 // including the lone-tail and any single-pair fallback calls, and including a
+// call a retry repeated (the repeat is a real call, and a pass that paid for it
+// paid for it). One batched call covers up to batchSize pairs, so compare this
+// against the pair count to see the batching win.
 func (h *RelationClassifier) Calls() int { return h.calls }
 
 // SetLogger attaches a logger for unparseable-verdict diagnostics. It is
@@ -394,6 +402,9 @@ func (h *RelationClassifier) SetLogger(l *slog.Logger) { h.logger = l }
 
 // ClassifyBatch classifies one or more pairs, chunking them into calls of at
 // most batchSize pairs, and returns one verdict per pair in the same order. A
+// Relation("") entry means that pair's reply line was missing or garbled; the
+// caller counts it (Result.Unclassified) without failing the pass, exactly as
+// the single-pair path does.
 func (h *RelationClassifier) ClassifyBatch(ctx context.Context, pairs []Candidate) ([]Relation, error) {
 	if len(pairs) == 0 {
 		return nil, nil
@@ -436,6 +447,10 @@ func (h *RelationClassifier) ClassifyBatch(ctx context.Context, pairs []Candidat
 
 // PartialVerdictsError is the error ClassifyBatch returns when one chunk's call
 // failed after the chunks before it had already answered, and it is what lets a
+// caller tell "nothing was decided" from "everything up to here was decided and
+// the rest was not" — which used to be the same error, so a repair pass over 87
+// edges threw away the calls it had already paid for and paid again for the
+// rerun (#808).
 type PartialVerdictsError struct {
 	Answered int
 	Err      error

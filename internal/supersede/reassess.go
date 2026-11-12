@@ -20,6 +20,8 @@ type reassessStore interface {
 
 // ReassessResult summarizes a reassess pass. Every input row is an edge that is
 // already in the graph, so the outcomes are "still supported" and "withdrawn" —
+// there is no "would create" side, and Withdrawn counts the invalidations that
+// actually landed (0 in dry-run).
 type ReassessResult struct {
 	Loaded                 int // live 'supersedes'/'llm' edges the pass considered
 	Skipped                int // edges it does not judge: an endpoint is gone, or the pair is scope-conflicting
@@ -43,6 +45,8 @@ type ReassessResult struct {
 
 // UnjudgedPair is one live edge whose pair the classifier never answered. It
 // carries the ids only, because that is all an operator needs to re-run the
+// pass over it — and all the pass can know: a classify call that failed answers
+// nothing about any pair it carried, not only the one the harness named last.
 type UnjudgedPair struct {
 	NewerID string
 	OlderID string
@@ -50,6 +54,8 @@ type UnjudgedPair struct {
 
 // CyclicEdge is one of a pair's two live 'supersedes' edges, in the direction it
 // is written: Source supersedes Target. It is a pair of ids and nothing else,
+// because a cycle is a graph shape and the report draws it, not the text of the
+// notes the two edges were written from.
 type CyclicEdge struct {
 	SourceID string
 	TargetID string
@@ -57,6 +63,8 @@ type CyclicEdge struct {
 
 // CyclicPair is one pair the graph claims in BOTH directions, and what this pass
 // did about it. First and Second are the two live edges, in the order the store
+// returned them — an order that carries no meaning, which is exactly why the pass
+// does not use it to choose a direction (see the cycle handling in Reassess).
 type CyclicPair struct {
 	First   CyclicEdge
 	Second  CyclicEdge
@@ -65,6 +73,11 @@ type CyclicPair struct {
 
 // CycleOutcome is what a pass decided about a pair live in BOTH directions. The
 // values are a DECISION and not a sentence, deliberately: the report is where the
+// wording lives, because only the report knows whether this was a dry run, and a
+// constant that spelled out "was withdrawn" would put a past-tense claim under a
+// list of "would withdraw" rows (#780's review). Each value is a claim the pass
+// can make from the answers it received — four of them from one verdict, and the
+// fifth from the N of them under a consensus gate:
 type CycleOutcome string
 
 const (
@@ -98,6 +111,8 @@ func (c *cycleDecision) edgeOf() (judged, other CyclicEdge) {
 
 // WithdrawnEdge is one edge the pass withdrew, or would withdraw under --apply.
 // The reason is the report's content: an operator deciding whether to apply needs
+// to see WHICH rule withdrew each edge, and "neither" and "vetoed" are different
+// findings about the corpus.
 type WithdrawnEdge struct {
 	NewerID           string
 	OlderID           string
@@ -158,6 +173,8 @@ func retriesOf(cls Classifier) int {
 
 // ReassessOptions carries ReassessWith's per-call decisions: Apply (write what
 // the verdicts decide) and Consensus (how many passes must agree before a live
+// edge moves). See ReassessWith for why both are here and what the gate does to
+// the pass. The zero value is today's ungated repair.
 type ReassessOptions struct {
 	Apply     bool
 	Consensus int
@@ -165,12 +182,16 @@ type ReassessOptions struct {
 
 // Reassess re-judges every live 'supersedes'/'llm' edge in the project with the
 // current rules and returns the edges the pass withdrew, or would withdraw with
+// --apply. A dry run (apply=false) writes nothing. It is ReassessWith with no
+// consensus: one verdict per edge, which is what `--reassess` has always meant.
 func Reassess(ctx context.Context, store reassessStore, cls Classifier, projectID string, apply bool, logger *slog.Logger) (ReassessResult, []WithdrawnEdge, error) {
 	return ReassessWith(ctx, store, cls, projectID, ReassessOptions{Apply: apply}, logger)
 }
 
 // ReassessWith is Reassess with the per-call decisions in one value, and the
 // gate it adds is #862's: since the creation pass stopped withdrawing (#845) this
+// repair is the only path that DELETES a live 'supersedes' edge, and it was the
+// one reading a single verdict per edge while `--consensus` was refused beside it.
 func ReassessWith(ctx context.Context, store reassessStore, cls Classifier, projectID string, opts ReassessOptions, logger *slog.Logger) (ReassessResult, []WithdrawnEdge, error) {
 	passes := opts.Consensus
 	if passes < 1 {
