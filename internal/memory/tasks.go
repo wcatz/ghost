@@ -37,12 +37,6 @@ func (s *Store) CreateTask(ctx context.Context, projectID, title, description st
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// A guarded TRANSACTION rather than execGuardedWrite: `RETURNING id` is a
-	// read, and the row must come back from the insert that produced it, so the
-	// scan has to run inside the same transaction — which is also where the
-	// newer-store check runs (#746). Routing this through QueryRowContext on the
-	// pool instead, as it did, is how a write reaches a store a newer Ghost owns
-	// with nothing checking: `ghost_task_create` is the live tool behind it.
 	tx, lock, err := s.beginWrite(ctx, "create-task")
 	if err != nil {
 		return "", fmt.Errorf("create task: %w", err)
@@ -101,22 +95,12 @@ func (s *Store) ListTasks(ctx context.Context, projectID, status string, limit i
 	return tasks, rows.Err()
 }
 
-// resolveTaskID expands a task ID or unique prefix to the full stored ID,
-// like git short SHAs. Session-hook and task-list output truncate IDs to 8
-// characters, so callers routinely hold a prefix rather than the full 32-char
-// ID. An exact id match is tried first and wins at any length; only an input
-// that names no task exactly is expanded as a prefix. Caller must hold s.mu
-// (read or write).
+// Caller must hold s.mu (read or write).
 func (s *Store) resolveTaskID(ctx context.Context, idOrPrefix string) (string, error) {
 	if idOrPrefix == "" {
 		return "", fmt.Errorf("task id is required")
 	}
 
-	// A byte-exact match wins at any length, the rule memref follows for a
-	// memory reference: the id is the primary key, so the spelling the caller
-	// typed is decisive. Without this arm a task whose id prefixes another's
-	// (`ghost import` writes an artifact's ids verbatim, so T1 beside T10 is
-	// possible) is ambiguous under every spelling and can never be reached.
 	var exact string
 	switch err := s.db.QueryRowContext(ctx, `SELECT id FROM tasks WHERE id = ?`, idOrPrefix).Scan(&exact); {
 	case err == nil:
@@ -155,34 +139,8 @@ func (s *Store) resolveTaskID(ctx context.Context, idOrPrefix string) (string, e
 	}
 }
 
-// CompleteTask marks a task as done. Accepts a full task ID or a unique prefix.
-//
-// Completing is idempotent (#1143): a task that is already done keeps the
-// completed_at it got when it became done (the rule UpdateTask follows, #1040),
-// and a blank (empty or whitespace-only, trimmed by Unicode rules) notes
-// argument never overwrites stored notes; a non-blank one replaces them. Both
-// are decided inside the single UPDATE, against the row as it stands when the
-// write lands, so a concurrent edit cannot interleave.
-//
-// The note is guarded on its UNCLAMPED text and THEN clamped to MaxContentLen
-// (#1238). The guard is first so a credential-shaped value past the cap is
-// refused rather than quietly cut out of sight. The clamp is here because this
-// is a task note's writer, and ImportTask clamps the same field — the two must
-// store the same bytes for the same input, or the documented backup and restore
-// path loses what a save kept. The returned bool reports that ClampContent cut
-// something, which is what ghost_task_complete warns the caller about;
-// ClampContent's marker is already in the stored value, so a reader of the row
-// alone sees the loss too.
-//
-// The RowsAffected of the UPDATE is read and a 0-row update is an error rather
-// than a success (#1083): the row is resolved above and a task deleted in
-// between leaves nothing for the write to land on, which is a completion the
-// caller believes happened.
+// CompleteTask marks a task as done. It returns whether notes were clamped.
 func (s *Store) CompleteTask(ctx context.Context, taskID, notes string) (bool, error) {
-	// Checked before resolveTaskID so the refusal is the same error whether or
-	// not the id resolves — and a completion note is where "here is the value
-	// that fixed it" gets written, so it is rendered straight into the next
-	// session's context.
 	if err := rejectSecret("notes", notes); err != nil {
 		return false, err
 	}
@@ -235,7 +193,7 @@ func (s *Store) CompleteTask(ctx context.Context, taskID, notes string) (bool, e
 	return clamped, nil
 }
 
-// GetTask returns a single task by ID. Accepts a full task ID or a unique prefix.
+// GetTask returns a single task by ID or unique prefix.
 func (s *Store) GetTask(ctx context.Context, taskID string) (Task, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -262,24 +220,8 @@ func (s *Store) GetTask(ctx context.Context, taskID string) (Task, error) {
 	return t, nil
 }
 
-// UpdateTask merges the caller's optional fields onto the current row and
-// writes the result. The row is read INSIDE the write transaction that then
-// writes it (#1083): read on the pool outside it, as this did, two handles
-// editing different fields of one task each merged onto a copy taken before the
-// other's edit landed, so one of the two was lost and both calls reported
-// success. s.mu is per Store and closes nothing across processes, and two MCP
-// servers on one database is a supported mode. The transaction is opened before
-// the read and _txlock=immediate holds the write lock across it, which is the
-// arrangement the Boundaries note in docs/architecture.md requires and the one
-// UpdateMemoryWithOptions already followed. status, priority, and description
-// are nil to preserve the current value.
-// completed_at follows the status like CompleteTask sets it: stamped when the
-// status moves INTO done and cleared when it moves out. Accepts a full task ID
-// or a unique prefix. Returns the task as it stood after the merge, so callers
-// don't need a separate read to get ProjectID or the resolved field values.
+// UpdateTask updates a task's mutable fields and returns the updated task.
 func (s *Store) UpdateTask(ctx context.Context, taskID string, status *string, priority *int, description *string) (Task, error) {
-	// The incoming description only, for the reason UpdateMemory gives: a row
-	// that already holds a credential must stay editable field by field.
 	if description != nil {
 		if err := rejectSecret("description", *description); err != nil {
 			return Task{}, err
@@ -293,10 +235,6 @@ func (s *Store) UpdateTask(ctx context.Context, taskID string, status *string, p
 		return Task{}, err
 	}
 
-	// The read that decides this write, in the transaction that makes it. The
-	// prefix is resolved above on the pool because it names a row and decides no
-	// value; a task that disappears between there and here is caught below, by
-	// the read returning no row or by the UPDATE matching nothing.
 	tx, lock, err := s.beginWrite(ctx, "update-task")
 	if err != nil {
 		return Task{}, fmt.Errorf("update task: %w", err)
@@ -318,10 +256,6 @@ func (s *Store) UpdateTask(ctx context.Context, taskID string, status *string, p
 		return Task{}, fmt.Errorf("get task: %w", err)
 	}
 
-	// completed_at tracks the status exactly as CompleteTask writes it (#1040):
-	// stamped on the transition INTO done and cleared on any transition out.
-	// The transition is what matters, so an already-done task edited again
-	// keeps the stamp it got when it became done rather than being re-stamped.
 	previousStatus := t.Status
 	if status != nil {
 		t.Status = *status
@@ -339,9 +273,6 @@ func (s *Store) UpdateTask(ctx context.Context, taskID string, status *string, p
 		t.CompletedAt = time.Now().UTC().Format(StoredStampLayout)
 	}
 
-	// Bind NULL rather than "" when clearing, so a cleared stamp is the
-	// column's own "no completion" rather than an empty value a reader has to
-	// interpret.
 	var completedAt any
 	if t.CompletedAt != "" {
 		completedAt = t.CompletedAt
@@ -354,9 +285,6 @@ func (s *Store) UpdateTask(ctx context.Context, taskID string, status *string, p
 	if err != nil {
 		return Task{}, fmt.Errorf("update task: %w", err)
 	}
-	// A 0-row update is an error, never a success nobody can detect (#1083).
-	// The read above is inside this transaction, so the row could only have
-	// gone away under it; the count is what says so rather than assuming.
 	n, err := res.RowsAffected()
 	if err != nil {
 		return Task{}, fmt.Errorf("update task: rows affected: %w", err)

@@ -18,14 +18,7 @@ var ErrSecretContent = errors.New("refusing to store credential-shaped content")
 // reflection — a prompt sent to a third-party model, so quoting the value would
 // relocate the secret rather than contain it.
 type SecretContentError struct {
-	// Field is the caller's name for the argument that was refused, e.g.
-	// "content" or "rationale". It is what makes the refusal actionable: an
-	// agent that put a credential in the rationale of a decision needs to be
-	// told it was the rationale.
-	Field string
-	// Format is secret.Finding's human-readable label, e.g. "AWS access key
-	// ID". It tells the saving agent which value to remove without showing it
-	// the value.
+	Field  string
 	Format string
 }
 
@@ -37,11 +30,6 @@ func (e *SecretContentError) Error() string {
 
 func (e *SecretContentError) Unwrap() error { return ErrSecretContent }
 
-// rejectSecret returns a *SecretContentError when text holds a credential. It
-// is the store's single seam for the guard, called before any statement on
-// every path that writes caller-supplied text: refusing first means a caller
-// that retries cannot race a partial write, and it means the refusal is the
-// same error whatever the store was doing when the value arrived.
 func rejectSecret(field, text string) error {
 	finding, ok := secret.Detect(text)
 	if !ok {
@@ -61,105 +49,18 @@ func rejectSecret(field, text string) error {
 // value asks it to choose between naming and withholding (mcpinit's
 // `renderMarkerProject`, which names an ordinary project and withholds a
 // credential-shaped one).
-//
-// Naming is a promise the value has to be able to keep, and a credential cannot.
-// A *SecretContentError quotes nothing precisely because the sentence it produces
-// reaches the log file, the saving agent's context, and — for reflection — a
-// prompt sent to a third-party model; a boundary that appended the value would
-// relocate the secret rather than contain it. So that boundary asks this FIRST
-// and returns the guard's own refusal untouched, and the shape rule it would
-// otherwise have quoted a value into is then free to name what is left.
-//
-// Asking first is also what makes the guarantee hold for a value that is BOTH.
-// `CheckImportedProject` judges shape before credentials, so a hostile id that
-// also holds a token comes back as a shape error with the credential hiding
-// behind it; a caller that branched on the returned error could not see it, and
-// would print the secret. Here there is nothing to branch on and nothing to
-// order: one question, one answer.
-//
-// The field is the boundary's own name for its argument rather than the column's,
-// because the boundary knows what the caller called it — an agent that passed
-// `project_id` has to be told it was the `project_id` — while the store's own
-// refusals name the artifact's field, which is where its sentences are read.
-//
-// It is the same `rejectSecret` every writer calls, not a second detection pass:
-// one implementation of the detector, so a boundary cannot reach a different
-// verdict from one a writer would.
 func RejectSecret(field, text string) error {
 	return rejectSecret(field, text)
 }
 
 // ProjectIdentifierLabel is what a store-level refusal names the value as when
 // the store cannot see the argument's own name.
-//
-// It is the honest answer rather than a default, because a refusal's whole job on
-// the credential path is to tell the caller WHICH argument to fix, and a name the
-// store guessed is worse than no name: `ghost_resolve` passes `project`,
-// `ghost_project_delete` passes `project`, and every other tool passes
-// `project_id`, so a store sentence that named a field would be naming an
-// argument the caller never passed on two of the three shapes.
-//
-// The boundary is where the field name belongs, because the boundary is what
-// knows it: those sentences render through `ProjectArg` with the caller's own
-// name, and this is what a store sentence uses when it is the one refusing.
 const ProjectIdentifierLabel = "project identifier"
 
 // ArgEchoMaxBytes is the longest argument a refusal repeats back; see RefusalArg.
 const ArgEchoMaxBytes = 256
 
 // ProjectArg renders a caller's argument — the value a `project_id` or `project`
-// tool parameter carries, a CLI's project operand, a file path the installer
-// names, or a prompt's own argument — for a sentence or a prompt that quotes
-// it.
-//
-// It is named for the project argument because that is the one that reaches
-// most surfaces; the RULE it carries is the one every caller-supplied argument
-// a sentence quotes follows, and the field says which argument it is. The
-// prompts are the second caller of it (#1712): `record_decision` quotes its
-// `topic` here, because a topic is caller text too and the two halves of that
-// are the same — a value the guard recognises is withheld, and a value it does
-// not is quoted, so it cannot close the slot it sits in.
-//
-// It is a RENDERER, and saying so is not the same as saying it is everywhere: a
-// refusal that quotes a project argument has to come through here, and one that
-// does not is a hole in the rule rather than a variation of it.
-//
-// Naming the value is the diagnostic and it is the reason every one of these
-// sentences wrote `%q`: `matches multiple projects: foo` is how an operator finds
-// the duplicate, `project "foo" not found` is how an agent learns its own project
-// is misspelled, and `does not belong to project "foo"` is how it learns the
-// memory it addressed is someone else's. So for every value the credential guard
-// does not recognise this is exactly `%q` and the sentence is byte-identical to
-// what it was.
-//
-// A credential is the one value that cannot be named, for the reason
-// *SecretContentError gives: the sentence reaches the log file, the calling
-// agent's context, and — for the paths a reflection prompt is built from — a
-// third-party model, so quoting it relocates the secret rather than containing
-// it. Those render as a placeholder carrying the guard's FORMAT instead, which is
-// the same disclosure *SecretContentError makes and the part that makes the
-// refusal actionable: an agent that pasted a clone URL with inline auth into
-// `project_id` is told which argument to change and what to take out of it. Not
-// one character of the value appears.
-//
-// The placeholder is shaped like a quoted value, with the quotes inside it, so it
-// drops into the `%q` slot these sentences were written with — which is why every
-// call site changed from `%q` to `%s`. Dropping it into the `%q` slot instead
-// would have put a second layer of Go quoting around it and read as a path
-// spelled with backslashes.
-//
-// It is a RENDERER, not a check: nothing here refuses a call. The refusal is
-// whichever predicate the sentence was about — ambiguous, not found, not
-// registered, not this project — and the only thing this changes is whether the
-// value is inside it. Asking the guard a second time for the value's own sake
-// would be a different decision, taken by a caller that has one, and #839's
-// sibling on the save path takes it in `ensureProjectFor`.
-//
-// It lives here, beside the guard, rather than at each boundary because the store
-// and the MCP handlers owe the same sentence: `ResolveProject`'s ambiguity
-// refusals are returned to the caller by every read and update handler as
-// `resolve project: %w`, so a second rendering at each of them is nineteen
-// chances to get one wrong.
 func ProjectArg(field, value string) string {
 	refusal := rejectSecret(field, value)
 	if refusal == nil {
@@ -169,10 +70,6 @@ func ProjectArg(field, value string) string {
 	if errors.As(refusal, &detected) {
 		return fmt.Sprintf("%q", "<"+field+" withheld: it holds a "+detected.Format+">")
 	}
-	// Unreachable while rejectSecret returns only *SecretContentError, and stated
-	// rather than assumed because the wrong default for this function is the leak
-	// this whole comment exists to prevent: a guard that grew a second error type
-	// must still refuse to quote, not fall through to naming the value.
 	return fmt.Sprintf("%q", "<"+field+" withheld: it holds a credential>")
 }
 
@@ -181,18 +78,6 @@ func ProjectArg(field, value string) string {
 // a refusal never hands the caller back a 200 KB argument. The token guard runs
 // on the whole value first, so a token inside an oversized one is still named by
 // its format.
-//
-// It is a separate function because ProjectArg is also used where the value must
-// come back whole: the prompts that tell an agent to call a tool with this very
-// project id, and the not-registered answers of the listing tools. Bounding those
-// would hand the agent a placeholder to pass as an id.
-//
-// A surface whose answer is BOUNDED BYTES can still bound the value itself
-// rather than through this function: the project-context tool renders its
-// not-registered answer inside a byte budget, so it echoes a long project id
-// through its own 512-byte rule and a longer one comes back withheld. The
-// renderer here is not that bound, and a surface that needs one asks for it
-// where the answer is built rather than widening this one for every caller.
 func RefusalArg(field, value string) string {
 	if len(value) > ArgEchoMaxBytes {
 		if refusal := rejectSecret(field, value); refusal != nil {
@@ -206,47 +91,15 @@ func RefusalArg(field, value string) string {
 
 // TokenGuardPlaceholder returns the placeholder a refusal would print for a
 // value the token guard withholds, and whether the guard withheld it at all.
-//
-// It is for the surfaces that need BOTH of a stored value's properties: the
-// guard's withholding (a credential-shaped value must not be printed whole) and
-// the line renderer's escaping (any other value must not end the line or open a
-// data block). RefusalArg alone gives the first and not the second — it quotes
-// with %q, which keeps printable non-ASCII as itself, so a stored id holding
-// « or » reaches the reader raw — and the line renderer alone gives the second
-// and not the first.
-//
-// The two are not merged here, and this is not a merge of them: the caller keeps
-// the choice of which renderer draws the value the guard did NOT withhold,
-// because that choice belongs to the surface. What lives here is only the
-// guard's answer and the placeholder that goes with it, so the placeholder has
-// ONE spelling wherever it appears and a value the guard recognises is withheld
-// the same way in every sentence that names it.
-//
-// The guard is asked FIRST, because the credential verdict has to win over the
-// line verdict: a value that is both hostile and credential-shaped must come
-// back as the placeholder, never as an escaped rendering of the token.
-//
-// A value the guard does not recognise comes back empty and false, and the
-// caller renders it with whatever renderer its surface uses — the guard has no
-// opinion about a value it did not withhold.
 func TokenGuardPlaceholder(field, value string) (string, bool) {
 	if rejectSecret(field, value) == nil {
 		return "", false
 	}
-	// RefusalArg, not ProjectArg: for a value the guard recognises the two agree
-	// (RefusalArg's length branch defers to ProjectArg for a guarded value), and
-	// RefusalArg is the renderer a refusal sentence uses, so the placeholder here
-	// is byte-identical to the one beside it.
 	return RefusalArg(field, value), true
 }
 
-// secretField is one caller-supplied text to check, named the way the caller
-// named the argument so the refusal says which one to fix.
 type secretField struct{ name, text string }
 
-// rejectSecretFields checks the named fields in order and returns the first
-// refusal. It is the form every multi-field writer uses, so the field in the
-// error is one the caller recognises.
 func rejectSecretFields(fields ...secretField) error {
 	for _, f := range fields {
 		if err := rejectSecret(f.name, f.text); err != nil {
@@ -256,11 +109,6 @@ func rejectSecretFields(fields ...secretField) error {
 	return nil
 }
 
-// rejectSecretList checks every entry of a list-valued field and names the
-// offending one by index. decisions.alternatives is the reason this exists: it
-// is rendered back to the agent by ghost_decisions_list, so an entry is stored
-// and replayed exactly like the rationale beside it — the only difference is
-// that it is a list, and "alternatives" alone would not say which entry to fix.
 func rejectSecretList(field string, values []string) error {
 	for i, v := range values {
 		if err := rejectSecret(fmt.Sprintf("%s[%d]", field, i), v); err != nil {
@@ -269,159 +117,3 @@ func rejectSecretList(field string, values []string) error {
 	}
 	return nil
 }
-
-// The guard's reach, and its deliberate limits.
-//
-// Reached: every write of text a tool, an import, or a model hands to a store
-// function the agent can reach — UpsertWithOptions (and so Upsert,
-// UpsertWithProvenance, the MCP save tools, the Claude first-contact import,
-// and reflection's candidate writes), Create, UpdateMemory, RecordDecision, the
-// three task writers, UpdateLearnedContext, and the three portable importers
-// ImportMemory/ImportTask/ImportDecision. A memory's scope keys and values are
-// guarded by checkScope (scope_guard.go) on Create, UpsertWithOptions and
-// CheckImportedMemory, with the bounds that function states. The importers matter more than their
-// position in this list suggests: they write with raw INSERTs rather than
-// through Upsert, and their input is a JSONL artifact that arrived from
-// somewhere.
-//
-// Not reached, on purpose:
-//
-//   - Store.RestoreSnapshot and SeedGlobalMemories. These write byte-exact data
-//     into a restored store: a snapshot file, and Ghost's own builtin seeds. A
-//     restore that silently dropped rows would be worse than the leak it
-//     prevents — a restore is a user's own database coming back — and they are
-//     outside the MaxContentLen contract in content.go for the same reason.
-//   - Store.ReplaceNonManual, which writes the reflect tier's memories with its
-//     own statements and is likewise exported on provider.MemoryStore. Two
-//     reasons, and the second is the one that decided it.
-//
-//     It runs inside ApplyReflection's transaction, so a refusal would roll back
-//     an entire consolidation — every merge and every preserved row — over one
-//     contaminated memory. The mitigation is `dropCredentialProposals` in
-//     cmd/ghost/promotion.go, which sits at the write boundary and therefore
-//     after the drop guard's audit — see the comment there for why that ordering
-//     is the point rather than an accident.
-//
-//     Filtering here instead would be worse than either. ReplaceNonManual
-//     deletes every replaceable row the snapshot does not account for, so
-//     dropping a credential-shaped memory from the emitted set DELETES the
-//     stored row: a database written before this guard existed would have that
-//     memory removed by an unattended nightly job, with no report and no way to
-//     recover it. That is the same reason the reflection drop guard takes an
-//     explicit --allow-drops before deleting anything (#549), and it is why
-//     clearing a credential out of an existing database is the separate,
-//     report-first job described below rather than a side effect of
-//     consolidation.
-//   - A project's NAME, PATH and repo_remote on the MCP save path, and the
-//     agent and session_id beside a saved memory. `source_ref` is NOT in this
-//     list any more — it became a caller-supplied argument on the three writer
-//     tools and is guarded on four of the seven writers that reach it. The
-//     paragraph below names the three that do not, because a lead-in that
-//     contradicts its own detail is the failure this whole comment is written
-//     against.
-//
-//     The project name and path are the real gap. The MCP writers now run the
-//     content, tag, source_ref and scope guards before they open the project
-//     (CheckUpsertArguments, CheckDecisionArguments), so a refused write creates
-//     no project; but the name, path and repo_remote themselves are not
-//     token-guarded on any path. Guarding them is a behaviour change on every
-//     save, for a field an operator sets once. Not taken here.
-//
-//     The tags were on this list too, on the claim that they are not returned by
-//     search and not quoted into a harness prompt. That claim was false and I
-//     should have checked it rather than asserted it: assemble.Item.Line
-//     marshals the tag list into the row that ghost_memory_search returns, and
-//     BuildReflectionPrompt writes `, tags:[…]` into the prompt sent to a CLI
-//     harness talking to a third-party model. validateTags allows ten tags of 64
-//     characters, so a 40-character token fits in one.
-//
-//     Guarding them took two rounds and the second one is the useful part: the
-//     first guarded Create and UpsertWithOptions and then said "they are guarded
-//     now", which read as the general claim and was true of two of the four
-//     tag-bearing writers. A guard's reach is a set, and a claim about it has to
-//     enumerate the set rather than assert it — so the writers that take a tag
-//     list are: Create, UpsertWithOptions, UpdateMemory, RecordDecision (which
-//     marshals tags into BOTH the decisions row and a companion memory row, and
-//     the companion is an ordinary memory), and the two portable importers that
-//     have a tags column at all — ImportMemory and ImportDecision, whose columns
-//     came straight out of an artifact file. All six, each before its lock, and
-//     TestEveryTagBearingWriterIsGuarded is the table.
-//
-//     The sixth is the one this paragraph had counted as if it were guarded, and
-//     the way it went missing is the reason the set is now written out rather than
-//     totalled: `RecordDecision` refused a credential-shaped tag from the start and
-//     `ImportDecision` did not, because a decision's tags are checked by a
-//     PREDICATE (CheckImportedDecision) rather than in a writer's own body, and a
-//     guard that lives in a shared function has no call site to grep for at the
-//     writer. "All five" was true of neither set — it counted the two importers as
-//     one and so claimed the decision route was covered. #835 closed it and this
-//     paragraph now says six because the code says six.
-//
-//     What is left unguarded is agent and session_id as the HARNESS states
-//     them, and a project's name and path. `source_ref` is not in that list any
-//     more: it became a caller-supplied argument on the three writer tools, so
-//     the harness route now carries it, and it is checked on four of the seven
-//     writers that reach the column — Create, UpsertWithOptions,
-//     UpdateMemoryWithOptions and ImportMemory — beside the portable import it was
-//     already guarded on. The other three are named two paragraphs down.
-//
-//     THREE writers do not reach it, and all three are named rather than left as
-//     an invisible remainder. RestoreSnapshot (SQL, from the snapshot table) and
-//     CreateFromCorpus (insertMemory directly) are the byte-exact exclusions
-//     MaxContentLen draws. ReplaceNonManual is the third, and it arrived with
-//     #677: a rewrite or a merge now inherits the replaced row's validity and
-//     provenance onto the row that becomes, so it writes source_ref. It is exempt
-//     for the reason given above rather than by omission — filtering there
-//     DELETES the stored row, so refusing an emission whose inherited reference is
-//     credential-shaped would silently drop a memory from a pre-guard database,
-//     and the value is a copy of one this database already guarded at its own
-//     write rather than new caller text. That is coverage by transitivity, and it
-//     is only true while the source row was itself written through a guard: a
-//     store predating it, or a hand-edited row, breaks the chain — the same
-//     residual the two byte-exact writers have, and the reason
-//     assemble.SourceRefLabel bounds what it PRINTS for all three. That is a
-//     length bound, not this guard: an untrusted `source_ref` is still checked
-//     wherever a writer can see it. agent and session_id as the harness states
-//     them are the real gap and it is structural: a harness is chosen by Ghost,
-//     not by the caller, so guarding it is the wrong layer — see above.
-//
-//     A SECOND COPY is the other way a field is unguarded while its writer is
-//     guarded, and it is the one #673 opened: since memory_provenance exists, a
-//     provenance value lands TWICE — once on memories, once on an append-only
-//     evidence row — and the table is the worse of the two, because it is never
-//     overwritten, the next `ghost export` re-emits it, and only the purge's
-//     explicit DELETE reaches it. So guarding a writer's memories column says
-//     nothing about the evidence rows the same write creates, and the rule is
-//     the import's, already stated there: guard a field at EVERY copy the write
-//     creates, or one of them leaks.
-//
-//     Both routes are covered, for different reasons and each with a witness.
-//     ImportMemory checks the memory's three provenance fields AND each carried
-//     record's own agent, session_id and source_ref, because there the copy is
-//     the FILE's content and the memory-level guard cannot see it at all — see
-//     TestImportedEvidenceIsGuardedLikeTheMemoryRow. The harness path cannot put
-//     a credential in an evidence row that its guard did not already refuse,
-//     because every appendEvidenceTx there writes the SAME Provenance value, in
-//     the SAME transaction, after the same rejectSecret: insertMemory behind
-//     Create's check, and all three of UpsertWithOptions' appends — the
-//     fold-into-existing one above the two fresh-insert ones — behind the single
-//     check at the top of that function. That is coverage BY CONSTRUCTION rather
-//     than by a second call, so it needs a witness instead of a redundant guard:
-//     TestObservedEvidenceCarriesNoUnguardedProvenance is that witness, and it is
-//     the assertion that fails the day a writer appends evidence from a Provenance
-//     its guard never saw.
-//   - Content already in the database. This guard reads what a caller is
-//     trying to write; it does not sweep rows a previous version stored. Doing
-//     that is a separate, report-first job — a detection pass over existing
-//     rows has to be able to tell an operator what it found without changing
-//     their memory store under them. Note that the portable importers are NOT
-//     in this category: an artifact is untrusted input arriving now, not a row
-//     that was already here.
-//
-// The consequence of the first limit is stated plainly: a caller that reaches
-// RestoreSnapshot or ReplaceNonManual directly bypasses the guard. Both are raw
-// "write exactly this" primitives on the provider.MemoryStore interface, both
-// have exactly one production caller, and each of those filters upstream — a
-// snapshot file, and the reflection tier. So the exposure is a future caller
-// reading the interface rather than a hole in a shipped path. If that changes,
-// the guard moves with it.
