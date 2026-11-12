@@ -547,16 +547,6 @@ func withCredDec(d memory.Decision, f func(*memory.Decision)) error {
 	return memory.CheckImportedDecision(d)
 }
 
-// credentialAdviceLine reports whether a line is part of the credential advice
-// paragraph: the lead-in, a per-tool "edits" line, or a per-group "No tool edits"
-// line. One predicate for the code scan and the doc scan, because the same
-// conditions written twice is a way for the comparison to pass against a document
-// and a report that are each half-matched.
-func credentialAdviceLine(line string) bool {
-	return strings.Contains(line, "A credential-shaped field is refused") ||
-		strings.Contains(line, "edits ") || strings.Contains(line, "No tool edits")
-}
-
 // contains is a membership test over a string slice, named rather than inlined
 // because three of the assertions below read as prose if it is spelled out each time.
 func contains(haystack []string, needle string) bool {
