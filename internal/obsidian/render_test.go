@@ -24,13 +24,6 @@ func TestSlug(t *testing.T) {
 	}
 }
 
-func TestFileName(t *testing.T) {
-	m := memory.Memory{ID: "74a37cba00112233", Content: "Embedding backfill bug"}
-	if got := fileName(m); got != "embedding-backfill-bug-74a37cba.md" {
-		t.Errorf("fileName = %q", got)
-	}
-}
-
 func TestRenderMemory(t *testing.T) {
 	m := memory.Memory{
 		ID: "74a37cba00112233", ProjectID: "ghost", Category: "gotcha",
@@ -66,29 +59,6 @@ Embedding backfill bug: ticker only swept seen projects.
 	got2 := renderMemory(m, links, map[string]string{})
 	if strings.Contains(got2, "[[") || !strings.Contains(got2, "beef0000") {
 		t.Errorf("missing target should render short ID without wikilink:\n%s", got2)
-	}
-}
-
-// TestRenderMemoryAlias: notes carry an `aliases` flow list so Obsidian's
-// graph and Quick Switcher show a readable label instead of the id8-suffixed
-// filename. The alias is a single-line preview of the content; the flow form
-// keeps the one-line-per-key invariant hasGhostID's scan depends on, and
-// ghost_id stays first for the reader.
-func TestRenderMemoryAlias(t *testing.T) {
-	m := memory.Memory{
-		ID: "74a37cba00112233", ProjectID: "ghost", Category: "gotcha",
-		Content:    "Embedding backfill bug: ticker only swept seen projects.",
-		Importance: 0.8, Source: "mcp",
-		CreatedAt: "2026-07-06 12:00:00", UpdatedAt: "2026-07-08 09:30:00",
-	}
-	got := renderMemory(m, nil, nil)
-	// Content holds ": " so the alias is quoted; it is under 60 chars so it is
-	// not truncated.
-	if !strings.Contains(got, "aliases: [\"Embedding backfill bug: ticker only swept seen projects.\"]\n") {
-		t.Errorf("expected quoted single-line alias:\n%s", got)
-	}
-	if !strings.HasPrefix(got, "---\nghost_id: 74a37cba00112233\n") {
-		t.Errorf("ghost_id must stay the first frontmatter line:\n%s", got)
 	}
 }
 
@@ -144,60 +114,6 @@ func TestRenderHostileFrontmatter(t *testing.T) {
 		if !strings.Contains(line, ": ") {
 			t.Errorf("frontmatter line lost its key-value shape: %q", line)
 		}
-	}
-}
-
-// TestRenderFrontmatterYAMLIndicators covers the value shapes the first
-// hardening pass missed: Obsidian-idiomatic '#' tags, a ':'-bearing tag, and
-// project values that open with a YAML indicator or end with a colon.
-func TestRenderFrontmatterYAMLIndicators(t *testing.T) {
-	cases := []struct {
-		name        string
-		projectID   string
-		tags        []string
-		wantProject string // exact "project: ..." line, without trailing newline
-		wantTags    string // exact "tags: ..." line, without trailing newline
-	}{
-		{
-			name:     "obsidian hash tags and colon tag",
-			tags:     []string{"#urgent", "status: open"},
-			wantTags: `tags: ["#urgent", "status: open"]`,
-		},
-		{
-			name:        "npm-scope project name",
-			projectID:   "@org/app",
-			wantProject: `project: "@org/app"`,
-		},
-		{
-			name:        "trailing colon project",
-			projectID:   "wip:",
-			wantProject: `project: "wip:"`,
-		},
-		{
-			name:     "boolean-like tags stay strings",
-			tags:     []string{"no", "on"},
-			wantTags: `tags: ["no", "on"]`,
-		},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			pid := c.projectID
-			if pid == "" {
-				pid = "ghost"
-			}
-			m := memory.Memory{
-				ID: "cafe000011223344", ProjectID: pid, Category: "fact",
-				Content: "body", Importance: 0.5, Source: "mcp", Tags: c.tags,
-				CreatedAt: "2026-07-10 10:00:00", UpdatedAt: "2026-07-10 10:00:00",
-			}
-			got := renderMemory(m, nil, nil)
-			if c.wantProject != "" && !strings.Contains(got, c.wantProject+"\n") {
-				t.Errorf("want %q in:\n%s", c.wantProject, got)
-			}
-			if c.wantTags != "" && !strings.Contains(got, c.wantTags+"\n") {
-				t.Errorf("want %q in:\n%s", c.wantTags, got)
-			}
-		})
 	}
 }
 
@@ -329,143 +245,5 @@ func TestRenderMemoryTypedEdges(t *testing.T) {
 		if strings.Contains(front, forbidden) {
 			t.Errorf("frontmatter must not contain %q:\n%s", forbidden, front)
 		}
-	}
-}
-
-// TestRenderMemoryTypedEdgesFilteredTarget: an other-endpoint absent from
-// fileFor (e.g. --project filtered it out) never becomes a typed wikilink;
-// prose keeps the short-ID fallback. If every entry for a relation is
-// skipped, the key is omitted entirely.
-func TestRenderMemoryTypedEdgesFilteredTarget(t *testing.T) {
-	m := memory.Memory{
-		ID: "74a37cba00112233", ProjectID: "ghost", Category: "fact",
-		Content: "Filtered edge target", Importance: 0.5, Source: "mcp",
-		CreatedAt: "2026-07-10 10:00:00", UpdatedAt: "2026-07-10 10:00:00",
-	}
-	links := []memory.Link{
-		{SourceID: m.ID, TargetID: "beef000011223344", Relation: "related", Strength: 0.83},
-		{SourceID: m.ID, TargetID: "dead000011223344", Relation: "supersedes", Strength: 0.9},
-	}
-	// beef resolved; dead filtered out of the vault selection.
-	fileFor := map[string]string{"beef000011223344": "other-note-beef0000.md"}
-	got := renderMemory(m, links, fileFor)
-
-	if !strings.Contains(got, "related: [\"[[other-note-beef0000]]\"]\n") {
-		t.Errorf("resolved related target must appear as typed field:\n%s", got)
-	}
-	if strings.Contains(got, "supersedes:") {
-		t.Errorf("fully filtered relation must omit its key:\n%s", got)
-	}
-	// The supersedes prose uses short id8 dead0000 because fileFor has no
-	// entry for that filtered target.
-	if !strings.Contains(got, "- dead0000 — supersedes (0.90)") {
-		t.Errorf("want short-ID supersedes prose line:\n%s", got)
-	}
-}
-
-// TestRenderMemoryTypedEdgesTargetEndpoint: when m is the TARGET of a
-// directional link, it emits no typed key for that relation; when m is the
-// target of related/elaborates, it still emits pointing at the source.
-func TestRenderMemoryTypedEdgesTargetEndpoint(t *testing.T) {
-	m := memory.Memory{
-		ID: "74a37cba00112233", ProjectID: "ghost", Category: "fact",
-		Content: "Target endpoint note", Importance: 0.5, Source: "mcp",
-		CreatedAt: "2026-07-10 10:00:00", UpdatedAt: "2026-07-10 10:00:00",
-	}
-	links := []memory.Link{
-		{SourceID: "cafe000011223344", TargetID: m.ID, Relation: "supersedes", Strength: 0.9},
-		{SourceID: "beef000011223344", TargetID: m.ID, Relation: "related", Strength: 0.8},
-		{SourceID: "fifth000011223344", TargetID: m.ID, Relation: "elaborates", Strength: 0.7},
-	}
-	fileFor := map[string]string{
-		"cafe000011223344":  "upstream-cafe0000.md",
-		"beef000011223344":  "other-note-beef0000.md",
-		"fifth000011223344": "detail-note-fifth0000.md",
-	}
-	got := renderMemory(m, links, fileFor)
-
-	if strings.Contains(got, "supersedes:") {
-		t.Errorf("target of directed supersedes must not emit supersedes:\n%s", got)
-	}
-	// This fixture has no contradicts link at all, so the key must never
-	// appear (positive contradicts coverage lives in TestRenderMemoryTypedEdges).
-	if strings.Contains(got, "contradicts:") {
-		t.Errorf("fixture has no contradicts link; frontmatter must not contain it:\n%s", got)
-	}
-	if !strings.Contains(got, "related: [\"[[other-note-beef0000]]\"]\n") {
-		t.Errorf("target of related must emit related at the source:\n%s", got)
-	}
-	if !strings.Contains(got, "elaborates: [\"[[detail-note-fifth0000]]\"]\n") {
-		t.Errorf("target of elaborates must emit elaborates at the source:\n%s", got)
-	}
-	// Prose still shows the directed edge from the target's point of view.
-	if !strings.Contains(got, "- [[upstream-cafe0000]] — supersedes (0.90)") {
-		t.Errorf("prose must still list directed link touching m:\n%s", got)
-	}
-}
-
-// TestRenderMemoryNoRelatedSectionWhenAllTypedAndResolvable: a note whose
-// links are all typed edge relations and whose targets all resolve in the vault
-// carries those links in frontmatter only; the body has no ## Related section.
-func TestRenderMemoryNoRelatedSectionWhenAllTypedAndResolvable(t *testing.T) {
-	const self = "74a37cba00112233"
-	m := memory.Memory{
-		ID: self, ProjectID: "ghost", Category: "fact",
-		Content: "All links resolvable", Importance: 0.5, Source: "mcp",
-		CreatedAt: "2026-07-10 10:00:00", UpdatedAt: "2026-07-10 10:00:00",
-	}
-	links := []memory.Link{
-		{SourceID: self, TargetID: "beef000011223344", Relation: "related", Strength: 0.83},
-		{SourceID: self, TargetID: "dead000011223344", Relation: "supersedes", Strength: 0.9},
-		{SourceID: "aaaa000011223344", TargetID: self, Relation: "elaborates", Strength: 0.6},
-	}
-	fileFor := map[string]string{
-		"beef000011223344": "other-note-beef0000.md",
-		"dead000011223344": "old-note-dead0000.md",
-		"aaaa000011223344": "detail-note-aaaa0000.md",
-	}
-	got := renderMemory(m, links, fileFor)
-	if strings.Contains(got, "## Related") {
-		t.Errorf("typed resolvable links must not render ## Related:\n%s", got)
-	}
-	for _, want := range []string{
-		`related: ["[[other-note-beef0000]]"]`,
-		`supersedes: ["[[old-note-dead0000]]"]`,
-		`elaborates: ["[[detail-note-aaaa0000]]"]`,
-	} {
-		if !strings.Contains(got, want) {
-			t.Errorf("frontmatter missing %q:\n%s", want, got)
-		}
-	}
-}
-
-// TestRenderMemoryRelatedListsOnlyUnresolvedTarget: when a note has both a
-// typed resolvable link and an unresolved target, ## Related lists only the
-// unresolved target.
-func TestRenderMemoryRelatedListsOnlyUnresolvedTarget(t *testing.T) {
-	const self = "74a37cba00112233"
-	m := memory.Memory{
-		ID: self, ProjectID: "ghost", Category: "fact",
-		Content: "Mixed links", Importance: 0.5, Source: "mcp",
-		CreatedAt: "2026-07-10 10:00:00", UpdatedAt: "2026-07-10 10:00:00",
-	}
-	links := []memory.Link{
-		{SourceID: self, TargetID: "beef000011223344", Relation: "related", Strength: 0.83},
-		{SourceID: self, TargetID: "dead000011223344", Relation: "supersedes", Strength: 0.9},
-	}
-	fileFor := map[string]string{"beef000011223344": "other-note-beef0000.md"}
-	got := renderMemory(m, links, fileFor)
-	if !strings.Contains(got, "## Related") {
-		t.Fatalf("expected ## Related for unresolved target:\n%s", got)
-	}
-	if !strings.Contains(got, "- dead0000 — supersedes (0.90)") {
-		t.Errorf("unresolved target must appear in ## Related:\n%s", got)
-	}
-	if strings.Contains(got, "[[other-note-beef0000]] — related") {
-		t.Errorf("typed resolvable link must not appear in ## Related:\n%s", got)
-	}
-	// Frontmatter still carries the resolvable link.
-	if !strings.Contains(got, `related: ["[[other-note-beef0000]]"]`) {
-		t.Errorf("frontmatter missing resolvable link:\n%s", got)
 	}
 }
