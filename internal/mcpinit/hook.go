@@ -59,7 +59,7 @@ func bumpSessionCount(dbPath, projectID string) int {
 	if err != nil {
 		return 0
 	}
-	defer db.Close()
+	defer db.Close() //nolint:errcheck
 
 	ctx := context.Background()
 	tx, err := db.BeginTx(ctx, nil)
@@ -479,8 +479,7 @@ func renderSessionContext(cwd string, asOf *time.Time, host hostevent.Source) st
 
 // SessionBlockAt renders the block a session start (and `ghost context`) emits for
 // the store at dbPath and the project cwd resolves to, reading at the instant now
-//nolint:errcheck
-
+// with the configuration cfg.
 func SessionBlockAt(dbPath, cwd string, cfg *config.Config, now time.Time) string {
 	projectID, project, memories, globals, learned, tasks, decisions, interactionCount, tally := loadSessionContextFrom(dbPath, cwd, cfg, func() time.Time { return now }, "", nil)
 

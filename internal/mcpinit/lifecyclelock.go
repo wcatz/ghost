@@ -40,7 +40,7 @@ func AcquireLifecycleLock(project string) (func(), bool, error) {
 	if err != nil {
 		return noop, true, fmt.Errorf("open database: %w", err)
 	}
-	defer db.Close()
+	defer db.Close() //nolint:errcheck
 
 	id, _, err := memory.NewStore(db, nil).ResolveProject(context.Background(), project)
 	if err != nil {
@@ -78,8 +78,7 @@ func AcquireLifecycleLock(project string) (func(), bool, error) {
 
 // LifecycleLockHeld reports whether a LIVE process holds projectID's per-project
 // lifecycle lock, reading the claim AcquireLifecycleLock writes. It takes the
-//nolint:errcheck
-
+// RESOLVED project id, not a name, id or path.
 func LifecycleLockHeld(dataDir, projectID string) bool {
 	if dataDir == "" || projectID == "" || !safeProjectIDComponent(projectID) {
 		return false
