@@ -16,11 +16,8 @@ import (
 	"github.com/wcatz/ghost/internal/memory"
 )
 
-// savedIDRe extracts the memory id from a ghost_memory_save response
-// ("Memory saved (id: <hex>[), ...]").
 var savedIDRe = regexp.MustCompile(`Memory saved \(id:\s*([0-9a-fA-F]+)\)`)
 
-// mcpSession wraps one long-lived `ghost mcp` subprocess connected over stdio.
 type mcpSession struct {
 	sess *mcp.ClientSession
 }
@@ -28,7 +25,7 @@ type mcpSession struct {
 func startMCP(ctx context.Context, ghostBin string, env []string) (*mcpSession, error) {
 	cmd := exec.Command(ghostBin, "mcp")
 	cmd.Env = env
-	cmd.Stderr = os.Stderr // surface server logs without corrupting the stdio protocol (stdout)
+	cmd.Stderr = os.Stderr
 	client := mcp.NewClient(&mcp.Implementation{Name: "ghost-evalcycle", Version: "0.1.0"}, nil)
 	sess, err := client.Connect(ctx, &mcp.CommandTransport{Command: cmd}, nil)
 	if err != nil {
@@ -60,9 +57,6 @@ func (s *mcpSession) callText(ctx context.Context, tool string, args map[string]
 	return textOf(res), nil
 }
 
-// saveAll injects every corpus entry through ghost_memory_save — the genuine
-// save path, including embedding-worker notification — and maps corpus keys to
-// stored memory ids for grading.
 func saveAll(ctx context.Context, s *mcpSession, project string, entries []corpus.Entry) (map[string]string, error) {
 	ids := make(map[string]string, len(entries))
 	for _, e := range entries {
@@ -84,19 +78,11 @@ func saveAll(ctx context.Context, s *mcpSession, project string, entries []corpu
 			return nil, fmt.Errorf("save %s: id collision %q vs %q", e.Key, prev, m[1])
 		}
 		ids[e.Key] = m[1]
-		// created_at/updated_at carry second granularity; without spacing all
-		// rows tie and supersede's newer/older ordering becomes arbitrary
-		// (source of the reversed-link false positives on the first judged
-		// run). Corpus order is chronological intent, so preserve it.
 		time.Sleep(1100 * time.Millisecond)
 	}
 	return ids, nil
 }
 
-// waitForEmbeddings polls the scratch store until every project memory has an
-// embedding row. Supersede's cosine candidate generation needs vectors; the
-// embedding worker lives in the MCP server process and fires on save when
-// Ollama is up. Unreachable Ollama fails fast with an actionable hint.
 func waitForEmbeddings(ctx context.Context, ollamaURL, dbPath, projectName string, timeout time.Duration) error {
 	if err := ollamaReachable(ollamaURL); err != nil {
 		return fmt.Errorf("embedding drain needs Ollama: %w", err)
@@ -148,14 +134,6 @@ func ollamaReachable(url string) error {
 	return nil
 }
 
-// restampChronology rewrites created_at/updated_at so corpus order becomes
-// true chronological order, one minute apart. A burst injection otherwise
-// leaves second-granularity ties across rows, making supersede's newer/older
-// ordering arbitrary. (The upsert strengthen-path refresh of the older row's
-// updated_at that also corrupted direction is fixed — see issue #335 — but
-// ties alone still justify restamping.) Real projects accumulate memories
-// over days — this makes the fixture honest. Timestamps are metadata, not
-// content; all content still flows through the save path.
 func restampChronology(dbPath, projectName string, entries []corpus.Entry, ids map[string]string) error {
 	db, err := memory.OpenDB(dbPath)
 	if err != nil {

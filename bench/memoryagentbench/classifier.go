@@ -9,11 +9,6 @@ import (
 	"github.com/wcatz/ghost/internal/supersede"
 )
 
-// buildClassifier builds the real supersede classifier backed by the
-// `opencode` CLI (ai.NewOpenCodeClientWithBinary). Ghost does not require a
-// direct Anthropic key, but OpenCode must be authenticated through its own
-// configuration. cfg.CLI.OpenCodeBinary overrides the "opencode" PATH lookup,
-// matching cmd/ghost/main.go's own opencode-tier resolution.
 func buildClassifier() (*supersede.RelationClassifier, error) {
 	cfg, err := config.Load()
 	if err != nil {

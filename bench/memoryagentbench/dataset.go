@@ -1,6 +1,3 @@
-// dataset.go loads MemoryAgentBench Conflict_Resolution demos (converted to
-// JSONL by convert.py) and splits each demo's numbered fact list into
-// ordered fact sentences.
 package main
 
 import (
@@ -12,8 +9,6 @@ import (
 	"regexp"
 )
 
-// Demo is one row of the Conflict_Resolution split, as written by convert.py:
-// a flat numbered fact list plus the single-hop questions probing it.
 type Demo struct {
 	Source    string     `json:"source"`
 	Context   string     `json:"context"`
@@ -22,15 +17,8 @@ type Demo struct {
 	QAPairIDs []string   `json:"qa_pair_ids"`
 }
 
-// factLine matches one numbered fact line, e.g. "16. Chanel was founded by
-// Coco Chanel." — the captured group is the fact sentence without its
-// leading index.
 var factLine = regexp.MustCompile(`(?m)^\d+\.[ \t]+([^\r\n]+)`)
 
-// splitFacts splits a demo's context into its ordered fact sentences. List
-// order is temporal order: MemoryAgentBench encodes a fact update/contradiction
-// as a later line restating an earlier subject+relation with a different
-// object, so fact N is understood to have been "stated after" fact N-1.
 func splitFacts(text string) []string {
 	matches := factLine.FindAllStringSubmatch(text, -1)
 	facts := make([]string, len(matches))
@@ -40,7 +28,6 @@ func splitFacts(text string) []string {
 	return facts
 }
 
-// loadDemos reads convert.py's output: one JSON Demo per line.
 func loadDemos(path string) ([]Demo, error) {
 	f, err := os.Open(path)
 	if err != nil {
