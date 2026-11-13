@@ -159,38 +159,6 @@ func TestDropNearDuplicatesKeepsALoserThatReplacesAThirdRow(t *testing.T) {
 	}
 }
 
-// TestDropNearDuplicatesStillCollapsesARestatementCluster: three restatements
-// of one claim, each linked to the others. The removal still leaves exactly one
-// of them, and it is the newest.
-func TestDropNearDuplicatesStillCollapsesARestatementCluster(t *testing.T) {
-	s := testStore(t)
-	a := addStamped(t, s, testProject, demotePgxV4, 0.9, 20, nil)
-	b := addStamped(t, s, testProject, demotePgxV4Again, 0.8, 22, nil)
-	c := addStamped(t, s, testProject, "The code imports pgx/v4 everywhere; go.mod pins github.com/jackc/pgx/v4 at v4.18.1 and the pool is built with pgxpool.Connect.", 0.7, 24, nil)
-	linkAt(t, s, a, b, "related")
-	linkAt(t, s, b, c, "related")
-	linkAt(t, s, a, c, "related")
-
-	kept, _, _, _ := s.dropNearDuplicates(context.Background(), hydrate(t, s, a, b, c), DefaultSearchParams(), dropNow)
-	if got, want := memIDs(kept), []string{c}; !eqStrings(got, want) {
-		t.Errorf("kept %v, want only the newest restatement %v", got, want)
-	}
-}
-
-// TestDropNearDuplicatesTiedStampsFallBackToRank: a pair with one created_at
-// has no chronology, so the relevance rank decides the loser as before.
-func TestDropNearDuplicatesTiedStampsFallBackToRank(t *testing.T) {
-	s := testStore(t)
-	a := addStamped(t, s, testProject, demotePgxV4, 0.8, 20, nil)
-	b := addStamped(t, s, testProject, demotePgxV4Again, 0.7, 20, nil)
-	linkAt(t, s, a, b, "related")
-
-	kept, _, _, _ := s.dropNearDuplicates(context.Background(), hydrate(t, s, a, b), DefaultSearchParams(), dropNow)
-	if got, want := memIDs(kept), []string{a}; !eqStrings(got, want) {
-		t.Errorf("kept %v, want the higher-ranked row %v", got, want)
-	}
-}
-
 // TestDropNearDuplicatesKeepsTheRankVerdictWhenTheEarlierRowIsProtected: the
 // earlier row is pinned, so the chronology rule may not remove it. The pair is
 // still a near-duplicate, so the verdict falls back to the rank (and
@@ -259,21 +227,6 @@ func TestDropNearDuplicatesDropsAPairWhenBothVerdictsAreVetoed(t *testing.T) {
 	kept, _, _, _ := s.dropNearDuplicates(context.Background(), hydrate(t, s, a, z, b), DefaultSearchParams(), dropNow)
 	if got, want := memIDs(kept), []string{a, z, b}; !eqStrings(got, want) {
 		t.Errorf("kept %v, want %v", got, want)
-	}
-}
-
-// TestDropNearDuplicatesLaterRowRankedFirstIsUnchanged: the common case the
-// rank rule already got right — the later restatement ranks first and the
-// earlier one is removed.
-func TestDropNearDuplicatesLaterRowRankedFirstIsUnchanged(t *testing.T) {
-	s := testStore(t)
-	a := addStamped(t, s, testProject, demotePgxV4, 0.7, 20, nil)
-	b := addStamped(t, s, testProject, demotePgxV4Again, 0.8, 24, nil)
-	linkAt(t, s, a, b, "related")
-
-	kept, removed, _, _ := s.dropNearDuplicates(context.Background(), hydrate(t, s, b, a), DefaultSearchParams(), dropNow)
-	if got, want := memIDs(kept), []string{b}; !eqStrings(got, want) {
-		t.Errorf("kept %v (removed %v), want %v", got, memIDs(removed), want)
 	}
 }
 

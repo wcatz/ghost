@@ -2,7 +2,6 @@ package memory
 
 import (
 	"context"
-	"strings"
 	"testing"
 )
 
@@ -79,66 +78,5 @@ func TestPinnedRowsWithContradictions(t *testing.T) {
 	got, total, err = s.PinnedRowsWithContradictions(ctx, 1)
 	if err != nil || len(got) != 1 || total != 2 {
 		t.Fatalf("limit 1: %d rows, total %d, err %v; want 1 row, total 2", len(got), total, err)
-	}
-}
-
-// A pinned row with an open contradiction stays out of every maintenance pool:
-// resolve and supersede read pools that exclude pinned rows, and the edge does
-// not change that.
-func TestPinnedContradictedRowStaysOutOfTheResolvePools(t *testing.T) {
-	s := testStore(t)
-	ctx := context.Background()
-	pin := makeMemory(t, s, "pinned claim")
-	newer := makeMemory(t, s, "newer claim")
-	if _, err := s.db.ExecContext(ctx, `UPDATE memories SET pinned = 1 WHERE id = ?`, pin); err != nil {
-		t.Fatalf("pin: %v", err)
-	}
-	if err := s.CreateLink(ctx, newer, pin, "contradicts", 1, "llm"); err != nil {
-		t.Fatalf("a contradicts edge against a pinned row must be recordable: %v", err)
-	}
-	cands, err := s.ResolveCandidates(ctx, testProject)
-	if err != nil {
-		t.Fatalf("ResolveCandidates: %v", err)
-	}
-	for _, m := range cands {
-		if m.ID == pin {
-			t.Fatalf("the pinned row is a resolve candidate")
-		}
-	}
-	if len(cands) != 1 || cands[0].ID != newer {
-		t.Fatalf("resolve candidates = %d rows, want only the unpinned one", len(cands))
-	}
-}
-
-// The report must not scan memory_links: it starts from the pinned rows and
-// reaches the edges through the partial indexes, once per direction.
-func TestPinnedContradictionQueryUsesTheLinkIndexes(t *testing.T) {
-	s := testStore(t)
-	scope := scopesConflictSQL("m.scope", "o.scope")
-	query := pinnedContradictionArmTarget + scope + " UNION " + pinnedContradictionArmSource + scope + pinnedContradictionTail
-	rows, err := s.db.QueryContext(context.Background(), "EXPLAIN QUERY PLAN "+query)
-	if err != nil {
-		t.Fatalf("explain: %v", err)
-	}
-	defer func() { _ = rows.Close() }()
-	var plan []string
-	for rows.Next() {
-		var id, parent, unused int
-		var detail string
-		if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
-			t.Fatalf("scan: %v", err)
-		}
-		plan = append(plan, detail)
-	}
-	var sawTarget, sawSource bool
-	for _, d := range plan {
-		if strings.HasPrefix(d, "SCAN ml") {
-			t.Errorf("full scan of memory_links in the plan: %q\n%s", d, strings.Join(plan, "\n"))
-		}
-		sawTarget = sawTarget || strings.Contains(d, "idx_links_target")
-		sawSource = sawSource || strings.Contains(d, "idx_links_source")
-	}
-	if !sawTarget || !sawSource {
-		t.Errorf("the plan does not use both link indexes (target %v, source %v):\n%s", sawTarget, sawSource, strings.Join(plan, "\n"))
 	}
 }

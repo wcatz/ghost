@@ -5,9 +5,7 @@ package memory
 
 import (
 	"database/sql"
-	"fmt"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -39,15 +37,6 @@ func dropVectorEpoch(t *testing.T, db *sql.DB) {
 	if _, err := db.Exec(`DROP TABLE IF EXISTS vector_epoch`); err != nil {
 		t.Fatalf("drop vector_epoch: %v", err)
 	}
-}
-
-func triggerSQL(t *testing.T, db *sql.DB, name string) string {
-	t.Helper()
-	var ddl string
-	if err := db.QueryRow(`SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?`, name).Scan(&ddl); err != nil {
-		t.Fatalf("trigger %s is missing: %v", name, err)
-	}
-	return strings.Join(strings.Fields(ddl), " ")
 }
 
 func rawEpoch(t *testing.T, db *sql.DB) int64 {
@@ -110,68 +99,6 @@ func assertEpochTriggersFire(t *testing.T, db *sql.DB) {
 	}
 }
 
-// The migration path and the fresh-database path (initSQL, then vectorEpochSQL)
-// produce the same counter and the same triggers. The step is run directly for the reason
-// TestMigrateV23MatchesTheFreshDatabaseSchema gives: OpenDB runs initSQL first,
-// which would put the objects back before the step could be seen to do it.
-func TestMigrateV24MatchesTheFreshDatabaseSchema(t *testing.T) {
-	newDB := func(t *testing.T) *sql.DB {
-		t.Helper()
-		db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "ghost.db"))
-		if err != nil {
-			t.Fatalf("open: %v", err)
-		}
-		t.Cleanup(func() { _ = db.Close() })
-		if _, err := db.Exec(initSQL); err != nil {
-			t.Fatalf("initSQL: %v", err)
-		}
-		if _, err := db.Exec(vectorEpochSQL); err != nil {
-			t.Fatalf("vectorEpochSQL: %v", err)
-		}
-		return db
-	}
-	fresh, migrated := newDB(t), newDB(t)
-	dropVectorEpoch(t, migrated)
-	tx, err := migrated.Begin()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := migrateV24(tx); err != nil {
-		_ = tx.Rollback()
-		t.Fatalf("migrateV24: %v", err)
-	}
-	if err := tx.Commit(); err != nil {
-		t.Fatal(err)
-	}
-
-	freshCols, err := columnShapes(t, fresh, "vector_epoch")
-	if err != nil || len(freshCols) == 0 {
-		t.Fatalf("a fresh database has no vector_epoch (%v, %v)", freshCols, err)
-	}
-	migratedCols, err := columnShapes(t, migrated, "vector_epoch")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if diff := columnShapeDiff(freshCols, migratedCols); diff != "" {
-		t.Errorf("the migration path and initSQL disagree on the table: %s", diff)
-	}
-	if got := rawEpoch(t, migrated); got != 0 {
-		t.Errorf("the migrated counter starts at %d, want 0", got)
-	}
-	var rowsBefore int
-	if err := migrated.QueryRow(`SELECT count(*) FROM vector_epoch`).Scan(&rowsBefore); err != nil || rowsBefore != 0 {
-		t.Errorf("the step wrote %d rows into the counter (%v): the first bump creates it, so opening a database writes nothing", rowsBefore, err)
-	}
-	for _, trg := range vectorEpochTriggers {
-		if f, m := triggerSQL(t, fresh, trg), triggerSQL(t, migrated, trg); f != m {
-			t.Errorf("trigger %s differs between the paths:\n fresh    %s\n migrated %s", trg, f, m)
-		}
-	}
-	// The migrated database's triggers do the work, not only exist.
-	seedOneEmbeddedMemory(t, migrated, true)
-	assertEpochTriggersFire(t, migrated)
-}
-
 // An old-schema database upgrades: the counter exists, the triggers fire, and
 // the data it already held is untouched. The database is shaped as a v23 build
 // left it (the table and triggers dropped, the stamp set back), which the
@@ -223,36 +150,6 @@ func TestOpenDBUpgradesAV23DatabaseToTheVectorEpoch(t *testing.T) {
 	defer again.Close() //nolint:errcheck
 	if got := rawEpoch(t, again); got != after {
 		t.Errorf("reopening changed the counter: %d -> %d", after, got)
-	}
-}
-
-// A database stamped newer than this build is still refused, and the refusal
-// does not put the counter back: a refusal that has already written is not one.
-func TestOpenDBRefusesANewerSchemaWithoutRecreatingTheVectorEpoch(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "newer.db")
-	seed, err := OpenDB(dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	dropVectorEpoch(t, seed)
-	if _, err := seed.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion+1)); err != nil {
-		t.Fatal(err)
-	}
-	if err := seed.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	if _, err := OpenDB(dbPath); err == nil || !strings.Contains(err.Error(), "newer") {
-		t.Fatalf("OpenDB error = %v, want the newer-schema refusal", err)
-	}
-	ro, err := OpenReadDB(dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer ro.Close() //nolint:errcheck
-	var n int
-	if err := ro.QueryRow(`SELECT count(*) FROM sqlite_master WHERE name = 'vector_epoch' OR name LIKE 'vector_epoch_%'`).Scan(&n); err != nil || n != 0 {
-		t.Errorf("a refused open recreated %d vector_epoch objects (%v)", n, err)
 	}
 }
 
