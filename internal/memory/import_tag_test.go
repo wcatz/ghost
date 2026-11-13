@@ -6,23 +6,12 @@ import (
 	"testing"
 )
 
-// TestImportMemoryCarriesATagByteForByteWhateverItHolds is the import half of the
-// #811 correction, and it is the assertion that keeps a backup a backup.
-//
-// `ImportMemory` used to refuse a tag holding a control character, a backtick or a
-// data delimiter, and `internal/portable`'s exporter applied the same check so
-// export→import would stay a round trip. That is a coherent rule with an incoherent
-// consequence: the memory is dropped from the ARTIFACT, so the user's backup loses
-// the row, on the strength of a label. Nothing on the MCP write path refused those
-// tags for the whole life of the feature, so any store written through it could
-// hold one, and the operator discovers the gap on the day they need the file.
-//
-// So an import carries the value and says nothing about its shape. This test is the
-// opposite of the one it replaces: every hostile shape is ACCEPTED, and stored
-// verbatim, because a restore that rewrites a label is a restore that does not
-// restore. The render-time neutralisation in `assemble.TagsLabel` is what makes the
-// stored value safe on the line an agent reads, and the class is still refused where
-// it is reachable — on the four MCP writers, in `validateTags`.
+// TestImportMemoryCarriesATagByteForByteWhateverItHolds is the import half of
+// the #811 correction: refusing a tag by shape dropped the memory from the
+// BACKUP on the strength of a label, so an import carries every hostile shape
+// verbatim (a restore that rewrites a label does not restore). Render-time
+// neutralisation in assemble.TagsLabel keeps the stored value safe, and the class
+// is still refused on the MCP writers in validateTags.
 func TestImportMemoryCarriesATagByteForByteWhateverItHolds(t *testing.T) {
 	carried := map[string][]string{
 		"an opening guillemet":                  {"a«b"},
@@ -58,10 +47,6 @@ func TestImportMemoryCarriesATagByteForByteWhateverItHolds(t *testing.T) {
 			if len(got[0].Tags) != len(tags) {
 				t.Fatalf("the row came back with tags %q, want %q", got[0].Tags, tags)
 			}
-			// Byte for byte, element by element: an importer that trimmed a tag
-			// would keep the COUNT and change the value, which is a silent rewrite
-			// of the user's row. Nothing bounds a tag on this path, so the
-			// over-long one arrives whole.
 			for i := range tags {
 				if got[0].Tags[i] != tags[i] {
 					t.Errorf("tag %d came back as %q (%d bytes), want %q (%d bytes) byte for byte",
@@ -72,14 +57,9 @@ func TestImportMemoryCarriesATagByteForByteWhateverItHolds(t *testing.T) {
 	}
 }
 
-// TestImportMemoryStillRefusesASecretInATag is the guard that is NOT about shape,
-// and it is here so the removal above cannot be read as "tags are unvalidated".
-//
-// A credential in a tag is a different question from a delimiter in one, and it is
-// the one that matters operationally: a tag is carried into every listing, every
-// search row and the next reflect prompt. The refusal names the field and never
-// echoes the value, and it runs in the same window as the other field checks, so a
-// dry run classifies the record exactly as the apply run it previews.
+// TestImportMemoryStillRefusesASecretInATag: the shape removal above is not "tags
+// are unvalidated". A token-shaped tag is refused naming the field without
+// echoing the value, in dry run and apply alike, and nothing is written.
 func TestImportMemoryStillRefusesASecretInATag(t *testing.T) {
 	s := portableTestStore(t)
 	ctx := context.Background()

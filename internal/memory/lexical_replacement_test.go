@@ -54,11 +54,9 @@ func TestLexicalReplacementsNeedsADistinctChronology(t *testing.T) {
 }
 
 // TestLexicalReplacementsKeepsParallelFactsApart: two live notes in one sentence
-// frame about two different subjects share a value and change another, which is
-// exactly a value swap to the similarity and value rules. The plain word that
-// names the subject differs in place (auth/billing, staging/reporting, the make
-// target), so they are not a replacement. The replacements below them reword
-// around their values instead, and still pair.
+// frame about different subjects share a value and change another, which looks
+// like a value swap; the plain word naming the subject differs in place, so they
+// are not a replacement. Replacements that reword around their values still pair.
 func TestLexicalReplacementsKeepsParallelFactsApart(t *testing.T) {
 	now := time.Date(2026, 9, 30, 0, 0, 0, 0, time.UTC)
 	cases := []struct {
@@ -69,10 +67,7 @@ func TestLexicalReplacementsKeepsParallelFactsApart(t *testing.T) {
 			"billing-service runs on node-7 and listens on port 8080 behind Nginx", false},
 		{"different database", "The staging database is Postgres 15 hosted in us-east",
 			"The reporting database is Postgres 16 hosted in us-east", false},
-		// Decided as NOT a pair: `make lint` in place of `make test` can be a
-		// changed procedure or a second step beside the first, and the text cannot
-		// say which. A code-span word counts by its shape, and a plain word swapped
-		// in place is a different step; an unmarked pair is the safe reading.
+		// `make lint` for `make test` could be a changed procedure or a second step, so it is not a pair.
 		{"different make target", "Run `make build` then `make test` before PRs",
 			"Run `make build` then `make lint` before PRs", false},
 		{"pgx upgrade", "go.mod pins github.com/jackc/pgx/v4 at v4.18.1; the pool is built with pgxpool.Connect and the code imports pgx/v4 everywhere.",
@@ -109,34 +104,18 @@ func worstCaseRows() []Candidate {
 	return rows
 }
 
-// lexicalWorstCaseCPUBound is the cost test's bar, in CPU time, and the
-// figures behind it are all measured rather than round numbers. Without race
-// instrumentation this laptop reads 23-44ms of CPU for the bucket; with it, as
-// CI runs the package, 151-168ms of CPU. The regression the test bounds — the
-// whole-note alignment that predates the changed-region trim and the 64-word
-// cap — reads 13.9s on the same machine, so the bar separates the two by an
-// order of magnitude in the direction that matters and still sits more than an
-// order of magnitude above the busiest honest sample: a runner several times
-// slower than this laptop clears the bar and still fails the regression.
+// lexicalWorstCaseCPUBound is the cost test's bar, in CPU time. The bucket reads
+// tens of milliseconds honestly (about 170ms under -race) and 13.9s with the
+// whole-note alignment that predates the changed-region trim and the 64-word cap,
+// so the bar separates the two by an order of magnitude on a slower runner too.
 const lexicalWorstCaseCPUBound = 2 * time.Second
 
 // TestLexicalReplacementsStaysCheapOnLongNearIdenticalNotes: the pair rule runs
-// on the session-start path, so its cost on the worst bucket it can be handed
-// is bounded, and the pairs in it are still found.
-//
-// The figure is the CHEAPEST CPU time over several rounds, not one wall-clock
-// sample: the single-sample wall clock flapped on a loaded shared runner
-// (#1458), one sample of a call that costs tens of milliseconds reading 257ms
-// against a 250ms bar. Wall time counts the time this process was not running,
-// so a wall bar close enough to the honest cost to catch a small regression
-// cannot also hold when the rest of the runner is busy, and one far above it
-// catches nothing; CPU time counts the work and only the work, so it is the
-// same on a busy runner as on an idle one, and the quadratic alignment this
-// bounds IS work. The minimum over rounds, not a mean, because everything that
-// can go wrong around the measurement — a collection charged to the window, a
-// page fault, a lost timeslice on the non-unix fallback clock — can only make
-// the call look more expensive, and the quadratic cost is in every round,
-// because it is the work.
+// on the session-start path, so its cost on the worst bucket is bounded and the
+// pairs in it are still found. The figure is the cheapest CPU time over several
+// rounds, not one wall-clock sample, which flapped on a loaded shared runner
+// (#1458): CPU time counts only the work, and the minimum discards everything
+// that can only make a round look more expensive.
 func TestLexicalReplacementsStaysCheapOnLongNearIdenticalNotes(t *testing.T) {
 	rows := worstCaseRows()
 	now := time.Date(2026, 9, 30, 0, 0, 0, 0, time.UTC)
@@ -182,14 +161,12 @@ func lexRowIn(id, category, created, content string) Candidate {
 	return c
 }
 
-// TestLexicalReplacementsPairsAReplacementSavedInAnotherCategory: a decision
-// that replaces a fact was never paired, because a pair across categories was
-// held to the save path's cross-category FOLD bar (token Jaccard >= 0.7), which
-// exists to keep paraphrases of one rule from splitting across categories and
-// which a replacement that rewords does not clear. The category says how a note
-// was filed, not what it is about, so the pair is judged by the bar a pair in
-// one category is judged by. The same texts in one category are the control:
-// they paired before the change and still do.
+// TestLexicalReplacementsPairsAReplacementSavedInAnotherCategory: a decision that
+// replaces a fact was never paired because a cross-category pair was held to the
+// save path's FOLD bar (token Jaccard >= 0.7), which a reworded replacement does
+// not clear. The category says how a note was filed, not what it is about, so the
+// pair is judged by the one-category bar; the direction is the stamps', never the
+// categories'.
 func TestLexicalReplacementsPairsAReplacementSavedInAnotherCategory(t *testing.T) {
 	now := time.Date(2026, 9, 30, 0, 0, 0, 0, time.UTC)
 	cases := []struct {
@@ -197,8 +174,6 @@ func TestLexicalReplacementsPairsAReplacementSavedInAnotherCategory(t *testing.T
 	}{
 		{"fact replaced by a decision", "fact", "decision", cacheMemcachedFact, cacheRistrettoDec},
 		{"same texts in one category", "fact", "fact", cacheMemcachedFact, cacheRistrettoDec},
-		// The direction is the stamps', never the categories': the newer row is
-		// the replacement whichever category it was filed in.
 		{"decision replaced by a fact", "decision", "fact", cacheRistrettoDec, cacheMemcachedFact},
 		{"dependency replaced by a gotcha", "dependency", "gotcha",
 			"go.mod pins github.com/jackc/pgx/v4 at v4.18.1; the pool is built with pgxpool.Connect and the code imports pgx/v4 everywhere.",
@@ -224,12 +199,10 @@ func TestLexicalReplacementsPairsAReplacementSavedInAnotherCategory(t *testing.T
 	}
 }
 
-// TestLexicalReplacementsAcrossCategoriesKeepsEveryOtherRule: lifting the
-// category bar lifts nothing else. A cross-category paraphrase that changes no
-// value is a restatement, not a replacement; two parallel facts about different
-// subjects in one frame stay apart; two environments' values are two settings;
-// and an explicit edge wins. Every fixture clears the similarity bar, so the named rule is the one
-// keeping it apart.
+// TestLexicalReplacementsAcrossCategoriesKeepsEveryOtherRule: lifting the category
+// bar lifts nothing else. A cross-category restatement that changes no value,
+// parallel facts about different subjects, differing scopes and an explicit edge
+// all stay as they were; every fixture clears the similarity bar.
 func TestLexicalReplacementsAcrossCategoriesKeepsEveryOtherRule(t *testing.T) {
 	now := time.Date(2026, 9, 30, 0, 0, 0, 0, time.UTC)
 	restate := "Decision: keep caching lookup responses in Memcached; internal/cache dials memcached-01.corp.example:11211 and entries live 300s."
@@ -270,14 +243,10 @@ func TestLexicalReplacementsAcrossCategoriesKeepsEveryOtherRule(t *testing.T) {
 	}
 }
 
-// TestLexicalReplacementsPairsAStandingCategoryRow: convention and preference
-// are standing categories, which resolve never retires. That exemption is a rule
-// about a WRITE (resolve marks nothing in them); the replacement guess writes
-// nothing and withholds nothing, so a standing row is a party to a pair like any
-// other, in either direction, and the reader sees it marked beside the note that
-// may replace it. The superseded-convention storyline's pair, a convention
-// replaced by a convention, already paired; this pins the pair across
-// categories.
+// TestLexicalReplacementsPairsAStandingCategoryRow: convention and preference are
+// standing categories resolve never retires, but that exemption is about a WRITE;
+// the replacement guess writes nothing, so a standing row is a party to a pair
+// like any other.
 func TestLexicalReplacementsPairsAStandingCategoryRow(t *testing.T) {
 	now := time.Date(2026, 9, 30, 0, 0, 0, 0, time.UTC)
 	semver := "Release tags follow semver: tag `vMAJOR.MINOR.PATCH` from main and run `make release` to publish."

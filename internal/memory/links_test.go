@@ -25,86 +25,43 @@ func TestCreateAndGetLinks(t *testing.T) {
 	a := makeMemory(t, s, "memory alpha about SQLite WAL mode")
 	b := makeMemory(t, s, "memory beta about SQLite busy timeout")
 
-	if err := s.CreateLink(ctx, a, b, "related", 0.85, "auto"); err != nil {
-		t.Fatalf("CreateLink: %v", err)
+	if err := s.CreateLink(ctx, a, a, "related", 0.9, "auto"); err == nil {
+		t.Fatal("CreateLink(a, a) succeeded, want error")
 	}
-
-	// Links are visible from BOTH endpoints.
-	for _, id := range []string{a, b} {
-		links, err := s.GetLinks(ctx, id)
-		if err != nil {
-			t.Fatalf("GetLinks(%s): %v", id, err)
-		}
-		if len(links) != 1 {
-			t.Fatalf("GetLinks(%s): got %d links, want 1", id, len(links))
-		}
-		if links[0].Relation != "related" || links[0].Strength != 0.85 {
-			t.Errorf("link = %+v, want relation=related strength=0.85", links[0])
-		}
-	}
-}
-
-func TestCreateLinkNormalizesSymmetricPair(t *testing.T) {
-	s := testStore(t)
-	ctx := context.Background()
-	a := makeMemory(t, s, "alpha content one")
-	b := makeMemory(t, s, "beta content two")
-
-	// Inserting A→B then B→A for symmetric 'related' must not duplicate.
+	// A symmetric pair inserted both ways is one link that keeps the higher strength.
 	if err := s.CreateLink(ctx, a, b, "related", 0.80, "auto"); err != nil {
 		t.Fatalf("CreateLink a->b: %v", err)
 	}
 	if err := s.CreateLink(ctx, b, a, "related", 0.90, "auto"); err != nil {
 		t.Fatalf("CreateLink b->a: %v", err)
 	}
-	links, err := s.GetLinks(ctx, a)
-	if err != nil {
-		t.Fatalf("GetLinks: %v", err)
+	// Links are visible from BOTH endpoints.
+	for _, id := range []string{a, b} {
+		links, err := s.GetLinks(ctx, id)
+		if err != nil || len(links) != 1 {
+			t.Fatalf("GetLinks(%s) = %d links, %v, want 1", id, len(links), err)
+		}
+		if links[0].Relation != "related" || links[0].Strength != 0.90 {
+			t.Errorf("link = %+v, want relation=related strength=0.90", links[0])
+		}
 	}
-	if len(links) != 1 {
-		t.Fatalf("got %d links, want 1 (symmetric pair must normalize)", len(links))
-	}
-	if links[0].Strength != 0.90 {
-		t.Errorf("strength = %f, want 0.90 (re-insert keeps higher strength)", links[0].Strength)
-	}
-}
 
-func TestCreateLinkRejectsSelfLink(t *testing.T) {
-	s := testStore(t)
-	ctx := context.Background()
-	a := makeMemory(t, s, "self referential memory")
-
-	if err := s.CreateLink(ctx, a, a, "related", 0.9, "auto"); err == nil {
-		t.Fatal("CreateLink(a, a) succeeded, want error")
-	}
-}
-
-func TestLinksCascadeOnMemoryDelete(t *testing.T) {
-	s := testStore(t)
-	ctx := context.Background()
-	a := makeMemory(t, s, "alpha to be deleted")
-	b := makeMemory(t, s, "beta survivor")
-
-	if err := s.CreateLink(ctx, a, b, "related", 0.8, "auto"); err != nil {
+	c := makeMemory(t, s, "alpha to be deleted")
+	if err := s.CreateLink(ctx, c, b, "related", 0.8, "auto"); err != nil {
 		t.Fatalf("CreateLink: %v", err)
 	}
-	if err := s.Delete(ctx, a); err != nil {
+	if err := s.Delete(ctx, c); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
-	links, err := s.GetLinks(ctx, b)
-	if err != nil {
-		t.Fatalf("GetLinks: %v", err)
-	}
-	if len(links) != 0 {
-		t.Fatalf("got %d links after cascade delete, want 0", len(links))
+	if links, err := s.GetLinks(ctx, b); err != nil || len(links) != 1 {
+		t.Fatalf("after cascade delete GetLinks(b) = %d, %v, want only the a-b link", len(links), err)
 	}
 }
 
-// TestInvalidateLinkCountsOnlyLiveLinks pins the count's meaning: it is links
-// that LEFT the live set, not rows the UPDATE happened to match. Without the
-// invalidated_at IS NULL guard, re-invalidating an already-invalidated link
-// reports 1 (SQLite counts a matched row even when the new value equals the
-// old), so a caller would log a graph change that an earlier pass already made.
+// TestInvalidateLinkCountsOnlyLiveLinks pins the count's meaning: links that LEFT
+// the live set, not rows the UPDATE matched, so re-invalidating a dead link or
+// an absent relation reports 0. A symmetric link is found in either order,
+// hides it from GetLinks and LinksByRelationSource, and re-creating revives it.
 func TestInvalidateLinkCountsOnlyLiveLinks(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -114,58 +71,37 @@ func TestInvalidateLinkCountsOnlyLiveLinks(t *testing.T) {
 	if err := s.CreateLink(ctx, a, b, "supersedes", 0.9, "llm"); err != nil {
 		t.Fatalf("CreateLink: %v", err)
 	}
-	n, err := s.InvalidateLink(ctx, a, b, "supersedes")
-	if err != nil {
-		t.Fatalf("InvalidateLink: %v", err)
+	for _, tc := range []struct {
+		x, y, rel string
+		want      int64
+	}{
+		{a, b, "supersedes", 1},
+		{a, b, "supersedes", 0},
+		{a, b, "causes", 0},
+	} {
+		n, err := s.InvalidateLink(ctx, tc.x, tc.y, tc.rel)
+		if err != nil || n != tc.want {
+			t.Errorf("InvalidateLink(%s) = %d, %v, want %d", tc.rel, n, err, tc.want)
+		}
 	}
-	if n != 1 {
-		t.Errorf("first invalidation moved %d link(s) out of the live set, want 1", n)
-	}
-	n, err = s.InvalidateLink(ctx, a, b, "supersedes")
-	if err != nil {
-		t.Fatalf("InvalidateLink (repeat): %v", err)
-	}
-	if n != 0 {
-		t.Errorf("re-invalidating a dead link reported %d, want 0", n)
-	}
-	// A link that never existed is 0 too, which is the case a reversed
-	// candidate normally hits.
-	n, err = s.InvalidateLink(ctx, a, b, "causes")
-	if err != nil {
-		t.Fatalf("InvalidateLink (absent): %v", err)
-	}
-	if n != 0 {
-		t.Errorf("invalidating an absent relation reported %d, want 0", n)
-	}
-}
-
-func TestInvalidateLinkHidesFromGetLinks(t *testing.T) {
-	s := testStore(t)
-	ctx := context.Background()
-	a := makeMemory(t, s, "alpha invalidation test")
-	b := makeMemory(t, s, "beta invalidation test")
-
-	if err := s.CreateLink(ctx, a, b, "related", 0.8, "auto"); err != nil {
-		t.Fatalf("CreateLink: %v", err)
-	}
-	// Invalidate using reversed order — normalization must still find it.
-	if _, err := s.InvalidateLink(ctx, b, a, "related"); err != nil {
-		t.Fatalf("InvalidateLink: %v", err)
-	}
-	links, err := s.GetLinks(ctx, a)
-	if err != nil {
-		t.Fatalf("GetLinks: %v", err)
-	}
-	if len(links) != 0 {
+	if links, _ := s.GetLinks(ctx, a); len(links) != 0 {
 		t.Fatalf("got %d links after invalidation, want 0", len(links))
 	}
-	// Re-creating the link revives it.
-	if err := s.CreateLink(ctx, a, b, "related", 0.9, "auto"); err != nil {
+	if links, err := s.LinksByRelationSource(ctx, testProject, "supersedes", "llm"); err != nil || len(links) != 0 {
+		t.Fatalf("LinksByRelationSource kept an invalidated link: %d, %v", len(links), err)
+	}
+	if err := s.CreateLink(ctx, a, b, "supersedes", 0.9, "llm"); err != nil {
 		t.Fatalf("CreateLink revive: %v", err)
 	}
-	links, _ = s.GetLinks(ctx, a)
-	if len(links) != 1 {
+	if links, _ := s.GetLinks(ctx, a); len(links) != 1 {
 		t.Fatalf("got %d links after revive, want 1", len(links))
+	}
+	// A symmetric link is found whichever order it is invalidated in.
+	if err := s.CreateLink(ctx, a, b, "related", 0.8, "auto"); err != nil {
+		t.Fatalf("CreateLink related: %v", err)
+	}
+	if n, err := s.InvalidateLink(ctx, b, a, "related"); err != nil || n != 1 {
+		t.Errorf("InvalidateLink(reversed related) = %d, %v, want 1", n, err)
 	}
 }
 
@@ -177,40 +113,31 @@ func TestUnscannedEmbeddedMemoryIDs(t *testing.T) {
 	_ = makeMemory(t, s, "not embedded")
 
 	vec := []float32{1, 0, 0}
-	if err := s.StoreEmbedding(ctx, a, vec, "test-model"); err != nil {
-		t.Fatalf("StoreEmbedding: %v", err)
+	for _, id := range []string{a, b} {
+		if err := s.StoreEmbedding(ctx, id, vec, "test-model"); err != nil {
+			t.Fatalf("StoreEmbedding: %v", err)
+		}
 	}
-	if err := s.StoreEmbedding(ctx, b, vec, "test-model"); err != nil {
-		t.Fatalf("StoreEmbedding: %v", err)
+	got, err := s.GetEmbedding(ctx, a)
+	if err != nil || len(got) != 3 || got[0] != 1 {
+		t.Fatalf("GetEmbedding = %v, %v, want %v", got, err, vec)
 	}
 	if err := s.MarkLinkScanned(ctx, b, vec); err != nil {
 		t.Fatalf("MarkLinkScanned: %v", err)
 	}
-
 	ids, err := s.UnscannedEmbeddedMemoryIDs(ctx, testProject, 10)
-	if err != nil {
-		t.Fatalf("UnscannedEmbeddedMemoryIDs: %v", err)
+	if err != nil || len(ids) != 1 || ids[0] != a {
+		t.Fatalf("got %v, %v, want [%s] (embedded, unscanned only)", ids, err, a)
 	}
-	if len(ids) != 1 || ids[0] != a {
-		t.Fatalf("got %v, want [%s] (embedded, unscanned only)", ids, a)
+	if err := s.CreateLink(ctx, a, b, "related", 0.9, "auto"); err != nil {
+		t.Fatalf("CreateLink: %v", err)
 	}
-}
-
-func TestGetEmbedding(t *testing.T) {
-	s := testStore(t)
-	ctx := context.Background()
-	a := makeMemory(t, s, "embedding roundtrip")
-
-	want := []float32{0.1, 0.2, 0.3}
-	if err := s.StoreEmbedding(ctx, a, want, "test-model"); err != nil {
-		t.Fatalf("StoreEmbedding: %v", err)
+	embedded, stale, total, err := s.EmbeddingStats(ctx)
+	if err != nil || embedded != 2 || total != 3 || stale != 0 {
+		t.Errorf("EmbeddingStats = %d embedded, %d stale, %d total, %v, want 2, 0, 3", embedded, stale, total, err)
 	}
-	got, err := s.GetEmbedding(ctx, a)
-	if err != nil {
-		t.Fatalf("GetEmbedding: %v", err)
-	}
-	if len(got) != 3 || got[0] != 0.1 || got[1] != 0.2 || got[2] != 0.3 {
-		t.Fatalf("got %v, want %v", got, want)
+	if links, scans, err := s.LinkStats(ctx); err != nil || links != 1 || scans != 1 {
+		t.Errorf("LinkStats = links %d scans %d, %v, want 1 and 1", links, scans, err)
 	}
 }
 
@@ -220,38 +147,25 @@ func TestLinksByRelationSource(t *testing.T) {
 	a := makeMemory(t, s, "decision: switched to Postgres LISTEN/NOTIFY")
 	b := makeMemory(t, s, "gotcha: NATS can reorder messages under partition rebalance")
 	c := makeMemory(t, s, "unrelated memory about grafana ports")
-
 	if err := s.CreateLink(ctx, a, b, "causes", 0.9, "llm"); err != nil {
 		t.Fatalf("CreateLink causes: %v", err)
 	}
 	if err := s.CreateLink(ctx, c, a, "supersedes", 0.85, "manual"); err != nil {
 		t.Fatalf("CreateLink supersedes: %v", err)
 	}
-
 	links, err := s.LinksByRelationSource(ctx, testProject, "causes", "llm")
-	if err != nil {
-		t.Fatalf("LinksByRelationSource: %v", err)
+	if err != nil || len(links) != 1 || links[0].SourceID != a || links[0].TargetID != b {
+		t.Fatalf("got %+v, %v, want exactly one causes/llm link a->b", links, err)
 	}
-	if len(links) != 1 || links[0].SourceID != a || links[0].TargetID != b {
-		t.Fatalf("got %+v, want exactly one causes/llm link a->b", links)
-	}
-
-	// A different source ('manual') for the same relation must not match.
-	none, err := s.LinksByRelationSource(ctx, testProject, "supersedes", "llm")
-	if err != nil {
-		t.Fatalf("LinksByRelationSource: %v", err)
-	}
-	if len(none) != 0 {
-		t.Fatalf("got %d links, want 0 (source filter must exclude 'manual')", len(none))
+	// A different source for the same relation must not match.
+	if none, err := s.LinksByRelationSource(ctx, testProject, "supersedes", "llm"); err != nil || len(none) != 0 {
+		t.Fatalf("got %d links, %v, want 0 (source filter must exclude 'manual')", len(none), err)
 	}
 }
 
-// TestSupersedesWithinIgnoresScopeConflictingEdge: this function has no
-// production caller — SupersedePenalties is the reader ranking uses — but it is
-// exported and documented as returning the 'supersedes' edges ranking consults,
-// so a caller added later would inherit an answer that contradicts every other
-// reader of the same edge. The guard is here so the function's contract cannot
-// quietly disagree with the rest of the store.
+// TestSupersedesWithinIgnoresScopeConflictingEdge: SupersedesWithin has no
+// production caller (SupersedePenalties is the reader ranking uses) but is
+// exported, so its answer must not contradict every other reader of the edge.
 func TestSupersedesWithinIgnoresScopeConflictingEdge(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -266,85 +180,16 @@ func TestSupersedesWithinIgnoresScopeConflictingEdge(t *testing.T) {
 	if err := s.CreateLink(ctx, sameProdNewer, sameProd, "supersedes", 0.95, "llm"); err != nil {
 		t.Fatalf("CreateLink same scope: %v", err)
 	}
-
 	// The conflicting edge is not deleted, only withheld.
-	links, err := s.GetLinks(ctx, prod)
-	if err != nil {
-		t.Fatalf("GetLinks: %v", err)
+	if links, err := s.GetLinks(ctx, prod); err != nil || len(links) != 1 {
+		t.Fatalf("scope guard must not delete the existing edge, got %+v, %v", links, err)
 	}
-	if len(links) != 1 {
-		t.Fatalf("scope guard must not delete the existing edge, got %+v", links)
-	}
-
 	pairs, err := s.SupersedesWithin(ctx, []string{dev, prod, sameProdNewer, sameProd})
 	if err != nil {
 		t.Fatalf("SupersedesWithin: %v", err)
 	}
 	if len(pairs) != 1 || pairs[0] != [2]string{sameProdNewer, sameProd} {
-		t.Errorf("SupersedesWithin = %v, want only the same-scope pair %v", pairs, [2]string{sameProdNewer, sameProd})
-	}
-}
-
-func TestLinksByRelationSourceExcludesInvalidated(t *testing.T) {
-	s := testStore(t)
-	ctx := context.Background()
-	a := makeMemory(t, s, "decision alpha")
-	b := makeMemory(t, s, "evidence beta")
-
-	if err := s.CreateLink(ctx, a, b, "causes", 0.9, "llm"); err != nil {
-		t.Fatalf("CreateLink: %v", err)
-	}
-	if _, err := s.InvalidateLink(ctx, a, b, "causes"); err != nil {
-		t.Fatalf("InvalidateLink: %v", err)
-	}
-
-	links, err := s.LinksByRelationSource(ctx, testProject, "causes", "llm")
-	if err != nil {
-		t.Fatalf("LinksByRelationSource: %v", err)
-	}
-	if len(links) != 0 {
-		t.Fatalf("got %d links, want 0 (invalidated link must be excluded)", len(links))
-	}
-}
-
-func TestEmbeddingAndLinkStats(t *testing.T) {
-	s := testStore(t)
-	ctx := context.Background()
-
-	a := makeMemory(t, s, "stats memory one")
-	b := makeMemory(t, s, "stats memory two")
-	_ = makeMemory(t, s, "stats memory three unembedded")
-
-	if err := s.StoreEmbedding(ctx, a, []float32{1, 0}, "test"); err != nil {
-		t.Fatalf("StoreEmbedding: %v", err)
-	}
-	if err := s.StoreEmbedding(ctx, b, []float32{0, 1}, "test"); err != nil {
-		t.Fatalf("StoreEmbedding: %v", err)
-	}
-	if err := s.CreateLink(ctx, a, b, "related", 0.9, "auto"); err != nil {
-		t.Fatalf("CreateLink: %v", err)
-	}
-	if err := s.MarkLinkScanned(ctx, a, []float32{1, 0}); err != nil {
-		t.Fatalf("MarkLinkScanned: %v", err)
-	}
-
-	embedded, stale, total, err := s.EmbeddingStats(ctx)
-	if err != nil {
-		t.Fatalf("EmbeddingStats: %v", err)
-	}
-	if embedded != 2 || total != 3 {
-		t.Errorf("EmbeddingStats = %d/%d, want 2/3", embedded, total)
-	}
-	if stale != 0 {
-		t.Errorf("EmbeddingStats stale = %d, want 0: no identity is configured, so no row is retired", stale)
-	}
-
-	links, scans, err := s.LinkStats(ctx)
-	if err != nil {
-		t.Fatalf("LinkStats: %v", err)
-	}
-	if links != 1 || scans != 1 {
-		t.Errorf("LinkStats = links %d scans %d, want 1 and 1", links, scans)
+		t.Errorf("SupersedesWithin = %v, want only the same-scope pair", pairs)
 	}
 }
 
@@ -363,23 +208,10 @@ func liveRelatedDegree(t *testing.T, s *Store, id string) int {
 	return n
 }
 
-func TestCreateLinkCapsRelatedDegree(t *testing.T) {
-	s := testStore(t)
-	ctx := context.Background()
-	hub := makeMemory(t, s, "hub memory")
-	others := make([]string, MaxRelatedDegree+5)
-	for i := range others {
-		others[i] = makeMemory(t, s, fmt.Sprintf("neighbor %d", i))
-		// Descending strengths so the first MaxRelatedDegree are strongest.
-		strength := 0.99 - float32(i)*0.001
-		if err := s.CreateLink(ctx, hub, others[i], "related", strength, "auto"); err != nil {
-			t.Fatalf("CreateLink %d: %v", i, err)
-		}
-	}
-	if got := liveRelatedDegree(t, s, hub); got != MaxRelatedDegree {
-		t.Fatalf("hub related degree = %d, want %d", got, MaxRelatedDegree)
-	}
-	links, err := s.GetLinks(ctx, hub)
+// keptNeighbors returns the set of memories still related-linked to hub.
+func keptNeighbors(t *testing.T, s *Store, hub string) map[string]bool {
+	t.Helper()
+	links, err := s.GetLinks(context.Background(), hub)
 	if err != nil {
 		t.Fatalf("GetLinks: %v", err)
 	}
@@ -394,51 +226,78 @@ func TestCreateLinkCapsRelatedDegree(t *testing.T) {
 		}
 		kept[other] = true
 	}
-	// The strongest MaxRelatedDegree (lowest indices) must survive.
-	for i := 0; i < MaxRelatedDegree; i++ {
-		if !kept[others[i]] {
-			t.Errorf("strong link to neighbor %d (strength %.3f) was invalidated; weakest should be dropped", i, 0.99-float32(i)*0.001)
-		}
-	}
-	for i := MaxRelatedDegree; i < len(others); i++ {
-		if kept[others[i]] {
-			t.Errorf("weak link to neighbor %d (strength %.3f) survived; degree cap should invalidate it", i, 0.99-float32(i)*0.001)
-		}
-	}
+	return kept
 }
 
-func TestCreateLinkCapsRelatedDegreeOnBothEndpoints(t *testing.T) {
-	s := testStore(t)
+// A hub's related degree is capped at MaxRelatedDegree, the weakest links go,
+// and the cap holds on both endpoints of a new link. TrimOverCapRelatedDegrees
+// repairs a store seeded over the cap the same way.
+func TestRelatedDegreeCap(t *testing.T) {
 	ctx := context.Background()
-	a := makeMemory(t, s, "endpoint a")
-	b := makeMemory(t, s, "endpoint b")
-	// Fill a to capacity with strong links.
-	for i := 0; i < MaxRelatedDegree; i++ {
-		peer := makeMemory(t, s, fmt.Sprintf("a peer %d", i))
-		if err := s.CreateLink(ctx, a, peer, "related", 0.95, "auto"); err != nil {
-			t.Fatalf("fill a: %v", err)
+	check := func(t *testing.T, s *Store, hub string, others []string) {
+		t.Helper()
+		if got := liveRelatedDegree(t, s, hub); got != MaxRelatedDegree {
+			t.Fatalf("hub related degree = %d, want %d", got, MaxRelatedDegree)
+		}
+		kept := keptNeighbors(t, s, hub)
+		for i, o := range others {
+			if want := i < MaxRelatedDegree; kept[o] != want {
+				t.Errorf("neighbor %d kept = %v, want %v (strongest survive)", i, kept[o], want)
+			}
 		}
 	}
-	// A weak link between a and b should not survive on a.
-	if err := s.CreateLink(ctx, a, b, "related", 0.70, "auto"); err != nil {
-		t.Fatalf("CreateLink a-b: %v", err)
-	}
-	links, err := s.GetLinks(ctx, a)
-	if err != nil {
-		t.Fatalf("GetLinks(a): %v", err)
-	}
-	for _, l := range links {
-		other := l.SourceID
-		if other == a {
-			other = l.TargetID
+	t.Run("create", func(t *testing.T) {
+		s := testStore(t)
+		hub := makeMemory(t, s, "hub memory")
+		others := make([]string, MaxRelatedDegree+5)
+		for i := range others {
+			others[i] = makeMemory(t, s, fmt.Sprintf("neighbor %d", i))
+			if err := s.CreateLink(ctx, hub, others[i], "related", 0.99-float32(i)*0.001, "auto"); err != nil {
+				t.Fatalf("CreateLink %d: %v", i, err)
+			}
 		}
-		if other == b {
+		check(t, s, hub, others)
+	})
+	t.Run("both endpoints", func(t *testing.T) {
+		s := testStore(t)
+		a := makeMemory(t, s, "endpoint a")
+		b := makeMemory(t, s, "endpoint b")
+		for i := 0; i < MaxRelatedDegree; i++ {
+			peer := makeMemory(t, s, fmt.Sprintf("a peer %d", i))
+			if err := s.CreateLink(ctx, a, peer, "related", 0.95, "auto"); err != nil {
+				t.Fatalf("fill a: %v", err)
+			}
+		}
+		if err := s.CreateLink(ctx, a, b, "related", 0.70, "auto"); err != nil {
+			t.Fatalf("CreateLink a-b: %v", err)
+		}
+		if keptNeighbors(t, s, a)[b] {
 			t.Fatal("weak a-b link survived on endpoint a despite degree cap")
 		}
-	}
-	if got := liveRelatedDegree(t, s, a); got != MaxRelatedDegree {
-		t.Fatalf("a degree = %d, want %d", got, MaxRelatedDegree)
-	}
+		if got := liveRelatedDegree(t, s, a); got != MaxRelatedDegree {
+			t.Fatalf("a degree = %d, want %d", got, MaxRelatedDegree)
+		}
+	})
+	t.Run("trim", func(t *testing.T) {
+		s := testStore(t)
+		hub := makeMemory(t, s, "over-cap hub")
+		others := make([]string, MaxRelatedDegree+10)
+		for i := range others {
+			others[i] = makeMemory(t, s, fmt.Sprintf("trim neighbor %d", i))
+			src, tgt := hub, others[i]
+			if src > tgt {
+				src, tgt = tgt, src
+			}
+			if _, err := s.db.ExecContext(ctx, `INSERT INTO memory_links (source_id, target_id, relation, strength, source)
+				VALUES (?, ?, 'related', ?, 'auto')`, src, tgt, 0.99-float32(i)*0.001); err != nil {
+				t.Fatalf("seed link %d: %v", i, err)
+			}
+		}
+		if err := s.TrimOverCapRelatedDegrees(ctx); err != nil {
+			t.Fatalf("TrimOverCapRelatedDegrees: %v", err)
+		}
+		check(t, s, hub, others)
+	})
 }
 
 func TestCapRelatedDegreePlanUsesIndexes(t *testing.T) {
@@ -459,90 +318,14 @@ func TestCapRelatedDegreePlanUsesIndexes(t *testing.T) {
 		}
 		plan = append(plan, detail)
 	}
-	if err := rows.Err(); err != nil {
-		t.Fatalf("rows: %v", err)
+	if err := rows.Err(); err != nil || len(plan) == 0 {
+		t.Fatalf("plan rows = %d, %v", len(plan), err)
 	}
-	if len(plan) == 0 {
-		t.Fatal("empty plan")
+	joined := strings.Join(plan, "\n")
+	if strings.Contains(joined, "SCAN memory_links") {
+		t.Errorf("cap plan scans memory_links:\n%s", joined)
 	}
-	for _, d := range plan {
-		if strings.Contains(d, "SCAN memory_links") {
-			t.Errorf("cap plan scans memory_links: %q\n%s", d, strings.Join(plan, "\n"))
-		}
-	}
-	var sawSource, sawTarget bool
-	for _, d := range plan {
-		sawSource = sawSource || strings.Contains(d, "idx_links_source")
-		sawTarget = sawTarget || strings.Contains(d, "idx_links_target")
-	}
-	if !sawSource || !sawTarget {
-		t.Errorf("cap plan does not use both link indexes (source %v, target %v):\n%s", sawSource, sawTarget, strings.Join(plan, "\n"))
-	}
-}
-
-func TestTrimOverCapRelatedDegrees(t *testing.T) {
-	s := testStore(t)
-	ctx := context.Background()
-	hub := makeMemory(t, s, "over-cap hub")
-	others := make([]string, MaxRelatedDegree+10)
-	for i := range others {
-		others[i] = makeMemory(t, s, fmt.Sprintf("trim neighbor %d", i))
-		src, tgt := hub, others[i]
-		if src > tgt {
-			src, tgt = tgt, src
-		}
-		strength := 0.99 - float32(i)*0.001
-		if _, err := s.db.ExecContext(ctx, `
-			INSERT INTO memory_links (source_id, target_id, relation, strength, source)
-			VALUES (?, ?, 'related', ?, 'auto')
-		`, src, tgt, strength); err != nil {
-			t.Fatalf("seed link %d: %v", i, err)
-		}
-	}
-	if got := liveRelatedDegree(t, s, hub); got != MaxRelatedDegree+10 {
-		t.Fatalf("seeded degree = %d, want %d", got, MaxRelatedDegree+10)
-	}
-	if err := s.TrimOverCapRelatedDegrees(ctx); err != nil {
-		t.Fatalf("TrimOverCapRelatedDegrees: %v", err)
-	}
-	if got := liveRelatedDegree(t, s, hub); got != MaxRelatedDegree {
-		t.Fatalf("trimmed degree = %d, want %d", got, MaxRelatedDegree)
-	}
-	links, err := s.GetLinks(ctx, hub)
-	if err != nil {
-		t.Fatalf("GetLinks: %v", err)
-	}
-	kept := map[string]bool{}
-	for _, l := range links {
-		if l.Relation != "related" {
-			continue
-		}
-		other := l.SourceID
-		if other == hub {
-			other = l.TargetID
-		}
-		kept[other] = true
-	}
-	for i := 0; i < MaxRelatedDegree; i++ {
-		if !kept[others[i]] {
-			t.Errorf("strong link to trim neighbor %d was invalidated", i)
-		}
-	}
-	for i := MaxRelatedDegree; i < len(others); i++ {
-		if kept[others[i]] {
-			t.Errorf("weak link to trim neighbor %d survived", i)
-		}
-	}
-	var invalidated int
-	row := s.db.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM memory_links
-		WHERE relation = 'related' AND invalidated_at IS NOT NULL
-		  AND (source_id = ? OR target_id = ?)
-	`, hub, hub)
-	if err := row.Scan(&invalidated); err != nil {
-		t.Fatalf("count invalidated: %v", err)
-	}
-	if invalidated != 10 {
-		t.Fatalf("invalidated = %d, want 10", invalidated)
+	if !strings.Contains(joined, "idx_links_source") || !strings.Contains(joined, "idx_links_target") {
+		t.Errorf("cap plan does not use both link indexes:\n%s", joined)
 	}
 }

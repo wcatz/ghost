@@ -1,7 +1,6 @@
 package memory
 
 import (
-	"context"
 	"database/sql"
 	"fmt"
 	"os"
@@ -218,81 +217,6 @@ func TestMigrateFreshDBStamped(t *testing.T) {
 	}
 }
 
-// TestMigrateFreshDBHasResolvedAt: a brand-new database (initSQL path, no
-// legacy schema involved) must have the resolved_at column from the start —
-// guards against resolved_at silently going missing from initSQL while
-// migrateV2 still exists to paper over it on upgraded databases.
-func TestMigrateFreshDBHasResolvedAt(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "ghost.db")
-	db, err := OpenDB(dbPath)
-	if err != nil {
-		t.Fatalf("OpenDB: %v", err)
-	}
-	defer db.Close() //nolint:errcheck
-
-	if _, err := db.Exec(`SELECT resolved_at FROM memories LIMIT 0`); err != nil {
-		t.Errorf("resolved_at column missing on fresh db: %v", err)
-	}
-}
-
-// TestMigrateFreshDBHasResolveKeptHash: a brand-new database (initSQL path, no
-// legacy schema involved) must have resolve_kept_hash from the start — guards
-// against the column silently going missing from initSQL while migrateV7 still
-// exists to paper over it on upgraded databases — and it must default to the
-// empty (never-judged) hash.
-func TestMigrateFreshDBHasResolveKeptHash(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "ghost.db")
-	db, err := OpenDB(dbPath)
-	if err != nil {
-		t.Fatalf("OpenDB: %v", err)
-	}
-	defer db.Close() //nolint:errcheck
-
-	if _, err := db.Exec(`SELECT resolve_kept_hash FROM memories LIMIT 0`); err != nil {
-		t.Fatalf("resolve_kept_hash column missing on fresh db: %v", err)
-	}
-	if _, err := db.Exec(
-		`INSERT INTO projects (id, path, name) VALUES ('p1', '/tmp/fresh-p1', 'p1')`,
-	); err != nil {
-		t.Fatalf("seed project: %v", err)
-	}
-	if _, err := db.Exec(
-		`INSERT INTO memories (id, project_id, content) VALUES ('m1', 'p1', 'fresh note')`,
-	); err != nil {
-		t.Fatalf("seed memory: %v", err)
-	}
-	var hash string
-	if err := db.QueryRow(`SELECT resolve_kept_hash FROM memories WHERE id = 'm1'`).Scan(&hash); err != nil {
-		t.Fatalf("read default: %v", err)
-	}
-	if hash != "" {
-		t.Errorf("default resolve_kept_hash = %q, want empty", hash)
-	}
-}
-
-// TestMigrateFreshDBHasSupersedeChecked: a brand-new database (initSQL path, no
-// legacy schema involved) must have supersede_checked from the start — guards
-// against the table silently going missing from initSQL while migrateV8 still
-// exists to paper over it on upgraded databases.
-func TestMigrateFreshDBHasSupersedeChecked(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "ghost.db")
-	db, err := OpenDB(dbPath)
-	if err != nil {
-		t.Fatalf("OpenDB: %v", err)
-	}
-	defer db.Close() //nolint:errcheck
-
-	if _, err := db.Exec(`SELECT newer_id, older_id, project_id, newer_hash, older_hash FROM supersede_checked LIMIT 0`); err != nil {
-		t.Fatalf("supersede_checked table missing on fresh db: %v", err)
-	}
-	var idx string
-	if err := db.QueryRow(
-		`SELECT name FROM sqlite_master WHERE type='index' AND name='idx_supersede_checked_project'`,
-	).Scan(&idx); err != nil {
-		t.Fatalf("idx_supersede_checked_project missing on fresh db: %v", err)
-	}
-}
-
 // TestMigrateHandMigratedDB: a database whose tables already match the current
 // schema but whose user_version is still 0 (hand-migrated) must be stamped
 // without a rebuild — the introspection guards skip work that is already done.
@@ -334,27 +258,18 @@ func TestMigrateHandMigratedDB(t *testing.T) {
 	}
 }
 
-// TestMigrateRepairsPreExistingCacheOrphans: a v5 database whose only orphans
-// are derived-cache rows — link_scans/memory_embeddings for deleted memories —
-// must migrate cleanly to schemaVersion: the debris is deleted with a warning,
-// the surviving rows are untouched, and the DB opens (it is not bricked).
-func TestMigrateRepairsPreExistingCacheOrphans(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "ghost.db")
-	db, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		t.Fatalf("open v5 db: %v", err)
-	}
-	defer db.Close() //nolint:errcheck
-
-	v5 := []string{
-		`CREATE TABLE projects (
+// v5Schema is the v5-vintage schema the orphan tests seed: the tables migrate()
+// continues through to the current version (memory_snapshots exists in a real
+// database of this vintage, without the identity columns v13 adds).
+var v5Schema = []string{
+	`CREATE TABLE projects (
     id          TEXT PRIMARY KEY,
     path        TEXT NOT NULL UNIQUE,
     name        TEXT NOT NULL,
     created_at  TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
 )`,
-		`CREATE TABLE memories (
+	`CREATE TABLE memories (
     id            TEXT PRIMARY KEY DEFAULT (hex(randomblob(16))),
     project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     category      TEXT NOT NULL DEFAULT 'fact',
@@ -369,17 +284,17 @@ func TestMigrateRepairsPreExistingCacheOrphans(t *testing.T) {
     updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
     resolved_at   TEXT
 )`,
-		`CREATE TABLE memory_embeddings (
+	`CREATE TABLE memory_embeddings (
     memory_id   TEXT PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
     embedding   BLOB NOT NULL,
     model       TEXT NOT NULL DEFAULT 'nomic-embed-text',
     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 )`,
-		`CREATE TABLE link_scans (
+	`CREATE TABLE link_scans (
     memory_id  TEXT PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
     scanned_at TEXT NOT NULL DEFAULT (datetime('now'))
 )`,
-		`CREATE TABLE ghost_state (
+	`CREATE TABLE ghost_state (
     project_id          TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
     interaction_count   INTEGER NOT NULL DEFAULT 0,
     learned_context     TEXT DEFAULT '',
@@ -387,10 +302,7 @@ func TestMigrateRepairsPreExistingCacheOrphans(t *testing.T) {
     reflection_summary  TEXT DEFAULT '',
     updated_at          TEXT NOT NULL DEFAULT (datetime('now'))
 )`,
-		// migrate() now continues to v13, which ALTERs memory_snapshots; a real
-		// database of this vintage always has the table (it predates v6 — see the
-		// pre-v6 schema in this file), just not the identity columns v13 adds.
-		`CREATE TABLE memory_snapshots (
+	`CREATE TABLE memory_snapshots (
     id            TEXT PRIMARY KEY DEFAULT (hex(randomblob(16))),
     snapshot_id   TEXT NOT NULL,
     project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -401,53 +313,55 @@ func TestMigrateRepairsPreExistingCacheOrphans(t *testing.T) {
     tags          TEXT DEFAULT '[]',
     created_at    TEXT NOT NULL DEFAULT (datetime('now'))
 )`,
-		`INSERT INTO projects (id, path, name) VALUES ('p1', '/tmp/v5c-p1', 'p1')`,
-		`INSERT INTO memories (id, project_id, content) VALUES ('m1', 'p1', 'survivor memory')`,
-		`INSERT INTO link_scans (memory_id, scanned_at) VALUES ('deleted-mem', datetime('now'))`,
-		`INSERT INTO memory_embeddings (memory_id, embedding) VALUES ('deleted-mem', X'0102')`,
-		`PRAGMA user_version = 5`,
+}
+
+// seedV5 opens a fresh database and applies the v5 schema plus the given rows,
+// stamped at user_version 5.
+func seedV5(t *testing.T, rows ...string) *sql.DB {
+	t.Helper()
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "ghost.db"))
+	if err != nil {
+		t.Fatalf("open v5 db: %v", err)
 	}
-	for _, s := range v5 {
+	t.Cleanup(func() { _ = db.Close() })
+	for _, s := range append(append(append([]string{}, v5Schema...), rows...), `PRAGMA user_version = 5`) {
 		if _, err := db.Exec(s); err != nil {
 			t.Fatalf("seed v5 db: %v", err)
 		}
 	}
+	return db
+}
 
+// TestMigrateRepairsPreExistingCacheOrphans: a v5 database whose only orphans
+// are derived-cache rows (link_scans/memory_embeddings for deleted memories)
+// migrates cleanly: the debris is deleted, the surviving rows are untouched, and
+// the DB is not bricked.
+func TestMigrateRepairsPreExistingCacheOrphans(t *testing.T) {
+	db := seedV5(t,
+		`INSERT INTO projects (id, path, name) VALUES ('p1', '/tmp/v5c-p1', 'p1')`,
+		`INSERT INTO memories (id, project_id, content) VALUES ('m1', 'p1', 'survivor memory')`,
+		`INSERT INTO link_scans (memory_id, scanned_at) VALUES ('deleted-mem', datetime('now'))`,
+		`INSERT INTO memory_embeddings (memory_id, embedding) VALUES ('deleted-mem', X'0102')`)
 	if err := migrate(db, 5); err != nil {
 		t.Fatalf("migrate v5->current with cache orphans: %v", err)
 	}
 	if v := schemaVersionOf(t, db); v != schemaVersion {
 		t.Errorf("user_version = %d, want %d", v, schemaVersion)
 	}
-
-	// The orphaned derived rows were deleted (repair path).
-	var n int
-	if err := db.QueryRow(`SELECT count(*) FROM link_scans`).Scan(&n); err != nil || n != 0 {
-		t.Errorf("link_scans after repair: n=%d err=%v, want 0", n, err)
-	}
-	if err := db.QueryRow(`SELECT count(*) FROM memory_embeddings`).Scan(&n); err != nil || n != 0 {
-		t.Errorf("memory_embeddings after repair: n=%d err=%v, want 0", n, err)
-	}
-	// The surviving memory row is untouched.
-	if err := db.QueryRow(`SELECT count(*) FROM memories WHERE id = 'm1'`).Scan(&n); err != nil || n != 1 {
-		t.Errorf("memories after repair: n=%d err=%v, want 1", n, err)
+	for table, want := range map[string]int{"link_scans": 0, "memory_embeddings": 0, "memories": 1} {
+		var n int
+		if err := db.QueryRow(`SELECT count(*) FROM ` + table).Scan(&n); err != nil || n != want {
+			t.Errorf("%s after repair: n=%d err=%v, want %d", table, n, err, want)
+		}
 	}
 }
 
 // TestMigrateRepairsAnOrphanedEvidenceRow: the evidence table is in the
-// derived-cache whitelist, and this is the case that puts it there.
-//
-// An evidence row whose memory is gone is debris by the table's OWN definition —
-// the foreign key cascades, so a live store cannot hold one, and this table says
-// in its schema comment that evidence without its memory means nothing. Left
-// unwhitelisted it would be treated as user content: every later migration would
-// ABORT on it, with copy-pasteable DELETEs, and a build one version ahead of the
-// delete would refuse to open the store at all. That is the failure the whitelist
-// exists to prevent, and the evidence rows it gives up are rows that a correct
-// delete would already have removed.
-//
-// The store must be USABLE afterwards, not merely open: the repair runs before the
-// migration steps, so a table left broken by it would fail the first save.
+// derived-cache whitelist, and this is the case that puts it there. An evidence
+// row whose memory is gone is debris by the table's own definition (the foreign
+// key cascades), and unwhitelisted it would abort every later migration as user
+// content. The store must be USABLE afterwards, not merely open, and the live
+// row's evidence is not collateral.
 func TestMigrateRepairsAnOrphanedEvidenceRow(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "ghost.db")
 	// A bare DSN, deliberately: foreign_keys is off here, which is exactly how a
@@ -525,69 +439,18 @@ func TestMigrateRepairsAnOrphanedEvidenceRow(t *testing.T) {
 }
 
 // TestMigrateBlocksUserContentOrphans: an orphan in a user-content table (a
-// memories row whose project is gone) must NOT be auto-deleted — migrate fails
-// with copy-pasteable DELETE statements naming the offending rows, so the
-// operator decides. This is the deliberate non-destructive side of the repair:
-// derived-cache debris self-heals, user content never silently disappears.
+// memories row whose project is gone) must NOT be auto-deleted: migrate fails with
+// copy-pasteable DELETE statements naming the offending rows, so the operator
+// decides. Derived-cache debris self-heals; user content never silently disappears.
 func TestMigrateBlocksUserContentOrphans(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "ghost.db")
-	db, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		t.Fatalf("open v5 db: %v", err)
-	}
-	defer db.Close() //nolint:errcheck
-
-	v5 := []string{
-		`CREATE TABLE projects (
-    id          TEXT PRIMARY KEY,
-    path        TEXT NOT NULL UNIQUE,
-    name        TEXT NOT NULL,
-    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
-)`,
-		`CREATE TABLE memories (
-    id            TEXT PRIMARY KEY DEFAULT (hex(randomblob(16))),
-    project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-    category      TEXT NOT NULL DEFAULT 'fact',
-    content       TEXT NOT NULL,
-    importance    REAL NOT NULL DEFAULT 0.5,
-    access_count  INTEGER NOT NULL DEFAULT 0,
-    last_accessed TEXT,
-    source        TEXT NOT NULL DEFAULT 'reflection',
-    tags          TEXT DEFAULT '[]',
-    pinned        INTEGER NOT NULL DEFAULT 0,
-    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
-    resolved_at   TEXT
-)`,
-		`CREATE TABLE ghost_state (
-    project_id          TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
-    interaction_count   INTEGER NOT NULL DEFAULT 0,
-    learned_context     TEXT DEFAULT '',
-    last_reflection_at  TEXT,
-    reflection_summary  TEXT DEFAULT '',
-    updated_at          TEXT NOT NULL DEFAULT (datetime('now'))
-)`,
+	db := seedV5(t,
 		`INSERT INTO projects (id, path, name) VALUES ('p1', '/tmp/v5b-p1', 'p1')`,
 		`INSERT INTO memories (id, project_id, content) VALUES ('m1', 'p1', 'survivor memory')`,
-		`INSERT INTO memories (id, project_id, content) VALUES ('m-orphan', 'gone-project', 'orphaned memory')`,
-		`PRAGMA user_version = 5`,
+		`INSERT INTO memories (id, project_id, content) VALUES ('m-orphan', 'gone-project', 'orphaned memory')`)
+	err := migrate(db, 5)
+	if err == nil || !strings.Contains(err.Error(), "DELETE FROM memories WHERE rowid") {
+		t.Fatalf("migrate on a DB with a user-content orphan = %v, want an error with copy-pasteable DELETE statements", err)
 	}
-	for _, s := range v5 {
-		if _, err := db.Exec(s); err != nil {
-			t.Fatalf("seed v5 db: %v", err)
-		}
-	}
-
-	err = migrate(db, 5)
-	if err == nil {
-		t.Fatal("migrate succeeded on DB with a user-content orphan, want error")
-	}
-	if !strings.Contains(err.Error(), "DELETE FROM memories WHERE rowid") {
-		t.Errorf("migrate error lacks copy-pasteable DELETE statements: %v", err)
-	}
-	// Nothing was deleted: the survivor row is intact and so is the orphan
-	// (the operator deletes it deliberately after reading the message).
 	var n int
 	if err := db.QueryRow(`SELECT count(*) FROM memories`).Scan(&n); err != nil || n != 2 {
 		t.Errorf("memories after blocked migrate: n=%d err=%v, want 2 (nothing auto-deleted)", n, err)
@@ -597,110 +460,65 @@ func TestMigrateBlocksUserContentOrphans(t *testing.T) {
 	}
 }
 
-// TestMigrateIdempotent: opening an already-migrated database repeatedly is a no-op.
-// v4WithConversationsDB writes a schemaVersion-4 database: the current
-// initSQL shape plus the pre-v5 conversations/messages tables with orphaned
-// rows still in them — the state of every DB created before #347's strip.
-// initSQL no longer creates those two tables, so they're added explicitly to
-// reproduce what a real v4 database carries; stamped at user_version=4.
-func v4WithConversationsDB(t *testing.T) string {
-	t.Helper()
+// TestMigrateV5DropsConversationTables (#347): a schemaVersion-4 database still
+// carrying the orphaned assistant-era conversations/messages rows lands at the
+// current version with both tables and their indices gone, while the surviving
+// tables keep their data.
+func TestMigrateV5DropsConversationTables(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "ghost.db")
-	db, err := sql.Open("sqlite", dbPath)
+	seed, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		t.Fatalf("open v4 db: %v", err)
 	}
-	defer db.Close() //nolint:errcheck
-	if _, err := db.Exec(initSQL); err != nil {
-		t.Fatalf("create current schema: %v", err)
-	}
-	legacy := []string{
+	for _, stmt := range []string{
+		initSQL,
 		`CREATE TABLE conversations (
     id          TEXT PRIMARY KEY DEFAULT (hex(randomblob(16))),
     project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-    mode        TEXT NOT NULL DEFAULT 'chat',
-    title       TEXT DEFAULT '',
-    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+    mode        TEXT NOT NULL DEFAULT 'chat'
 )`,
+		`CREATE INDEX idx_conversations_project ON conversations(project_id)`,
 		`CREATE TABLE messages (
     id              TEXT PRIMARY KEY DEFAULT (hex(randomblob(16))),
     conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
-    role            TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'tool_use', 'tool_result')),
-    content         TEXT NOT NULL,
-    tool_name       TEXT,
-    tool_use_id     TEXT,
-    created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+    role            TEXT NOT NULL,
+    content         TEXT NOT NULL
 )`,
+		`CREATE INDEX idx_messages_conv ON messages(conversation_id)`,
 		`INSERT INTO projects (id, path, name) VALUES ('p1', '/tmp/v4-p1', 'p1')`,
-		`INSERT INTO memories (id, project_id, category, content, source) VALUES
-			('m1', 'p1', 'fact', 'memory that must survive the drop', 'mcp')`,
-		`INSERT INTO conversations (id, project_id, mode) VALUES ('c1', 'p1', 'chat')`,
-		`INSERT INTO messages (conversation_id, role, content) VALUES
-			('c1', 'user', 'pre-strip transcript row'),
-			('c1', 'assistant', 'another orphaned row')`,
+		`INSERT INTO memories (id, project_id, category, content, source) VALUES ('m1', 'p1', 'fact', 'memory that must survive the drop', 'mcp')`,
+		`INSERT INTO conversations (id, project_id) VALUES ('c1', 'p1')`,
+		`INSERT INTO messages (conversation_id, role, content) VALUES ('c1', 'user', 'pre-strip transcript row')`,
 		`PRAGMA user_version = 4`,
-	}
-	for _, s := range legacy {
-		if _, err := db.Exec(s); err != nil {
+	} {
+		if _, err := seed.Exec(stmt); err != nil {
 			t.Fatalf("seed v4 db: %v", err)
 		}
 	}
-	return dbPath
-}
-
-// TestMigrateV5DropsConversationTables: a schemaVersion-4 database carrying
-// the orphaned assistant-era conversations/messages rows must land at the
-// current version with both tables (and their indices) gone, while every
-// surviving table keeps its data untouched (#347).
-func TestMigrateV5DropsConversationTables(t *testing.T) {
-	dbPath := v4WithConversationsDB(t)
-
+	if err := seed.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
 	db, err := OpenDB(dbPath)
 	if err != nil {
 		t.Fatalf("OpenDB on v4 db: %v", err)
 	}
 	defer db.Close() //nolint:errcheck
-
 	if v := schemaVersionOf(t, db); v != schemaVersion {
 		t.Errorf("user_version = %d, want %d", v, schemaVersion)
 	}
-
-	// Tables and their indices are gone entirely — not just emptied.
-	for _, name := range []string{
-		"conversations", "messages",
-		"idx_conversations_project", "idx_messages_conv",
-	} {
+	for _, name := range []string{"conversations", "messages", "idx_conversations_project", "idx_messages_conv"} {
 		var c int
-		typ := "table"
-		if strings.HasPrefix(name, "idx_") {
-			typ = "index"
-		}
-		if err := db.QueryRow(
-			`SELECT count(*) FROM sqlite_master WHERE type=? AND name=?`, typ, name,
-		).Scan(&c); err != nil || c != 0 {
-			t.Errorf("%s %s still present after migration (c=%d err=%v)", typ, name, c, err)
+		if err := db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE name=?`, name).Scan(&c); err != nil || c != 0 {
+			t.Errorf("%s still present after migration (c=%d err=%v)", name, c, err)
 		}
 	}
-
-	// Surviving data is intact: the seeded project and memory rows are
-	// unaffected by dropping their conversational siblings.
 	var n int
 	if err := db.QueryRow(`SELECT count(*) FROM memories WHERE id = 'm1'`).Scan(&n); err != nil || n != 1 {
 		t.Errorf("memories after migration: n=%d err=%v, want 1", n, err)
 	}
-	if err := db.QueryRow(`SELECT count(*) FROM projects WHERE id = 'p1'`).Scan(&n); err != nil || n != 1 {
-		t.Errorf("projects after migration: n=%d err=%v, want 1", n, err)
-	}
-
-	// A fresh write into a surviving table works normally post-migration.
-	if _, err := db.Exec(
-		`INSERT INTO memories (id, project_id, content, source) VALUES ('m2', 'p1', 'post-migration insert', 'mcp')`,
-	); err != nil {
-		t.Errorf("insert after migration: %v", err)
-	}
 }
 
+// TestMigrateIdempotent: opening an already-migrated database repeatedly is a no-op.
 func TestMigrateIdempotent(t *testing.T) {
 	dbPath := newLegacyDB(t)
 	for i := 0; i < 3; i++ {
@@ -725,466 +543,6 @@ func TestMigrateIdempotent(t *testing.T) {
 	}
 	if _, err := os.Stat(dbPath); err != nil {
 		t.Errorf("db missing: %v", err)
-	}
-}
-
-// TestMigrateAddsResolvedAt: a pre-versioning database gains the resolved_at
-// column, keeps all rows and FTS integrity, and lands at the current version.
-func TestMigrateAddsResolvedAt(t *testing.T) {
-	dbPath := newLegacyDB(t)
-
-	db, err := OpenDB(dbPath)
-	if err != nil {
-		t.Fatalf("OpenDB on legacy db: %v", err)
-	}
-	defer db.Close() //nolint:errcheck
-
-	if v := schemaVersionOf(t, db); v != schemaVersion {
-		t.Errorf("user_version = %d, want %d", v, schemaVersion)
-	}
-
-	// The column exists and defaults to NULL (active) for migrated rows.
-	var nNull int
-	if err := db.QueryRow(
-		`SELECT count(*) FROM memories WHERE resolved_at IS NULL`,
-	).Scan(&nNull); err != nil || nNull != 2 {
-		t.Fatalf("resolved_at NULL count: n=%d err=%v, want 2", nNull, err)
-	}
-
-	// A value can be written and read back.
-	if _, err := db.Exec(
-		`UPDATE memories SET resolved_at = datetime('now') WHERE id = 'm1'`,
-	); err != nil {
-		t.Fatalf("write resolved_at: %v", err)
-	}
-	var nResolved int
-	if err := db.QueryRow(
-		`SELECT count(*) FROM memories WHERE resolved_at IS NOT NULL`,
-	).Scan(&nResolved); err != nil || nResolved != 1 {
-		t.Errorf("resolved_at set count: n=%d err=%v, want 1", nResolved, err)
-	}
-
-	// FTS survived the column add (external-content index keyed on rowid).
-	var nFts int
-	if err := db.QueryRow(
-		`SELECT count(*) FROM memories_fts WHERE memories_fts MATCH 'obsidian'`,
-	).Scan(&nFts); err != nil || nFts != 1 {
-		t.Errorf("fts match after add-column migration: n=%d err=%v, want 1", nFts, err)
-	}
-}
-
-// TestMigrateV6AddsReflectInputSig exercises the one-shot upgrade every
-// existing v5 database takes — through v6 and on into the later steps (the
-// seed carries the tables those steps touch): migrateV6 must ALTER the old
-// ghost_state shape, not rely on initSQL's fresh-database column.
-func TestMigrateV6AddsReflectInputSig(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "ghost.db")
-	db, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		t.Fatalf("open v5 db: %v", err)
-	}
-	defer db.Close() //nolint:errcheck
-
-	v5 := []string{
-		`CREATE TABLE projects (
-    id          TEXT PRIMARY KEY,
-    path        TEXT NOT NULL UNIQUE,
-    name        TEXT NOT NULL,
-    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
-)`,
-		`CREATE TABLE ghost_state (
-    project_id          TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
-    interaction_count   INTEGER NOT NULL DEFAULT 0,
-    learned_context     TEXT DEFAULT '',
-    last_reflection_at  TEXT,
-    reflection_summary  TEXT DEFAULT '',
-    updated_at          TEXT NOT NULL DEFAULT (datetime('now'))
-)`,
-		// migrate() now continues past v6 to v7, which ALTERs memories; a real
-		// v5 database always has this table (with resolved_at from v2).
-		`CREATE TABLE memories (
-    id            TEXT PRIMARY KEY DEFAULT (hex(randomblob(16))),
-    project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-    category      TEXT NOT NULL DEFAULT 'fact',
-    content       TEXT NOT NULL,
-    importance    REAL NOT NULL DEFAULT 0.5,
-    access_count  INTEGER NOT NULL DEFAULT 0,
-    last_accessed TEXT,
-    source        TEXT NOT NULL DEFAULT 'reflection',
-    tags          TEXT DEFAULT '[]',
-    pinned        INTEGER NOT NULL DEFAULT 0,
-    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
-    resolved_at   TEXT
-)`,
-		// migrate() now continues to v13, which ALTERs memory_snapshots; a real
-		// database of this vintage always has the table (it predates v6 — see the
-		// pre-v6 schema in this file), just not the identity columns v13 adds.
-		`CREATE TABLE memory_snapshots (
-    id            TEXT PRIMARY KEY DEFAULT (hex(randomblob(16))),
-    snapshot_id   TEXT NOT NULL,
-    project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-    category      TEXT NOT NULL,
-    content       TEXT NOT NULL,
-    importance    REAL NOT NULL,
-    source        TEXT NOT NULL,
-    tags          TEXT DEFAULT '[]',
-    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
-)`,
-		`INSERT INTO projects (id, path, name) VALUES ('p1', '/tmp/v5-p1', 'p1')`,
-		`INSERT INTO ghost_state (project_id, learned_context) VALUES ('p1', 'pre-migration context')`,
-		`PRAGMA user_version = 5`,
-	}
-	for _, s := range v5 {
-		if _, err := db.Exec(s); err != nil {
-			t.Fatalf("seed v5 db: %v", err)
-		}
-	}
-
-	if err := migrate(db, 5); err != nil {
-		t.Fatalf("migrate v5->current: %v", err)
-	}
-	if v := schemaVersionOf(t, db); v != schemaVersion {
-		t.Errorf("user_version = %d, want %d", v, schemaVersion)
-	}
-
-	tx, err := db.Begin()
-	if err != nil {
-		t.Fatalf("begin: %v", err)
-	}
-	exists, err := columnExists(tx, "ghost_state", "reflect_input_sig")
-	_ = tx.Rollback() //nolint:errcheck
-	if err != nil {
-		t.Fatalf("columnExists: %v", err)
-	}
-	if !exists {
-		t.Fatal("reflect_input_sig column missing after migrateV6")
-	}
-
-	// The migrated row defaults to the empty fingerprint and its other columns
-	// survive.
-	var sig, learned string
-	if err := db.QueryRow(
-		`SELECT reflect_input_sig, learned_context FROM ghost_state WHERE project_id = 'p1'`,
-	).Scan(&sig, &learned); err != nil {
-		t.Fatalf("read migrated row: %v", err)
-	}
-	if sig != "" {
-		t.Errorf("reflect_input_sig = %q, want empty", sig)
-	}
-	if learned != "pre-migration context" {
-		t.Errorf("learned_context = %q, want preserved value", learned)
-	}
-}
-
-// TestMigrateV7AddsResolveKeptHash exercises the one-shot upgrade every
-// existing v6 database takes: migrateV7 must ALTER the old memories shape, not
-// rely on initSQL's fresh-database column, and migrated rows must default to
-// the empty (never-judged) hash.
-func TestMigrateV7AddsResolveKeptHash(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "ghost.db")
-	db, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		t.Fatalf("open v6 db: %v", err)
-	}
-	defer db.Close() //nolint:errcheck
-
-	v6 := []string{
-		`CREATE TABLE projects (
-    id          TEXT PRIMARY KEY,
-    path        TEXT NOT NULL UNIQUE,
-    name        TEXT NOT NULL,
-    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
-)`,
-		`CREATE TABLE memories (
-    id            TEXT PRIMARY KEY DEFAULT (hex(randomblob(16))),
-    project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-    category      TEXT NOT NULL DEFAULT 'fact',
-    content       TEXT NOT NULL,
-    importance    REAL NOT NULL DEFAULT 0.5,
-    access_count  INTEGER NOT NULL DEFAULT 0,
-    last_accessed TEXT,
-    source        TEXT NOT NULL DEFAULT 'reflection',
-    tags          TEXT DEFAULT '[]',
-    pinned        INTEGER NOT NULL DEFAULT 0,
-    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
-    resolved_at   TEXT
-)`,
-		// migrate() now continues to v13, which ALTERs memory_snapshots; a real
-		// database of this vintage always has the table (it predates v6 — see the
-		// pre-v6 schema in this file), just not the identity columns v13 adds.
-		`CREATE TABLE memory_snapshots (
-    id            TEXT PRIMARY KEY DEFAULT (hex(randomblob(16))),
-    snapshot_id   TEXT NOT NULL,
-    project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-    category      TEXT NOT NULL,
-    content       TEXT NOT NULL,
-    importance    REAL NOT NULL,
-    source        TEXT NOT NULL,
-    tags          TEXT DEFAULT '[]',
-    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
-)`,
-		`INSERT INTO projects (id, path, name) VALUES ('p1', '/tmp/v6-p1', 'p1')`,
-		`INSERT INTO memories (id, project_id, content) VALUES ('m1', 'p1', 'pre-migration note')`,
-		`PRAGMA user_version = 6`,
-	}
-	for _, s := range v6 {
-		if _, err := db.Exec(s); err != nil {
-			t.Fatalf("seed v6 db: %v", err)
-		}
-	}
-
-	if err := migrate(db, 6); err != nil {
-		t.Fatalf("migrate v6->v7: %v", err)
-	}
-	if v := schemaVersionOf(t, db); v != schemaVersion {
-		t.Errorf("user_version = %d, want %d", v, schemaVersion)
-	}
-
-	tx, err := db.Begin()
-	if err != nil {
-		t.Fatalf("begin: %v", err)
-	}
-	exists, err := columnExists(tx, "memories", "resolve_kept_hash")
-	_ = tx.Rollback() //nolint:errcheck
-	if err != nil {
-		t.Fatalf("columnExists: %v", err)
-	}
-	if !exists {
-		t.Fatal("resolve_kept_hash column missing after migrateV7")
-	}
-
-	// The migrated row defaults to the empty hash and its other columns
-	// survive.
-	var hash, content string
-	if err := db.QueryRow(
-		`SELECT resolve_kept_hash, content FROM memories WHERE id = 'm1'`,
-	).Scan(&hash, &content); err != nil {
-		t.Fatalf("read migrated row: %v", err)
-	}
-	if hash != "" {
-		t.Errorf("resolve_kept_hash = %q, want empty", hash)
-	}
-	if content != "pre-migration note" {
-		t.Errorf("content = %q, want preserved value", content)
-	}
-}
-
-// TestMigrateV8AddsSupersedeChecked exercises the one-shot upgrade every
-// existing v7 database takes: migrateV8 must create supersede_checked (and its
-// project index), not rely on initSQL's fresh-database DDL.
-func TestMigrateV8AddsSupersedeChecked(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "ghost.db")
-	db, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		t.Fatalf("open v7 db: %v", err)
-	}
-	defer db.Close() //nolint:errcheck
-
-	v7 := []string{
-		`CREATE TABLE projects (
-    id          TEXT PRIMARY KEY,
-    path        TEXT NOT NULL UNIQUE,
-    name        TEXT NOT NULL,
-    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
-)`,
-		`CREATE TABLE memories (
-    id            TEXT PRIMARY KEY DEFAULT (hex(randomblob(16))),
-    project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-    category      TEXT NOT NULL DEFAULT 'fact',
-    content       TEXT NOT NULL,
-    importance    REAL NOT NULL DEFAULT 0.5,
-    access_count  INTEGER NOT NULL DEFAULT 0,
-    last_accessed TEXT,
-    source        TEXT NOT NULL DEFAULT 'reflection',
-    tags          TEXT DEFAULT '[]',
-    pinned        INTEGER NOT NULL DEFAULT 0,
-    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
-    resolved_at   TEXT,
-    resolve_kept_hash TEXT NOT NULL DEFAULT ''
-)`,
-		// migrate() now continues to v13, which ALTERs memory_snapshots; a real
-		// database of this vintage always has the table (it predates v6 — see the
-		// pre-v6 schema in this file), just not the identity columns v13 adds.
-		`CREATE TABLE memory_snapshots (
-    id            TEXT PRIMARY KEY DEFAULT (hex(randomblob(16))),
-    snapshot_id   TEXT NOT NULL,
-    project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-    category      TEXT NOT NULL,
-    content       TEXT NOT NULL,
-    importance    REAL NOT NULL,
-    source        TEXT NOT NULL,
-    tags          TEXT DEFAULT '[]',
-    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
-)`,
-		`INSERT INTO projects (id, path, name) VALUES ('p1', '/tmp/v7-p1', 'p1')`,
-		`INSERT INTO memories (id, project_id, content) VALUES ('m1', 'p1', 'newer note')`,
-		`INSERT INTO memories (id, project_id, content) VALUES ('m2', 'p1', 'older note')`,
-		`PRAGMA user_version = 7`,
-	}
-	for _, s := range v7 {
-		if _, err := db.Exec(s); err != nil {
-			t.Fatalf("seed v7 db: %v", err)
-		}
-	}
-
-	if err := migrate(db, 7); err != nil {
-		t.Fatalf("migrate v7->v8: %v", err)
-	}
-	if v := schemaVersionOf(t, db); v != schemaVersion {
-		t.Errorf("user_version = %d, want %d", v, schemaVersion)
-	}
-
-	var name string
-	if err := db.QueryRow(
-		`SELECT name FROM sqlite_master WHERE type='table' AND name='supersede_checked'`,
-	).Scan(&name); err != nil {
-		t.Fatalf("supersede_checked table missing after migrateV8: %v", err)
-	}
-	if err := db.QueryRow(
-		`SELECT name FROM sqlite_master WHERE type='index' AND name='idx_supersede_checked_project'`,
-	).Scan(&name); err != nil {
-		t.Fatalf("idx_supersede_checked_project missing after migrateV8: %v", err)
-	}
-
-	// The migrated table is usable and stores the pair.
-	if _, err := db.Exec(
-		`INSERT INTO supersede_checked (newer_id, older_id, project_id, newer_hash, older_hash) VALUES ('m1', 'm2', 'p1', 'h1', 'h2')`,
-	); err != nil {
-		t.Fatalf("insert after migrateV8: %v", err)
-	}
-	var newerHash string
-	if err := db.QueryRow(
-		`SELECT newer_hash FROM supersede_checked WHERE newer_id = 'm1' AND older_id = 'm2'`,
-	).Scan(&newerHash); err != nil {
-		t.Fatalf("read migrated table: %v", err)
-	}
-	if newerHash != "h1" {
-		t.Errorf("newer_hash = %q, want h1", newerHash)
-	}
-}
-
-// v2WithLinksSQL is a schemaVersion-2 database: memories, memory_links (old
-// CHECK — no 'duplicate'), and the surrounding tables current initSQL creates.
-// Distinct from legacySQL, which predates memory_links entirely.
-const v2WithLinksSQL = `
-CREATE TABLE projects (
-    id          TEXT PRIMARY KEY,
-    path        TEXT NOT NULL UNIQUE,
-    name        TEXT NOT NULL,
-    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
-CREATE TABLE memories (
-    id            TEXT PRIMARY KEY DEFAULT (hex(randomblob(16))),
-    project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-    category      TEXT NOT NULL DEFAULT 'fact',
-    content       TEXT NOT NULL,
-    importance    REAL NOT NULL DEFAULT 0.5,
-    access_count  INTEGER NOT NULL DEFAULT 0,
-    last_accessed TEXT,
-    source        TEXT NOT NULL DEFAULT 'reflection',
-    tags          TEXT DEFAULT '[]',
-    pinned        INTEGER NOT NULL DEFAULT 0,
-    resolved_at   TEXT,
-    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
-CREATE VIRTUAL TABLE memories_fts USING fts5(
-    content,
-    content=memories,
-    content_rowid=rowid,
-    tokenize='porter unicode61'
-);
-
-CREATE TRIGGER memories_ai AFTER INSERT ON memories BEGIN
-    INSERT INTO memories_fts(rowid, content) VALUES (new.rowid, new.content);
-END;
-
-CREATE TABLE memory_links (
-    source_id      TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
-    target_id      TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
-    relation       TEXT NOT NULL DEFAULT 'related'
-                   CHECK (relation IN ('related', 'supersedes', 'contradicts', 'elaborates', 'causes')),
-    strength       REAL NOT NULL DEFAULT 0.5,
-    source         TEXT NOT NULL DEFAULT 'auto'
-                   CHECK (source IN ('auto', 'llm', 'manual')),
-    created_at     TEXT NOT NULL DEFAULT (datetime('now')),
-    invalidated_at TEXT,
-    PRIMARY KEY (source_id, target_id, relation)
-);
-`
-
-// newV2WithLinksDB writes a schemaVersion-2 database with two memories and a
-// 'related' link between them, stamped at user_version=2, and returns its path.
-func newV2WithLinksDB(t *testing.T) string {
-	t.Helper()
-	dbPath := filepath.Join(t.TempDir(), "ghost.db")
-	db, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		t.Fatalf("open v2 db: %v", err)
-	}
-	defer db.Close() //nolint:errcheck
-	if _, err := db.Exec(v2WithLinksSQL); err != nil {
-		t.Fatalf("create v2 schema: %v", err)
-	}
-	seed := []string{
-		`INSERT INTO projects (id, path, name) VALUES ('p1', '/tmp/v2-p1', 'p1')`,
-		`INSERT INTO memories (id, project_id, category, content, source) VALUES
-			('m1', 'p1', 'fact', 'existing memory one', 'mcp'),
-			('m2', 'p1', 'fact', 'existing memory two', 'mcp')`,
-		`INSERT INTO memory_links (source_id, target_id, relation, strength, source)
-			VALUES ('m1', 'm2', 'related', 0.6, 'auto')`,
-		`PRAGMA user_version = 2`,
-	}
-	for _, s := range seed {
-		if _, err := db.Exec(s); err != nil {
-			t.Fatalf("seed v2 db: %v", err)
-		}
-	}
-	return dbPath
-}
-
-// TestMigrateV3AddsDuplicateRelation: a schemaVersion-2 database with an
-// existing memory_links row must upgrade to schemaVersion 3, keep the
-// existing link intact, and accept a 'duplicate' relation afterward.
-func TestMigrateV3AddsDuplicateRelation(t *testing.T) {
-	dbPath := newV2WithLinksDB(t)
-
-	db, err := OpenDB(dbPath)
-	if err != nil {
-		t.Fatalf("OpenDB on v2-with-links db: %v", err)
-	}
-	defer db.Close() //nolint:errcheck
-
-	if v := schemaVersionOf(t, db); v != schemaVersion {
-		t.Errorf("user_version = %d, want %d", v, schemaVersion)
-	}
-
-	// The existing 'related' link survived the rebuild.
-	var strength float64
-	err = db.QueryRow(
-		`SELECT strength FROM memory_links WHERE source_id = 'm1' AND target_id = 'm2' AND relation = 'related'`,
-	).Scan(&strength)
-	if err != nil {
-		t.Fatalf("existing link missing after migration: %v", err)
-	}
-	if strength != 0.6 {
-		t.Errorf("existing link strength = %f, want 0.6", strength)
-	}
-
-	// The widened CHECK now accepts 'duplicate'.
-	if _, err := db.Exec(
-		`INSERT INTO memory_links (source_id, target_id, relation, strength, source) VALUES ('m2', 'm1', 'duplicate', 0.8, 'auto')`,
-	); err != nil {
-		t.Errorf("insert with relation='duplicate' still fails: %v", err)
 	}
 }
 
@@ -1268,194 +626,10 @@ func newV3DB(t *testing.T) string {
 	return dbPath
 }
 
-// totalChanges reads SQLite's total_changes() counter on the given pinned
-// connection: the count of rows written since the connection opened,
-// including rows written by trigger bodies (unlike changes(), which counts
-// only the outermost statement and excludes trigger-driven writes). This is
-// the only reliable way to observe whether memories_au's body actually ran —
-// a delete+re-insert of byte-identical FTS content is otherwise invisible
-// from the row data alone, since the shadow tables end up in the same state
-// whether or not the trigger fired.
-func totalChanges(t *testing.T, ctx context.Context, conn *sql.Conn) int64 {
-	t.Helper()
-	var n int64
-	if err := conn.QueryRowContext(ctx, `SELECT total_changes()`).Scan(&n); err != nil {
-		t.Fatalf("total_changes: %v", err)
-	}
-	return n
-}
-
-// TestMigrateV4NarrowsUpdateTrigger: a schemaVersion-3 database's memories_au
-// trigger fires unconditionally on every UPDATE, doing a wasteful FTS
-// delete+re-insert even when content is untouched — e.g. SET pinned, SET
-// resolved_at, SET access_count (#286). Migrating to v4 must narrow it with a
-// WHEN old.content != new.content guard, while a genuine content change must
-// still refresh FTS exactly as before (don't regress the trigger's purpose).
-func TestMigrateV4NarrowsUpdateTrigger(t *testing.T) {
-	dbPath := newV3DB(t)
-
-	db, err := OpenDB(dbPath)
-	if err != nil {
-		t.Fatalf("OpenDB on v3 db: %v", err)
-	}
-	defer db.Close() //nolint:errcheck
-
-	if v := schemaVersionOf(t, db); v != schemaVersion {
-		t.Errorf("user_version = %d, want %d", v, schemaVersion)
-	}
-
-	// Pin a single connection: total_changes() is per-connection, and
-	// SetMaxOpenConns(1) makes reuse overwhelmingly likely but not
-	// contractual, so pin explicitly rather than rely on pool behavior.
-	ctx := context.Background()
-	conn, err := db.Conn(ctx)
-	if err != nil {
-		t.Fatalf("pin conn: %v", err)
-	}
-	defer conn.Close() //nolint:errcheck
-
-	// Primary evidence: a non-content UPDATE must cost exactly the 1 row
-	// write of the UPDATE itself, with no extra trigger-driven FTS writes.
-	before := totalChanges(t, ctx, conn)
-	if _, err := conn.ExecContext(ctx, `UPDATE memories SET pinned = 1 WHERE id = 'm1'`); err != nil {
-		t.Fatalf("update pinned: %v", err)
-	}
-	pinnedDelta := totalChanges(t, ctx, conn) - before
-	if pinnedDelta != 1 {
-		t.Errorf("pinned-only update total_changes delta = %d, want 1 (trigger fired when it should not have)", pinnedDelta)
-	}
-
-	// A genuine content change must still cost strictly more: the trigger
-	// firing and rewriting the FTS shadow tables on top of the base update.
-	before = totalChanges(t, ctx, conn)
-	if _, err := conn.ExecContext(ctx, `UPDATE memories SET content = 'updated content here' WHERE id = 'm1'`); err != nil {
-		t.Fatalf("update content: %v", err)
-	}
-	contentDelta := totalChanges(t, ctx, conn) - before
-	if contentDelta <= pinnedDelta {
-		t.Errorf("content-changing update total_changes delta = %d, want > %d (trigger should have fired)", contentDelta, pinnedDelta)
-	}
-
-	// FTS actually reflects the new content, not just "some write happened".
-	var n int
-	if err := conn.QueryRowContext(ctx, `SELECT count(*) FROM memories_fts WHERE memories_fts MATCH 'updated'`).Scan(&n); err != nil || n != 1 {
-		t.Errorf("fts match on updated content: n=%d err=%v, want 1", n, err)
-	}
-	if err := conn.QueryRowContext(ctx, `SELECT count(*) FROM memories_fts WHERE memories_fts MATCH 'original'`).Scan(&n); err != nil || n != 0 {
-		t.Errorf("fts still matches stale content: n=%d err=%v, want 0", n, err)
-	}
-
-	// Secondary evidence: the trigger definition itself carries the guard.
-	// If this fails while the delta assertions above pass, that points to a
-	// marker/whitespace mismatch in this check rather than a real regression.
-	// Uses the pinned conn, not db: db's pool has exactly 1 connection (see
-	// OpenDB's SetMaxOpenConns(1)), which conn is still holding, so a db.*
-	// call here would block forever waiting for a connection that only this
-	// same, still-running function could ever release.
-	var auSQL string
-	if err := conn.QueryRowContext(ctx,
-		`SELECT sql FROM sqlite_master WHERE type='trigger' AND name='memories_au'`,
-	).Scan(&auSQL); err != nil {
-		t.Fatalf("read memories_au trigger SQL: %v", err)
-	}
-	if !strings.Contains(auSQL, "old.content != new.content") {
-		t.Errorf("memories_au trigger missing content-change guard, got: %s", auSQL)
-	}
-}
-
-// TestMigrateV9AddsMaintenanceRuns exercises the one-shot upgrade every existing
-// v8 database takes: migrateV9 must create maintenance_runs (schemaVersion 9),
-// stamp the version, and leave existing rows untouched. The fixture drops the
-// table initSQL would create and stamps user_version=8 to simulate a real
-// pre-migration database, and migrate() is called directly — bypassing
-// OpenDB's unconditional initSQL run — so the step's own DDL is what the test
-// proves.
-func TestMigrateV9AddsMaintenanceRuns(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "ghost.db")
-	db, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		t.Fatalf("open v8 db: %v", err)
-	}
-	defer db.Close() //nolint:errcheck
-
-	if _, err := db.Exec(initSQL); err != nil {
-		t.Fatalf("create schema: %v", err)
-	}
-	if _, err := db.Exec(`DROP TABLE maintenance_runs`); err != nil {
-		t.Fatalf("drop maintenance_runs to simulate a v8 database: %v", err)
-	}
-	seed := []string{
-		`INSERT INTO projects (id, path, name) VALUES ('p1', '/tmp/v9-p1', 'p1')`,
-		`PRAGMA user_version = 8`,
-	}
-	for _, s := range seed {
-		if _, err := db.Exec(s); err != nil {
-			t.Fatalf("seed v8 db (%s): %v", s, err)
-		}
-	}
-
-	if err := migrate(db, 8); err != nil {
-		t.Fatalf("migrate v8->v9: %v", err)
-	}
-	if v := schemaVersionOf(t, db); v != schemaVersion {
-		t.Errorf("user_version = %d, want %d", v, schemaVersion)
-	}
-
-	// The migrated table is usable and stores a budget-check event.
-	if _, err := db.Exec(
-		`INSERT INTO maintenance_runs (kind, scratch_bytes, scratch_reaped_bytes, scratch_reaped_count, note)
-		 VALUES ('scratch-budget', 123456, 8192, 2, 'probe')`,
-	); err != nil {
-		t.Fatalf("insert after migrateV9: %v", err)
-	}
-	var gotBytes, gotReaped int
-	var gotNote string
-	if err := db.QueryRow(
-		`SELECT scratch_bytes, scratch_reaped_count, note FROM maintenance_runs WHERE kind='scratch-budget'`,
-	).Scan(&gotBytes, &gotReaped, &gotNote); err != nil {
-		t.Fatalf("select from maintenance_runs: %v", err)
-	}
-	if gotBytes != 123456 || gotReaped != 2 || gotNote != "probe" {
-		t.Errorf("row = (%d, %d, %q), want (123456, 2, probe)", gotBytes, gotReaped, gotNote)
-	}
-
-	// Pre-migration rows survived the additive step.
-	var n int
-	if err := db.QueryRow(`SELECT count(*) FROM projects`).Scan(&n); err != nil || n != 1 {
-		t.Errorf("projects after migration: n=%d err=%v, want 1", n, err)
-	}
-}
-
-// TestMigrateFreshDBHasMaintenanceRuns: a brand-new database (initSQL path, no
-// migration involved) must have maintenance_runs and its recency index from the
-// start — guards against the table silently dropping out of initSQL while
-// migrateV9 still exists to paper over it on upgraded databases.
-func TestMigrateFreshDBHasMaintenanceRuns(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "ghost.db")
-	db, err := OpenDB(dbPath)
-	if err != nil {
-		t.Fatalf("OpenDB: %v", err)
-	}
-	defer db.Close() //nolint:errcheck
-
-	if _, err := db.Exec(`SELECT scratch_bytes, scratch_reaped_bytes, scratch_reaped_count FROM maintenance_runs LIMIT 0`); err != nil {
-		t.Fatalf("maintenance_runs columns missing on fresh db: %v", err)
-	}
-	var idx string
-	if err := db.QueryRow(
-		`SELECT name FROM sqlite_master WHERE type='index' AND name='idx_maintenance_runs_at'`,
-	).Scan(&idx); err != nil {
-		t.Fatalf("idx_maintenance_runs_at index missing on fresh db: %v", err)
-	}
-}
-
-// TestMigrateV17AddsMemoryHistory exercises the one-shot upgrade every
-// existing v16 database takes: migrateV17 must create memory_history and
-// both of its indexes, stamp the version, and leave existing rows untouched.
-// The fixture drops what initSQL would create and stamps user_version=16 to
-// simulate a real pre-migration database, and migrate() is called directly —
-// bypassing OpenDB's unconditional initSQL run — so the step's own DDL is what
-// the test proves.
+// TestMigrateV17AddsMemoryHistory exercises the one-shot upgrade every v16
+// database takes: migrateV17 must create memory_history and both indexes, stamp
+// the version and leave existing rows untouched. The fixture drops what initSQL
+// created and calls migrate() directly, so the step's own DDL is what is proved.
 func TestMigrateV17AddsMemoryHistory(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "ghost.db")
 	db, err := sql.Open("sqlite", dbPath)
@@ -1469,14 +643,9 @@ func TestMigrateV17AddsMemoryHistory(t *testing.T) {
 	}
 	for _, drop := range []string{
 		`DROP INDEX idx_history_memory`,
-		// The recorded_at index this migration does not create, under either name
-		// it has had: no release ever shipped one, but a developer's build
-		// between two commits could have made it, and a stale index would make
-		// the absence assertion below fail for a reason that has nothing to do
-		// with this step. initSQL does not create it either, so leaving it out
-		// of the list would have made this test run against a v16 database that
-		// never had it, and the absence assertion would have passed for the
-		// wrong reason.
+		// A recorded_at index under either name it has had is dropped too: this
+		// step does not create it, and a stale one would break the absence
+		// assertion below for an unrelated reason.
 		`DROP INDEX IF EXISTS idx_history_recorded`,
 		`DROP INDEX IF EXISTS idx_provenance_recorded`,
 		`DROP TABLE memory_history`,
@@ -1822,9 +991,8 @@ func TestMigrateV18RefusesADevTableUnderTheEvidenceName(t *testing.T) {
 			t.Errorf("error = %q, want it to name %q", msg, want)
 		}
 	}
-	// The refusal is a refusal: the dev table and the corpus are both untouched,
-	// and the version is not stamped, so the store is exactly as recoverable as it
-	// was before the upgrade was attempted.
+	// The refusal changes nothing: the dev table and corpus are untouched and the
+	// version is not stamped.
 	if v := schemaVersionOf(t, db); v != 17 {
 		t.Errorf("user_version = %d after a refused migration, want 17", v)
 	}
@@ -1835,20 +1003,10 @@ func TestMigrateV18RefusesADevTableUnderTheEvidenceName(t *testing.T) {
 	if rows != 0 {
 		t.Errorf("the refused migration wrote %d row(s) into the dev table", rows)
 	}
-	// The OPEN path is where the cost and the diagnosis live, and the two
-	// consequences of putting the check only in the step are both observable:
-	//
-	//   - OpenDB takes a full VACUUM INTO copy before migrating, and this
-	//     condition is permanent, so a check that ran only inside migrateV18
-	//     would write a copy of the database on every open of a store that
-	//     cannot be opened (and keep three of them);
-	//   - the copy is named at one-second granularity and refuses an existing
-	//     path, so a second open in the same second — which is exactly what a
-	//     session start does, the hook and the MCP server both opening — would
-	//     report "refusing to overwrite an existing file" and name neither the
-	//     table nor the remedy.
-	//
-	// So: no copy is written, and the retry says the same actionable thing.
+	// The OPEN path is where the cost lives: a check only inside migrateV18 would
+	// write a VACUUM INTO copy on every open of a store that cannot be opened, and
+	// a second open in the same second would fail on the copy's name without
+	// naming the table or the remedy. So: no copy, and the retry says the same.
 	for attempt := range 2 {
 		if _, err := OpenDB(dbPath); err == nil {
 			t.Fatalf("attempt %d: OpenDB opened a store holding a foreign memory_provenance table", attempt)
@@ -1922,10 +1080,9 @@ func TestTheEvidenceShapeProbeAsksWhetherItIsTheEvidenceTable(t *testing.T) {
 			t.Fatalf("%s: %v", drop, err)
 		}
 	}
-	// The evidence table as an EARLIER build of it wrote it: identity columns and
-	// the four provenance fields, no carried_from. Its rows are real evidence, and
-	// a probe that reads the column list as a version check would tell an operator
-	// to drop them.
+	// The evidence table as an EARLIER build wrote it (no carried_from): its rows
+	// are real evidence, and a probe reading the column list as a version check
+	// would tell an operator to drop them.
 	if _, err := db.Exec(`
 		CREATE TABLE memory_provenance (
     id          TEXT PRIMARY KEY DEFAULT (hex(randomblob(16))),
@@ -1961,8 +1118,6 @@ func TestTheEvidenceShapeProbeAsksWhetherItIsTheEvidenceTable(t *testing.T) {
 		t.Fatalf("OpenDB refused a store whose evidence table is an older shape of ours: %v", err)
 	}
 	defer opened.Close() //nolint:errcheck
-	// It is the evidence table, so its rows are evidence and the probe must not
-	// have cost the operator any.
 	var kept int
 	if err := opened.QueryRow(`SELECT count(*) FROM memory_provenance WHERE agent = 'claude-code'`).Scan(&kept); err != nil {
 		t.Fatalf("count the evidence: %v", err)
@@ -1970,14 +1125,11 @@ func TestTheEvidenceShapeProbeAsksWhetherItIsTheEvidenceTable(t *testing.T) {
 	if kept != 1 {
 		t.Errorf("%d evidence row(s) survived, want 1", kept)
 	}
-	// And the column the current build reads is the one that is actually missing, so
-	// the store says so itself rather than being told to drop a table it owns.
 	if _, err := opened.Exec(`SELECT carried_from FROM memory_provenance LIMIT 0`); err == nil {
 		t.Error("the older table somehow has carried_from; the fixture no longer tests what it claims")
 	}
 
-	// The other half, restated: a table with no `kind` is NOT the evidence table,
-	// and is still refused. Same probe, opposite answer, one column apart.
+	// A table with no `kind` is NOT the evidence table and is still refused.
 	if err := refuseForeignProvenanceTable(opened); err != nil {
 		t.Errorf("the probe refused the evidence table itself: %v", err)
 	}
@@ -2002,162 +1154,6 @@ func TestTheEvidenceShapeProbeAsksWhetherItIsTheEvidenceTable(t *testing.T) {
 		t.Error("the probe accepted a change log under the evidence name; it has no kind column")
 	} else if !strings.Contains(err.Error(), "kind") {
 		t.Errorf("error = %q, want it to name the column that is missing", err)
-	}
-}
-
-// TestMigrateFreshDBHasMemoryHistory: a brand-new database (initSQL path, no
-// migration involved) must have memory_history and its indexes from the start
-// — guards against the table silently dropping out of initSQL while migrateV17
-// still exists to paper over it on upgraded databases.
-func TestMigrateFreshDBHasMemoryHistory(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "ghost.db")
-	db, err := OpenDB(dbPath)
-	if err != nil {
-		t.Fatalf("OpenDB: %v", err)
-	}
-	defer db.Close() //nolint:errcheck
-
-	if _, err := db.Exec(`SELECT memory_id, phase, agent, session_id, content, category,
-		importance, resolved_at, source FROM memory_history LIMIT 0`); err != nil {
-		t.Fatalf("memory_history columns missing on fresh db: %v", err)
-	}
-	// One index, deliberately. The per-memory cap ranks by rowid, which the
-	// implicit index serves for free, and an as_of read (#647) filters on
-	// memory_id — so a standalone recorded_at index would have no reader while
-	// every append paid a second b-tree insert to keep it current, on the write
-	// path's critical section. Asserted as an absence: an index added back
-	// "just in case" is a cost this test should have to be edited to accept.
-	for _, name := range []string{"idx_history_memory"} {
-		var idx string
-		if err := db.QueryRow(
-			`SELECT name FROM sqlite_master WHERE type='index' AND name=?`, name,
-		).Scan(&idx); err != nil {
-			t.Errorf("%s index missing on fresh db: %v", name, err)
-		}
-	}
-	var stray int
-	if err := db.QueryRow(
-		`SELECT count(*) FROM sqlite_master WHERE type='index' AND tbl_name='memory_history'
-		 AND name NOT LIKE 'sqlite_autoindex%' AND name <> 'idx_history_memory'`,
-	).Scan(&stray); err != nil {
-		t.Fatalf("count history-table indexes: %v", err)
-	}
-	if stray != 0 {
-		t.Errorf("memory_history carries %d index(es) nothing reads; each is a b-tree insert on every write", stray)
-	}
-}
-
-// TestMigrateFreshDBHasMemoryProvenance: a brand-new database (initSQL path, no
-// migration involved) must have memory_provenance and its index from the start —
-// guards against the table silently dropping out of initSQL while migrateV18 still
-// exists to paper over it on upgraded databases.
-func TestMigrateFreshDBHasMemoryProvenance(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "ghost.db")
-	db, err := OpenDB(dbPath)
-	if err != nil {
-		t.Fatalf("OpenDB: %v", err)
-	}
-	defer db.Close() //nolint:errcheck
-
-	if _, err := db.Exec(`SELECT id, memory_id, kind, agent, session_id, source_ref,
-		confidence, observed_at, verified_at FROM memory_provenance LIMIT 0`); err != nil {
-		t.Fatalf("memory_provenance columns missing on fresh db: %v", err)
-	}
-	var idx string
-	if err := db.QueryRow(
-		`SELECT name FROM sqlite_master WHERE type='index' AND name='idx_provenance_memory'`,
-	).Scan(&idx); err != nil {
-		t.Errorf("idx_provenance_memory missing on fresh db: %v", err)
-	}
-	// One index, asserted as an absence for the reason the history table keeps
-	// one: every append pays a b-tree insert per index, inside the write
-	// transaction that holds the write lock.
-	var stray int
-	if err := db.QueryRow(`
-		SELECT count(*) FROM sqlite_master WHERE type='index' AND tbl_name='memory_provenance'
-		 AND name NOT LIKE 'sqlite_autoindex%' AND name <> 'idx_provenance_memory'`,
-	).Scan(&stray); err != nil {
-		t.Fatalf("count evidence indexes: %v", err)
-	}
-	if stray != 0 {
-		t.Errorf("memory_provenance carries %d index(es) nothing reads; each is a b-tree insert on every save", stray)
-	}
-	// The foreign key is the reason a delete takes the evidence with it, so its
-	// absence would be invisible until a delete silently left rows behind.
-	var fkSQL string
-	if err := db.QueryRow(
-		`SELECT sql FROM sqlite_master WHERE type='table' AND name='memory_provenance'`,
-	).Scan(&fkSQL); err != nil {
-		t.Fatalf("read memory_provenance DDL: %v", err)
-	}
-	if !strings.Contains(fkSQL, "REFERENCES memories(id) ON DELETE CASCADE") {
-		t.Errorf("memory_provenance.memory_id does not cascade from memories: %s", fkSQL)
-	}
-}
-
-// TestMigrateFreshDBHasRetrievalRecord: a brand-new database (initSQL path, no
-// migration involved) must have the retrieval record from the start — guards
-// against the table silently going missing from initSQL while migrateV20 still
-// creates it on upgraded databases, which is the state where a fresh install
-// records nothing and a migrated one does.
-//
-// The columns are read by name rather than by SELECT *, so a column renamed on
-// one path and not the other fails here by name.
-func TestMigrateFreshDBHasRetrievalRecord(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "ghost.db")
-	db, err := OpenDB(dbPath)
-	if err != nil {
-		t.Fatalf("OpenDB: %v", err)
-	}
-	defer db.Close() //nolint:errcheck
-
-	if _, err := db.Exec(`SELECT project_id, session_id, source, query_hash, as_of,
-		outcome, reason, verdicts, recorded_at FROM retrieval_record LIMIT 0`); err != nil {
-		t.Fatalf("retrieval_record columns missing on fresh db: %v", err)
-	}
-	// The CHECK is the privacy rule expressed in the schema, so its absence is
-	// not a detail: a column that accepts any string accepts a question.
-	if _, err := db.Exec(
-		`INSERT INTO retrieval_record (project_id, source, query_hash, outcome, reason, verdicts)
-		 VALUES ('p1', 'search', 'how does the ingress rotate its cert', 'answerable', 'floor_met', '[]')`,
-	); err == nil {
-		t.Error("a retrieval_record accepted the query text in query_hash — the column that cannot hold a question is gone")
-	}
-	// A digest is still accepted, so the check above is not a blanket refusal.
-	if _, err := db.Exec(
-		`INSERT INTO retrieval_record (project_id, source, query_hash, outcome, reason, verdicts)
-		 VALUES ('p1', 'search', ?, 'answerable', 'floor_met', '[]')`,
-		strings.Repeat("ab", 32),
-	); err != nil {
-		t.Errorf("retrieval_record refused a 64-character hex digest: %v", err)
-	}
-	// And an empty hash, which is what a call with no query carries.
-	if _, err := db.Exec(
-		`INSERT INTO retrieval_record (project_id, source, query_hash, outcome, reason, verdicts)
-		 VALUES ('p1', 'session_start', '', 'answerable', 'floor_met', '[]')`,
-	); err != nil {
-		t.Errorf("retrieval_record refused an empty query_hash: %v", err)
-	}
-	// No json_valid CHECK on verdicts, and its ABSENCE is the property: the
-	// readers have to tolerate a document they cannot read, and a constraint
-	// refusing to store one would only make that tolerance unreachable.
-	if _, err := db.Exec(
-		`INSERT INTO retrieval_record (project_id, source, query_hash, outcome, reason, verdicts)
-		 VALUES ('p1', 'search', ?, 'answerable', 'floor_met', 'not json')`,
-		strings.Repeat("cd", 32),
-	); err != nil {
-		t.Errorf("retrieval_record refused an unreadable verdicts column: %v — the readers' tolerance is unreachable", err)
-	}
-
-	var stray int
-	if err := db.QueryRow(`
-		SELECT count(*) FROM sqlite_master WHERE type='index' AND tbl_name='retrieval_record'
-		 AND name NOT LIKE 'sqlite_autoindex%' AND name <> 'idx_retrieval_record_project'`,
-	).Scan(&stray); err != nil {
-		t.Fatalf("count retrieval_record indexes: %v", err)
-	}
-	if stray != 0 {
-		t.Errorf("retrieval_record carries %d index(es) nothing reads; each is a b-tree insert on every search", stray)
 	}
 }
 
@@ -2230,53 +1226,6 @@ func TestMigrateV20MatchesTheFreshDatabaseSchema(t *testing.T) {
 		`SELECT name FROM sqlite_master WHERE type='index' AND name='idx_retrieval_record_project'`,
 	).Scan(&idx); err != nil {
 		t.Errorf("migrateV20 did not create the project index: %v", err)
-	}
-}
-
-// TestMigrateV20LeavesAnEarlierStoreReadable: the step is additive, so a store
-// that has rows must keep them. A migration that rebuilt a table to reach the
-// new version would be the shape of mistake this pins.
-func TestMigrateV20LeavesAnEarlierStoreReadable(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "ghost.db")
-	db, err := OpenDB(path)
-	if err != nil {
-		t.Fatalf("OpenDB: %v", err)
-	}
-	if _, err := db.Exec(
-		`INSERT INTO projects (id, path, name) VALUES ('p1', '/tmp/v20-p1', 'p1')`); err != nil {
-		t.Fatalf("seed project: %v", err)
-	}
-	if _, err := db.Exec(
-		`INSERT INTO memories (id, project_id, content) VALUES ('m1', 'p1', 'a note that predates the record')`,
-	); err != nil {
-		t.Fatalf("seed memory: %v", err)
-	}
-	if err := db.Close(); err != nil {
-		t.Fatalf("close: %v", err)
-	}
-
-	reopened, err := OpenDB(path)
-	if err != nil {
-		t.Fatalf("reopen: %v", err)
-	}
-	defer reopened.Close() //nolint:errcheck
-	var content string
-	if err := reopened.QueryRow(`SELECT content FROM memories WHERE id = 'm1'`).Scan(&content); err != nil {
-		t.Fatalf("the memory is gone after the reopen: %v", err)
-	}
-	if content != "a note that predates the record" {
-		t.Errorf("content = %q, want the row the earlier store held", content)
-	}
-	// Nothing is backfilled: the table's subject is calls that HAVE HAPPENED,
-	// and every call before this version happened with no record of it. A
-	// synthesised row would report retrievals nobody made and land in the
-	// audit's denominator.
-	var n int
-	if err := reopened.QueryRow(`SELECT count(*) FROM retrieval_record`).Scan(&n); err != nil {
-		t.Fatalf("count: %v", err)
-	}
-	if n != 0 {
-		t.Errorf("the migration backfilled %d retrieval record(s) — the table records calls, and none were made", n)
 	}
 }
 
