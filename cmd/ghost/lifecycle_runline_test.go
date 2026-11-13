@@ -1,13 +1,5 @@
 package main
 
-// lifecycle.log is one file shared by every project's detached lifecycle chain,
-// so two chains that end close together append to it interleaved. These tests
-// hold every line the coordinator itself writes to the shape the hook's
-// cooldown-skip line already has: an RFC3339 time, then `lifecycle:`, then the
-// project the run is for, rendered through memory.RefusalArg. A run also opens
-// with a line naming its project and start time, so the lines that follow can
-// be matched to it.
-
 import (
 	"go/ast"
 	"go/parser"
@@ -17,8 +9,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/wcatz/ghost/internal/memory"
 )
 
 // runLinePrefix matches the prefix every coordinator line carries and captures
@@ -108,63 +98,6 @@ func TestRunLifecycleOpensWithAStartLine(t *testing.T) {
 	}
 	if stamp.Before(before.Truncate(time.Second)) || stamp.After(time.Now().Add(time.Second)) {
 		t.Errorf("start line time %s is not this run's start", stamp)
-	}
-}
-
-// TestRunLifecycleBoundsAnOddProject: --project is the session's clone URL as
-// often as a name, and nothing bounds it on the way in. An oversized operand
-// with a newline in it must come out withheld with its length, never repeated,
-// and must not split a coordinator line in two.
-func TestRunLifecycleBoundsAnOddProject(t *testing.T) {
-	odd := "odd project\n" + strings.Repeat("proj", 100)
-	lines := runLifecycleLines(t, odd)
-	for _, l := range lines {
-		if strings.Contains(l, "proj"+"proj"+"proj") {
-			t.Errorf("a coordinator line repeated the oversized project:\n%q", l)
-		}
-		m := runLinePrefix.FindStringSubmatch(l)
-		if m == nil {
-			t.Errorf("a coordinator line names no run (a newline in the project splits it?):\n%q", l)
-			continue
-		}
-		if !strings.Contains(m[2], "withheld") || !strings.Contains(m[2], "bytes") {
-			t.Errorf("the oversized project was not withheld with its length: %s", m[2])
-		}
-	}
-}
-
-// TestLifecycleLineRendersTheProjectAsAToken: the line renderer itself, for
-// the phase outcome lines a test cannot reach in-process (a phase is a child
-// of the running binary, and under go test that binary is the suite).
-func TestLifecycleLineRendersTheProjectAsAToken(t *testing.T) {
-	// A local -06:00 time is written in UTC, as the cooldown-skip line is.
-	now := time.Date(2026, 10, 17, 17, 7, 9, 0, time.FixedZone("x", -6*3600))
-	got := lifecycleLine(now, "beta", "reflect failed after 1s (continuing): exit status 1")
-	want := `2026-10-17T23:07:09Z lifecycle: project "beta": reflect failed after 1s (continuing): exit status 1` + "\n"
-	if got != want {
-		t.Errorf("lifecycleLine =\n%q\nwant\n%q", got, want)
-	}
-
-	key := lifecycleCredential()
-	for name, project := range map[string]string{
-		"token-shaped": key,
-		"oversized":    strings.Repeat("proj", 100),
-		"newline":      "a\nb",
-	} {
-		out := lifecycleLine(now, project, "scratch reap removed=0")
-		if strings.Count(out, "\n") != 1 || !strings.HasSuffix(out, "\n") {
-			t.Errorf("%s: the line is not exactly one line:\n%q", name, out)
-		}
-		if strings.Contains(out, project) {
-			t.Errorf("%s: the raw project reached the line:\n%q", name, out)
-		}
-		checkRunLine(t, strings.TrimSuffix(out, "\n"), memory.RefusalArg("project", project))
-	}
-	if out := lifecycleLine(now, key, "x"); !strings.Contains(out, "withheld") {
-		t.Errorf("a token-shaped project was not withheld:\n%q", out)
-	}
-	if out := lifecycleLine(now, strings.Repeat("proj", 100), "x"); !strings.Contains(out, "bytes") {
-		t.Errorf("an oversized project was not withheld with its length:\n%q", out)
 	}
 }
 

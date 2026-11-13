@@ -21,8 +21,6 @@ func saveGlobalRow(t *testing.T, session *mcp.ClientSession, content string) str
 	return id
 }
 
-// rowLine is the one line that starts a memory with id, failing on anything but
-// exactly one: the marker is a field on the memory's line, never a line.
 func rowLine(t *testing.T, out, id string) string {
 	t.Helper()
 	var found []string
@@ -37,9 +35,6 @@ func rowLine(t *testing.T, out, id string) string {
 	return found[0]
 }
 
-// linesFor returns every rendered memory line naming id. The withheld side of a
-// separated pair renders none, so a caller checking a pair needs a non-fatal
-// form rather than rowLine.
 func linesFor(out, id string) []string {
 	var found []string
 	for _, l := range strings.Split(out, "\n") {
@@ -50,8 +45,6 @@ func linesFor(out, id string) []string {
 	return found
 }
 
-// wantSeparatedPair asserts the pair is separated on this surface: exactly one
-// side renders, and its line names the other as the row stage 5 withheld.
 func wantSeparatedPair(t *testing.T, surface, out, a, b string) {
 	t.Helper()
 	la, lb := linesFor(out, a), linesFor(out, b)
@@ -118,7 +111,6 @@ func TestNoSurfaceMarksAWithdrawnOrHalfWithheldPair(t *testing.T) {
 			t.Fatalf("withdraw: n=%d err=%v", n, err)
 		}
 	}
-	// A live edge whose other side is expired: stage 2 withholds it.
 	if err := st.CreateLink(ctx, a, gone, "contradicts", 1, "manual"); err != nil {
 		t.Fatalf("link: %v", err)
 	}

@@ -16,21 +16,6 @@ import (
 	"time"
 )
 
-// The harness funnel's deadline must bound the WHOLE call, not only the direct
-// child. A harness is a CLI that spawns helpers, a helper that does not
-// redirect its stdio inherits the child's stdout, and os/exec reads that pipe
-// until EOF — so a cancelled call used to block until the last holder of the
-// write end exited, however long that was. These two tests drive a fake harness
-// that leaves exactly such a helper behind and assert the two mechanisms that
-// close it: the group signal (a helper that respects it) and WaitDelay (a
-// helper that does not).
-
-// writeGrandchildHarness writes a POSIX fake harness whose body leaves a
-// background helper holding the harness's stdout, and pins the scratch root and
-// the passthrough the helper reports its pid through. The pid reaches the test
-// in a FILE rather than a Go variable because it is written by a shell child,
-// and through GHOST_PASSTHROUGH_ENV because a test-only name in the production
-// allowlist would be a hole in the policy these tests sit beside.
 func writeGrandchildHarness(t *testing.T, body string) (bin, pidFile string) {
 	t.Helper()
 	t.Setenv("GHOST_SCRATCH_DIR", t.TempDir())
@@ -44,17 +29,6 @@ func writeGrandchildHarness(t *testing.T, body string) (bin, pidFile string) {
 	return bin, pidFile
 }
 
-// startHarness runs the funnel-built command with stdout bound to a buffer,
-// which is what makes os/exec copy the child's output through a pipe — the
-// descriptor the grandchild inherits and the reason a cancelled Wait used to
-// block. It returns once the fake has recorded its grandchild, so the context
-// is cancelled with the helper already running rather than racing its start.
-//
-// The helper records its OWN pid, after it has installed whatever disposition
-// the test depends on, and that ordering is what removes the race: a pid the
-// harness shell wrote for a background job can be read before that job has
-// started, and a deadline landing in that window would kill a helper that had
-// not yet set up rather than the one under test.
 func startHarness(t *testing.T, ctx context.Context, bin, pidFile string) (*exec.Cmd, func(), int) {
 	t.Helper()
 	cmd, release, err := harnessCommand(ctx, bin, nil, os.Environ(), harnessGoose)
@@ -76,10 +50,6 @@ func startHarness(t *testing.T, ctx context.Context, bin, pidFile string) (*exec
 	return cmd, release, grandchild
 }
 
-// waitForRecordedPid blocks until the fake has written its helper's pid. It
-// polls rather than sleeping a fixed span because the write happens as soon as
-// the shell reaches it, and a fixed sleep would either race it or slow every
-// run down for no reason.
 func waitForRecordedPid(t *testing.T, path string) int {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
@@ -100,9 +70,6 @@ func waitForRecordedPid(t *testing.T, path string) int {
 	return 0
 }
 
-// processAlive reports whether pid still exists. EPERM means it exists but is
-// not ours to signal, which is still alive; a pid of zero or below names no
-// process, so it is reported as gone rather than asked about.
 func processAlive(pid int) bool {
 	if pid <= 0 {
 		return false
@@ -111,8 +78,6 @@ func processAlive(pid int) bool {
 	return err == nil || errors.Is(err, syscall.EPERM)
 }
 
-// waitGone polls until pid is gone, so a group signal the kernel has delivered
-// but not yet had reaped is not read as the helper still running.
 func waitGone(pid int, within time.Duration) error {
 	deadline := time.Now().Add(within)
 	for time.Now().Before(deadline) {
@@ -124,8 +89,6 @@ func waitGone(pid int, within time.Duration) error {
 	return errors.New("still running")
 }
 
-// killGrandchild ends a helper a test deliberately left alive, so the test does
-// not leak a process into the rest of the package's run.
 func killGrandchild(t *testing.T, pid int) {
 	t.Helper()
 	t.Cleanup(func() {
@@ -135,15 +98,6 @@ func killGrandchild(t *testing.T, pid int) {
 	})
 }
 
-// TestHarnessDeadlineSweepsTheProcessGroup makes the group signal observable: a
-// helper that takes the default SIGTERM is in the harness's process group, so
-// the deadline's Cancel must reach it — a signal to the direct child alone
-// leaves the helper running, and with it the child's stdout pipe, which is what
-// held the call open past its deadline in the first place.
-//
-// The assertion is the helper being GONE, not a duration: a duration alone
-// cannot tell the group signal apart from the WaitDelay backstop, which is
-// covered by the test below.
 func TestHarnessDeadlineSweepsTheProcessGroup(t *testing.T) {
 	bin, pidFile := writeGrandchildHarness(t, "sh -c 'echo $$ > \"$HARNESS_GRANDCHILD_PID\"; exec sleep 30' &\nwait\n")
 
@@ -166,20 +120,7 @@ func TestHarnessDeadlineSweepsTheProcessGroup(t *testing.T) {
 	}
 }
 
-// TestHarnessWaitDelayBoundsAPipeHoldingGrandchild covers the helper the group
-// signal cannot end by itself: one that ignores SIGTERM. The grace period is
-// what it is given, and then the whole group is force-killed, so the call is
-// still bounded by the deadline plus the backstop and nothing the harness
-// started outlives the call.
-//
-// The helper surviving the deadline is what proves this run measured the
-// escalation rather than a helper that happened to exit: the call cannot return
-// before the grace has been waited out, so that is asserted too.
 func TestHarnessWaitDelayBoundsAPipeHoldingGrandchild(t *testing.T) {
-	// `exec` keeps the trap's disposition — an ignored signal survives exec —
-	// so the process whose pid is recorded is itself the one ignoring SIGTERM.
-	// The hold is well past twice the backstop so the assertion separates the
-	// two by a wide margin rather than sharing one.
 	bin, pidFile := writeGrandchildHarness(t, "sh -c 'trap \"\" TERM; echo $$ > \"$HARNESS_GRANDCHILD_PID\"; exec sleep 10' &\nwait\n")
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -204,10 +145,6 @@ func TestHarnessWaitDelayBoundsAPipeHoldingGrandchild(t *testing.T) {
 	}
 }
 
-// runHarnessToCompletion runs a fake harness through the funnel-built command
-// to the end of the call, with stdout bound to a buffer as the clients do. The
-// fakes below do not exit until their helper has recorded its pid, so the pid
-// file is readable once Run returns without a sleep in the test.
 func runHarnessToCompletion(t *testing.T, ctx context.Context, bin string) error {
 	t.Helper()
 	cmd, release, err := harnessCommand(ctx, bin, nil, os.Environ(), harnessGoose)
@@ -221,12 +158,6 @@ func runHarnessToCompletion(t *testing.T, ctx context.Context, bin string) error
 	return runHarnessCommand(cmd)
 }
 
-// TestHarnessCleanExitSweepsTheProcessGroup covers a call that returns
-// successfully while a helper it started is still running: the harness sends
-// the helper's stdio to the null device and exits 0, so Run returns nil and the
-// helper no longer holds anything the caller waits on. Nothing else would end
-// it, so the group is swept after Wait returns — the same check and escalation
-// the Cancel path uses — rather than only on the cancellation path.
 func TestHarnessCleanExitSweepsTheProcessGroup(t *testing.T) {
 	bin, pidFile := writeGrandchildHarness(t, "sh -c 'echo $$ > \"$HARNESS_GRANDCHILD_PID\"; exec sleep 30' >/dev/null 2>&1 &\nwhile [ ! -s \"$HARNESS_GRANDCHILD_PID\" ]; do sleep 0.01; done\n")
 
@@ -244,11 +175,6 @@ func TestHarnessCleanExitSweepsTheProcessGroup(t *testing.T) {
 	}
 }
 
-// TestHarnessWaitDelaySweepsTheProcessGroup covers the helper the backstop
-// releases but cannot end: it holds the harness's stdout pipe and ignores
-// SIGTERM, so WaitDelay expires, Wait closes the pipe and returns ErrWaitDelay,
-// and the helper is still running. The post-Wait sweep is what ends it, and the
-// error the call reports stays the WaitDelay error the caller saw before.
 func TestHarnessWaitDelaySweepsTheProcessGroup(t *testing.T) {
 	bin, pidFile := writeGrandchildHarness(t, "sh -c 'trap \"\" TERM; echo $$ > \"$HARNESS_GRANDCHILD_PID\"; exec sleep 30' &\nwhile [ ! -s \"$HARNESS_GRANDCHILD_PID\" ]; do sleep 0.01; done\n")
 
@@ -266,13 +192,6 @@ func TestHarnessWaitDelaySweepsTheProcessGroup(t *testing.T) {
 	}
 }
 
-// TestCleanupRunnerSuccessIsNotReportedAsATimeoutWhenTheSweepCrossesTheDeadline
-// covers the timeout decision reading the clock the post-run sweep spends. A
-// list that exits 0 just before the deadline leaves a helper that ignores
-// SIGTERM, so the sweep waits out the grace and force-kills it; the deadline
-// fires during that sweep. The call itself succeeded, so it must not be
-// reported as a timeout: the decision is read from the command's own outcome
-// before the sweep, not from the context error after it.
 func TestCleanupRunnerSuccessIsNotReportedAsATimeoutWhenTheSweepCrossesTheDeadline(t *testing.T) {
 	t.Setenv("GHOST_SCRATCH_DIR", t.TempDir())
 	dir := t.TempDir()
@@ -306,13 +225,6 @@ printf '[]'
 	}
 }
 
-// TestOpenCodeCleanupRunnerBoundsAPipeHoldingHelper covers the one harness
-// child that is NOT built by harnessCommand. The cleanup runner builds its own
-// command, because it must reach the user's own opencode store rather than the
-// isolated tree the funnel's clients use, so the bound has to reach it another
-// way — through the shared helper. Without that, this child keeps exactly the
-// defect the fallback below pins for the funnel: a helper that inherited its
-// stdout holds the call open past the deadline.
 func TestOpenCodeCleanupRunnerBoundsAPipeHoldingHelper(t *testing.T) {
 	t.Setenv("GHOST_SCRATCH_DIR", t.TempDir())
 	dir := t.TempDir()

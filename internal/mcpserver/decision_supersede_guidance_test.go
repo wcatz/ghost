@@ -8,9 +8,6 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// The rule that a changed decision is recorded with supersedes is told to the
-// agent on both surfaces it reads: the tool description and the server
-// instructions.
 func TestChangedDecisionGuidanceIsOnBothSurfaces(t *testing.T) {
 	const rule = "call ghost_decisions_list to find it and record the new decision"
 	if !strings.Contains(mcpInstructions, rule) || !strings.Contains(mcpInstructions, "supersedes=<that decision_id>") ||
@@ -75,7 +72,6 @@ func TestDecisionRecordGivesNoAdviceWithoutAMatch(t *testing.T) {
 	if out := recordTitled(t, session, "abc123", "Use SQLite", nil); strings.Contains(out, "pass supersedes") {
 		t.Errorf("advice on a title that matches nothing:\n%s", out)
 	}
-	// A first decision does not match itself.
 	if out := recordTitled(t, session, "abc123", "Fresh title", nil); strings.Contains(out, "pass supersedes") {
 		t.Errorf("a new decision matched itself:\n%s", out)
 	}
@@ -104,7 +100,6 @@ func TestDecisionRecordGivesNoAdviceWhenSupersedesIsPassed(t *testing.T) {
 	}
 }
 
-// A decision flagged for revisit is live, not superseded, so it draws the advice.
 func TestDecisionRecordAdvisesSupersedesOnARevisitDecision(t *testing.T) {
 	db, _, srv := newStoreWithDB(t)
 	session := connectedClient(t, srv)

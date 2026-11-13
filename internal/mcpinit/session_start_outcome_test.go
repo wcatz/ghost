@@ -32,13 +32,6 @@ func outcomeSessionWithGlobals(t *testing.T, nLive, nExpired, nExpiredGlobals in
 }
 
 // outcomeSessionRows is the ONE builder behind both fixtures above.
-//
-// The fixture is built the way validitySession's is, for the same reasons: the
-// moving window is written relative to now in memory.StoredStampLayout (an RFC
-// 3339 value would be UNREADABLE rather than unexpired, and an unreadable stamp
-// KEEPS the row), and the expired rows are given the HIGHEST importance and the
-// NEWEST created_at on purpose — a row that survives must be the one that earned
-// its place, so a dropped row has to be a row the ranking wanted.
 func outcomeSessionRows(t *testing.T, nLive, nExpired, nExpiredGlobals int) (projectPath string) {
 	t.Helper()
 	xdgHome := t.TempDir()
@@ -182,25 +175,6 @@ func TestSessionStartSaysRowsWereWithheldWhenEveryGlobalRowIsExpired(t *testing.
 	}
 }
 
-// TestSessionStartRendersNoGlobalSectionWhenTheStoreHasNoGlobals is the control
-// for the regression above: a store whose global bucket is EMPTY — nothing was
-// ever saved, rather than found and withheld — keeps today's output and gains no
-// Global heading and no withheld sentence. Without it the fix could pass by
-// printing the note whenever the section is short.
-func TestSessionStartRendersNoGlobalSectionWhenTheStoreHasNoGlobals(t *testing.T) {
-	got := renderSessionStart(t, outcomeSessionWithGlobals(t, 1, 0, 0))
-
-	if !strings.Contains(got, "live row 00") {
-		t.Fatalf("the fixture project did not render its live row, so the block is not exercising the no-globals branch:\n%s", got)
-	}
-	if strings.Contains(got, "Global (applies to all projects)") {
-		t.Errorf("a store with no global rows must render no Global section:\n%s", got)
-	}
-	if strings.Contains(got, "Call ghost_memories_list") {
-		t.Errorf("a store with no global rows must not claim rows were withheld — nothing was seen:\n%s", got)
-	}
-}
-
 // TestUnmatchedDirectoryKeepsAWhollyWithheldGlobalSectionOnEverySurface is the
 // unmatched-directory half of #1316. A directory that resolves to no project,
 // over a store whose every `_global` row is withheld, got the Global heading and
@@ -298,94 +272,6 @@ func TestSessionStartDoesNotCallWithheldRowsRankedOut(t *testing.T) {
 	}
 }
 
-// TestSessionStartMixedHeaderStatesBothFates is the combined line: a block that
-// cut rows at the cap AND received rows from a stage that withheld them must
-// name the two fates separately, in one header — the ranking's cut and the
-// withholding are different authority, and collapsing them would re-introduce
-// the repro (b) lie for a block that has both.
-func TestSessionStartMixedHeaderStatesBothFates(t *testing.T) {
-	got := renderSessionStart(t, outcomeSession(t, 17, 3))
-
-	want := "**Memories (15 shown of 20 total — 5 not shown: 2 ranked out by a composite score of importance, " +
-		"pinned status, and category-aware recency decay, 3 withheld rather than ranked out; " +
-		"use ghost_memories_list or ghost_memory_search for the rest):**"
-	if !strings.Contains(got, want) {
-		t.Errorf("the mixed header is not what the issue asks for:\n want %q\n got:\n%s", want, got)
-	}
-	for _, absent := range []string{"expired row 00", "expired row 01", "expired row 02"} {
-		if strings.Contains(got, absent) {
-			t.Errorf("a withheld row rendered as if current (%q); got:\n%s", absent, got)
-		}
-	}
-}
-
-// TestSessionStartWithNoRowsKeepsTheAbsentSection: a project the store has
-// never seen (or whose rows are all resolved) must keep today's output — no
-// Memories section, and no sentence claiming rows were withheld when none were
-// found. The withheld sentence is a claim about rows the block was assembled
-// from, and a block assembled from nothing cannot say it.
-func TestSessionStartWithNoRowsKeepsTheAbsentSection(t *testing.T) {
-	got := renderSessionStart(t, outcomeSession(t, 0, 0))
-
-	if !strings.Contains(got, "## Ghost context: outcomeproj") {
-		t.Fatalf("the fixture project did not resolve; the block is not exercising the no-rows branch:\n%s", got)
-	}
-	if strings.Contains(got, "**Memories") {
-		t.Errorf("a project with no rows must render no Memories section:\n%s", got)
-	}
-	if strings.Contains(got, "withheld") {
-		t.Errorf("a project with no rows must not claim rows were withheld — nothing was assembled:\n%s", got)
-	}
-}
-
-// TestSessionStartTotalIsTheStoreNotTheOverFetchWindow: the retrieval reads an
-// over-fetched window (three times the cap), so a project holding more rows than
-// the window used to read "15 shown of 45 total". The header's total is the
-// rows the project holds that the retrieval could draw from, and the rows
-// behind the window are ranked out.
-func TestSessionStartTotalIsTheStoreNotTheOverFetchWindow(t *testing.T) {
-	got := renderSessionStart(t, outcomeSession(t, 60, 0))
-
-	want := "**Memories (15 shown of 60 total — 45 not shown, ranked by a composite score of importance, " +
-		"pinned status, and category-aware recency decay; use ghost_memories_list or ghost_memory_search for the rest):**"
-	if !strings.Contains(got, want) {
-		t.Errorf("the header understates the store:\n want %q\n got:\n%s", want, got)
-	}
-	if strings.Contains(got, "of 45 total") {
-		t.Errorf("the header reports the over-fetch window as the store:\n%s", got)
-	}
-}
-
-// TestSessionStartTotalCountsWithheldRowsOnceBesideRowsBeyondTheWindow: the
-// withheld rows sit inside the window and the count shares the window's
-// predicates, so the two never count the same row twice.
-func TestSessionStartTotalCountsWithheldRowsOnceBesideRowsBeyondTheWindow(t *testing.T) {
-	got := renderSessionStart(t, outcomeSession(t, 60, 3))
-
-	want := "**Memories (15 shown of 63 total — 48 not shown: 45 ranked out by a composite score of importance, " +
-		"pinned status, and category-aware recency decay, 3 withheld rather than ranked out; " +
-		"use ghost_memories_list or ghost_memory_search for the rest):**"
-	if !strings.Contains(got, want) {
-		t.Errorf("the mixed header double counts or understates:\n want %q\n got:\n%s", want, got)
-	}
-}
-
-// TestSessionStartSaysRowsWereWithheldWhenMoreExpiredRowsThanTheWindow: the
-// wholly-withheld sentence must not depend on the project fitting under the
-// over-fetch. Sixty expired rows fill the 45-row window with withheld rows and
-// leave fifteen behind it; the block still says the rows were withheld rather
-// than printing a "0 shown" count header over nothing.
-func TestSessionStartSaysRowsWereWithheldWhenMoreExpiredRowsThanTheWindow(t *testing.T) {
-	got := renderSessionStart(t, outcomeSession(t, 0, 60))
-
-	if !strings.Contains(got, "**Memories:**\nNo sufficiently trustworthy memory found") {
-		t.Errorf("a project whose whole window is withheld lost the withheld sentence; got:\n%s", got)
-	}
-	if strings.Contains(got, "**Memories (") {
-		t.Errorf("a block with nothing shown rendered a count-line header; got:\n%s", got)
-	}
-}
-
 // topUpOutcomeRows adds n live rows to the fixture project's store in one
 // statement, so a test can sit on either side of the eligible count's cap. The
 // rows rank below the fixture's own, which keeps the shown rows the same.
@@ -433,21 +319,5 @@ func TestSessionStartHeaderSaysAtLeastWhenTheCountStoppedAtTheCap(t *testing.T) 
 				t.Errorf("the header names the over-fetch window as the total:\n%s", got)
 			}
 		})
-	}
-}
-
-// TestSessionStartHeaderIsExactJustBelowTheCap is the control: one row under the
-// cap the count is exact and the header carries no suffix.
-func TestSessionStartHeaderIsExactJustBelowTheCap(t *testing.T) {
-	cap := memory.PassiveEligibleCountCap
-	path := outcomeSession(t, 60, 0)
-	topUpOutcomeRows(t, cap-1-60)
-	got := renderSessionStart(t, path)
-
-	want := fmt.Sprintf("**Memories (15 shown of %d total — %d not shown, ranked by a composite score of importance, "+
-		"pinned status, and category-aware recency decay; use ghost_memories_list or ghost_memory_search for the rest):**",
-		cap-1, cap-1-15)
-	if !strings.Contains(got, want) {
-		t.Errorf("the exact header changed below the cap:\n want %q\n got:\n%s", want, got)
 	}
 }

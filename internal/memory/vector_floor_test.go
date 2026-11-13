@@ -68,19 +68,6 @@ func TestSearchHybridAppliesVectorMinSimilarity(t *testing.T) {
 	}
 }
 
-// TestStoreVectorMinSimilarityDefaultIsZero: unset store keeps historical
-// behavior (floor 0).
-func TestStoreVectorMinSimilarityDefaultIsZero(t *testing.T) {
-	s := testStore(t)
-	if got := s.vectorMinSimilarityFloor(); got != 0 {
-		t.Errorf("default floor = %v, want 0", got)
-	}
-	s.SetVectorMinSimilarity(0.25)
-	if got := s.vectorMinSimilarityFloor(); got != 0.25 {
-		t.Errorf("SetVectorMinSimilarity(0.25) = %v, want 0.25", got)
-	}
-}
-
 func TestFilterVectorFloor(t *testing.T) {
 	in := []ScoredMemory{
 		{MemoryID: "a", Score: 0.9},

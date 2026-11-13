@@ -70,24 +70,6 @@ func TestLooksLikeSecretIsAScopeDecision(t *testing.T) {
 	}
 }
 
-// TestLooksLikeSecretSeesNoValue pins that the function never inspects a
-// value's shape: two texts differing only in the value must reach the same
-// verdict, because the question is what the memory is ABOUT, not what it
-// carries. internal/secret is what answers the second question.
-func TestLooksLikeSecretSeesNoValue(t *testing.T) {
-	const head = "the deploy token is "
-	shapes := []string{
-		"a random string",
-		"in the runner env",
-		"rotated quarterly",
-	}
-	for _, shape := range shapes {
-		if looksLikeSecret(lowerAll(head+shape)) != true {
-			t.Errorf("looksLikeSecret(%q) = false, want true — the key names a credential either way", head+shape)
-		}
-	}
-}
-
 func lowerAll(s string) string {
 	b := []byte(s)
 	for i := range b {

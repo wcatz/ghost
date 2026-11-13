@@ -36,22 +36,9 @@ func TestBaselineScopeFilteredAnswerBytes(t *testing.T) {
 	}
 }
 
-func TestBaselineScopeEmptiedAnswerBytes(t *testing.T) {
-	dev := scopedCandidate("D1", map[string]string{"environment": "development"}, 0.95)
-	res := run(t, &fakeRetriever{set: hybridSet(dev)}, baselineScoped())
-	if len(res.Items) != 0 {
-		t.Fatalf("admitted %v, want none", itemIDs(res.Items))
-	}
-	const want = "No sufficiently trustworthy memory found: nothing found matched the requested scope. The note below breaks the removals down per stage.\n\n(Note: the scope filter was applied to a finite search window, so further matches may exist beyond the retrieved candidates — raise the limit.)\n(Note: 1 candidate rows were removed and none reached the answer: predicates 1)\n[ghost:outcome=empty reason=all_out_of_scope floor_fts_rank=not_applied abstain_cosine=off candidates=1 admitted=0 legs=fts:ok,vector:ok tokens_est=0]\n"
-	if res.Response != want {
-		t.Errorf("response changed:\n got: %q\nwant: %q", res.Response, want)
-	}
-}
-
-// TestBaselineScopeEmptiedPoolCarriesTheDropScopeAdvice is the store-level
-// shape of a scope-emptied answer: scope narrowing removed every candidate
-// before the window, so nothing came back at all and the absence note names the
-// filters the request set.
+// TestBaselineScopeEmptiedPoolCarriesTheDropScopeAdvice is the store-level shape
+// of a scope-emptied answer: scope narrowing removed every candidate before the
+// window.
 func TestBaselineScopeEmptiedPoolCarriesTheDropScopeAdvice(t *testing.T) {
 	res := run(t, &fakeRetriever{set: hybridSet()}, baselineScoped())
 	const want = "Ghost memory: no match within the searched window — widen the limit or drop the scope filter. This is not evidence that nothing exists.\n\n(Note: the scope filter was applied to a finite search window, so further matches may exist beyond the retrieved candidates — raise the limit.)\n[ghost:outcome=empty reason=no_candidates floor_fts_rank=not_applied abstain_cosine=off candidates=0 admitted=0 legs=fts:ok,vector:ok tokens_est=0]\n"

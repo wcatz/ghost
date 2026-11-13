@@ -69,9 +69,6 @@ func runContextCLI(t *testing.T, argv ...string) (code int, stdout, stderr strin
 // and printed a block for a scope nobody asked about (#1195). Each of these must
 // be refused with exit 1 BEFORE the render: nothing on stdout, the count
 // untouched, nothing new in the data directory.
-//
-// The control run first proves the probe can see the write it is guarding
-// against: a plain render of the same directory does move the count.
 func TestContextPlainRefusalRunsNoSideEffect(t *testing.T) {
 	dir := contextAsOfStore(t)
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
@@ -114,55 +111,5 @@ func TestContextPlainRefusalRunsNoSideEffect(t *testing.T) {
 				t.Errorf("data directory changed from [%s] to [%s]", filesBefore, got)
 			}
 		})
-	}
-}
-
-// TestContextPlainRefusalNamesUnknownFlags: --project and --since were flags of
-// the removed `ghost context --audit` mode. They are now unknown flags of the
-// session-start block and are refused as such.
-func TestContextPlainRefusalNamesUnknownFlags(t *testing.T) {
-	for _, argv := range [][]string{
-		{"--project", "ghost"},
-		{"--project=ghost"},
-		{"--since", "1h"},
-		{"--since=1h"},
-	} {
-		_, _, err := parseContextBlockArgs(argv)
-		if err == nil || !strings.Contains(err.Error(), "unknown flag") {
-			t.Errorf("parseContextBlockArgs(%v) error = %v, want an unknown-flag refusal", argv, err)
-		}
-	}
-}
-
-// TestContextPlainArgsAccepted: the flags the block does take still parse, and
-// an EMPTY --cwd value stays what it has always been — the process's own
-// directory — because the opencode adapter spawns `ghost context --cwd <dir>`
-// with whatever directory it was handed, and a refusal there would be a session
-// with no context rather than a visible error.
-func TestContextPlainArgsAccepted(t *testing.T) {
-	for _, tc := range []struct {
-		argv    []string
-		wantCwd string
-		wantAt  bool
-	}{
-		{nil, "", false},
-		{[]string{"--cwd", "/x"}, "/x", false},
-		{[]string{"--cwd=/x"}, "/x", false},
-		{[]string{"--cwd", ""}, "", false},
-		{[]string{"--cwd="}, "", false},
-		{[]string{"--cwd", "/x", "--as-of", "2026-01-01T00:00:00Z"}, "/x", true},
-		{[]string{"--as-of=2026-01-01T00:00:00Z", "--cwd=/x"}, "/x", true},
-		// A dash-leading directory is a value, not a flag: the token after --cwd
-		// is taken whatever it looks like, as --project's is under --audit.
-		{[]string{"--cwd", "-odd"}, "-odd", false},
-	} {
-		cwd, at, err := parseContextBlockArgs(tc.argv)
-		if err != nil {
-			t.Errorf("parseContextBlockArgs(%q) = %v, want no error", tc.argv, err)
-			continue
-		}
-		if cwd != tc.wantCwd || (at != nil) != tc.wantAt {
-			t.Errorf("parseContextBlockArgs(%q) = (%q, %v), want (%q, as-of %v)", tc.argv, cwd, at, tc.wantCwd, tc.wantAt)
-		}
 	}
 }

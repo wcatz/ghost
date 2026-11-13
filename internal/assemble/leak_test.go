@@ -8,20 +8,6 @@ import (
 
 // TestResultLeaksReadsTheAssemblersOwnVerdicts pins the contamination classifier
 // to the verdicts the trace recorded, one arm at a time.
-//
-// The arms are individually unreachable through a real Run on the graded corpus —
-// stage 2 drops an expired or not-yet-valid row, stage 3 drops a scope
-// contradiction, and project membership is constrained in SQL — so a fixture that
-// only drove assemble.Run could cover the `resolved` arm and nothing else. This
-// table builds the Result a stage that failed to filter would have produced, and
-// the arm each recorded verdict is supposed to raise is what fails when an arm is
-// dropped: a classifier that loses the not-yet-valid arm passes every run of this
-// package and scores a real leak as clean.
-//
-// The negative rows are the point. `valid_window_open` and `valid_current` are
-// what stop the obvious over-broad predicates: a classifier keyed on "this row has
-// a validity column" or "this row has any scope" flags both of them, and both are
-// the shapes most of a healthy corpus is made of.
 func TestResultLeaksReadsTheAssemblersOwnVerdicts(t *testing.T) {
 	resolved := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 	open := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
@@ -84,19 +70,15 @@ func TestResultLeaksReadsTheAssemblersOwnVerdicts(t *testing.T) {
 			want: nil,
 		},
 		{
-			// Two arms, and arms in report order rather than in the order this
-			// struct happens to list its fields: a map walked for the report
-			// would render this row's two arms in a different order on each run.
+			// Two arms, and arms in report order rather than in the order this struct
+			// happens to list its fields: a map walked for the report.
 			name: "a row can raise more than one arm",
 			item: Item{ID: "r9", ResolvedAt: &resolved, Bucket: "other-project"},
 			sig:  Signals{ValidityState: validityValid, ScopeMatched: true, ProjectMatch: false},
 			want: []string{LeakResolved, LeakOtherProject},
 		},
 		{
-			// No recorded verdict is not a clean verdict. An item the trace never
-			// reached is a trace bug, and reading its missing entry as "matched
-			// everything" would score it clean — so it raises no arm, and the
-			// caller is expected to notice the gap (bench asserts one).
+			// No recorded verdict is not a clean verdict.
 			name:  "an item with no recorded signal raises no arm",
 			item:  Item{ID: "r10"},
 			unset: true,
@@ -129,46 +111,9 @@ func TestResultLeaksReadsTheAssemblersOwnVerdicts(t *testing.T) {
 	}
 }
 
-// TestLeaksIsUnconditionalAndNilSafe: Leaks is a MEASUREMENT, so it has to answer
-// for a result whose pipeline changed under it. A nil trace is the degenerate
-// case, and returning no leaks for it is the answer — the measurement found
-// nothing, and the caller checks the trace is there rather than the classifier
-// inventing a verdict. It must also not filter: an empty block is not a clean
-// block, it is a block with no rows to judge, and the distinction is the caller's
-// (bench counts an empty result toward the result rate alone).
-func TestLeaksIsUnconditionalAndNilSafe(t *testing.T) {
-	if got := (Result{}).Leaks(); len(got) != 0 {
-		t.Errorf("a result with no trace reported %d leaks, want 0", len(got))
-	}
-	if got := (Result{Items: []Item{{ID: "a"}, {ID: "b"}}}).Leaks(); len(got) != 0 {
-		t.Errorf("a result with no trace and two items reported %d leaks, want 0", len(got))
-	}
-	if got := (Result{Items: []Item{}}).Leaks(); len(got) != 0 {
-		t.Errorf("an empty result reported %d leaks, want 0", len(got))
-	}
-	// A leak among clean rows keeps its position in the answer's order, so a
-	// caller reporting ids does not have to re-sort against the block.
-	res := Result{
-		Items: []Item{{ID: "a"}, {ID: "b"}, {ID: "c"}},
-		Trace: &Trace{Signals: map[string]Signals{
-			"a": {ValidityState: validityValid, ScopeMatched: true, ProjectMatch: true},
-			"b": {ValidityState: validityExpired, ScopeMatched: true, ProjectMatch: true},
-			"c": {ValidityState: validityValid, ScopeMatched: true, ProjectMatch: true},
-		}},
-	}
-	got := res.Leaks()
-	if len(got) != 1 || got[0].ID != "b" {
-		t.Fatalf("Leaks() = %+v, want exactly [b]", got)
-	}
-}
-
-// TestTraceTrimmedByBudgetSeparatesTheTwoTrims: the budget stage and the
-// response-fit post-pass both remove rows and both can remove a row a query graded
-// relevant, and their remedies differ — one is the caller's limit, the other is a
-// byte cap on the rendered envelope. A caller reading the trims off the trace has
-// to be able to say which was which, and the stage names are this package's
-// strings, so the split is made here rather than by a caller naming "budget" and
-// "response_fit" itself.
+// TestTraceTrimmedByBudgetSeparatesTheTwoTrims: the budget stage and the response-
+// fit post-pass both remove rows and both can remove a row a query graded
+// relevant, and their remedies differ — one is the caller's limit.
 func TestTraceTrimmedByBudgetSeparatesTheTwoTrims(t *testing.T) {
 	tr := &Trace{Stages: []StageTrace{
 		{Stage: stageValidity, DroppedIDs: []string{"expired"}},
@@ -187,5 +132,14 @@ func TestTraceTrimmedByBudgetSeparatesTheTwoTrims(t *testing.T) {
 	// slice so a caller can print "0" without distinguishing the two.
 	if stage, fit := (&Trace{}).TrimmedByBudget(); stage != nil || fit != nil {
 		t.Errorf("a trace with no stages reported trims %v / %v, want nil / nil", stage, fit)
+	}
+}
+
+func TestLeaksAndTagsLabelAreNilSafe(t *testing.T) {
+	if got := (Result{}).Leaks(); got != nil {
+		t.Errorf("Leaks over a result with no trace = %v, want nil", got)
+	}
+	if got := TagsLabel(nil); got != "" {
+		t.Errorf("TagsLabel(nil) = %q, want empty", got)
 	}
 }

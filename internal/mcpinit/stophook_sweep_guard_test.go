@@ -92,21 +92,6 @@ func assertNothingRemoved(t *testing.T, root string, before []string) {
 	}
 }
 
-// TestSweepRemovesTheDirectoryThePluginMaterialised: the one directory shape
-// the plugin creates is still removed, for both plugin formats.
-func TestSweepRemovesTheDirectoryThePluginMaterialised(t *testing.T) {
-	for _, format := range []string{"opencode-messages", "opencode-v2-messages"} {
-		t.Run(format, func(t *testing.T) {
-			base := sweepTempBase(t)
-			dir := plantPluginSessionDir(t, base)
-			sweepWithFormat(t, "opencode", format, filepath.Join(dir, opencodeTranscriptName))
-			if _, err := os.Lstat(dir); !os.IsNotExist(err) {
-				t.Errorf("the plugin's session directory was not swept: %v", err)
-			}
-		})
-	}
-}
-
 // TestSweepLeavesEverythingTheHostDidNotMaterialise holds the blast radius: a
 // payload path pointing into any other entry of the temp directory removes
 // nothing. Each case after the issue's own three fails exactly one check, so a

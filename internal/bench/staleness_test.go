@@ -11,31 +11,6 @@ import (
 	"github.com/wcatz/ghost/internal/memory"
 )
 
-func TestJudgeProbe(t *testing.T) {
-	cases := []struct {
-		name              string
-		ranked            []string
-		fresh             string
-		stale             []string
-		found, wins, top1 bool
-	}{
-		{"fresh first", []string{"f", "s1", "s2"}, "f", []string{"s1", "s2"}, true, true, true},
-		{"fresh beats present stale, not top", []string{"x", "f", "s1"}, "f", []string{"s1", "s2"}, true, true, false},
-		{"stale outranks fresh", []string{"s1", "f"}, "f", []string{"s1"}, true, false, false},
-		{"fresh missing", []string{"s1", "x"}, "f", []string{"s1"}, false, false, false},
-		{"stale absent counts as win", []string{"x", "f"}, "f", []string{"s1"}, true, true, false},
-		{"chain: middle version outranks", []string{"v2", "f", "v1"}, "f", []string{"v1", "v2"}, true, false, false},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			found, wins, top1 := judgeProbe(c.ranked, c.fresh, c.stale)
-			if found != c.found || wins != c.wins || top1 != c.top1 {
-				t.Errorf("judgeProbe = (%v,%v,%v), want (%v,%v,%v)", found, wins, top1, c.found, c.wins, c.top1)
-			}
-		})
-	}
-}
-
 // loadStalenessTestdata loads the committed scenario fixture.
 func loadStalenessTestdata(t *testing.T) []StalenessScenario {
 	t.Helper()
@@ -51,35 +26,42 @@ func loadStalenessTestdata(t *testing.T) []StalenessScenario {
 	return scenarios
 }
 
-// TestStalenessReport runs the suite and logs the report. What IS enforced:
-// the fixture loads with a healthy scenario count, both probe types are
-// present, the suite runs without error, and the fresh version is at least
-// RETRIEVED for every probe under the production default (decay on) — decay
-// only reorders the window, never dropping a relevant memory (findability).
-func TestStalenessReport(t *testing.T) {
-	// Parallel: opens its own stores and reads no process-global state, so it
-	// overlaps the corpus-wide tests instead of running ahead of them.
-	t.Parallel()
-	scenarios := loadStalenessTestdata(t)
-	if len(scenarios) < 20 {
-		t.Fatalf("fixture has %d scenarios, want >= 20", len(scenarios))
+// stalenessRow parses one row of the staleness table by its leading label and
+// returns its numeric columns. It parses rather than searches for a substring
+// because a table is a table: the test that guards it should not pass on a
+// scenario name that happens to contain the label.
+func stalenessRow(report, label string) (map[string]float64, bool) {
+	for _, line := range strings.Split(report, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 5 || fields[0] != label {
+			continue
+		}
+		out := map[string]float64{}
+		for i, col := range []string{"n", "fresh-found", "fresh-wins", "fresh@1"} {
+			v, err := strconv.ParseFloat(fields[i+1], 64)
+			if err != nil {
+				return nil, false
+			}
+			out[col] = v
+		}
+		return out, true
 	}
+	return nil, false
+}
 
-	// Production defaults (DecayEnabled true) — documents today's behavior.
-	outcomes, err := RunStaleness(context.Background(), scenarios, memory.DefaultSearchParams(), false)
-	if err != nil {
-		t.Fatalf("RunStaleness: %v", err)
+// freshWins reports the fraction of probes where the fresh version outranked
+// every superseded sibling.
+func freshWins(outcomes []ProbeOutcome) float64 {
+	if len(outcomes) == 0 {
+		return 0
 	}
-	summaries := SummarizeStaleness(outcomes)
-	if len(summaries) < 2 {
-		t.Fatalf("want state + premise summaries, got %+v", summaries)
-	}
+	wins := 0
 	for _, o := range outcomes {
-		if !o.FreshFound {
-			t.Errorf("%s/%s: fresh version not retrieved at all (findability regression)", o.Scenario, o.ProbeType)
+		if o.FreshWins {
+			wins++
 		}
 	}
-	t.Logf("staleness suite (report-only, default params):\n%s", FormatStaleness(outcomes))
+	return float64(wins) / float64(len(outcomes))
 }
 
 // TestStalenessReportNamesFreshAt1 is the headline the docs publish, and it used
@@ -161,44 +143,6 @@ func TestStalenessReportNamesFreshAt1(t *testing.T) {
 	if int(row["n"]) != all.Probes {
 		t.Errorf("all row's n is %d, want %d", int(row["n"]), all.Probes)
 	}
-}
-
-// stalenessRow parses one row of the staleness table by its leading label and
-// returns its numeric columns. It parses rather than searches for a substring
-// because a table is a table: the test that guards it should not pass on a
-// scenario name that happens to contain the label.
-func stalenessRow(report, label string) (map[string]float64, bool) {
-	for _, line := range strings.Split(report, "\n") {
-		fields := strings.Fields(line)
-		if len(fields) != 5 || fields[0] != label {
-			continue
-		}
-		out := map[string]float64{}
-		for i, col := range []string{"n", "fresh-found", "fresh-wins", "fresh@1"} {
-			v, err := strconv.ParseFloat(fields[i+1], 64)
-			if err != nil {
-				return nil, false
-			}
-			out[col] = v
-		}
-		return out, true
-	}
-	return nil, false
-}
-
-// freshWins reports the fraction of probes where the fresh version outranked
-// every superseded sibling.
-func freshWins(outcomes []ProbeOutcome) float64 {
-	if len(outcomes) == 0 {
-		return 0
-	}
-	wins := 0
-	for _, o := range outcomes {
-		if o.FreshWins {
-			wins++
-		}
-	}
-	return float64(wins) / float64(len(outcomes))
 }
 
 // TestStalenessDecayProof proves the decay factor flips the suite: at

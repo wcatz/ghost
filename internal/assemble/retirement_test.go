@@ -15,9 +15,7 @@ const (
 
 // TestRunPassiveOrdersARetirementFirstAndMarksTheRetiredRow is the session start
 // after a dependency's removal on a default install: the retired claim ranked
-// first (it is the more important row and nothing relates the two) and neither
-// line said it was gone. The retirement must come first, and the retired row
-// must stay, marked as maybe replaced by the retirement.
+// first (it is the more important row and nothing relates the two) and neither.
 func TestRunPassiveOrdersARetirementFirstAndMarksTheRetiredRow(t *testing.T) {
 	r := newReplacementStore(t)
 	older := r.add(dep(sendgridDep, 0.8), 20)

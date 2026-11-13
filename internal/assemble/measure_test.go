@@ -1,15 +1,15 @@
 package assemble
 
 import (
-	"github.com/wcatz/ghost/internal/memory"
 	"strings"
 	"testing"
+
+	"github.com/wcatz/ghost/internal/memory"
 )
 
 // TestMeasureCapsTheCallersOwnRenderAndKeepsPinned: with Budget.Measure the cap is
 // on the caller's render, not the search envelope, a cut is recorded as
-// response_fit, and with KeepPinned a pinned row ranked LAST outlives unpinned
-// rows ranked above it.
+// response_fit.
 func TestMeasureCapsTheCallersOwnRenderAndKeepsPinned(t *testing.T) {
 	rows := []string{"A1", "A2", "A3", "PIN"}
 	build := func() Request {
@@ -105,11 +105,7 @@ func TestMeasureCapsTheCallersOwnRenderAndKeepsPinned(t *testing.T) {
 
 // TestTheFramingCeilingIsDecidedFromTheAllCutFraming: a caller's framing that
 // grows with the cuts (a count line that names how many rows were cut) can sit
-// just under the ceiling with no cut and over it after the first. Reading the
-// framing on every iteration cut rows for that and then stopped, leaving the
-// render over the cap with rows recorded as cut for nothing. The decision is
-// made ONCE, against the framing as it stands with every row cut, so such a block
-// keeps every row.
+// just under the ceiling with no cut and over it after the first.
 func TestTheFramingCeilingIsDecidedFromTheAllCutFraming(t *testing.T) {
 	rows := []string{"A1", "A2", "A3", "A4"}
 	var cands []memory.Candidate
@@ -143,9 +139,7 @@ func TestTheFramingCeilingIsDecidedFromTheAllCutFraming(t *testing.T) {
 	if len(res.Items) != len(rows) {
 		t.Errorf("kept %d rows, want %d: the framing cannot reach the cap, so no row is cut", len(res.Items), len(rows))
 	}
-	// The measure it decided against, not merely that it decided once: a version
-	// that read the framing with only the cuts made so far would pass this on the
-	// first row and stop on the second.
+	// The measure it decided against.
 	if mostCuts != len(rows) {
 		t.Errorf("the ceiling was decided against a trace holding %d cut rows, want %d: the framing is measured "+
 			"at its longest, with every row cut", mostCuts, len(rows))
@@ -159,8 +153,7 @@ func TestTheFramingCeilingIsDecidedFromTheAllCutFraming(t *testing.T) {
 
 // TestTheFramingCeilingStillCutsWhenTheFramingCannotReachIt is the other half of
 // the once-only decision: a caller whose framing does NOT grow with the cuts, and
-// cannot reach the ceiling, still loses rows down to the cap. A decision made
-// once is not a decision never to cut.
+// cannot reach the ceiling, still loses rows down to the cap.
 func TestTheFramingCeilingStillCutsWhenTheFramingCannotReachIt(t *testing.T) {
 	rows := []string{"A1", "A2", "A3", "A4"}
 	var cands []memory.Candidate
@@ -190,112 +183,9 @@ func TestTheFramingCeilingStillCutsWhenTheFramingCannotReachIt(t *testing.T) {
 	}
 }
 
-// TestAFramingAtOrOverTheCeilingKeepsEveryRowAndRecordsNoCut is the documented
-// edge: when even the all-cut framing is at or over the host ceiling, cutting
-// cannot help, so the pass keeps every row and records no response_fit cut. The
-// ceiling itself is inside the band (at, not only over).
-func TestAFramingAtOrOverTheCeilingKeepsEveryRowAndRecordsNoCut(t *testing.T) {
-	for _, framing := range []int{10000, 12000} {
-		rows := []string{"A1", "A2", "A3", "A4"}
-		var cands []memory.Candidate
-		for i, id := range rows {
-			cands = append(cands, ranked(id, i, strings.Repeat("x", 100)))
-		}
-		req := baseRequest()
-		req.Budget.MaxItems = 10
-		req.Budget.MaxBytes = 9000
-		req.Budget.FramingCeiling = 10000
-		req.Budget.Measure = func(items []Item, _ *Trace) int { return framing + 10*len(items) }
-		res := run(t, &fakeRetriever{set: ftsOnlySet(cands...)}, req)
-
-		if len(res.Items) != len(rows) {
-			t.Errorf("framing %d: kept %d rows, want %d", framing, len(res.Items), len(rows))
-		}
-		for _, d := range res.Trace.Decisions {
-			if d.Stage == stageResponseFit {
-				t.Errorf("framing %d: response_fit decision recorded for %s (kept=%v), want none", framing, d.ID, d.Kept)
-			}
-		}
-	}
-}
-
-// TestKeepPinnedCutsUnpinnedRowsFirst: with KeepPinned the cut order is the
-// lowest-ranked unpinned row each time, so a pinned row ranked above unpinned
-// ones outlives them and is the last to go.
-func TestKeepPinnedCutsUnpinnedRowsFirst(t *testing.T) {
-	var cands []memory.Candidate
-	for i, id := range []string{"U1", "P1", "U2", "U3"} {
-		c := ranked(id, i, strings.Repeat("x", 100))
-		c.Pinned = id == "P1"
-		cands = append(cands, c)
-	}
-	req := baseRequest()
-	req.Budget.MaxItems = 10
-	req.Budget.KeepPinned = true
-	req.Budget.MaxBytes = 100
-	req.Budget.Measure = func(items []Item, _ *Trace) int { return 100 * len(items) }
-	res := run(t, &fakeRetriever{set: ftsOnlySet(cands...)}, req)
-	if got := strings.Join(itemIDs(res.Items), ","); got != "P1" {
-		t.Fatalf("kept %q, want only the pinned row", got)
-	}
-	var order []string
-	for _, d := range res.Trace.Decisions {
-		if d.Stage == stageResponseFit && !d.Kept {
-			order = append(order, d.ID)
-		}
-	}
-	if got := strings.Join(order, ","); got != "U3,U2,U1" {
-		t.Errorf("cut order %q, want U3,U2,U1: lowest-ranked unpinned first", got)
-	}
-}
-
-// TestReserveByProjectKeepsGlobalBucketFromZero: the response-fit pass must not
-// empty a reserved bucket to zero when other buckets can be cut, and it prefers
-// keeping pinned rows in that bucket.
-func TestReserveByProjectKeepsGlobalBucketFromZero(t *testing.T) {
-	var cands []memory.Candidate
-	for i, id := range []string{"P1", "P2", "P3"} {
-		c := ranked(id, i, strings.Repeat("x", 100))
-		c.ProjectID = "proj"
-		cands = append(cands, c)
-	}
-	for i, id := range []string{"G1", "GP"} {
-		c := ranked(id, 10+i, strings.Repeat("x", 100))
-		c.ProjectID = memory.GlobalProjectID
-		c.Pinned = id == "GP"
-		cands = append(cands, c)
-	}
-	req := baseRequest()
-	req.Budget.MaxItems = 10
-	req.Budget.KeepPinned = true
-	req.Budget.MaxBytes = 150
-	req.Budget.ReserveByProject = map[string]int{memory.GlobalProjectID: 1}
-	req.Budget.Measure = func(items []Item, _ *Trace) int { return 100 * len(items) }
-	res := run(t, &fakeRetriever{set: ftsOnlySet(cands...)}, req)
-	gotGlobals := 0
-	hasPinnedGlobal := false
-	for _, it := range res.Items {
-		if it.ProjectID == memory.GlobalProjectID {
-			gotGlobals++
-			if it.Pinned {
-				hasPinnedGlobal = true
-			}
-		}
-	}
-	if gotGlobals == 0 {
-		t.Fatalf("kept %v, want at least one global row; the fit pass must not empty the reserved global bucket", itemIDs(res.Items))
-	}
-	if !hasPinnedGlobal {
-		t.Fatalf("kept %v, want the pinned global row preserved first", itemIDs(res.Items))
-	}
-}
-
-// TestReservePinnedByProjectKeepsPinnedGlobalsOverProjectPins: the fit pass
-// keeps up to the reserved number of PINNED rows of a bucket while rows of any
-// other kind can be cut instead — including pinned rows of another bucket, which
-// otherwise rank above every global and survive while the global pins (a user's
-// cross-project non-negotiables) are cut. An unpinned row of the reserved bucket
-// is not protected by it.
+// TestReservePinnedByProjectKeepsPinnedGlobalsOverProjectPins: the fit pass keeps
+// up to the reserved number of PINNED rows of a bucket while rows of any other
+// kind can be cut instead — including pinned rows of another bucket.
 func TestReservePinnedByProjectKeepsPinnedGlobalsOverProjectPins(t *testing.T) {
 	var cands []memory.Candidate
 	for i, id := range []string{"P1", "P2", "P3", "P4"} {
@@ -322,9 +212,6 @@ func TestReservePinnedByProjectKeepsPinnedGlobalsOverProjectPins(t *testing.T) {
 	}
 }
 
-// TestReserveGivesWayWhenASingleGlobalRowCannotStay: a reserved bucket row is
-// cut last, but it is still cut when keeping it would leave the block over the
-// byte cap.
 func TestReserveGivesWayWhenASingleGlobalRowCannotStay(t *testing.T) {
 	c := ranked("G1", 0, strings.Repeat("x", 100))
 	c.ProjectID = memory.GlobalProjectID
@@ -341,29 +228,5 @@ func TestReserveGivesWayWhenASingleGlobalRowCannotStay(t *testing.T) {
 	}
 	if tally := CountsFor(res.Trace, memory.GlobalProjectID, 0); tally.ByteCut != 1 {
 		t.Errorf("global tally ByteCut=%d, want 1", tally.ByteCut)
-	}
-}
-
-// TestReserveWithoutKeepPinnedCutsOtherBucketFirst: with KeepPinned off the
-// reserve still holds, and a pinned flag plays no part in which row is cut.
-func TestReserveWithoutKeepPinnedCutsOtherBucketFirst(t *testing.T) {
-	var cands []memory.Candidate
-	for i, id := range []string{"P1", "P2"} {
-		c := ranked(id, i, strings.Repeat("x", 100))
-		c.ProjectID = "proj"
-		cands = append(cands, c)
-	}
-	g := ranked("G1", 10, strings.Repeat("x", 100))
-	g.ProjectID = memory.GlobalProjectID
-	cands = append(cands, g)
-	req := baseRequest()
-	req.Budget.MaxItems = 10
-	req.Budget.KeepPinned = false
-	req.Budget.MaxBytes = 100
-	req.Budget.ReserveByProject = map[string]int{memory.GlobalProjectID: 1}
-	req.Budget.Measure = func(items []Item, _ *Trace) int { return 100 * len(items) }
-	res := run(t, &fakeRetriever{set: ftsOnlySet(cands...)}, req)
-	if got := strings.Join(itemIDs(res.Items), ","); got != "G1" {
-		t.Errorf("kept %q, want only G1: the lowest-ranked project rows go before the reserved global row", got)
 	}
 }

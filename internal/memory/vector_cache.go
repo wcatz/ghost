@@ -60,12 +60,6 @@ type vectorCache struct {
 
 func newVectorCache() *vectorCache { return &vectorCache{idle: vectorCacheIdle} }
 
-func (c *vectorCache) setIdle(d time.Duration) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.idle = d
-}
-
 func (c *vectorCache) get(epoch int64, identity string) *vectorCorpus {
 	c.mu.Lock()
 	defer c.mu.Unlock()

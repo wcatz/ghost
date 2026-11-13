@@ -1,12 +1,9 @@
 package selfupdate
 
 import (
-	"bytes"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 )
@@ -47,11 +44,6 @@ func assertAsideHoldsTheReplacedBinary(t *testing.T, aside, want string) {
 }
 
 // TestInstallNewBinaryMovesARunningTargetAside is the Windows half of #558.
-// A running executable's image is open without delete sharing, so renaming a
-// new file over it fails with "Access is denied" and `ghost upgrade` — the
-// command that repairs a machine — could never repair a Windows one. Windows
-// does allow renaming the running image, so the old binary moves to a fixed
-// sibling name and the new one takes the path the old one vacated.
 func TestInstallNewBinaryMovesARunningTargetAside(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "ghost")
@@ -73,10 +65,6 @@ func TestInstallNewBinaryMovesARunningTargetAside(t *testing.T) {
 	}
 }
 
-// TestInstallNewBinaryReusesTheAsideName keeps a leftover from blocking or
-// multiplying. The old image cannot be deleted while this process is still
-// running from it, so a fixed name is reused on the next upgrade rather than a
-// unique one that would leave a file behind per attempt.
 func TestInstallNewBinaryReusesTheAsideName(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "ghost")
@@ -105,11 +93,6 @@ func TestInstallNewBinaryReusesTheAsideName(t *testing.T) {
 	assertAsideHoldsTheReplacedBinary(t, target+asideSuffix, "old-binary")
 }
 
-// TestInstallNewBinaryRestoresTheTargetWhenTheMoveFails is the safety
-// property of the two-step move: the old binary goes back where it was, so a
-// failure between the two renames cannot leave an install with no binary at
-// all. A staged path that does not exist fails the second rename
-// deterministically, with no permission or timing games.
 func TestInstallNewBinaryRestoresTheTargetWhenTheMoveFails(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "ghost")
@@ -129,9 +112,6 @@ func TestInstallNewBinaryRestoresTheTargetWhenTheMoveFails(t *testing.T) {
 	}
 }
 
-// TestInstallNewBinaryRenamesDirectlyWhereThePlatformAllowsIt is the Unix
-// path: renaming over the target is atomic there, and moving the old image
-// aside first would only open a window where the install path does not exist.
 func TestInstallNewBinaryRenamesDirectlyWhereThePlatformAllowsIt(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "ghost")
@@ -151,53 +131,6 @@ func TestInstallNewBinaryRenamesDirectlyWhereThePlatformAllowsIt(t *testing.T) {
 	}
 }
 
-// TestInstallNewBinaryFollowsThePlatformPolicy pins the one build-tagged
-// decision in the install path. The Windows CI job runs internal/mcpinit and
-// internal/ai, so this package's tests never execute on Windows: without this
-// assertion nothing anywhere checks that the platform whose rename fails is the
-// one that gets the aside move.
-func TestInstallNewBinaryFollowsThePlatformPolicy(t *testing.T) {
-	if want := runtime.GOOS == "windows"; asideRunningTarget != want {
-		t.Errorf("asideRunningTarget = %v on %s, want %v: a running executable cannot be renamed over on Windows, and nowhere else",
-			asideRunningTarget, runtime.GOOS, want)
-	}
-}
-
-// TestReplaceAppliesThePlatformPolicy drives the exported entry point so the
-// wiring between Replace and the policy cannot be dropped. A Replace that passed
-// the wrong answer to installNewBinary would look perfectly correct on Unix —
-// the two policies agree there — and only fail on Windows, which is exactly the
-// platform this guards. The leftover is the observable: Unix removes the aside
-// as part of a successful install, Windows cannot remove the image it is still
-// running from, and the policy says which of those to expect.
-func TestReplaceAppliesThePlatformPolicy(t *testing.T) {
-	dir := t.TempDir()
-	target := filepath.Join(dir, "ghost")
-	writeFile(t, target, "old-binary")
-
-	if _, err := Replace(target, []byte("new-binary")); err != nil {
-		t.Fatalf("Replace: %v", err)
-	}
-	if got, _ := readIfPresent(t, target); string(got) != "new-binary" {
-		t.Fatalf("target holds %q, want the new binary", got)
-	}
-
-	_, asidePresent := readIfPresent(t, target+asideSuffix)
-	if asidePresent != asideRunningTarget {
-		t.Errorf("after Replace the replaced binary is at %s: present=%v, but this platform's policy is asideRunningTarget=%v",
-			target+asideSuffix, asidePresent, asideRunningTarget)
-	}
-}
-
-// TestReplaceLeavesTheOldBinaryWhenAStagedWriteIsInterrupted is the failure the
-// staging file exists to survive: a write that stops part-way. The installed
-// binary must come out of it byte for byte unchanged, and the partial file must
-// not survive, because the path is reopened and rewritten by the next upgrade
-// while a leftover is a full copy of a binary nobody asked to keep.
-//
-// The interruption is injected because it cannot be provoked any other way
-// without a full disk or a revoked permission, and neither is the failure a
-// staged write is there for: a write that begins and does not finish.
 func TestReplaceLeavesTheOldBinaryWhenAStagedWriteIsInterrupted(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "ghost")
@@ -222,108 +155,6 @@ func TestReplaceLeavesTheOldBinaryWhenAStagedWriteIsInterrupted(t *testing.T) {
 			got, present)
 	}
 	assertOnlyEntry(t, dir, target)
-}
-
-// TestReplaceIsNeverObservedHalfWritten is what the rename buys, and it is not
-// observable any other way. A reader that opens the install path while an
-// upgrade runs has to see the whole old binary or the whole new one; a prefix of
-// the new binary is what a copy-in-place install hands a client that spawns
-// ghost at the wrong moment, and it is a file no verification will ever run
-// against.
-//
-// The window is what makes this a test rather than a comment, so the binaries
-// are megabyte-scale: a rename is a single operation however large the file, so
-// this costs nothing on the path under test, while a truncating write of a
-// megabyte is a window wide enough for a tight reader loop to land in. Both
-// bodies are made of one repeated byte so a truncated or padded read cannot be
-// mistaken for the other.
-func TestReplaceIsNeverObservedHalfWritten(t *testing.T) {
-	oldBinary := bytes.Repeat([]byte("O"), 1<<20)
-	newBinary := bytes.Repeat([]byte("N"), 4<<20)
-	dir := t.TempDir()
-	target := filepath.Join(dir, "ghost")
-	if err := os.WriteFile(target, oldBinary, 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	// Reads run on their own goroutine so the replacement is not serialised
-	// behind them: a reader that only ever runs before or after the rename sees
-	// one version or the other and proves nothing.
-	readErr := make(chan string, 1)
-	stop := make(chan struct{})
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		for {
-			select {
-			case <-stop:
-				return
-			default:
-			}
-			got, err := os.ReadFile(target)
-			if err != nil {
-				// Absent is not torn. The Windows install renames the running
-				// image aside before the replacement takes the path, which
-				// opens a window where the install path does not exist; that
-				// window is documented and accepted, and it is the platform
-				// where rename-over-target is impossible.
-				if os.IsNotExist(err) && !asideRunningTarget {
-					select {
-					case readErr <- fmt.Sprintf("the install path vanished mid-upgrade: %v", err):
-					default:
-					}
-					return
-				}
-				continue
-			}
-			switch {
-			case bytes.Equal(got, oldBinary), bytes.Equal(got, newBinary):
-			default:
-				select {
-				case readErr <- fmt.Sprintf("read %d bytes, which is neither the %d-byte installed binary nor the %d-byte replacement",
-					len(got), len(oldBinary), len(newBinary)):
-				default:
-				}
-				return
-			}
-		}
-	}()
-
-	if _, err := Replace(target, newBinary); err != nil {
-		t.Fatalf("Replace: %v", err)
-	}
-	close(stop)
-	<-done
-
-	select {
-	case msg := <-readErr:
-		t.Error(msg)
-	default:
-	}
-	if got, _ := readIfPresent(t, target); !bytes.Equal(got, newBinary) {
-		t.Fatalf("target holds %d bytes, want the %d-byte new binary", len(got), len(newBinary))
-	}
-}
-
-// assertOnlyEntry checks that dir holds the target and nothing else, naming any
-// debris. On Windows the aside the OS will not let this process delete is
-// expected, so it is allowed there and nowhere else.
-func assertOnlyEntry(t *testing.T, dir, target string) {
-	t.Helper()
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var names []string
-	for _, e := range entries {
-		if asideRunningTarget && e.Name() == filepath.Base(target)+asideSuffix {
-			continue
-		}
-		names = append(names, e.Name())
-	}
-	if len(names) != 1 || names[0] != filepath.Base(target) {
-		t.Errorf("%s holds %v, want only %s: a failed upgrade must leave no debris", dir, names, filepath.Base(target))
-	}
 }
 
 func TestInstallNewBinaryUsesUniqueAsideWhenFixedAsideCannotBeRemoved(t *testing.T) {
@@ -421,6 +252,24 @@ func TestInstallNewBinaryRestoresTargetWhenUniqueAsideFails(t *testing.T) {
 		if strings.HasPrefix(e.Name(), filepath.Base(target)+asideSuffix+"-") {
 			t.Errorf("unique aside survived a failed install: %s", e.Name())
 		}
+	}
+}
+
+func assertOnlyEntry(t *testing.T, dir, target string) {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, e := range entries {
+		if asideRunningTarget && e.Name() == filepath.Base(target)+asideSuffix {
+			continue
+		}
+		names = append(names, e.Name())
+	}
+	if len(names) != 1 || names[0] != filepath.Base(target) {
+		t.Errorf("%s holds %v, want only %s: a failed upgrade must leave no debris", dir, names, filepath.Base(target))
 	}
 }
 

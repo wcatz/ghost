@@ -27,8 +27,7 @@ func TestSourceProviderForSource(t *testing.T) {
 		{"opencode", "opencode", true},
 		{"codex", "codex", true},
 		{"goose", "goose", true},
-		// Empty/unknown source must NOT cascade to claude (or anything else):
-		// callers resolve the source or fail, so the provider is unavailable.
+
 		{"unknown-source", "none", false},
 		{"", "none", false},
 	}
@@ -45,12 +44,6 @@ func TestSourceProviderForSource(t *testing.T) {
 	}
 }
 
-// TestKnownSourcesMatchTheProviderSwitch ties the written-down source list to
-// newSourceProvider's switch: every listed token resolves to an available
-// provider when its binary exists, and a few tokens outside the list do not.
-// A source dropped from the list fails here; a case added to the switch alone
-// does not, because the switch cannot be enumerated, so a new source still has
-// to be added to knownSources by hand.
 func TestKnownSourcesMatchTheProviderSwitch(t *testing.T) {
 	binary := sourceProviderTestBinary(t)
 	for _, source := range KnownSources() {
@@ -61,9 +54,6 @@ func TestKnownSourcesMatchTheProviderSwitch(t *testing.T) {
 			t.Errorf("listed source %q is not resolved by the provider switch", source)
 		}
 	}
-	// Every token this package itself produces — from an MCP client name or
-	// a harness process name — must be one the list names, or a detected
-	// source would be refused as unknown.
 	for _, c := range clientSourceNames {
 		if !IsKnownSource(c.source) {
 			t.Errorf("clientSourceNames maps %q to %q, which KnownSources omits", c.name, c.source)
@@ -164,16 +154,10 @@ func TestSourceForClientName(t *testing.T) {
 	}
 }
 
-// TestNewSourceProviderForSourceWithModel_ThreadsModel pins that the
-// constructor-level model reaches the opencode backend (and only that backend).
-// The other harnesses have no model flag, so their backends must be constructed
-// as before. This is the MCP server's path for applying cli.model_resolve
-// without mutating process env.
 func TestNewSourceProviderForSourceWithModel_ThreadsModel(t *testing.T) {
 	binary := sourceProviderTestBinary(t)
 	claude, opencode := binary, binary
 
-	// opencode backend: constructor model must be non-empty.
 	p := NewSourceProviderForSourceWithModel("opencode", "opencode/big-pickle", claude, opencode, "", "")
 	oc, ok := p.backend.(*OpenCodeClient)
 	if !ok {
@@ -183,14 +167,11 @@ func TestNewSourceProviderForSourceWithModel_ThreadsModel(t *testing.T) {
 		t.Errorf("opencode backend model = %q, want opencode/big-pickle", oc.model)
 	}
 
-	// claude backend: no model field — it must still construct as *CLIClient
-	// (the model is simply not threaded to harnesses that have no model flag).
 	p = NewSourceProviderForSourceWithModel("claude-code", "opencode/big-pickle", claude, opencode, "", "")
 	if _, ok := p.backend.(*CLIClient); !ok {
 		t.Errorf("claude backend = %T, want *CLIClient", p.backend)
 	}
 
-	// Empty model: constructor behaves like the plain constructor.
 	p = NewSourceProviderForSourceWithModel("opencode", "", claude, opencode, "", "")
 	oc, ok = p.backend.(*OpenCodeClient)
 	if !ok {

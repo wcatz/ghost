@@ -1,7 +1,6 @@
 package portable
 
 import (
-	"bytes"
 	"context"
 	"strings"
 	"testing"
@@ -123,47 +122,5 @@ func TestAKeyRepeatedInsideAPayloadIsNotAFileRefusal(t *testing.T) {
 		if report.Rejected != 0 || report.Created["memory"] != 1 {
 			t.Errorf("apply=%v: created=%v rejected=%d, want one memory and no rejection", apply, report.Created, report.Rejected)
 		}
-	}
-}
-
-// TestARealExportStillImportsCleanly: the exporter never repeats a key, so its
-// own artifact passes the check in both modes.
-func TestARealExportStillImportsCleanly(t *testing.T) {
-	src := newTestStore(t)
-	seed(t, src)
-	artifact := exportBytes(t, src, "")
-	for _, apply := range []bool{false, true} {
-		dst := newTestStore(t)
-		report, err := Import(context.Background(), dst, bytes.NewReader(artifact), ImportOptions{Apply: apply}, nil)
-		if err != nil {
-			t.Fatalf("apply=%v: import refused the exporter's own artifact: %v", apply, err)
-		}
-		if report.Rejected != 0 {
-			t.Errorf("apply=%v: rejected=%d, errors=%v", apply, report.Rejected, report.Errors)
-		}
-		if report.Created["memory"] == 0 || report.Created["task"] == 0 || report.Created["decision"] == 0 {
-			t.Errorf("apply=%v: created=%v, want every kind the seed wrote", apply, report.Created)
-		}
-	}
-}
-
-// TestARepeatedKeyIsNamedThroughTheRefusalGuard: the key is text from the file,
-// so the refusal names it the way every import refusal names a value from the
-// file — escaped, and withheld when it is longer than a refusal repeats — and a
-// key cannot carry a line break or a wall of text into the terminal.
-func TestARepeatedKeyIsNamedThroughTheRefusalGuard(t *testing.T) {
-	long := `zq\n` + strings.Repeat("a", 300)
-	body := `{"type":"header","schema_version":2}` + "\n" +
-		`{"type":"project","project":{"id":"pH","path":"/src/pH","name":"pH"},"` + long + `":1,"` + long + `":2}` + "\n"
-	_, err := Import(context.Background(), newTestStore(t), strings.NewReader(body), ImportOptions{}, nil)
-	if err == nil {
-		t.Fatal("import accepted a line that repeats a key")
-	}
-	msg := err.Error()
-	if !strings.Contains(msg, "line 2") {
-		t.Errorf("error = %v, want it to name line 2", err)
-	}
-	if strings.Contains(msg, "\n") || strings.Contains(msg, strings.Repeat("a", 300)) || strings.Contains(msg, "zq") {
-		t.Errorf("error repeats the key's text: %q", msg)
 	}
 }

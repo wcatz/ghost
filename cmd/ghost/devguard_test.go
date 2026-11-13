@@ -70,9 +70,6 @@ func TestApplyBuildVersionHandsTheCLIVersionToTheDataDirGuard(t *testing.T) {
 		t.Fatalf("mkdir %s: %v", other, err)
 	}
 	t.Setenv("XDG_DATA_HOME", other)
-	// The listing names the NEW data home's ghost directory: the release half
-	// above already created the first one, so pointing at it would prove nothing
-	// about a directory that does not exist yet.
 	t.Setenv(config.DevForbidDataDirEnv, filepath.Join(other, "ghost"))
 	if _, err := config.DataDirPath(); err == nil {
 		t.Error("config.DataDirPath = nil, want a refusal on a development build")
