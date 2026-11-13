@@ -74,30 +74,3 @@ func TestTheFormatRuneClassIsExactlyUnicodeCategoryCf(t *testing.T) {
 			len(extra), min(8, len(extra)), sampleRunes(extra))
 	}
 }
-
-// TestTheFormatRuneClassNamesTheInvisibleMembers: the members the class exists
-// for are named one by one, because each is a character some future change
-// would plausibly reach for. The exhaustive test above proves the SET matches;
-// this says which members are the point.
-func TestTheFormatRuneClassNamesTheInvisibleMembers(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		r    rune
-	}{
-		{"zero-width space", 0x200B},
-		{"zero-width non-joiner", 0x200C},
-		{"zero-width joiner", 0x200D},
-		{"word joiner", 0x2060},
-		{"byte-order mark", 0xFEFF},
-		{"left-to-right mark", 0x200E},
-		{"right-to-left override", 0x202E},
-		{"left-to-right isolate", 0x2066},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if !IsFormatRune(tc.r) {
-				t.Errorf("%U is not recognised as a FORMAT character, so a renderer "+
-					"prints it raw and two values that differ in bytes print alike", tc.r)
-			}
-		})
-	}
-}

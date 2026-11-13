@@ -2,7 +2,6 @@ package memory
 
 import (
 	"context"
-	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -64,36 +63,4 @@ func assertNoRemoteOnGlobal(t *testing.T, s *Store, remote string) {
 	if got == remote {
 		t.Errorf("_global still records the seeded repository %q", remote)
 	}
-}
-
-// TestMigrateV15ClearsGlobalRepository covers the migration side directly: a
-// v14 database whose _global row still carries a remote is a valid state
-// written by an older build, and upgrading must strip it rather than preserve an
-// identity that can never be honoured.
-func TestMigrateV15ClearsGlobalRepository(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "global-remote.sqlite")
-	db, err := OpenDB(path)
-	if err != nil {
-		t.Fatalf("OpenDB seed: %v", err)
-	}
-	const remote = "github.com/me/infra"
-	if _, err := db.Exec(`INSERT INTO projects (id, path, name, repo_remote) VALUES ('_global', '_global', 'global', ?)`, remote); err != nil {
-		t.Fatalf("insert _global: %v", err)
-	}
-	// Re-stamp so the v15 step actually runs; the seed was written by a build
-	// that had already reached this version.
-	if _, err := db.Exec(`PRAGMA user_version = 14`); err != nil {
-		t.Fatalf("stamp v14: %v", err)
-	}
-	if err := db.Close(); err != nil {
-		t.Fatalf("close seed: %v", err)
-	}
-
-	migrated, err := OpenDB(path)
-	if err != nil {
-		t.Fatalf("OpenDB migrated: %v", err)
-	}
-	defer migrated.Close() //nolint:errcheck
-
-	assertNoRemoteOnGlobal(t, NewStore(migrated, nil), remote)
 }

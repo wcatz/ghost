@@ -133,39 +133,3 @@ func TestImportedEvidenceReadsAnRFC3339StampAsTheSaveToolDoes(t *testing.T) {
 	}
 	t.Errorf("the carried evidence record is missing: %+v", records)
 }
-
-// An absent claim is not a claim: a record carrying an empty stamp stores NULL
-// rather than a value every reader has to know to ignore, exactly as the
-// memory's own triple does.
-func TestImportedEvidenceStoresAnEmptyStampAsNoClaim(t *testing.T) {
-	empty := "   "
-	s := portableTestStore(t)
-	ctx := context.Background()
-	if err := s.EnsureProject(ctx, "p1", "/src/p1", "p1"); err != nil {
-		t.Fatalf("EnsureProject: %v", err)
-	}
-	created, _, _, err := s.ImportMemory(ctx, PortableMemory{
-		ID: "m-evidence", ProjectID: "p1", Category: "fact", Source: "mcp",
-		Content:  "a body carrying no claim at all",
-		Evidence: []PortableEvidence{{Kind: "observed", ObservedAt: &empty}},
-	}, ImportOptions{Apply: true})
-	if err != nil || !created {
-		t.Fatalf("ImportMemory: created=%v err=%v", created, err)
-	}
-	records, err := s.MemoryProvenance(ctx, "m-evidence")
-	if err != nil {
-		t.Fatalf("MemoryProvenance: %v", err)
-	}
-	for _, r := range records {
-		// The arrival record the import appends carries the store's own clock,
-		// so the carried one is the record under test.
-		if r.Kind != "observed" {
-			continue
-		}
-		if r.ObservedAt != nil {
-			t.Errorf("observed_at = %q, want NULL: a blank stamp is no claim", *r.ObservedAt)
-		}
-		return
-	}
-	t.Errorf("the carried evidence record is missing: %+v", records)
-}

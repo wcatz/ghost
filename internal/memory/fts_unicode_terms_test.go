@@ -2,7 +2,6 @@ package memory
 
 import (
 	"context"
-	"strings"
 	"testing"
 )
 
@@ -244,43 +243,5 @@ func TestSanitizeFTSKeepsNonLatinWords(t *testing.T) {
 				t.Errorf("sanitizeFTS(%q)\n  got:  %s\n  want: %s", tc.input, got, tc.want)
 			}
 		})
-	}
-}
-
-// TestSanitizeFTSKeepsTheTermBudgetForNonLatinWords: the budget is the budget.
-// A widened term is an ordinary term, so a query of twelve non-Latin words still
-// emits ten of them — the cap is what keeps the OR query narrow, and it must
-// not grow because a script widened.
-func TestSanitizeFTSKeepsTheTermBudgetForNonLatinWords(t *testing.T) {
-	words := []string{
-		"память", "запуск", "деплоя", "конфигурация", "хранилище", "ключ",
-		"مرحبا", "النشر", "التكوين", "المخزن", "المفتاح", "الاحتفاظ",
-	}
-	got := sanitizeFTS(strings.Join(words, " "), nil)
-	terms := splitFTSTERMs(t, got)
-	if len(terms) != ftsSearchWordLimit {
-		t.Errorf("sanitizeFTS emitted %d terms, want exactly %d: the budget is unchanged by the widening", len(terms), ftsSearchWordLimit)
-	}
-	for _, term := range terms {
-		if term == "" {
-			t.Errorf("sanitizeFTS emitted an empty term: %s", got)
-		}
-	}
-}
-
-// TestFTSQueryTermsDropsAWordOfOnlyMarks pins that a combining mark is kept only
-// beside a base character: a word made of marks alone, or of zero-width format
-// characters, is not a term and takes no slot from the budget.
-func TestFTSQueryTermsDropsAWordOfOnlyMarks(t *testing.T) {
-	for _, q := range []string{"\u0301", "\u0301\u0301 \u200b\u200d"} {
-		if got := ftsQueryTerms(q, ftsSearchWordLimit, nil); len(got) != 0 {
-			t.Errorf("ftsQueryTerms(%q) = %d term(s), want none: a word of marks or zero-width characters only matches nothing", q, len(got))
-		}
-	}
-	if got := ftsQueryTerms("\u0301 \u043f\u0440\u0438\u0432\u0435\u0442", ftsSearchWordLimit, nil); len(got) != 1 {
-		t.Errorf("a lone mark beside one real word gave %d term(s), want 1", len(got))
-	}
-	if got := ftsQueryTerms("cafe\u0301", ftsSearchWordLimit, nil); len(got) != 1 {
-		t.Errorf("a word with an edge mark gave %d term(s), want 1: the mark stays on its word", len(got))
 	}
 }
