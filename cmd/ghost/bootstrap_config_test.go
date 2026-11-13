@@ -10,11 +10,6 @@ import (
 )
 
 // isolateConfigEnv clears every GHOST_* variable for the duration of the test.
-// The fallback under test reads the real environment, so a host that exports
-// GHOST_EMBEDDING_ENABLED=false or GHOST_SCRATCH_MAX_BYTES=0 would otherwise
-// make the compiled-default assertions below fail on that machine and nowhere
-// else. config's own tests have the same helper; it is unexported, so it is
-// repeated here rather than exported for one caller.
 func isolateConfigEnv(t *testing.T) {
 	t.Helper()
 	for _, kv := range os.Environ() {
@@ -36,11 +31,6 @@ func isolateConfigEnv(t *testing.T) {
 // defaults, or a typo in a file the user may not know exists would leave their
 // editor with no Ghost tools at all.
 func TestConfigOnLoadError(t *testing.T) {
-	// Set the opt-outs BEFORE isolating, so isolating has something to clear:
-	// without the isolation the fallback would see them and this test would fail,
-	// which is what makes the helper's effect checkable rather than assumed. On a
-	// machine that exports these it is the difference between a test that runs
-	// everywhere and one that only fails where it happens to matter.
 	t.Setenv("GHOST_EMBEDDING_ENABLED", "false")
 	t.Setenv("GHOST_SCRATCH_MAX_BYTES", "0")
 	isolateConfigEnv(t)
@@ -58,9 +48,6 @@ func TestConfigOnLoadError(t *testing.T) {
 	if cfg == nil {
 		t.Fatal("warnOnConfig fallback = nil, want the compiled defaults")
 	}
-	// The fallback must be config.FallbackConfig() itself, so the server and the
-	// session hooks can never drift onto different values. Embedding.Enabled
-	// doubles as the check that the environment really was cleared above.
 	if !cfg.Embedding.Enabled || cfg.Scratch.MaxBytes != config.DefaultScratchMaxBytes ||
 		cfg.Linking.DemotionThreshold != 0.90 || cfg.Injection.BehaviorFloor != 8 ||
 		cfg.Obsidian.Interval != "30s" {

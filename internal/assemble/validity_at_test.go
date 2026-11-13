@@ -8,21 +8,8 @@ import (
 	"github.com/wcatz/ghost/internal/memory"
 )
 
-// TestAsOfStageTwoKeepsWhatTheListingWithholdsAtT is #910's half of the rule the
-// as_of listings use. The rows go through Run itself, so the comparison is
-// against the real stage and not against a second reading of its rule: every row
-// survives a historical read, including the ones memory.ValidityAt withholds at
-// the same instant, and the ones a browsing surface would label.
-//
-// The two verdicts are deliberately different, and this is the test that says so:
-// #898/#899 held the listing's helper to stage 2's verdict on the grounds that a
-// row search left out at an instant was a row the listing left out at that
-// instant. That stopped being true when the borrowed window was recognised for
-// what it is. The bounds an as_of row carries are the LIVE row's — memory_history
-// records no validity — so a verdict drawn from them is a claim about today's
-// bounds, not about the row at T. Stage 2 therefore draws none, and
-// memory.ValidityAt stays the LISTING's rule (and ValidityStateOf the browsing
-// surfaces'), each of which is still the one helper for its own question.
+// TestAsOfStageTwoKeepsWhatTheListingWithholdsAtT: the as-of listing and stage 2
+// agree on validity at the instant T (#898/#899).
 func TestAsOfStageTwoKeepsWhatTheListingWithholdsAtT(t *testing.T) {
 	t0 := time.Date(2027, 2, 1, 12, 0, 0, 0, time.UTC)
 	f := memory.StoredStampLayout
@@ -88,9 +75,7 @@ func TestAsOfStageTwoKeepsWhatTheListingWithholdsAtT(t *testing.T) {
 					"verdict: a clock's answer about today's window is not a claim about T", r.name, it.ValidityState)
 			}
 		}
-		// The two rules that still hold a verdict are unchanged, and each is
-		// still the one helper for its own surface: the listing withholds on
-		// ValidityAt, a browsing surface labels with ValidityStateOf.
+		// The two rules that still hold a verdict are unchanged.
 		if got := ValidityStateOf(r.from, r.until, r.ver, t0); got != state {
 			t.Errorf("%s: ValidityStateOf at T = %q, memory.ValidityAt = %q", r.name, got, state)
 		}

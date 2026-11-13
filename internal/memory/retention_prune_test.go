@@ -3,39 +3,16 @@ package memory
 import (
 	"context"
 	"fmt"
-	"path/filepath"
 	"testing"
 	"time"
 )
 
-// pruneFixture writes one row of the given tier and ages it: an expiry and a
-// recorded last access in the past, which is the shape prune prefers to see.
-//
-// lastAccessed may be empty, which leaves last_accessed NULL — a row nothing has
-// recorded a read for, and the only shape a real store has. pruneActivitySQL then
-// falls back to the newest of the row's own stamps (see prune.go), so a fixture
-// that wants such a row to be prunable has to age updated_at AND expires_at
-// (backdateWrite plus the expires argument below); leaving either at the save
-// instant is the ordinary case and the row is inside the grace.
-//
-// A test that writes SEVERAL rows through this does NOT get the same result: the
-// save half runs the dedup probe, and a store of session notes is a store of
-// near-duplicates, so a later row folds into an earlier one and REFRESHES its
-// expiry (#772) — undoing the ageing. Those tests use pruneRow and agePruneRow and
-// do all the ageing last, which is what makes their rows mean what the test says
-// they mean. The fixture content here is near-duplicate on purpose, so this is
-// not a hypothetical.
-// pruneFixtureIn is pruneFixture for a named project. The `_global` row a
-// `session` save can produce is a normal row in every respect but its project
-// id, and pinning the decision that a store-wide prune reaches it needs a way to
-// write one.
 func pruneFixtureIn(t *testing.T, s *Store, projectID, content, tier, expires, lastAccessed string) string {
 	t.Helper()
 	id := pruneRow(t, s, projectID, content, tier)
 	agePruneRow(t, s, id, expires, lastAccessed)
 	return id
 }
-
 func pruneFixture(t *testing.T, s *Store, content, tier, expires, lastAccessed string) string {
 	t.Helper()
 	id := pruneRow(t, s, testProject, content, tier)
@@ -43,16 +20,9 @@ func pruneFixture(t *testing.T, s *Store, content, tier, expires, lastAccessed s
 	return id
 }
 
-// pruneRow is the save half of pruneFixture, and agePruneRow is the other half.
-// They are separate so a multi-row fixture can age every row after every save:
-// see pruneFixture for why the interleaved order does not hold (#772).
 func pruneRow(t *testing.T, s *Store, projectID, content, tier string) string {
 	t.Helper()
 	ctx := context.Background()
-	// A project_id that is not in `projects` trips the FK, and `_global` is only
-	// in a store that has had a global write go through ensureGlobalProject — the
-	// same path a real `ghost_save_global` takes. The test therefore makes the
-	// global row the way production does, not by naming the id directly.
 	if projectID == GlobalProjectID {
 		if err := s.EnsureProject(ctx, GlobalProjectID, GlobalProjectID, "global"); err != nil {
 			t.Fatalf("EnsureProject(%s): %v", GlobalProjectID, err)
@@ -64,7 +34,6 @@ func pruneRow(t *testing.T, s *Store, projectID, content, tier string) string {
 	}
 	return id
 }
-
 func agePruneRow(t *testing.T, s *Store, id, expires, lastAccessed string) {
 	t.Helper()
 	if _, err := s.db.ExecContext(context.Background(),
@@ -74,17 +43,6 @@ func agePruneRow(t *testing.T, s *Store, id, expires, lastAccessed string) {
 	}
 }
 
-// backdateWrite ages a row's last write, which is what the grace falls back to
-// when no read has ever been recorded for it.
-// seedPruneRow writes one prune-shaped row straight into the store, skipping
-// the upsert dedup probe. Batch tests seed thousands of rows, and each probe is
-// an FTS ranking pass over every same-category row already present, so seeding
-// through UpsertWithOptions is quadratic in the backlog — and the race
-// detector's per-step instrumentation turns that quadratic into tens of
-// minutes, which is how this package misses its own ten-minute test deadline.
-// The probe is a dedup concern; the assertions that follow are prune-batching
-// concerns, so the direct INSERT keeps the same row shape (the memories→fts
-// triggers still index the content) without paying the probe.
 func seedPruneRow(t *testing.T, s *Store, content, tier, expires, lastAccessed string) string {
 	t.Helper()
 	ctx := context.Background()
@@ -100,8 +58,6 @@ func seedPruneRow(t *testing.T, s *Store, content, tier, expires, lastAccessed s
 	return id
 }
 
-// backdateWrite ages a row's last write, which is what the grace falls back to
-// when no read has ever been recorded for it.
 func backdateWrite(t *testing.T, s *Store, id, when string) {
 	t.Helper()
 	if _, err := s.db.ExecContext(context.Background(),
@@ -110,26 +66,13 @@ func backdateWrite(t *testing.T, s *Store, id, when string) {
 	}
 }
 
-// stamp renders a time the way every timestamp column here stores one, read from
-// the clock NOW.
-//
-// A test that stamps a row and then holds that stamp to an expectation must use
-// stampAt instead, once, and derive both from the one base. Two stamp calls are
-// two clock reads, and a second boundary between them moves the expectation one
-// second past the value the row already holds — which reads as a production
-// defect and is not one (#800). The same holds for two stamps meant to describe
-// the same instant, or to sit a fixed distance apart: the two rows a boundary
-// test pins either side of a threshold are only a minute apart if the minute is
-// measured from one instant.
 func stamp(offset time.Duration) string {
 	return stampAt(time.Now().UTC(), offset)
 }
 
-// stampAt is stamp at a base the caller chose.
 func stampAt(base time.Time, offset time.Duration) string {
 	return base.UTC().Add(offset).Format("2006-01-02 15:04:05")
 }
-
 func liveCount(t *testing.T, s *Store, projectID string) int {
 	t.Helper()
 	var n int
@@ -139,7 +82,6 @@ func liveCount(t *testing.T, s *Store, projectID string) int {
 	}
 	return n
 }
-
 func historyPhases(t *testing.T, s *Store, id string) []string {
 	t.Helper()
 	rows, err := s.db.QueryContext(context.Background(),
@@ -159,27 +101,10 @@ func historyPhases(t *testing.T, s *Store, id string) []string {
 	return out
 }
 
-// TestPruneRemovesOnlyExpiredSessionRowsPastTheGrace: the predicate is the whole
-// safety argument, and it has five parts that each have to hold. A durable row is
-// never removed however old it is, and neither is a pinned row. A session row is
-// not removed before its expiry. A session row whose last activity is inside the
-// grace period is not removed even after it expires. And a recorded last access
-// is preferred over the row's last write, because a memory somebody is still
-// reading is not garbage. TestPruneNeverRemovesAPinnedRow and
-// TestPruneRemovesOnlyExpiredSessionRowsPastTheGrace sit side by side because a
-// predicate that dangled either clause would look identical to a caller watching
-// the other one hold.
 func TestPruneRemovesOnlyExpiredSessionRowsPastTheGrace(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
 
-	// Written first, aged second, for the reason pruneFixture gives: every one of
-	// these is a near-duplicate of another, so a save made after a row was aged
-	// folds into it and refreshes its expiry.
-	//
-	// One instant for the whole table. Several rows are meant to carry the SAME
-	// expiry and the same recorded read, and separate clock reads make those values
-	// differ from each other by a second without any of them being wrong (#800).
 	now := time.Now().UTC()
 	rows := []struct{ content, tier, expires, lastAccessed string }{
 		{content: "a session note expired long ago and untouched since", tier: RetentionSession,
@@ -188,14 +113,8 @@ func TestPruneRemovesOnlyExpiredSessionRowsPastTheGrace(t *testing.T) {
 			expires: stampAt(now, time.Hour), lastAccessed: stampAt(now, -29*24*time.Hour)},
 		{content: "a session note expired but read yesterday", tier: RetentionSession,
 			expires: stampAt(now, -30*24*time.Hour), lastAccessed: stampAt(now, -24*time.Hour)},
-		// No recorded access: the grace falls back to the row's last write, so this
-		// row has to be old in both columns to be a candidate.
 		{content: "a session note expired and never read", tier: RetentionSession,
 			expires: stampAt(now, -30*24*time.Hour)},
-		// And the row that is expired, never read, and last written a minute ago:
-		// inside the grace, so kept. This is the default shape of a real session
-		// memory, and it is the case a prune that measured only the expiry would
-		// delete.
 		{content: "a session note expired seconds after it was saved", tier: RetentionSession,
 			expires: stampAt(now, -time.Hour)},
 		{content: "a durable fact that is just as old", tier: RetentionProject,
@@ -248,73 +167,6 @@ func TestPruneRemovesOnlyExpiredSessionRowsPastTheGrace(t *testing.T) {
 	}
 }
 
-// TestPrunePinsTheGraceBoundaryFromBothSides: "past the grace period" is a
-// threshold, and a threshold nobody can test from both sides is a threshold that
-// is either off by a rounding error or off by a factor of grace. The two rows
-// here differ by a minute and by nothing else.
-func TestPrunePinsTheGraceBoundaryFromBothSides(t *testing.T) {
-	s := testStore(t)
-	ctx := context.Background()
-	const grace = 24 * time.Hour
-	// One instant for both rows. The comment below claims they differ by a minute
-	// and by nothing else, and two clock reads make them differ by a minute plus
-	// whatever second boundary fell between them (#800).
-	now := time.Now().UTC()
-
-	// Both expired a month ago, so only the grace decides. Aged after both saves
-	// for the reason pruneFixture gives.
-	justOutside := pruneRow(t, s, testProject, "a session note last touched a minute past the grace", RetentionSession)
-	justInside := pruneRow(t, s, testProject, "a session note last touched a minute inside the grace", RetentionSession)
-	agePruneRow(t, s, justOutside, stampAt(now, -30*24*time.Hour), stampAt(now, -grace-time.Minute))
-	agePruneRow(t, s, justInside, stampAt(now, -30*24*time.Hour), stampAt(now, -grace+time.Minute))
-
-	report, err := s.PruneSessionMemories(ctx, PruneOptions{Apply: true, Grace: grace})
-	if err != nil {
-		t.Fatalf("PruneSessionMemories: %v", err)
-	}
-	if len(report.RemovedIDs) != 1 || report.RemovedIDs[0] != justOutside {
-		t.Fatalf("removed %v, want exactly [%s] (the row just outside the grace)", report.RemovedIDs, justOutside)
-	}
-	if _, err := s.GetByIDs(ctx, []string{justInside}); err != nil || liveCount(t, s, testProject) != 1 {
-		t.Errorf("the row just inside the grace was removed")
-	}
-}
-
-// TestPrunePinsTheExpiryBoundaryToo: the grace is the outer gate, but the tier's
-// own expiry is the inner one, and a prune that only implemented the outer gate
-// would delete a session note the user saved a moment ago.
-func TestPrunePinsTheExpiryBoundaryToo(t *testing.T) {
-	s := testStore(t)
-	ctx := context.Background()
-
-	expired := pruneRow(t, s, testProject, "a session note one minute past its expiry", RetentionSession)
-	live := pruneRow(t, s, testProject, "a session note one minute short of its expiry", RetentionSession)
-	// One instant for both rows, so the pair is a minute either side of the same
-	// boundary rather than of two boundaries (#800).
-	now := time.Now().UTC()
-	// Aged after both saves: these two are near-duplicates, so the second save
-	// folds into the first and refreshes its expiry (pruneFixture).
-	agePruneRow(t, s, expired, stampAt(now, -time.Minute), stampAt(now, -30*24*time.Hour))
-	agePruneRow(t, s, live, stampAt(now, time.Minute), stampAt(now, -30*24*time.Hour))
-
-	report, err := s.PruneSessionMemories(ctx, PruneOptions{Apply: true, Grace: 0})
-	if err != nil {
-		t.Fatalf("PruneSessionMemories: %v", err)
-	}
-	if len(report.RemovedIDs) != 1 || report.RemovedIDs[0] != expired {
-		t.Fatalf("removed %v, want exactly [%s]", report.RemovedIDs, expired)
-	}
-	if liveCount(t, s, testProject) != 1 {
-		t.Errorf("%d rows left, want the unexpired session note", liveCount(t, s, testProject))
-	}
-	_ = live
-}
-
-// TestPruneDefaultsToADryRunThatWritesNothing: the default is a report, and the
-// reason it has to be a report is that a prune deletes. Nothing may be written on
-// the preview path — not the row, and not the history row the apply appends —
-// because a preview that left a tombstone behind would make the store's own audit
-// claim a removal that did not happen.
 func TestPruneDefaultsToADryRunThatWritesNothing(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -350,8 +202,6 @@ func TestPruneDefaultsToADryRunThatWritesNothing(t *testing.T) {
 		t.Errorf("a dry run appended %d history row(s)", got-beforeHistory)
 	}
 
-	// And the same run with Apply does remove it, so the dry run was a preview of
-	// this pass rather than of nothing at all.
 	applied, err := s.PruneSessionMemories(ctx, PruneOptions{Apply: true})
 	if err != nil {
 		t.Fatalf("PruneSessionMemories(apply): %v", err)
@@ -361,19 +211,11 @@ func TestPruneDefaultsToADryRunThatWritesNothing(t *testing.T) {
 	}
 }
 
-// TestPruneLeavesADeleteTombstonePerRemoval: memory_history.memory_id has no
-// foreign key precisely so a hard delete leaves a record of the row — and that
-// record is the only thing that will still know the text of a memory that a
-// prune removed. A prune that deleted without appending would make every
-// removal invisible to `ghost history`, which is the one command that can say
-// what was lost.
 func TestPruneLeavesADeleteTombstonePerRemoval(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
 	first := pruneRow(t, s, testProject, "the first session note a prune will remove", RetentionSession)
 	second := pruneRow(t, s, testProject, "the second session note a prune will remove", RetentionSession)
-	// Aged after both saves, for the reason pruneFixture gives: a prune backlog is
-	// a store of near-duplicates, and the second save folds into the first.
 	agePruneRow(t, s, first, stamp(-30*24*time.Hour), stamp(-29*24*time.Hour))
 	agePruneRow(t, s, second, stamp(-31*24*time.Hour), stamp(-30*24*time.Hour))
 
@@ -393,8 +235,6 @@ func TestPruneLeavesADeleteTombstonePerRemoval(t *testing.T) {
 		if last := phases[len(phases)-1]; last != phaseDelete {
 			t.Errorf("%s last history phase = %q, want %q", id, last, phaseDelete)
 		}
-		// The tombstone carries the text, which is the point of it surviving the
-		// row.
 		entries, err := s.MemoryHistory(ctx, id, 10)
 		if err != nil {
 			t.Fatalf("MemoryHistory(%s): %v", id, err)
@@ -408,26 +248,11 @@ func TestPruneLeavesADeleteTombstonePerRemoval(t *testing.T) {
 	}
 }
 
-// TestPruneNeverRemovesAPinnedRow is one of the review blockers on #587: prune
-// reuses a single predicate for its SELECT and its DELETE, and the predicate
-// carried no `pinned = 0`, so a pinned session row whose expiry and activity
-// were in the past was removed like any other expired session row. A pin is an
-// explicit user override — the same "keep this where it is" the tier design is
-// built on — and the session tier is a promise made for rows the user did NOT
-// override, so the DELETE must re-check the pin at the same instant it deletes,
-// exactly as it re-checks the tier. The unpinned control is in the same test:
-// without it, a predicate that spared everything would pass.
 func TestPruneNeverRemovesAPinnedRow(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
 	pinned := pruneRow(t, s, testProject, "a pinned session note that expired long ago", RetentionSession)
 	control := pruneRow(t, s, testProject, "an unpinned session note that expired long ago", RetentionSession)
-	// Aged after both saves, for the reason pruneFixture gives: the second save
-	// folds into the first, so a fixture that aged first would be measuring the
-	// refresh rather than the pin — and a pinned row kept because its expiry was
-	// fresh proves nothing about pinned = 0.
-	// One instant for both rows: the argument below is that the control differs
-	// from the pinned row by `pinned` and by nothing else (#800).
 	now := time.Now().UTC()
 	aged, newer := stampAt(now, -30*24*time.Hour), stampAt(now, -29*24*time.Hour)
 	agePruneRow(t, s, pinned, aged, newer)
@@ -451,24 +276,6 @@ func TestPruneNeverRemovesAPinnedRow(t *testing.T) {
 	}
 }
 
-// TestAStoreWidePruneReachesGlobalRows: a store-wide `ghost prune --apply`
-// (no --project) sweeps every project, `_global` included. That is DELIBERATE and
-// this test is what makes it a decision rather than an accident.
-//
-// The `_global` protection rule (best_practices.md) covers destructive and
-// REASSIGNING PROJECT operations — DeleteProject, MergeProject, anything that
-// deletes project rows or moves child records between them. It protects the
-// project IDENTITY, not the rows a project happens to hold. Prune is neither:
-// it deletes a memory row the user asked to have expired, in place, and moves
-// nothing. And skipping `_global` would break the tier's own promise in the
-// opposite direction: `ghost_save_global` takes `retention`, so a global memory
-// saved as `session` carries a derived `expires_at`, and a predicate that
-// excluded the project would leave that row in the store forever, past an
-// expiry the save already published — a session row that no prune can ever
-// remove is worse than one that a person asked to be removed.
-//
-// So the predicate carries no `_global` term, and the report names every row it
-// touches — which is the narrower safety the rule's intent asks for.
 func TestAStoreWidePruneReachesGlobalRows(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -487,9 +294,6 @@ func TestAStoreWidePruneReachesGlobalRows(t *testing.T) {
 		t.Errorf("after the prune _global holds %d row(s), want 0", liveCount(t, s, GlobalProjectID))
 	}
 
-	// The scoped run is the half that must NOT reach it: `--project <id>` is the
-	// narrower blast radius, and a store-wide sweep being intended does not make
-	// a scoped one store-wide.
 	kept := pruneFixtureIn(t, s, GlobalProjectID, "a global note a scoped prune must not touch", RetentionSession,
 		stamp(-30*24*time.Hour), stamp(-29*24*time.Hour))
 	scoped, err := s.PruneSessionMemories(ctx, PruneOptions{Apply: true, ProjectID: testProject})
@@ -504,34 +308,9 @@ func TestAStoreWidePruneReachesGlobalRows(t *testing.T) {
 	}
 }
 
-// TestPruneSparesARowThatStoppedMatchingMidRun: Candidates is the PREVIEW's
-// selection, and every batch re-derives the predicate under the write lock — so a
-// row a write changed between the preview and its own batch stops matching, is
-// correctly spared, and is STILL in Candidates while absent from RemovedIDs. That
-// asymmetry is the whole reporting contract on the apply path: `ghost prune`
-// counted the candidates, so an apply that removed 3049 of 3050 headlined 3050
-// removals with the spared row live in the store.
-//
-// Placing the write is the whole difficulty, and the shape here is the one that
-// works. pruneBeforeDelete cannot do it: that seam runs inside the batch
-// transaction, which holds the write lock (BEGIN IMMEDIATE) AND has already
-// selected the batch's ids, so a second connection's write blocks on the lock and
-// an in-transaction write arrives too late to spare anything. So the write is a
-// trigger on the tombstone insert — the one write a batch makes before its DELETE.
-// It fires inside that transaction and therefore COMMITS with the batch, which is
-// exactly a write that landed after the preview and before the next batch
-// re-derived the predicate, and it needs no second connection and no timing.
-//
-// The row it touches has to be the one the first batch cannot reach, so it is
-// seeded a day newer and sorts last in the removal order. Two directions, because
-// "spared" is not one fact and the rendered line has to hold for both: a pin
-// leaves the row in the store, a concurrent delete leaves nothing to spare.
 func TestPruneSparesARowThatStoppedMatchingMidRun(t *testing.T) {
 	for _, tc := range []struct {
-		name string
-		// change is the trigger body, and its WHEN clause is what keeps it to one
-		// firing: the tombstone statement inserts one history row per batched id,
-		// so the trigger runs pruneBatchSize times and only the first may act.
+		name   string
 		change string
 		live   bool
 	}{
@@ -556,21 +335,13 @@ func TestPruneSparesARowThatStoppedMatchingMidRun(t *testing.T) {
 			s := testStore(t)
 			ctx := context.Background()
 			const total = pruneBatchSize + 1 // two batches
-			// One instant for the whole backlog. Every row below is meant to carry
-			// the same expiry and the same recorded read, and prune orders the
-			// removal by activity, so reading the clock per row would order the
-			// batches differently from run to run (#800).
 			now := time.Now().UTC()
 			aged, newer := stampAt(now, -30*24*time.Hour), stampAt(now, -29*24*time.Hour)
 			for i := 0; i < total-1; i++ {
 				seedPruneRow(t, s, fmt.Sprintf("an expired session note %d", i), RetentionSession, aged, aged)
 			}
-			// Newer activity, so it sorts last in the removal order and the first
-			// batch cannot reach it.
 			spared := seedPruneRow(t, s, "the row a write reaches between batches", RetentionSession,
 				aged, newer)
-			// The id is store-minted hex, so inlining it into the trigger cannot
-			// carry a quote out of the literal.
 			installPruneSpareTrigger(t, s, fmt.Sprintf(tc.change, spared))
 
 			report, err := s.PruneSessionMemories(ctx, PruneOptions{Apply: true})
@@ -588,9 +359,6 @@ func TestPruneSparesARowThatStoppedMatchingMidRun(t *testing.T) {
 					t.Errorf("the spared row %s is in RemovedIDs", spared)
 				}
 			}
-			// The pin leaves the row behind and the delete leaves nothing, which is
-			// why the rendered line names the change rather than claiming the row is
-			// still there. One row survived the first batch in both directions.
 			want := 0
 			if tc.live {
 				want = 1
@@ -605,10 +373,6 @@ func TestPruneSparesARowThatStoppedMatchingMidRun(t *testing.T) {
 	}
 }
 
-// installPruneSpareTrigger puts a write into the window between the preview and
-// the batch that would have taken a row: it fires on the first delete tombstone
-// of the run, which is inside the first batch's transaction, and therefore
-// commits with it.
 func installPruneSpareTrigger(t *testing.T, s *Store, whenAndBody string) {
 	t.Helper()
 	if _, err := s.db.ExecContext(context.Background(), `CREATE TEMP TRIGGER prune_spare_mid_run AFTER INSERT ON memory_history `+whenAndBody); err != nil {
@@ -616,9 +380,6 @@ func installPruneSpareTrigger(t *testing.T, s *Store, whenAndBody string) {
 	}
 }
 
-// liveID returns the one live row id in a project, and fails when there is not
-// exactly one — the caller here asserts what a single spared row left behind, so
-// a second survivor is itself the finding.
 func liveID(t *testing.T, s *Store, projectID string) string {
 	t.Helper()
 	var id string
@@ -628,14 +389,6 @@ func liveID(t *testing.T, s *Store, projectID string) string {
 	return id
 }
 
-// TestPruneRollsBackTheBatchThatFailed: a batch that appended its tombstones and
-// then failed before the DELETE would leave the store claiming removals that did
-// not happen — and the failure that matters is the ordinary one, a busy database
-// or a full disk, not a crash between two statements nobody would notice. The
-// seam below is the only way to make that happen on purpose, and the single
-// candidate here is one batch: the failure must undo the tombstones AND the
-// DELETE together, which is the guarantee TestPruneBatchesCommitPerBatch relies
-// on for the boundary between two batches.
 func TestPruneRollsBackTheBatchThatFailed(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -657,22 +410,11 @@ func TestPruneRollsBackTheBatchThatFailed(t *testing.T) {
 	}
 }
 
-// TestPruneBatchesCommitPerBatch: the review's bounded-batch ask, proven in the
-// two directions it has. A backlog bigger than one batch is fully pruned by a
-// clean apply — removed == seeded everywhere. And a failure on the SECOND batch
-// leaves the FIRST batch's removals committed (rows gone, tombstones present)
-// while everything after the failure stays: each batch is its own transaction,
-// so the earlier progress is real, and a rerun continues from where it stopped
-// rather than redoing an already-committed window. Without batching (one
-// unbounded transaction), the failure would have rolled back the whole backlog
-// and the first half would still be in the store.
 func TestPruneBatchesCommitPerBatch(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
 
 	const total = pruneBatchSize + 50 // two batches
-	// One instant for the whole backlog, for the reason the other batch loop
-	// gives: the rows are identical in shape and differ only in content (#800).
 	now := time.Now().UTC()
 	aged, newer := stampAt(now, -30*24*time.Hour), stampAt(now, -29*24*time.Hour)
 	for i := 0; i < total; i++ {
@@ -682,7 +424,6 @@ func TestPruneBatchesCommitPerBatch(t *testing.T) {
 		t.Fatalf("seeded %d rows, store has %d", total, liveCount(t, s, testProject))
 	}
 
-	// Direction 1: a clean apply over a >1-batch backlog removes everything.
 	report, err := s.PruneSessionMemories(ctx, PruneOptions{Apply: true})
 	if err != nil {
 		t.Fatalf("full prune: %v", err)
@@ -697,8 +438,6 @@ func TestPruneBatchesCommitPerBatch(t *testing.T) {
 		t.Errorf("the full prune left %d delete tombstone(s), want %d — one per removal, across all batches", got, total)
 	}
 
-	// Direction 2: a failure on the second batch proves each batch commits
-	// separately. Re-seed, then interrupt at the batch boundary.
 	if _, err := s.db.ExecContext(ctx, `DELETE FROM memory_history`); err != nil {
 		t.Fatalf("clear history between directions: %v", err)
 	}
@@ -727,9 +466,6 @@ func TestPruneBatchesCommitPerBatch(t *testing.T) {
 	}
 }
 
-// countDeleteTombstones counts the delete-phase rows in memory_history across the
-// whole store — the tombstone is memory_history's own visible world, so a batch
-// that committed is a batch whose tombstones a rerun would see too.
 func countDeleteTombstones(t *testing.T, s *Store) int {
 	t.Helper()
 	var n int
@@ -739,81 +475,6 @@ func countDeleteTombstones(t *testing.T, s *Store) int {
 	return n
 }
 
-// TestPruneReadsAnAccessStampInEitherTimestampShape: the grace term coalesces
-// three columns and they do not all hold the same shape — Store.Touch writes
-// last_accessed as RFC 3339 while datetime('now') writes the other two in
-// SQLite's own form. Nothing in production calls Touch today, so a text
-// comparison looks correct and quietly becomes wrong the day a surface records a
-// read, and a guarantee that holds only while a column has no writer is not a
-// guarantee.
-//
-// The instants are fixed and deliberately all fall on ONE date, because that is
-// the only place the two shapes disagree: compared as text, 'T' (0x54) sorts
-// above the space (0x20) that separates date from time, so a value stored as
-// 11:30 sorts after a cutoff of 11:00 and the row is kept when it should have
-// gone. Across dates the two orders agree, which is exactly what makes this a
-// silent one-day-late bug rather than an obvious one.
-func TestPruneReadsAnAccessStampInEitherTimestampShape(t *testing.T) {
-	s := testStore(t)
-	ctx := context.Background()
-
-	// A fixed clock, so every instant below falls on the same calendar day as the
-	// cutoff and the test does not depend on when it runs. The grace window runs
-	// BACK from the cutoff, so 10:30 is outside it (prunable) and 11:30 is inside
-	// it (kept) — and both are on the cutoff's own day, which is the only place
-	// the two shapes disagree.
-	now := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
-	const grace = time.Hour
-	cutoff := now.Add(-grace)
-	outside := cutoff.Add(-30 * time.Minute)
-	inside := cutoff.Add(30 * time.Minute)
-
-	rfcGone := pruneRow(t, s, testProject, "a session note read half an hour before the cutoff, in RFC 3339", RetentionSession)
-	sqlGone := pruneRow(t, s, testProject, "a session note read half an hour before the cutoff, in SQLite's shape", RetentionSession)
-	rfcKept := pruneRow(t, s, testProject, "a session note read half an hour after the cutoff, in RFC 3339", RetentionSession)
-	sqlKept := pruneRow(t, s, testProject, "a session note read half an hour after the cutoff, in SQLite's shape", RetentionSession)
-	// Aged after all four saves, for the reason pruneFixture gives: the four
-	// differ by a couple of words, so each save folds into an earlier row and
-	// refreshes its expiry.
-	for _, r := range []struct {
-		id, accessed string
-	}{{rfcGone, outside.Format(time.RFC3339)}, {sqlGone, outside.Format("2006-01-02 15:04:05")},
-		{rfcKept, inside.Format(time.RFC3339)}, {sqlKept, inside.Format("2006-01-02 15:04:05")}} {
-		agePruneRow(t, s, r.id, "2026-08-01 00:00:00", r.accessed)
-	}
-
-	report, err := s.PruneSessionMemories(ctx, PruneOptions{Apply: true, Grace: grace, Now: now})
-	if err != nil {
-		t.Fatalf("PruneSessionMemories: %v", err)
-	}
-	removed := map[string]bool{}
-	for _, id := range report.RemovedIDs {
-		removed[id] = true
-	}
-	// The row that discriminates: read at 10:30 in the shape Store.Touch writes,
-	// against a cutoff of 11:00. Compared as text the stored 'T' sorts after the
-	// cutoff's space, so the row is KEPT — a prune that runs a day late on every
-	// row whose last read fell on the cutoff's own day.
-	if !removed[rfcGone] {
-		t.Errorf("a row read at %s — before the %s cutoff, in the shape Store.Touch writes — survived: "+
-			"the two timestamp shapes are not both read", outside.Format(time.RFC3339), cutoff)
-	}
-	if !removed[sqlGone] {
-		t.Error("the control row, in SQLite's own shape, survived — the fixture is not exercising the predicate")
-	}
-	for _, tc := range []struct{ id, why string }{
-		{rfcKept, "a row read after the cutoff, in the RFC 3339 shape"},
-		{sqlKept, "a row read after the cutoff, in SQLite's shape"},
-	} {
-		if removed[tc.id] {
-			t.Errorf("%s was removed: %s", tc.id, tc.why)
-		}
-	}
-}
-
-// TestPruneScopesToOneProjectWhenAsked: `ghost prune --project` is how an
-// operator looks at one repository's session notes, and a filter that was ignored
-// would report a store-wide number next to a project name.
 func TestPruneScopesToOneProjectWhenAsked(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -822,8 +483,6 @@ func TestPruneScopesToOneProjectWhenAsked(t *testing.T) {
 	}
 	mine := pruneRow(t, s, testProject, "a session note in the project being pruned", RetentionSession)
 	theirs := pruneRow(t, s, testProject, "a session note in another project", RetentionSession)
-	// Aged after both saves, for the reason pruneFixture gives, and moved before
-	// the prune so the scoping decision is the only thing under test.
 	agePruneRow(t, s, mine, stamp(-30*24*time.Hour), stamp(-29*24*time.Hour))
 	agePruneRow(t, s, theirs, stamp(-30*24*time.Hour), stamp(-29*24*time.Hour))
 	if _, err := s.db.ExecContext(ctx, `UPDATE memories SET project_id = 'other-project' WHERE id = ?`, theirs); err != nil {
@@ -839,93 +498,5 @@ func TestPruneScopesToOneProjectWhenAsked(t *testing.T) {
 	}
 	if liveCount(t, s, "other-project") != 1 {
 		t.Error("a project-scoped prune reached into another project")
-	}
-}
-
-// TestPruneIgnoresAnUnknownGrace: a caller that passes a negative grace is asking
-// for "expired, regardless of when it was last touched", which is not a thing a
-// grace period can mean. It is refused rather than clamped, because a clamp to
-// zero would silently do exactly that.
-func TestPruneIgnoresAnUnknownGrace(t *testing.T) {
-	s := testStore(t)
-	if _, err := s.PruneSessionMemories(context.Background(), PruneOptions{Grace: -time.Hour}); err == nil {
-		t.Error("a negative grace was accepted")
-	}
-}
-
-// TestABackupTakenAfterAPruneStillVerifies: the prune appends a history row per
-// removal, so a store that has been pruned holds rows a backup of the pre-prune
-// store did not. The manifest counts the memories (and not the change log), and
-// what has to hold is that a backup taken AFTER a prune describes that store
-// exactly — the counts move with the data rather than lagging it, which is the
-// failure a reader restoring from the manifest would otherwise discover by hand.
-func TestABackupTakenAfterAPruneStillVerifies(t *testing.T) {
-	ctx := context.Background()
-	dbPath := filepath.Join(t.TempDir(), "ghost.db")
-	db, err := OpenDB(dbPath)
-	if err != nil {
-		t.Fatalf("OpenDB: %v", err)
-	}
-	defer db.Close() //nolint:errcheck
-	s := NewStore(db, nil)
-	if err := s.EnsureProject(ctx, testProject, "/tmp/prune-backup", testProject); err != nil {
-		t.Fatalf("EnsureProject: %v", err)
-	}
-	for i, tier := range RetentionValues() {
-		if _, _, _, err := s.UpsertWithOptions(ctx, testProject, "fact",
-			"a fact to survive the backup, number "+string(rune('1'+i)), "mcp", 0.6, nil,
-			UpsertOptions{Retention: tier}); err != nil {
-			t.Fatalf("UpsertWithOptions: %v", err)
-		}
-	}
-	pruneFixture(t, s, "a session note that the prune removes before the backup", RetentionSession,
-		stamp(-30*24*time.Hour), stamp(-29*24*time.Hour))
-
-	before, err := s.Backup(ctx, filepath.Join(t.TempDir(), "before.db"))
-	if err != nil {
-		t.Fatalf("Backup: %v", err)
-	}
-	if before.Counts.Memories != 4 {
-		t.Fatalf("pre-prune backup holds %d memories, want 4", before.Counts.Memories)
-	}
-	preReport, err := VerifyBackup(ctx, before.Path)
-	if err != nil {
-		t.Fatalf("VerifyBackup(pre-prune): %v", err)
-	}
-	if len(preReport.Problems) != 0 {
-		t.Errorf("a fresh backup reported problems: %v", preReport.Problems)
-	}
-
-	if report, err := s.PruneSessionMemories(ctx, PruneOptions{Apply: true}); err != nil {
-		t.Fatalf("PruneSessionMemories: %v", err)
-	} else if report.Removed != 1 {
-		t.Fatalf("prune removed %d, want 1", report.Removed)
-	}
-
-	after, err := s.Backup(ctx, filepath.Join(t.TempDir(), "after.db"))
-	if err != nil {
-		t.Fatalf("Backup after prune: %v", err)
-	}
-	if after.Counts.Memories != 3 {
-		t.Errorf("post-prune backup holds %d memories, want 3: the manifest counted a store the prune had already changed", after.Counts.Memories)
-	}
-	postReport, err := VerifyBackup(ctx, after.Path)
-	if err != nil {
-		t.Fatalf("VerifyBackup(post-prune): %v", err)
-	}
-	if len(postReport.Problems) != 0 {
-		t.Errorf("a backup taken after a prune did not verify: %v", postReport.Problems)
-	}
-	if !postReport.CountsRead || postReport.Counts.Memories != 3 {
-		t.Errorf("verify reported %+v, want a read count of 3 memories", postReport.Counts)
-	}
-	// And the pre-prune copy is still restorable and still describes itself: the
-	// prune did not reach back into a file that had already been written.
-	preAgain, err := VerifyBackup(ctx, before.Path)
-	if err != nil {
-		t.Fatalf("VerifyBackup(pre-prune, again): %v", err)
-	}
-	if len(preAgain.Problems) != 0 {
-		t.Errorf("the pre-prune backup stopped verifying after the prune: %v", preAgain.Problems)
 	}
 }

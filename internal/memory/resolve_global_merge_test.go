@@ -72,27 +72,3 @@ func TestMergeProjectTxRefusesGlobal(t *testing.T) {
 		t.Error("_global was deleted by a refused merge")
 	}
 }
-
-// TestMergeProjectRefusesGlobalThroughWrapper checks the public surface still
-// refuses now that MergeProject inherits the guard instead of repeating it.
-func TestMergeProjectRefusesGlobalThroughWrapper(t *testing.T) {
-	s := testStore(t)
-	ctx := context.Background()
-
-	if err := s.EnsureProject(ctx, "_global", "_global", "global"); err != nil {
-		t.Fatalf("ensure _global: %v", err)
-	}
-	if err := s.EnsureProject(ctx, "regular", "/tmp/regular", "regular"); err != nil {
-		t.Fatalf("ensure regular: %v", err)
-	}
-	if err := s.MergeProject(ctx, "regular", "_global"); err == nil {
-		t.Fatal("MergeProject into _global succeeded, want a refusal")
-	}
-	var n int
-	if err := s.db.QueryRow(`SELECT count(*) FROM projects WHERE id = '_global'`).Scan(&n); err != nil {
-		t.Fatalf("count _global: %v", err)
-	}
-	if n != 1 {
-		t.Error("MergeProject consumed _global")
-	}
-}

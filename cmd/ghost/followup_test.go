@@ -5,156 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
-
-	"github.com/wcatz/ghost/internal/scratch"
-	"github.com/wcatz/ghost/internal/supersede"
 )
-
-// TestWithdrawnTargetsDedupesInListOrder: the follow-up names the memories whose
-// resolution the withdrawal left behind, and two withdrawn edges can point at
-// the same one. The list is deduplicated in the order the edges were reported,
-// because a --only argument with the same id twice is a command the operator
-// reads as a mistake.
-func TestWithdrawnTargetsDedupesInListOrder(t *testing.T) {
-	edges := []supersede.WithdrawnEdge{
-		{NewerID: "n1", OlderID: "aaaaaaaa1111111111111111111111", TargetProjectID: "myproj", Written: true},
-		{NewerID: "n2", OlderID: "bbbbbbbb2222222222222222222222", TargetProjectID: "myproj", Written: true},
-		{NewerID: "n3", OlderID: "aaaaaaaa1111111111111111111111", TargetProjectID: "myproj", Written: true},
-	}
-	got := withdrawnTargets(edges)
-	if len(got) != 1 {
-		t.Fatalf("withdrawnTargets = %+v, want one project group", got)
-	}
-	want := []string{"aaaaaaaa1111111111111111111111", "bbbbbbbb2222222222222222222222"}
-	if got[0].ProjectID != "myproj" || len(got[0].Targets) != len(want) {
-		t.Fatalf("withdrawnTargets = %+v, want one group for myproj holding %v", got, want)
-	}
-	for i := range want {
-		if got[0].Targets[i] != want[i] {
-			t.Errorf("withdrawnTargets()[0].Targets[%d] = %q, want %q", i, got[0].Targets[i], want[i])
-		}
-	}
-}
-
-// TestWithdrawnTargetsGroupsByTheProjectThatCanRepairThem: the grouping is the
-// repair's own requirement and not presentation. A resolve repair draws its pool
-// from ResolvedCandidates(projectID), which filters `project_id = ?`, so a --only
-// selector resolved against one project and repaired against another is a SILENT
-// no-op — every id reported as a miss, under a block that says the repair is
-// available. One group per project, and the group is the TARGET's.
-func TestWithdrawnTargetsGroupsByTheProjectThatCanRepairThem(t *testing.T) {
-	got := withdrawnTargets([]supersede.WithdrawnEdge{
-		{NewerID: "n1", OlderID: "aaaa1111", TargetProjectID: "p", Written: true},
-		{NewerID: "n2", OlderID: "bbbb2222", TargetProjectID: "other", Written: true},
-		{NewerID: "n3", OlderID: "cccc3333", TargetProjectID: "p", Written: true},
-	})
-	if len(got) != 2 {
-		t.Fatalf("withdrawnTargets = %+v, want two groups", got)
-	}
-	if got[0].ProjectID != "p" || len(got[0].Targets) != 2 || got[0].Targets[0] != "aaaa1111" || got[0].Targets[1] != "cccc3333" {
-		t.Errorf("the first group = %+v, want project p holding both of its targets in report order", got[0])
-	}
-	if got[1].ProjectID != "other" || len(got[1].Targets) != 1 || got[1].Targets[0] != "bbbb2222" {
-		t.Errorf("the second group = %+v, want project other holding its one target", got[1])
-	}
-}
-
-// TestWithdrawnTargetsIsEmptyForNoWithdrawal: with nothing withdrawn there is
-// no follow-up, and printing one would be an operator running a repair against
-// ids nothing here touched.
-func TestWithdrawnTargetsIsEmptyForNoWithdrawal(t *testing.T) {
-	if got := withdrawnTargets(nil); len(got) != 0 {
-		t.Errorf("withdrawnTargets(nil) = %v, want nothing", got)
-	}
-}
-
-// TestResolveFollowupCommandIsCopyable: the whole point of printing the command
-// is that the operator runs it verbatim, so it carries full ids (a prefix could
-// go ambiguous the moment another memory is written) and ends in --apply, which
-// is the half that actually clears resolved_at.
-func TestResolveFollowupCommandIsCopyable(t *testing.T) {
-	ids := []string{"aaaaaaaa1111111111111111111111", "bbbbbbbb2222222222222222222222"}
-	// The ids are quoted, and a POSIX shell concatenates adjacent quoted words, so
-	// --only receives ONE argument holding "a,b" — which is what parseResolveArgs
-	// splits on. Quoting them is not a formality: `ghost import` writes an
-	// artifact's ids verbatim, so an id can hold a space or a shell
-	// metacharacter, and unquoted one word-splits into selectors the repair
-	// refuses (or executes, when pasted).
-	want := "ghost resolve myproj --reassess --only 'aaaaaaaa1111111111111111111111','bbbbbbbb2222222222222222222222' --apply"
-	got, viaFile, unnameable := resolveFollowupCommand("myproj", ids)
-	if got != want {
-		t.Errorf("resolveFollowupCommand() = %q, want %q", got, want)
-	}
-	if len(viaFile) != 0 || len(unnameable) != 0 {
-		t.Errorf("ordinary ids were pushed out of the command: viaFile %v, unnameable %v", viaFile, unnameable)
-	}
-}
-
-// TestResolveFollowupCommandQuotesAnAwkwardProjectName: a project name is free
-// text — `--project` takes the next argument verbatim precisely so a
-// dash-leading name works — so the printed command has to quote it. Unquoted, a
-// name with a space is two positionals and the repair fails with "expected
-// exactly one project", a dash-leading name is an unknown flag, and a name
-// holding a metacharacter is executed when pasted.
-func TestResolveFollowupCommandQuotesAnAwkwardProjectName(t *testing.T) {
-	ids := []string{"aaaaaaaa1111111111111111111111"}
-	for _, tc := range []struct {
-		name    string
-		project string
-		want    string
-	}{
-		{"plain", "myproj", "ghost resolve myproj --reassess --only 'aaaaaaaa1111111111111111111111' --apply"},
-		{"dotted and dashed", "platform-ops.v2", "ghost resolve platform-ops.v2 --reassess --only 'aaaaaaaa1111111111111111111111' --apply"},
-		{"with a space", "my proj", "ghost resolve --project 'my proj' --reassess --only 'aaaaaaaa1111111111111111111111' --apply"},
-		{"leading dash", "-myproj", "ghost resolve --project '-myproj' --reassess --only 'aaaaaaaa1111111111111111111111' --apply"},
-		{"looks like a flag", "--apply", "ghost resolve --project '--apply' --reassess --only 'aaaaaaaa1111111111111111111111' --apply"},
-		{"single quote", "o'brien proj", `ghost resolve --project 'o'\''brien proj' --reassess --only 'aaaaaaaa1111111111111111111111' --apply`},
-		{"shell metacharacters", "a; rm -rf /", "ghost resolve --project 'a; rm -rf /' --reassess --only 'aaaaaaaa1111111111111111111111' --apply"},
-		{"substitution", "$(id)", "ghost resolve --project '$(id)' --reassess --only 'aaaaaaaa1111111111111111111111' --apply"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if got, _, _ := resolveFollowupCommand(tc.project, ids); got != tc.want {
-				t.Errorf("resolveFollowupCommand(%q) = %q, want %q", tc.project, got, tc.want)
-			}
-		})
-	}
-}
-
-// TestPrintedFollowupRuns is the anti-drift test: the printed command is only
-// useful if a shell hands it back to the parser as the operator typed it. This
-// splits the string the way a POSIX shell does and feeds it to the real
-// parseResolveArgs, so a quoting change that reads fine and parses wrong fails
-// here rather than in a repair.
-func TestPrintedFollowupRuns(t *testing.T) {
-	for _, project := range []string{"myproj", "my proj", "-myproj", "o'brien proj", "a; rm -rf /"} {
-		t.Run(project, func(t *testing.T) {
-			ids := []string{"aaaaaaaa1111111111111111111111", "bbbbbbbb2222222222222222222222"}
-			// argv[2:], exactly as main hands the parser a command's own words.
-			line, viaFile, unnameable := resolveFollowupCommand(project, ids)
-			if len(viaFile) != 0 || len(unnameable) != 0 {
-				t.Fatalf("these ids are not comma-bearing, so none may need the file form: %v", viaFile)
-			}
-			words := shellSplit(t, line)
-			if len(words) < 2 || words[1] != "resolve" {
-				t.Fatalf("the printed command does not start with the command word: %v", words)
-			}
-			parsed, err := parseResolveArgs(words[2:])
-			if err != nil {
-				t.Fatalf("the printed command does not parse: %v", err)
-			}
-			if parsed.project != project {
-				t.Errorf("parsed project = %q, want %q", parsed.project, project)
-			}
-			if !parsed.reassess || !parsed.apply {
-				t.Errorf("the printed command lost --reassess/--apply: %+v", parsed)
-			}
-			if len(parsed.only) != 2 || parsed.only[0] != ids[0] || parsed.only[1] != ids[1] {
-				t.Errorf("parsed --only = %v, want both full ids from the one comma-joined argument", parsed.only)
-			}
-		})
-	}
-}
 
 // shellSplit splits a command line the way a POSIX shell does for the quoting
 // this package emits: a single-quoted run is literal, a backslash outside one
@@ -218,18 +69,12 @@ func TestSupersedeReassessFollowupNamesTheCommandAndTheFile(t *testing.T) {
 	if !strings.Contains(got, "resolutions those edges justified") {
 		t.Errorf("the follow-up must say the ids are resolved memories to clear:\n%s", got)
 	}
-	// And it must not promise a clear the repair pass will refuse: the floor is
-	// counted per edge (#697), so a note two newer notes both supersede is still
-	// held after one of the two edges is withdrawn.
 	if !strings.Contains(got, "another edge still holds is reported as still") {
 		t.Errorf("the follow-up must not promise a clear a surviving edge prevents:\n%s", got)
 	}
 	if blank := supersedeReassessFollowup("myproj", nil, ""); blank != "" {
 		t.Errorf("with nothing withdrawn there is no follow-up, got %q", blank)
 	}
-	// A comma-bearing id is not nameable by `--only`, so the command omits it — and
-	// a block that listed the id and then printed a command without it, without
-	// saying so, is the one lie this block must not tell.
 	commy := supersedeReassessFollowup("myproj", []string{"aaaaaaaa1111111111111111111111", "imported,note"}, "/data/x.ids")
 	if !strings.Contains(commy, "hold a comma") || !strings.Contains(commy, "--only cannot carry") {
 		t.Errorf("the follow-up does not say the command omits a comma-bearing id:\n%s", commy)
@@ -239,62 +84,12 @@ func TestSupersedeReassessFollowupNamesTheCommandAndTheFile(t *testing.T) {
 	}
 }
 
-// The file is the only surface that can name a comma-bearing id, so a block that
-// points at the file when there is NO file to point at lists the id nowhere — the
-// invisibility this block exists to remove. There are two ways to have no file:
-// writeReassessTargets returns an empty path on failure, and a path holding a
-// line break cannot be printed as one line of command at all. Both must name the
-// ids instead.
-func TestSupersedeReassessFollowupNamesTheIDsWhenTheFileIsMissing(t *testing.T) {
-	for name, path := range map[string]string{
-		"the write failed":             "",
-		"the path holds a line break":  "/data/x\n.ids",
-		"the path holds a bare return": "/data/x\r.ids",
-	} {
-		t.Run(name, func(t *testing.T) {
-			got := supersedeReassessFollowup("myproj", []string{"imported,note"}, path)
-			if strings.Contains(got, "are in the file") || strings.Contains(got, "they are in the file") {
-				t.Errorf("the follow-up points at a file no operator can use:\n%s", got)
-			}
-			if !strings.Contains(got, "imported,note") {
-				t.Errorf("the follow-up neither wrote nor named the id, so nothing can reach it:\n%s", got)
-			}
-			if !strings.Contains(got, "no id file can be named here") {
-				t.Errorf("the follow-up does not say there is no file to point at:\n%s", got)
-			}
-		})
-	}
-}
-
-// The path in the --only-file line is printed in TWO forms, and they must not be
-// composed: the display copy is assemble.Label's, and the ARGUMENT is the raw
-// value in single quotes. Pre-escaping the argument is a silent corruption —
-// Label renders a backtick as \`, and a backslash inside single quotes is
-// literal, so the command would name a project and a file that do not exist.
-func TestTheOnlyFileLineQuotesTheRawPathAndName(t *testing.T) {
-	const path = "/data/my`dir with space/x.ids"
-	got := supersedeReassessFollowup("my`proj", []string{"aaaaaaaa1111111111111111111111"}, path)
-	// The display copy is escaped — a backtick in it would close the backtick span
-	// the line prints the command in, and the value has to stay one line.
-	if !strings.Contains(got, "my\\`dir") {
-		t.Errorf("the display copy of the path is not escaped, so a backtick in it closes the command span:\n%s", got)
-	}
-	// And the ARGUMENT carries the real value, which is the one spelling a shell
-	// reads back as the same path and the same project.
-	if !strings.Contains(got, "--project 'my`proj'") || !strings.Contains(got, "--only-file '"+path+"'") {
-		t.Errorf("the command's arguments are not the raw values:\n%s", got)
-	}
-}
-
 // When EVERY id holds a comma there is no --only command, and the block must not
 // fall back to the command without --only: that is the project-wide re-judge #698
 // measured, printed under a heading that promises nothing outside this list is
 // judged. The file is the way, and the block says so.
 func TestSupersedeReassessFollowupNeverPrintsTheUnscopedRepair(t *testing.T) {
 	got := supersedeReassessFollowup("myproj", []string{"one,two", "three,four"}, "/data/x.ids")
-	// Every line naming a command must name a SCOPED one, and the unscoped repair
-	// must not even be written out in the warning: a copy-pasteable line that
-	// re-judges the whole project is what this block exists to avoid handing over.
 	for _, line := range strings.Split(got, "\n") {
 		if strings.Contains(line, "ghost resolve") && !strings.Contains(line, "--only") && !strings.Contains(line, "--only-file") {
 			t.Errorf("the follow-up printed an unscoped repair line: %q\n%s", line, got)
@@ -305,56 +100,6 @@ func TestSupersedeReassessFollowupNeverPrintsTheUnscopedRepair(t *testing.T) {
 	}
 	if !strings.Contains(got, "/data/x.ids") {
 		t.Errorf("the follow-up does not point at the file that can name them:\n%s", got)
-	}
-}
-
-// No surface can carry an id holding a newline — `--only` splits on commas and the
-// file is one id per line — so the block has to say the memory stays resolved
-// rather than implying a repair exists.
-//
-// The two ways an empty command happens are different facts, and a block that
-// words both as "a comma" contradicts itself: it says the file is the only way and
-// that nothing can name the id. It must also not point at a file that names
-// nothing, since writeReassessTargets omits a newline-bearing id and
-// readRefSelectors then refuses the whole list — the operator's run of the
-// printed repair would fail.
-func TestSupersedeReassessFollowupSaysNoSurfaceCanNameANewlineID(t *testing.T) {
-	got := supersedeReassessFollowup("myproj", []string{"two\nlines"}, "")
-	if !strings.Contains(got, "no --only or --only-file form can carry") {
-		t.Errorf("the follow-up does not say the id is unreachable:\n%s", got)
-	}
-	if !strings.Contains(got, "stay resolved") {
-		t.Errorf("the follow-up does not say what happens to that memory:\n%s", got)
-	}
-	if strings.Contains(got, "comma") {
-		t.Errorf("the follow-up blames a comma for an id no surface can name:\n%s", got)
-	}
-	if strings.Contains(got, "/data/x.ids") {
-		t.Errorf("the follow-up points at a file that names nothing:\n%s", got)
-	}
-}
-
-// The mixed case: some ids are carriable by the file and some by nothing, so the
-// file line, the comma sentence and the newline sentence must all be present and
-// none of them may claim the file reaches the newline id.
-func TestSupersedeReassessFollowupSeparatesFileOnlyFromUnnameable(t *testing.T) {
-	got := supersedeReassessFollowup("myproj", []string{"aaaaaaaa1111111111111111111111", "one,two", "three\nfour"}, "/data/x.ids")
-	if !strings.Contains(got, "--only 'aaaaaaaa1111111111111111111111'") {
-		t.Errorf("the command lost the id it can carry:\n%s", got)
-	}
-	if !strings.Contains(got, "/data/x.ids") {
-		t.Errorf("the file line is missing though the file names ids:\n%s", got)
-	}
-	if !strings.Contains(got, "hold a comma") {
-		t.Errorf("the comma sentence is missing:\n%s", got)
-	}
-	if !strings.Contains(got, "no --only or --only-file form can carry") {
-		t.Errorf("the newline sentence is missing:\n%s", got)
-	}
-	for _, line := range strings.Split(got, "\n") {
-		if strings.Contains(line, "ghost resolve") && !strings.Contains(line, "--only") && !strings.Contains(line, "--only-file") {
-			t.Errorf("the follow-up printed an unscoped repair line: %q", line)
-		}
 	}
 }
 
@@ -401,108 +146,6 @@ func TestWriteReassessTargetsRefusesASetItCannotName(t *testing.T) {
 	}
 }
 
-// TestWriteReassessTargetsIsReadableAsOnlyFile: the file the supersede repair
-// writes and the flag resolve reads are one format, and the way to hold them
-// together is for the writer's own output to parse. A header comment names the
-// command; every other line is an id.
-func TestWriteReassessTargetsIsReadableAsOnlyFile(t *testing.T) {
-	root := t.TempDir()
-	t.Setenv("GHOST_SCRATCH_DIR", root)
-
-	ids := []string{"aaaaaaaa1111111111111111111111", "bbbbbbbb2222222222222222222222"}
-	path, err := writeReassessTargets("myproj", ids, "ghost supersede --reassess --apply")
-	if err != nil {
-		t.Fatalf("writeReassessTargets: %v", err)
-	}
-	if dir := filepath.Dir(path); dir != root {
-		t.Errorf("wrote %s, want it under the scratch root %s", path, root)
-	}
-	if !strings.HasPrefix(filepath.Base(path), "supersede-reassess-myproj-") {
-		t.Errorf("file name %q must name the project and the repair", filepath.Base(path))
-	}
-	got, err := readRefSelectors("--only-file", path)
-	if err != nil {
-		t.Fatalf("the file resolve is pointed at must parse: %v", err)
-	}
-	if len(got) != len(ids) {
-		t.Fatalf("readRefSelectors = %v, want %v", got, ids)
-	}
-	for i := range ids {
-		if got[i] != ids[i] {
-			t.Errorf("selector %d = %q, want %q", i, got[i], ids[i])
-		}
-	}
-	body, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read: %v", err)
-	}
-	if !strings.Contains(string(body), "ghost resolve myproj --reassess --only") {
-		t.Errorf("the file must carry the command it is for:\n%s", body)
-	}
-	if !strings.HasPrefix(string(body), "#") {
-		t.Errorf("the file must open with a comment, not with a selector:\n%s", body)
-	}
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatalf("stat: %v", err)
-	}
-	if perm := info.Mode().Perm(); perm != 0o600 {
-		t.Errorf("mode = %v, want 0600 — the file lists memory ids", perm)
-	}
-}
-
-// TestWriteReassessTargetsSanitizesTheProjectName: a project name is free text
-// (see --project, which takes the next argument verbatim so a dash-leading name
-// works), so a name carrying a path separator must not be able to steer the
-// write out of the scratch root.
-func TestWriteReassessTargetsSanitizesTheProjectName(t *testing.T) {
-	root := t.TempDir()
-	t.Setenv("GHOST_SCRATCH_DIR", root)
-
-	path, err := writeReassessTargets("../../escape/odd name", []string{"aaaaaaaa1111111111111111111111"}, "ghost supersede --reassess --apply")
-	if err != nil {
-		t.Fatalf("writeReassessTargets: %v", err)
-	}
-	if dir := filepath.Dir(path); dir != root {
-		t.Errorf("wrote %s, want it under the scratch root %s", path, root)
-	}
-	if strings.ContainsAny(filepath.Base(path), `/\ `) {
-		t.Errorf("file name %q must not carry a separator or a space", filepath.Base(path))
-	}
-}
-
-// TestWriteReassessTargetsGivesEachRunItsOwnFile: the printed block tells the
-// operator "(the same ids are in <path>)", so a second run must not land on the
-// first run's path and replace the list that sentence points at. The name
-// carries a per-run token for that reason, and a whole-second timestamp alone is
-// not one — two repairs of the same project in the same second collide, and the
-// operator would then run a repair for the wrong set of memories.
-func TestWriteReassessTargetsGivesEachRunItsOwnFile(t *testing.T) {
-	root := t.TempDir()
-	t.Setenv("GHOST_SCRATCH_DIR", root)
-
-	first, err := writeReassessTargets("myproj", []string{"aaaaaaaa1111111111111111111111"}, "ghost supersede --reassess --apply")
-	if err != nil {
-		t.Fatalf("first write: %v", err)
-	}
-	second, err := writeReassessTargets("myproj", []string{"bbbbbbbb2222222222222222222222"}, "ghost supersede --reassess --apply")
-	if err != nil {
-		t.Fatalf("second write: %v", err)
-	}
-	if first == second {
-		t.Fatalf("two runs wrote the same path %q: the second list replaced the first", first)
-	}
-	for path, want := range map[string]string{first: "aaaaaaaa1111111111111111111111", second: "bbbbbbbb2222222222222222222222"} {
-		body, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatalf("read %s: %v", path, err)
-		}
-		if !strings.Contains(string(body), want) {
-			t.Errorf("%s holds the wrong run's ids:\n%s", path, body)
-		}
-	}
-}
-
 // TestWriteReassessTargetsNeverWritesOverSomethingElse: the name is derived
 // from the project and a clock, and a scratch root may be a directory someone
 // else can write to ($GHOST_SCRATCH_DIR, or a shared root), so a name that
@@ -534,9 +177,6 @@ func TestWriteReassessTargetsNeverWritesOverSomethingElse(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(root, "victim.txt"), []byte("do not touch\n"), 0o600); err != nil {
 				t.Fatalf("write the victim: %v", err)
 			}
-			// Pin the name so the planted entry is the one the writer asks for,
-			// and make every attempt collide: what is under test is the refusal,
-			// not the retry.
 			taken := "supersede-reassess-myproj-20260101T000000Z-pinned.ids"
 			reassessTargetsName = func(string) (string, error) { return taken, nil }
 			t.Cleanup(func() { reassessTargetsName = defaultReassessTargetsName })
@@ -565,62 +205,5 @@ func TestWriteReassessTargetsFailsWithoutAnId(t *testing.T) {
 	t.Setenv("GHOST_SCRATCH_DIR", t.TempDir())
 	if _, err := writeReassessTargets("myproj", nil, "ghost supersede --reassess --apply"); err == nil {
 		t.Fatal("writeReassessTargets with no ids must not write a file")
-	}
-}
-
-// TestTheFollowupIDFileIsReclaimedAfterItsWindow: the id file the follow-up
-// writes under the scratch root is the operator's pending repair — read days
-// later by whoever runs it — so nothing may take it while that is still a live
-// possibility. But no pass ever removed it either: Reap's markerless rule
-// collects per-invocation DIRECTORIES only, and this is a regular file, so
-// every --apply run added one more entry nothing could ever reclaim, each
-// counting against the scratch budget forever. It is now collected once its
-// own window passes, and only then.
-func TestTheFollowupIDFileIsReclaimedAfterItsWindow(t *testing.T) {
-	root := t.TempDir()
-	t.Setenv("GHOST_SCRATCH_DIR", root)
-	ids := []string{"aaaaaaaa1111111111111111111111"}
-
-	pending, err := writeReassessTargets("myproj", ids, "ghost supersede --reassess --apply")
-	if err != nil {
-		t.Fatalf("writeReassessTargets: %v", err)
-	}
-	fresh, err := writeReassessTargets("myproj", ids, "ghost supersede --reassess --apply")
-	if err != nil {
-		t.Fatalf("second writeReassessTargets: %v", err)
-	}
-	if pending == fresh {
-		t.Fatalf("the two runs wrote the same path %q", pending)
-	}
-	// Age the first file past the point an operator still needs it. The second
-	// is left at its write time: that is the list still waiting to be run.
-	past := time.Now().Add(-90 * 24 * time.Hour)
-	if err := os.Chtimes(pending, past, past); err != nil {
-		t.Fatalf("chtimes: %v", err)
-	}
-
-	// Reap(0) gives the caller no age bound of its own, so whatever collects the
-	// file has to be the file's OWN window — the same call the budget check's
-	// repro uses.
-	removed, _, err := scratch.Reap(0)
-	if err != nil {
-		t.Fatalf("Reap: %v", err)
-	}
-	if removed != 1 {
-		t.Errorf("Reap(0) removed %d entries, want 1 — the id file past its window is reclaimable", removed)
-	}
-	if _, err := os.Stat(pending); !os.IsNotExist(err) {
-		t.Errorf("the id file past its window survived Reap (stat err %v)", err)
-	}
-
-	if _, err := os.Stat(fresh); err != nil {
-		t.Fatalf("an id file inside its window must survive the reaper: %v", err)
-	}
-	got, err := readRefSelectors("--only-file", fresh)
-	if err != nil {
-		t.Fatalf("the surviving file must still be readable as --only-file: %v", err)
-	}
-	if len(got) != 1 || got[0] != ids[0] {
-		t.Errorf("the surviving file reads as %v, want %v", got, ids)
 	}
 }

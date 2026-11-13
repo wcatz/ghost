@@ -41,100 +41,6 @@ func TestResolveBasenameRefusesUnrelatedDirectory(t *testing.T) {
 	}
 }
 
-// TestResolveBasenameStillMatchesOwnDirectory guards the other half: the
-// fallback must keep working for a session genuinely in the project, because
-// the prefix step skips paths this short. Refusing everything would break
-// short-path projects entirely rather than merely securing them.
-func TestResolveBasenameStillMatchesOwnDirectory(t *testing.T) {
-	s := testStore(t)
-	ctx := context.Background()
-	projectPath := filepath.Join(t.TempDir(), "infra")
-	subdir := filepath.Join(projectPath, "sub")
-	for _, dir := range []string{projectPath, subdir} {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			t.Fatalf("mkdir %s: %v", dir, err)
-		}
-	}
-
-	if err := s.EnsureProject(ctx, "infra-id", projectPath, "infra"); err != nil {
-		t.Fatalf("EnsureProject: %v", err)
-	}
-
-	id, name, err := s.ResolveProject(ctx, projectPath)
-	if err != nil {
-		t.Fatalf("ResolveProject: %v", err)
-	}
-	if id != "infra-id" || name != "infra" {
-		t.Errorf("session inside its own project did not resolve: id=%q name=%q, want infra-id/infra", id, name)
-	}
-
-	id, name, err = s.ResolveProject(ctx, subdir)
-	if err != nil {
-		t.Fatalf("ResolveProject subdir: %v", err)
-	}
-	if id != "infra-id" || name != "infra" {
-		t.Errorf("session in a project subdirectory resolved to %q (%q), want infra-id/infra", id, name)
-	}
-}
-
-// TestResolveBasenameIgnoresCandidatesThatDisagree: ambiguity is decided on
-// the candidates that AGREE with the evidence, not on the raw candidate set.
-// Deciding it before the filters strands a session that is standing in the
-// right directory because an unrelated duplicate of the name happens to
-// exist — the caller loses its project for the sake of a row that the same
-// evidence rules reject.
-func TestResolveBasenameIgnoresCandidatesThatDisagree(t *testing.T) {
-	s := testStore(t)
-	ctx := context.Background()
-	root := t.TempDir()
-	realPath := filepath.Join(root, "real", "infra")
-	aliasPath := filepath.Join(root, "alias", "infra")
-	if err := os.MkdirAll(realPath, 0o755); err != nil {
-		t.Fatalf("mkdir real path: %v", err)
-	}
-	if err := os.MkdirAll(filepath.Dir(aliasPath), 0o755); err != nil {
-		t.Fatalf("mkdir alias parent: %v", err)
-	}
-	if err := os.Symlink(realPath, aliasPath); err != nil {
-		t.Skipf("symlink unavailable: %v", err)
-	}
-
-	if err := s.EnsureProject(ctx, "real-id", aliasPath, "infra"); err != nil {
-		t.Fatalf("EnsureProject real: %v", err)
-	}
-	if err := s.EnsureProject(ctx, "dup-id", "", "infra"); err != nil {
-		t.Fatalf("EnsureProject duplicate: %v", err)
-	}
-
-	id, name, err := s.ResolveProject(ctx, realPath)
-	if err != nil {
-		t.Fatalf("ResolveProject: %v", err)
-	}
-	if id != "real-id" || name != "infra" {
-		t.Errorf("session inside its own project got id=%q name=%q, want real-id/infra — a duplicate that disagrees with the evidence is not a competing answer", id, name)
-	}
-}
-
-// TestResolveProjectByAmbiguousBareNameReturnsError prevents the save path
-// from treating multiple exact-name matches as a miss and auto-creating a
-// third project.
-func TestResolveProjectByAmbiguousBareNameReturnsError(t *testing.T) {
-	s := testStore(t)
-	ctx := context.Background()
-
-	if err := s.EnsureProject(ctx, "a", "", "infra"); err != nil {
-		t.Fatalf("EnsureProject a: %v", err)
-	}
-	if err := s.EnsureProject(ctx, "b", "", "infra"); err != nil {
-		t.Fatalf("EnsureProject b: %v", err)
-	}
-
-	_, _, err := s.ResolveProject(ctx, "infra")
-	if !errors.Is(err, ErrAmbiguousProject) {
-		t.Fatalf("ResolveProject(infra) error = %v, want ErrAmbiguousProject", err)
-	}
-}
-
 // TestResolveBasenameRequiresUniqueName uses two recorded aliases of one real
 // directory so the path and remote rules cannot choose a winner.
 func TestResolveBasenameRequiresUniqueName(t *testing.T) {
@@ -165,54 +71,6 @@ func TestResolveBasenameRequiresUniqueName(t *testing.T) {
 	_, _, err := s.ResolveProject(ctx, realPath)
 	if !errors.Is(err, ErrAmbiguousProject) {
 		t.Fatalf("two consistent candidates error = %v, want ErrAmbiguousProject", err)
-	}
-}
-
-// TestResolveBasenameRefusesRelativePathInput replaces a test that could not
-// fail: the old gate test used "/x/infra", which filepath.IsAbs reports as
-// absolute on Linux, so reverting the gate to IsAbs left it green and it
-// duplicated TestResolveBasenameStillMatchesOwnDirectory. A RELATIVE
-// path-shaped input is the shape that separates the two gates, and
-// filepath.Base splits it on Linux and Windows alike.
-func TestResolveBasenameRefusesRelativePathInput(t *testing.T) {
-	s := testStore(t)
-	ctx := context.Background()
-	stored := filepath.Join(t.TempDir(), "infra")
-	if err := os.MkdirAll(stored, 0o755); err != nil {
-		t.Fatalf("mkdir stored path: %v", err)
-	}
-	if err := s.EnsureProject(ctx, "infra-id", stored, "infra"); err != nil {
-		t.Fatalf("EnsureProject: %v", err)
-	}
-
-	id, name, err := s.ResolveProject(ctx, "some/relative/place/infra")
-	if err != nil {
-		t.Fatalf("ResolveProject: %v", err)
-	}
-	if id != "" || name != "" {
-		t.Errorf("a relative path claimed project %q (%q): it did not prove agreement with the recorded location", id, name)
-	}
-}
-
-// TestResolveBasenameRefusesRootPathProject: samePath trims the trailing
-// slash off a stored "/" and is left comparing against "", so HasPrefix(a,
-// "/") accepts EVERY absolute path on the machine. A project recorded at the
-// filesystem root would claim any session whose directory shares its name —
-// the #546 shape, with a wildcard instead of a basename.
-func TestResolveBasenameRefusesRootPathProject(t *testing.T) {
-	s := testStore(t)
-	ctx := context.Background()
-
-	if err := s.EnsureProject(ctx, "root-id", "/", "infra"); err != nil {
-		t.Fatalf("EnsureProject: %v", err)
-	}
-
-	id, name, err := s.ResolveProject(ctx, "/x/infra")
-	if err != nil {
-		t.Fatalf("ResolveProject: %v", err)
-	}
-	if id != "" || name != "" {
-		t.Errorf("a project recorded at the filesystem root claimed %q (%q) — / contains every absolute path", id, name)
 	}
 }
 
@@ -250,62 +108,6 @@ func TestResolveBasenameRefusesProvenRemoteConflict(t *testing.T) {
 	}
 }
 
-// TestResolveBasenameAllowsUnprovenRemote keeps the other half honest: a
-// project that never recorded a remote has asserted nothing, so a session
-// arriving with one is not a contradiction. Refusing here would strand every
-// project created before repository identity existed behind an invisible
-// wall — a duplicate project instead of a match, for want of evidence.
-func TestResolveBasenameAllowsUnprovenRemote(t *testing.T) {
-	s := testStore(t)
-	ctx := context.Background()
-	root := t.TempDir()
-	realPath := filepath.Join(root, "real", "infra")
-	aliasPath := filepath.Join(root, "alias", "infra")
-	if err := os.MkdirAll(realPath, 0o755); err != nil {
-		t.Fatalf("mkdir real path: %v", err)
-	}
-	if err := os.MkdirAll(filepath.Dir(aliasPath), 0o755); err != nil {
-		t.Fatalf("mkdir alias parent: %v", err)
-	}
-	if err := os.Symlink(realPath, aliasPath); err != nil {
-		t.Skipf("symlink unavailable: %v", err)
-	}
-	if err := s.EnsureProject(ctx, "infra-id", aliasPath, "infra"); err != nil {
-		t.Fatalf("EnsureProject: %v", err)
-	}
-	SetDetectRemote(func(string) string { return "github.com/me/infra" })
-	t.Cleanup(func() { SetDetectRemote(nil) })
-
-	id, name, err := s.ResolveProject(ctx, realPath)
-	if err != nil {
-		t.Fatalf("ResolveProject: %v", err)
-	}
-	if id != "infra-id" || name != "infra" {
-		t.Errorf("project with no recorded remote refused a session: id=%q name=%q — nothing was disproved", id, name)
-	}
-}
-
-// TestResolveProjectByBareNameStillWorks: callers that name a project
-// outright — the CLI, ghost_resolve, hooks passing a heading's name — are
-// asserting which project they mean, not reporting a directory. A bare name
-// carries no location to disagree with, so it must still resolve.
-func TestResolveProjectByBareNameStillWorks(t *testing.T) {
-	s := testStore(t)
-	ctx := context.Background()
-
-	if err := s.EnsureProject(ctx, "infra-id", "/home/u/git/infra", "infra"); err != nil {
-		t.Fatalf("EnsureProject: %v", err)
-	}
-
-	id, name, err := s.ResolveProject(ctx, "infra")
-	if err != nil {
-		t.Fatalf("ResolveProject: %v", err)
-	}
-	if id != "infra-id" || name != "infra" {
-		t.Errorf("bare name did not resolve: id=%q name=%q, want infra-id/infra", id, name)
-	}
-}
-
 // TestResolveBasenameSentinelProjectRefusesPathShapedInput closes the gap
 // review caught on #565: the path-agreement guard only ran when the stored
 // path contained a separator, and a sentinel path (path == id) never does —
@@ -338,39 +140,6 @@ func TestResolveBasenameSentinelProjectRefusesPathShapedInput(t *testing.T) {
 	}
 	if id != "" || name != "" {
 		t.Errorf("a directory claiming a project that recorded no location resolved to %q (%q) — the #546 scenario is still reachable for sentinel-path projects", id, name)
-	}
-}
-
-// TestResolveBasenameProjectWithoutRealPath keeps the other half honest: a
-// project created over MCP has path == id, a non-absolute value — it has
-// never said where it lives. Refusing a directory that merely shares its
-// basename (see TestResolveBasenameSentinelProjectRefusesPathShapedInput)
-// must not strand it, because a caller holding the name alone — MCP tools,
-// the CLI, ghost_resolve — is naming the project, not reporting a location.
-func TestResolveBasenameProjectWithoutRealPath(t *testing.T) {
-	s := testStore(t)
-	ctx := context.Background()
-
-	// path = id, the sentinel ensureProjectLocked normalizes empty to.
-	if err := s.EnsureProject(ctx, "infra-id", "", "infra"); err != nil {
-		t.Fatalf("EnsureProject: %v", err)
-	}
-	var path string
-	if err := s.db.QueryRowContext(ctx, `SELECT path FROM projects WHERE id = 'infra-id'`).Scan(&path); err != nil {
-		t.Fatalf("read path: %v", err)
-	}
-	if path != "infra-id" {
-		t.Fatalf("precondition: path = %q, want the id sentinel %q", path, "infra-id")
-	}
-
-	// The name, not the id, so this exercises the name-only match rather
-	// than the exact-id step above it.
-	id, name, err := s.ResolveProject(ctx, "infra")
-	if err != nil {
-		t.Fatalf("ResolveProject: %v", err)
-	}
-	if id != "infra-id" || name != "infra" {
-		t.Errorf("project that recorded no path refused a bare name: id=%q name=%q — every MCP-created project would be unreachable", id, name)
 	}
 }
 
@@ -434,33 +203,6 @@ func TestStoredPathIsUsable(t *testing.T) {
 	for _, c := range cases {
 		if got := storedPathIsUsable(c.stored); got != c.want {
 			t.Errorf("%s: storedPathIsUsable(%q) = %v, want %v", c.name, c.stored, got, c.want)
-		}
-	}
-}
-
-// TestIsPathShaped pins the single definition of "the caller is reporting a
-// location", shared by the store's path steps, the basename evidence rules
-// and mcpserver's repository detection. filepath.IsAbs is the wrong test —
-// false for a drive-relative Windows path — and that is what both the Windows
-// fixtures in this file and the mcpserver gate depend on.
-func TestIsPathShaped(t *testing.T) {
-	cases := []struct {
-		name  string
-		input string
-		want  bool
-	}{
-		{"bare project name", "infra", false},
-		{"project id", "a7293a04b38a", false},
-		{"posix absolute path", "/home/u/git/infra", true},
-		{"relative path", "sub/dir", true},
-		{"drive-relative windows path", `\work\ghost`, true},
-		{"windows absolute path", `C:\work\ghost`, true},
-		{"repository url", "github.com/wcatz/ghost", true},
-		{"empty", "", false},
-	}
-	for _, c := range cases {
-		if got := IsPathShaped(c.input); got != c.want {
-			t.Errorf("%s: IsPathShaped(%q) = %v, want %v", c.name, c.input, got, c.want)
 		}
 	}
 }

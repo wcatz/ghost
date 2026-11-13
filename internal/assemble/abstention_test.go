@@ -684,16 +684,3 @@ func TestAFitPassThatEmptiesTheBlockClearsTheArmsState(t *testing.T) {
 		t.Errorf("machine line = %q, want the unapplied state on an answer with no rows", res.Machine)
 	}
 }
-
-// stageTrace returns the named stage's record, failing the test when the stage
-// was never recorded.
-func stageTrace(t *testing.T, res Result, name string) StageTrace {
-	t.Helper()
-	for _, st := range res.Trace.Stages {
-		if st.Stage == name {
-			return st
-		}
-	}
-	t.Fatalf("the trace records no %q stage: %+v", name, res.Trace.Stages)
-	return StageTrace{}
-}

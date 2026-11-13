@@ -12,10 +12,10 @@ import (
 	"github.com/wcatz/ghost/internal/memory"
 )
 
-// TestExportArtifactIsNotGroupOrWorldReadable: the artifact holds every memory
-// in the file, in plain text, so it must land at the width the database has. The
-// data directory is 0700, but an --out destination is often a shared folder or a
-// synced directory, where the file's own mode is the only thing protecting it.
+// TestExportArtifactIsNotGroupOrWorldReadable: the artifact holds every memory in
+// plain text and an --out destination is often a shared or synced folder, so it
+// is created at 0600 (requested at creation; narrowing afterwards leaves the
+// window #553 was about).
 func TestExportArtifactIsNotGroupOrWorldReadable(t *testing.T) {
 	store := transferTestStore(t)
 	ctx := context.Background()
@@ -25,7 +25,6 @@ func TestExportArtifactIsNotGroupOrWorldReadable(t *testing.T) {
 	if _, err := store.Create(ctx, "p1", memory.Memory{Category: "fact", Content: "a private fact", Source: "mcp"}); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-
 	dest := filepath.Join(t.TempDir(), "export.jsonl")
 	if err := runExportCore(ctx, store, &strings.Builder{}, &strings.Builder{}, dest, ""); err != nil {
 		t.Fatalf("runExportCore: %v", err)
@@ -34,13 +33,7 @@ func TestExportArtifactIsNotGroupOrWorldReadable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("no artifact at %s: %v", dest, err)
 	}
-	if got := info.Mode().Perm(); got != 0o600 {
-		t.Errorf("artifact mode = %#o, want 0600", got)
-	}
-	// The width has to be requested at creation: a file created wider and
-	// narrowed afterwards has been group-readable for a moment, which is the
-	// window #553 was about.
-	if !info.Mode().IsRegular() {
-		t.Errorf("artifact is not a regular file: %v", info.Mode())
+	if got := info.Mode().Perm(); got != 0o600 || !info.Mode().IsRegular() {
+		t.Errorf("artifact mode = %v, want a regular file at 0600", info.Mode())
 	}
 }

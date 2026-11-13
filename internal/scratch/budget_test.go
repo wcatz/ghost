@@ -16,55 +16,8 @@ import (
 	"github.com/wcatz/ghost/internal/memory"
 )
 
-// TestSize_CountsRegularFilesOnly: Size accounts bytes + files over regular
-// files with lstat semantics — symlinks are never followed (a link to a large
-// out-of-tree file contributes neither bytes nor file counts), directories
-// count zero, and a missing root is (0, 0, nil).
-func TestSize_CountsRegularFilesOnly(t *testing.T) {
-	root := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(root, "sub"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(root, "a.bin"), make([]byte, 1000), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(root, "sub", "b.bin"), make([]byte, 2000), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	// A symlink whose target lives outside the root: must not be followed.
-	outside := filepath.Join(t.TempDir(), "big.bin")
-	if err := os.WriteFile(outside, make([]byte, 1<<20), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(outside, filepath.Join(root, "link.bin")); err != nil {
-		t.Fatalf("symlink: %v", err)
-	}
-
-	gotBytes, gotFiles, gotSkipped, err := Size(root)
-	if err != nil {
-		t.Fatalf("Size: %v", err)
-	}
-	if gotSkipped != 0 {
-		t.Errorf("Size skipped = %d, want 0 (every entry readable)", gotSkipped)
-	}
-	if gotBytes != 3000 {
-		t.Errorf("Size bytes = %d, want 3000 (symlink target excluded)", gotBytes)
-	}
-	if gotFiles != 2 {
-		t.Errorf("Size files = %d, want 2 (symlink excluded)", gotFiles)
-	}
-
-	gotBytes, gotFiles, gotSkipped, err = Size(filepath.Join(root, "does-not-exist"))
-	if err != nil {
-		t.Errorf("Size on missing root: err = %v, want nil", err)
-	}
-	if gotBytes != 0 || gotFiles != 0 || gotSkipped != 0 {
-		t.Errorf("Size on missing root = (%d, %d, %d), want (0, 0, 0)", gotBytes, gotFiles, gotSkipped)
-	}
-}
-
 // captureLogs redirects the package-level default logger for the test's
-// duration so budget warnings are assertable byte-for-byte.
+// duration so budget warnings are assertable.
 func captureLogs(t *testing.T) *bytes.Buffer {
 	t.Helper()
 	var buf bytes.Buffer
@@ -74,98 +27,160 @@ func captureLogs(t *testing.T) *bytes.Buffer {
 	return &buf
 }
 
-// TestEnforceBudget_UnderBudgetSilentAndSkipsReap: a root within budget must
-// produce no warning and no maintenance_runs row — and, per the controller's
-// fixed order (measure → only-if-over: reap), NO reap: the stale markerless
-// dir survives because the lifecycle/init reaps own unconditional hygiene.
-// The database is deliberately absent here too: the under-budget path must not
-// need or create one.
-func TestEnforceBudget_UnderBudgetSilentAndSkipsReap(t *testing.T) {
-	root := t.TempDir()
+// openTestDB opens (creating if needed) the ghost database at dbPath the same
+// way bootstrap does, so budget-record tests exercise the real schema.
+func openTestDB(dbPath string) (*sql.DB, error) {
+	return memory.OpenDB(dbPath)
+}
+
+// budgetEnv points the scratch root and data dir at fresh temp dirs with the
+// given scratch.max_bytes, optionally seeds the database, and returns the root
+// and database path.
+func budgetEnv(t *testing.T, maxBytes string, seed bool) (root, dbPath string) {
+	t.Helper()
+	root = t.TempDir()
+	dataHome := t.TempDir()
 	t.Setenv("GHOST_SCRATCH_DIR", root)
-	t.Setenv("GHOST_SCRATCH_MAX_BYTES", "1048576") // 1 MiB — plenty for the fixture
-	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	t.Setenv("GHOST_SCRATCH_MAX_BYTES", maxBytes)
+	t.Setenv("XDG_DATA_HOME", dataHome)
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	dbPath = filepath.Join(dataHome, "ghost", "ghost.db")
+	if seed {
+		must(t, os.MkdirAll(filepath.Dir(dbPath), 0o700))
+		db, err := openTestDB(dbPath)
+		must(t, err)
+		must(t, db.Close())
+	}
+	return root, dbPath
+}
 
-	// Stale markerless scratch-shaped dir, older than the 24h age bound: would
-	// be reaped if the check fired, must survive because it did not.
-	stale := filepath.Join(root, "123-0123456789abcdef")
-	if err := os.Mkdir(stale, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(stale, "payload"), make([]byte, 4096), 0o600); err != nil {
-		t.Fatal(err)
-	}
+// staleEntry creates a markerless Open-shaped dir holding size payload bytes,
+// aged 25h so it is past the budget reap's 24h bound.
+func staleEntry(t *testing.T, root string, size int) string {
+	t.Helper()
+	dir := filepath.Join(root, "123-0123456789abcdef")
+	must(t, os.Mkdir(dir, 0o700))
+	must(t, os.WriteFile(filepath.Join(dir, "payload"), make([]byte, size), 0o600))
 	old := time.Now().Add(-25 * time.Hour)
-	if err := os.Chtimes(stale, old, old); err != nil {
-		t.Fatal(err)
-	}
+	must(t, os.Chtimes(dir, old, old))
+	return dir
+}
 
-	logs := captureLogs(t)
-	res := EnforceBudget()
+// lockDir makes dir unreadable until the test ends.
+func lockDir(t *testing.T, dir string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("permission bits are not enforced the same way on Windows")
+	}
+	must(t, os.Chmod(dir, 0o000))
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+}
 
-	if res.Fired {
-		t.Errorf("EnforceBudget fired under budget: %+v", res)
+// queryRow runs query against the database at dbPath and scans one row.
+func queryRow(t *testing.T, dbPath, query string, dest ...any) {
+	t.Helper()
+	db, err := openTestDB(dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
 	}
-	if res.ReapedCount != 0 {
-		t.Errorf("ReapedCount = %d, want 0 (no reap under budget)", res.ReapedCount)
+	defer db.Close() //nolint:errcheck
+	if err := db.QueryRow(query).Scan(dest...); err != nil {
+		t.Fatalf("query %q: %v", query, err)
 	}
-	if _, err := os.Stat(stale); err != nil {
-		t.Errorf("stale dir reaped although under budget: %v", err)
+}
+
+func noteOf(t *testing.T, dbPath string) string {
+	t.Helper()
+	var note string
+	queryRow(t, dbPath, `SELECT note FROM maintenance_runs`, &note)
+	return note
+}
+
+func rowCount(t *testing.T, dbPath string) int {
+	t.Helper()
+	var n int
+	queryRow(t, dbPath, `SELECT count(*) FROM maintenance_runs`, &n)
+	return n
+}
+
+// TestSize_CountsRegularFilesOnly: Size counts regular files with lstat
+// semantics — symlinks are never followed, directories count zero, and a
+// missing root is (0, 0, 0, nil).
+func TestSize_CountsRegularFilesOnly(t *testing.T) {
+	skipWindowsSymlink(t)
+	root := t.TempDir()
+	must(t, os.MkdirAll(filepath.Join(root, "sub"), 0o700))
+	must(t, os.WriteFile(filepath.Join(root, "a.bin"), make([]byte, 1000), 0o600))
+	must(t, os.WriteFile(filepath.Join(root, "sub", "b.bin"), make([]byte, 2000), 0o600))
+	outside := filepath.Join(t.TempDir(), "big.bin")
+	must(t, os.WriteFile(outside, make([]byte, 1<<20), 0o600))
+	must(t, os.Symlink(outside, filepath.Join(root, "link.bin")))
+
+	b, f, s, err := Size(root)
+	if err != nil || b != 3000 || f != 2 || s != 0 {
+		t.Errorf("Size = (%d, %d, %d, %v), want (3000, 2, 0, nil)", b, f, s, err)
 	}
-	if out := logs.String(); strings.Contains(out, "over budget") {
-		t.Errorf("warning emitted under budget:\n%s", out)
+	b, f, s, err = Size(filepath.Join(root, "does-not-exist"))
+	if err != nil || b != 0 || f != 0 || s != 0 {
+		t.Errorf("Size on missing root = (%d, %d, %d, %v), want zeros and nil", b, f, s, err)
+	}
+}
+
+// TestEnforceBudget_NoActionUnderBudgetOrDisabled: a root within budget, or any
+// root with max_bytes=0, produces no warning, no reap and no row. The stale dir
+// survives because the lifecycle and init reaps own unconditional hygiene, and
+// the database is absent: that path must not need or create one.
+func TestEnforceBudget_NoActionUnderBudgetOrDisabled(t *testing.T) {
+	tests := []struct {
+		name, maxBytes string
+		payload        int
+	}{
+		{"under budget", "1048576", 4096},
+		{"disabled", "0", 1 << 20},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root, dbPath := budgetEnv(t, tt.maxBytes, false)
+			stale := staleEntry(t, root, tt.payload)
+
+			logs := captureLogs(t)
+			res := EnforceBudget()
+
+			if res.Fired || res.ReapedCount != 0 || res.Recorded {
+				t.Errorf("EnforceBudget acted: %+v", res)
+			}
+			if _, err := os.Stat(stale); err != nil {
+				t.Errorf("stale dir reaped: %v", err)
+			}
+			if out := logs.String(); strings.Contains(out, "over budget") {
+				t.Errorf("warning emitted:\n%s", out)
+			}
+			if _, err := os.Stat(dbPath); !os.IsNotExist(err) {
+				t.Errorf("database created on a no-action path (stat err %v)", err)
+			}
+		})
 	}
 }
 
 // TestEnforceBudget_OverBudgetReapsWarnsAndRecords: the full fire path. Over
 // budget → reap stale → STILL over (foreign file kept) → loud warning naming
-// root and over-bytes → a maintenance_runs row with post-reap scratch bytes
-// and reaped counts. Returns normally either way (never blocks).
+// root and over-bytes → a maintenance_runs row with post-reap scratch bytes and
+// reaped counts.
 func TestEnforceBudget_OverBudgetReapsWarnsAndRecords(t *testing.T) {
-	root := t.TempDir()
-	t.Setenv("GHOST_SCRATCH_DIR", root)
-	t.Setenv("GHOST_SCRATCH_MAX_BYTES", "4096")
-	dataHome := t.TempDir()
-	t.Setenv("XDG_DATA_HOME", dataHome)
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-
-	// The database exists (record target); created here exactly as bootstrap does.
-	if err := os.MkdirAll(filepath.Join(dataHome, "ghost"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	dbPath := filepath.Join(dataHome, "ghost", "ghost.db")
-	db, err := openTestDB(dbPath)
-	if err != nil {
-		t.Fatalf("seed db: %v", err)
-	}
-	if err := db.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	stale := filepath.Join(root, "123-0123456789abcdef")
-	if err := os.Mkdir(stale, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(stale, "payload"), make([]byte, 8192), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	old := time.Now().Add(-25 * time.Hour)
-	if err := os.Chtimes(stale, old, old); err != nil {
-		t.Fatal(err)
-	}
+	root, dbPath := budgetEnv(t, "4096", true)
+	stale := staleEntry(t, root, 8192)
 	foreign := filepath.Join(root, "foreign.bin")
-	if err := os.WriteFile(foreign, make([]byte, 8192), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	must(t, os.WriteFile(foreign, make([]byte, 8192), 0o600))
 
 	logs := captureLogs(t)
 	res := EnforceBudget()
 
-	if !res.Fired {
-		t.Fatalf("budget check did not fire over budget: %+v", res)
+	if !res.Fired || !res.OverBudget || !res.Recorded {
+		t.Fatalf("want Fired, OverBudget and Recorded: %+v", res)
+	}
+	if res.ReapedCount != 1 || res.ReapedBytes != 8192 {
+		t.Errorf("reaped = (%d, %d), want (1, 8192)", res.ReapedCount, res.ReapedBytes)
 	}
 	if _, err := os.Stat(stale); !os.IsNotExist(err) {
 		t.Errorf("stale dir survived the reaper (stat err %v)", err)
@@ -173,94 +188,36 @@ func TestEnforceBudget_OverBudgetReapsWarnsAndRecords(t *testing.T) {
 	if _, err := os.Stat(foreign); err != nil {
 		t.Errorf("foreign file must survive Reap: %v", err)
 	}
-	out := logs.String()
 	for _, want := range []string{"over budget", root, "max_bytes=4096", "over_by=4096"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("warning missing %q; slog output:\n%s", want, out)
+		if !strings.Contains(logs.String(), want) {
+			t.Errorf("warning missing %q; slog output:\n%s", want, logs.String())
 		}
 	}
-	if !res.OverBudget {
-		t.Errorf("OverBudget = false, want true (8192 > 4096 after reap)")
-	}
-	if res.ReapedCount != 1 || res.ReapedBytes != 8192 {
-		t.Errorf("reaped = (%d, %d), want (1, 8192)", res.ReapedCount, res.ReapedBytes)
-	}
-	if !res.Recorded {
-		t.Errorf("Recorded = false, want true (fire path writes a maintenance_runs row)")
-	}
 
-	// The row itself.
-	db, err = openTestDB(dbPath)
-	if err != nil {
-		t.Fatalf("reopen db: %v", err)
-	}
-	defer db.Close() //nolint:errcheck
 	var kind, note string
 	var scratchBytes, reapedBytes, reapedCount int
-	if err := db.QueryRow(
-		`SELECT kind, scratch_bytes, scratch_reaped_bytes, scratch_reaped_count, note
-		 FROM maintenance_runs`,
-	).Scan(&kind, &scratchBytes, &reapedBytes, &reapedCount, &note); err != nil {
-		t.Fatalf("select maintenance_runs: %v", err)
-	}
-	if kind != "scratch-budget" {
-		t.Errorf("kind = %q, want scratch-budget", kind)
-	}
-	if scratchBytes != 8192 {
-		t.Errorf("scratch_bytes = %d, want 8192 (post-reap)", scratchBytes)
-	}
-	if reapedBytes != 8192 || reapedCount != 1 {
-		t.Errorf("reaped = (%d B, %d), want (8192, 1)", reapedBytes, reapedCount)
+	queryRow(t, dbPath, `SELECT kind, scratch_bytes, scratch_reaped_bytes, scratch_reaped_count, note
+		 FROM maintenance_runs`, &kind, &scratchBytes, &reapedBytes, &reapedCount, &note)
+	if kind != "scratch-budget" || scratchBytes != 8192 || reapedBytes != 8192 || reapedCount != 1 {
+		t.Errorf("row = (%q, %d, %d, %d), want (scratch-budget, 8192, 8192, 1)", kind, scratchBytes, reapedBytes, reapedCount)
 	}
 	if !strings.Contains(note, "over budget by 4096 bytes") {
 		t.Errorf("note = %q, want it to carry the over-budget delta", note)
 	}
 }
 
-// TestEnforceBudget_ReapIntoBudgetRecordsWithoutWarning: over budget only
-// because of stale content — the reap brings the root back within budget, so
-// there is nothing to warn about, but the fired check still records its reaped
-// counts (the "reaped spawn" the status command must show).
+// TestEnforceBudget_ReapIntoBudgetRecordsWithoutWarning: the reap brings the
+// root back within budget, so nothing is warned, but the fired check still
+// records its reaped counts.
 func TestEnforceBudget_ReapIntoBudgetRecordsWithoutWarning(t *testing.T) {
-	root := t.TempDir()
-	t.Setenv("GHOST_SCRATCH_DIR", root)
-	t.Setenv("GHOST_SCRATCH_MAX_BYTES", "4096")
-	dataHome := t.TempDir()
-	t.Setenv("XDG_DATA_HOME", dataHome)
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-
-	if err := os.MkdirAll(filepath.Join(dataHome, "ghost"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	db, err := openTestDB(filepath.Join(dataHome, "ghost", "ghost.db"))
-	if err != nil {
-		t.Fatalf("seed db: %v", err)
-	}
-	if err := db.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	stale := filepath.Join(root, "123-0123456789abcdef")
-	if err := os.Mkdir(stale, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(stale, "payload"), make([]byte, 8192), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	old := time.Now().Add(-25 * time.Hour)
-	if err := os.Chtimes(stale, old, old); err != nil {
-		t.Fatal(err)
-	}
+	root, _ := budgetEnv(t, "4096", true)
+	staleEntry(t, root, 8192)
 
 	logs := captureLogs(t)
 	res := EnforceBudget()
 
-	if !res.Fired {
-		t.Fatalf("check did not fire: %+v", res)
-	}
-	if res.OverBudget {
-		t.Errorf("OverBudget = true, want false (root emptied by reap)")
+	if !res.Fired || res.OverBudget {
+		t.Fatalf("want Fired and within budget after the reap: %+v", res)
 	}
 	if out := logs.String(); strings.Contains(out, "over budget") {
 		t.Errorf("warning emitted although the reap restored budget:\n%s", out)
@@ -270,50 +227,30 @@ func TestEnforceBudget_ReapIntoBudgetRecordsWithoutWarning(t *testing.T) {
 	}
 }
 
-// TestEnforceBudget_ReapsAStaleReassessIDFile: the issue's own repro through
-// the budget check — a follow-up id file, 90 days old, over a one-byte budget.
-// EnforceBudget reaps through Reap(staleAge), so the id file's OWN window is
-// what has to reach it, and the fresh list must survive even while the root is
-// over budget: the budget is why the file is collected eventually, not a
-// reason to take a repair nobody has run yet.
+// TestEnforceBudget_ReapsAStaleReassessIDFile: a follow-up id file, 90 days old,
+// over a one-byte budget. The id file's OWN window must reach it through the
+// budget reap, and a fresh list survives even while the root is over budget.
 func TestEnforceBudget_ReapsAStaleReassessIDFile(t *testing.T) {
-	root := t.TempDir()
-	t.Setenv("GHOST_SCRATCH_DIR", root)
-	t.Setenv("GHOST_SCRATCH_MAX_BYTES", "1")
-	t.Setenv("XDG_DATA_HOME", t.TempDir())
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-
-	body := []byte("# one id\naaaaaaaa1111111111111111111111\n")
+	root, _ := budgetEnv(t, "1", false)
 	stale := filepath.Join(root, "supersede-reassess-proj-20260101T000000Z-123-0123456789abcdef.ids")
 	fresh := filepath.Join(root, "supersede-reassess-proj-20260102T000000Z-124-f00dbeefcafe1234.ids")
 	for _, p := range []string{stale, fresh} {
-		if err := os.WriteFile(p, body, 0o600); err != nil {
-			t.Fatal(err)
-		}
+		must(t, os.WriteFile(p, []byte(idFileBody), 0o600))
 	}
 	old := time.Now().Add(-90 * 24 * time.Hour)
-	if err := os.Chtimes(stale, old, old); err != nil {
-		t.Fatal(err)
-	}
+	must(t, os.Chtimes(stale, old, old))
 
 	logs := captureLogs(t)
 	res := EnforceBudget()
 
-	if !res.Fired {
-		t.Fatalf("check did not fire over a one-byte budget: %+v", res)
-	}
-	if res.ReapedCount != 1 {
-		t.Errorf("ReapedCount = %d, want 1 — the stale id file is reclaimable through the budget path", res.ReapedCount)
+	if !res.Fired || !res.OverBudget || res.ReapedCount != 1 {
+		t.Errorf("want Fired, OverBudget and 1 reaped: %+v", res)
 	}
 	if _, err := os.Stat(stale); !os.IsNotExist(err) {
 		t.Errorf("the stale id file survived the budget reap (stat err %v)", err)
 	}
 	if _, err := os.Stat(fresh); err != nil {
 		t.Errorf("a fresh id file must survive even an over-budget reap: %v", err)
-	}
-	if !res.OverBudget {
-		t.Errorf("OverBudget = false, want true (the surviving file still exceeds one byte)")
 	}
 	for _, want := range []string{"over budget", root, "reaped=1"} {
 		if !strings.Contains(logs.String(), want) {
@@ -322,269 +259,109 @@ func TestEnforceBudget_ReapsAStaleReassessIDFile(t *testing.T) {
 	}
 }
 
-// TestRecordBudgetRun_ReapFailureNotRecordedAsWithinBudget: EnforceBudget warns
-// and proceeds when Reap fails — correctly, hygiene must never block a spawn.
-// But recordBudgetRun must not then write "within budget after reaping stale
-// entries", which asserts a successful reap that did not happen. The recorded
-// row is an audit trail; it has to name the failure.
-func TestRecordBudgetRun_ReapFailureNotRecordedAsWithinBudget(t *testing.T) {
-	dataHome := t.TempDir()
-	t.Setenv("XDG_DATA_HOME", dataHome)
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	if err := os.MkdirAll(filepath.Join(dataHome, "ghost"), 0o700); err != nil {
-		t.Fatal(err)
+// TestRecordBudgetRun_Notes: the recorded note is an audit trail, so it names a
+// failed reap and the entries it could not remove, and never claims a
+// successful reap after an error.
+func TestRecordBudgetRun_Notes(t *testing.T) {
+	tests := []struct {
+		name    string
+		res     BudgetResult
+		want    []string
+		notWant string
+	}{
+		{"reap error", BudgetResult{MaxBytes: 4096, ReapErr: errors.New("scratch root unreadable")},
+			[]string{"reap", "failed"}, "within budget after reaping stale entries"},
+		{"reap failed", BudgetResult{MaxBytes: 512, BytesAfter: 1024, ReapFailed: 2, OverBudget: true},
+			[]string{"2 stale entries could not be removed"}, ""},
 	}
-	dbPath := filepath.Join(dataHome, "ghost", "ghost.db")
-	seed, err := openTestDB(dbPath)
-	if err != nil {
-		t.Fatalf("seed db: %v", err)
-	}
-	if err := seed.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	// The failure shape: the root measured back within budget (OverBudget
-	// false) but the reap itself returned an error.
-	res := BudgetResult{
-		Root:       "/root/scratch",
-		MaxBytes:   4096,
-		BytesAfter: 0,
-		ReapErr:    errors.New("scratch root unreadable"),
-	}
-	if !recordBudgetRun(res) {
-		t.Fatalf("recordBudgetRun = false, want a recorded row")
-	}
-
-	db, err := openTestDB(dbPath)
-	if err != nil {
-		t.Fatalf("reopen db: %v", err)
-	}
-	defer db.Close() //nolint:errcheck
-	var note string
-	if err := db.QueryRow(`SELECT note FROM maintenance_runs`).Scan(&note); err != nil {
-		t.Fatalf("select note: %v", err)
-	}
-	if strings.Contains(note, "within budget after reaping stale entries") {
-		t.Errorf("note = %q, must not claim a successful reap when Reap returned an error", note)
-	}
-	if !strings.Contains(note, "reap") || !strings.Contains(note, "failed") {
-		t.Errorf("note = %q, want it to name the reap failure", note)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, dbPath := budgetEnv(t, "4096", true)
+			tt.res.Root = "/root/scratch"
+			if !recordBudgetRun(tt.res) {
+				t.Fatal("recordBudgetRun = false, want a recorded row")
+			}
+			note := noteOf(t, dbPath)
+			for _, w := range tt.want {
+				if !strings.Contains(note, w) {
+					t.Errorf("note = %q, want it to contain %q", note, w)
+				}
+			}
+			if tt.notWant != "" && strings.Contains(note, tt.notWant) {
+				t.Errorf("note = %q, must not contain %q", note, tt.notWant)
+			}
+		})
 	}
 }
 
-// TestEnforceBudget_DisabledWhenZero: max_bytes=0 is the explicit opt-out —
-// no measure-driven reap, no warning, no row, even for a wildly over-budget
-// root. (The stale dir survives exactly as in the under-budget case.)
-func TestEnforceBudget_DisabledWhenZero(t *testing.T) {
-	root := t.TempDir()
-	t.Setenv("GHOST_SCRATCH_DIR", root)
-	t.Setenv("GHOST_SCRATCH_MAX_BYTES", "0")
-	t.Setenv("XDG_DATA_HOME", t.TempDir())
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-
-	stale := filepath.Join(root, "123-0123456789abcdef")
-	if err := os.Mkdir(stale, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(stale, "payload"), make([]byte, 1<<20), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	old := time.Now().Add(-25 * time.Hour)
-	if err := os.Chtimes(stale, old, old); err != nil {
-		t.Fatal(err)
-	}
-
-	logs := captureLogs(t)
-	res := EnforceBudget()
-
-	if res.Fired || res.ReapedCount != 0 || res.Recorded {
-		t.Errorf("disabled budget still acted: %+v", res)
-	}
-	if _, err := os.Stat(stale); err != nil {
-		t.Errorf("stale dir reaped although enforcement disabled: %v", err)
-	}
-	if out := logs.String(); strings.Contains(out, "over budget") {
-		t.Errorf("warning emitted although enforcement disabled:\n%s", out)
-	}
-}
-
-// openTestDB opens (creating if needed) the ghost database at dbPath the same
-// way bootstrap does, so budget-record tests exercise the real schema.
-func openTestDB(dbPath string) (*sql.DB, error) {
-	return memory.OpenDB(dbPath)
-}
-
-// TestSize_MeasuresWhatItCanWithUnreadableSubdir: an unreadable directory
-// inside the root must not prevent Size from measuring the rest of the tree.
-// Reproduction for issue #1960.
+// TestSize_MeasuresWhatItCanWithUnreadableSubdir: an unreadable directory must
+// not prevent Size from measuring the rest of the tree. Reproduction for issue
+// #1960.
 func TestSize_MeasuresWhatItCanWithUnreadableSubdir(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("permission bits are not enforced the same way on Windows")
-	}
 	root := t.TempDir()
-	if err := os.WriteFile(filepath.Join(root, "a.bin"), make([]byte, 1000), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	must(t, os.WriteFile(filepath.Join(root, "a.bin"), make([]byte, 1000), 0o600))
 	sub := filepath.Join(root, "sub")
-	if err := os.Mkdir(sub, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(sub, "hidden.bin"), make([]byte, 2000), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(sub, 0o000); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(sub, 0o700) })
+	must(t, os.Mkdir(sub, 0o700))
+	must(t, os.WriteFile(filepath.Join(sub, "hidden.bin"), make([]byte, 2000), 0o600))
+	lockDir(t, sub)
 
 	logs := captureLogs(t)
-	gotBytes, gotFiles, gotSkipped, err := Size(root)
-	if err != nil {
-		t.Fatalf("Size: %v", err)
-	}
-	if gotBytes != 1000 {
-		t.Errorf("Size bytes = %d, want 1000 (measure what it can)", gotBytes)
-	}
-	if gotFiles != 1 {
-		t.Errorf("Size files = %d, want 1 (measure what it can)", gotFiles)
-	}
-	if gotSkipped != 1 {
-		t.Errorf("Size skipped = %d, want 1 (the unreadable subtree)", gotSkipped)
+	b, f, s, err := Size(root)
+	if err != nil || b != 1000 || f != 1 || s != 1 {
+		t.Errorf("Size = (%d, %d, %d, %v), want (1000, 1, 1, nil)", b, f, s, err)
 	}
 	if !strings.Contains(logs.String(), "skipped unreadable entries") {
 		t.Errorf("skipped entries left no trace in the log:\n%s", logs.String())
 	}
 }
 
-// TestEnforceBudget_MeasuresWhatItCanWithUnreadableSubdir: an unreadable
-// subtree inside the root must not disable the budget check. When the
-// measurable portion is over budget, the check fires and records a row.
-// Reproduction for issue #1960.
+// TestEnforceBudget_MeasuresWhatItCanWithUnreadableSubdir: an unreadable subtree
+// must not disable the budget check; the measurable portion over budget fires
+// it and records a row. Reproduction for issue #1960.
 func TestEnforceBudget_MeasuresWhatItCanWithUnreadableSubdir(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("permission bits are not enforced the same way on Windows")
-	}
-	root := t.TempDir()
-	t.Setenv("GHOST_SCRATCH_DIR", root)
-	t.Setenv("GHOST_SCRATCH_MAX_BYTES", "512")
-	dataHome := t.TempDir()
-	t.Setenv("XDG_DATA_HOME", dataHome)
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-
-	if err := os.MkdirAll(filepath.Join(dataHome, "ghost"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	db, err := openTestDB(filepath.Join(dataHome, "ghost", "ghost.db"))
-	if err != nil {
-		t.Fatalf("seed db: %v", err)
-	}
-	if err := db.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	// Measurable content over budget.
-	stale := filepath.Join(root, "123-0123456789abcdef")
-	if err := os.Mkdir(stale, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(stale, "payload"), make([]byte, 1024), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	old := time.Now().Add(-25 * time.Hour)
-	if err := os.Chtimes(stale, old, old); err != nil {
-		t.Fatal(err)
-	}
-
-	// Unreadable subtree that must not disable the check.
+	root, _ := budgetEnv(t, "512", true)
+	stale := staleEntry(t, root, 1024)
 	blocked := filepath.Join(root, "blocked")
-	if err := os.Mkdir(blocked, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(blocked, "x"), []byte("x"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(blocked, 0o000); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(blocked, 0o700) })
+	must(t, os.Mkdir(blocked, 0o700))
+	must(t, os.WriteFile(filepath.Join(blocked, "x"), []byte("x"), 0o600))
+	lockDir(t, blocked)
 
 	logs := captureLogs(t)
 	res := EnforceBudget()
 
-	if !res.Fired {
+	if !res.Fired || !res.Recorded {
 		t.Fatalf("budget check skipped because of an unreadable entry: %+v; logs:\n%s", res, logs.String())
 	}
-	if out := logs.String(); strings.Contains(out, "cannot measure root; skipping check") {
-		t.Errorf("check was skipped on unreadable entry:\n%s", out)
+	if strings.Contains(logs.String(), "cannot measure root; skipping check") {
+		t.Errorf("check was skipped on unreadable entry:\n%s", logs.String())
 	}
-	if !res.Recorded {
-		t.Errorf("Recorded = false, want true (fired check must record a row)")
-	}
-	// The stale measurable entry should have been reaped.
-	if _, statErr := os.Stat(stale); !os.IsNotExist(statErr) {
-		t.Errorf("stale dir survived (stat err %v)", statErr)
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Errorf("stale dir survived (stat err %v)", err)
 	}
 }
 
 // TestSize_UnreadableRootReturnsError: an unreadable scratch root cannot be
 // measured, so Size returns an error rather than a partial measurement.
 func TestSize_UnreadableRootReturnsError(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("permission bits are not enforced the same way on Windows")
-	}
 	if os.Geteuid() == 0 {
 		t.Skip("running as root: a mode-0o000 directory is still readable")
 	}
-	parent := t.TempDir()
-	root := filepath.Join(parent, "scratchroot")
-	if err := os.Mkdir(root, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(root, "a"), []byte("x"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(root, 0o000); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(root, 0o700) })
+	root := filepath.Join(t.TempDir(), "scratchroot")
+	must(t, os.Mkdir(root, 0o700))
+	must(t, os.WriteFile(filepath.Join(root, "a"), []byte("x"), 0o600))
+	lockDir(t, root)
 
-	_, _, _, err := Size(root)
-	if err == nil {
+	if _, _, _, err := Size(root); err == nil {
 		t.Fatal("Size returned no error for an unreadable root")
 	}
 }
 
-// TestEnforceBudget_ReportsUnremovableStaleEntries: a stale entry whose
-// removal fails makes the fired budget check report ReapFailed and record a
-// maintenance_runs row that names the entries it could not remove.
+// TestEnforceBudget_ReportsUnremovableStaleEntries: a stale entry whose removal
+// fails makes the fired check report ReapFailed and record a row naming it.
 func TestEnforceBudget_ReportsUnremovableStaleEntries(t *testing.T) {
-	const deadPid = 1 << 30
-	root := t.TempDir()
-	t.Setenv("GHOST_SCRATCH_DIR", root)
-	t.Setenv("GHOST_SCRATCH_MAX_BYTES", "512")
-	dataHome := t.TempDir()
-	t.Setenv("XDG_DATA_HOME", dataHome)
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-
-	if err := os.MkdirAll(filepath.Join(dataHome, "ghost"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	db, err := openTestDB(filepath.Join(dataHome, "ghost", "ghost.db"))
-	if err != nil {
-		t.Fatalf("seed db: %v", err)
-	}
-	if err := db.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	stale := writeOwnerDir(t, root, "123-0123456789abcdef", "pid="+strconv.Itoa(deadPid)+"\ntoken=aa\nstart=gone\n")
-	if err := os.WriteFile(filepath.Join(stale, "payload"), make([]byte, 1024), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	root, dbPath := budgetEnv(t, "512", true)
+	stale := writeOwnerDir(t, root, "123-0123456789abcdef", "pid="+strconv.Itoa(1<<30)+"\ntoken=aa\nstart=gone\n")
+	must(t, os.WriteFile(filepath.Join(stale, "payload"), make([]byte, 1024), 0o600))
 	prev := removeTree
 	removeTree = func(string) error { return errForcedRemoval }
 	t.Cleanup(func() { removeTree = prev })
@@ -592,377 +369,111 @@ func TestEnforceBudget_ReportsUnremovableStaleEntries(t *testing.T) {
 	logs := captureLogs(t)
 	res := EnforceBudget()
 
-	if !res.Fired {
-		t.Fatalf("budget check did not fire: %+v", res)
-	}
-	if res.ReapedCount != 0 || res.ReapFailed != 1 {
-		t.Errorf("reaped = (%d, failed %d), want (0, 1)", res.ReapedCount, res.ReapFailed)
-	}
-	if !res.Recorded {
-		t.Errorf("Recorded = false, want true")
+	if !res.Fired || !res.Recorded || res.ReapedCount != 0 || res.ReapFailed != 1 {
+		t.Fatalf("want fired and recorded with (reaped 0, failed 1): %+v", res)
 	}
 	for _, want := range []string{"could not remove stale entries", "failed=1"} {
 		if !strings.Contains(logs.String(), want) {
 			t.Errorf("log missing %q; slog output:\n%s", want, logs.String())
 		}
 	}
-
-	db, err = openTestDB(filepath.Join(dataHome, "ghost", "ghost.db"))
-	if err != nil {
-		t.Fatalf("reopen db: %v", err)
-	}
-	defer db.Close() //nolint:errcheck
-	var note string
-	if err := db.QueryRow(`SELECT note FROM maintenance_runs`).Scan(&note); err != nil {
-		t.Fatalf("select note: %v", err)
-	}
-	if !strings.Contains(note, "1 stale entries could not be removed") {
+	if note := noteOf(t, dbPath); !strings.Contains(note, "1 stale entries could not be removed") {
 		t.Errorf("note = %q, want it to name the unremoved stale entries", note)
 	}
 }
 
-// TestRecordBudgetRun_ReapFailedNotDropped: the note a recorded run carries
-// names the entries the reap could not remove.
-func TestRecordBudgetRun_ReapFailedNotDropped(t *testing.T) {
-	dataHome := t.TempDir()
-	t.Setenv("XDG_DATA_HOME", dataHome)
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	if err := os.MkdirAll(filepath.Join(dataHome, "ghost"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	dbPath := filepath.Join(dataHome, "ghost", "ghost.db")
-	seed, err := openTestDB(dbPath)
-	if err != nil {
-		t.Fatalf("seed db: %v", err)
-	}
-	if err := seed.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	res := BudgetResult{
-		Root:       "/root/scratch",
-		MaxBytes:   512,
-		BytesAfter: 1024,
-		ReapFailed: 2,
-		OverBudget: true,
-	}
-	if !recordBudgetRun(res) {
-		t.Fatalf("recordBudgetRun = false, want a recorded row")
-	}
-
-	db, err := openTestDB(dbPath)
-	if err != nil {
-		t.Fatalf("reopen db: %v", err)
-	}
-	defer db.Close() //nolint:errcheck
-	var note string
-	if err := db.QueryRow(`SELECT note FROM maintenance_runs`).Scan(&note); err != nil {
-		t.Fatalf("select note: %v", err)
-	}
-	if !strings.Contains(note, "2 stale entries could not be removed") {
-		t.Errorf("note = %q, want the unremoved count", note)
-	}
-}
-
 // TestEnforceBudget_PartialMeasurementFiresAndRecords: a locked subtree larger
-// than the budget hides bytes nobody measured. The measurable portion may
-// read within budget, but a partial measurement must not be compared
-// silently: the check fires, reaps through the lock, and records a row
-// naming the skipped entries.
+// than the budget hides bytes nobody measured. A partial measurement must not
+// be compared silently: the check fires, reaps through the lock, and records a
+// row naming the skipped entries.
 func TestEnforceBudget_PartialMeasurementFiresAndRecords(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("permission bits are not enforced the same way on Windows")
-	}
-	root := t.TempDir()
-	t.Setenv("GHOST_SCRATCH_DIR", root)
-	t.Setenv("GHOST_SCRATCH_MAX_BYTES", "4096")
-	dataHome := t.TempDir()
-	t.Setenv("XDG_DATA_HOME", dataHome)
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-
-	if err := os.MkdirAll(filepath.Join(dataHome, "ghost"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	db, err := openTestDB(filepath.Join(dataHome, "ghost", "ghost.db"))
-	if err != nil {
-		t.Fatalf("seed db: %v", err)
-	}
-	if err := db.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	// The measurable portion is small (and would read within budget).
-	if err := os.WriteFile(filepath.Join(root, "small"), []byte("small"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	// A dead-owner entry behind a lock: its bytes are unmeasured, and it is
-	// stale so the reap can collect it through the lock.
-	stale := filepath.Join(root, "123-0123456789abcdef")
-	if err := os.Mkdir(stale, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(stale, ".owner"), []byte("pid=1073741824\ntoken=aa\nstart=gone\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(stale, "payload"), make([]byte, 8192), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	// The marker cannot be read behind the lock, so the entry is reaped by
-	// the markerless age backstop: its mtime must be older than 24h.
-	old := time.Now().Add(-25 * time.Hour)
-	if err := os.Chtimes(stale, old, old); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(stale, 0o000); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(stale, 0o700) })
+	root, dbPath := budgetEnv(t, "4096", true)
+	must(t, os.WriteFile(filepath.Join(root, "small"), []byte("small"), 0o600))
+	// A dead-owner entry behind a lock: its marker cannot be read, so it is
+	// reaped by the markerless age backstop.
+	stale := staleEntry(t, root, 8192)
+	lockDir(t, stale)
 
 	logs := captureLogs(t)
 	res := EnforceBudget()
 
-	if !res.Fired {
-		t.Fatalf("budget check did not fire on a partial measurement: %+v", res)
+	if !res.Fired || !res.Recorded || res.Skipped != 1 {
+		t.Fatalf("want Fired, Recorded and Skipped=1: %+v", res)
 	}
-	if res.Skipped != 1 {
-		t.Errorf("Skipped = %d, want 1 (the locked entry directory)", res.Skipped)
+	if !strings.Contains(logs.String(), "skipped unreadable entries") {
+		t.Errorf("warning missing the skipped count:\n%s", logs.String())
 	}
-	if out := logs.String(); !strings.Contains(out, "skipped unreadable entries") {
-		t.Errorf("warning missing the skipped count:\n%s", out)
+	if _, err := os.Lstat(stale); !os.IsNotExist(err) {
+		t.Errorf("locked stale entry survived the reap: %v", err)
 	}
-	if _, statErr := os.Lstat(stale); !os.IsNotExist(statErr) {
-		t.Errorf("locked stale entry survived the reap: %v", statErr)
-	}
-	if !res.Recorded {
-		t.Errorf("Recorded = false, want true (fired check must record a row)")
-	}
-
-	db, err = openTestDB(filepath.Join(dataHome, "ghost", "ghost.db"))
-	if err != nil {
-		t.Fatalf("reopen db: %v", err)
-	}
-	defer db.Close() //nolint:errcheck
-	var note string
-	if err := db.QueryRow(`SELECT note FROM maintenance_runs`).Scan(&note); err != nil {
-		t.Fatalf("select note: %v", err)
-	}
-	if !strings.Contains(note, "measurement skipped") {
+	if note := noteOf(t, dbPath); !strings.Contains(note, "measurement skipped") {
 		t.Errorf("note = %q, want it to name the skipped entries", note)
 	}
 }
 
 // TestEnforceBudget_SurvivingLockedEntryCountsOnce: a locked entry the reap
-// leaves in place is skipped by the initial measure AND by the re-measure. It
-// is one unreadable subtree, so Skipped stays at the initial count (1) and the
-// recorded note says 1, not 2.
+// leaves in place is skipped by both measures but is one unreadable subtree, so
+// the recorded note says 1, not 2.
 func TestEnforceBudget_SurvivingLockedEntryCountsOnce(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("permission bits are not enforced the same way on Windows")
-	}
-	root := t.TempDir()
-	t.Setenv("GHOST_SCRATCH_DIR", root)
-	t.Setenv("GHOST_SCRATCH_MAX_BYTES", "4096")
-	dataHome := t.TempDir()
-	t.Setenv("XDG_DATA_HOME", dataHome)
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-
-	if err := os.MkdirAll(filepath.Join(dataHome, "ghost"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	db, err := openTestDB(filepath.Join(dataHome, "ghost", "ghost.db"))
-	if err != nil {
-		t.Fatalf("seed db: %v", err)
-	}
-	if err := db.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	// Markerless, Open-shaped and fresh: the reap's age backstop keeps it, so
-	// it is still locked when the budget check re-measures.
+	root, dbPath := budgetEnv(t, "4096", true)
+	// Fresh, so the reap's age backstop keeps it and it is still locked at the
+	// re-measure.
 	locked := filepath.Join(root, "123-0123456789abcdef")
-	if err := os.Mkdir(locked, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(locked, "payload"), make([]byte, 8192), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(locked, 0o000); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(locked, 0o700) })
+	must(t, os.Mkdir(locked, 0o700))
+	must(t, os.WriteFile(filepath.Join(locked, "payload"), make([]byte, 8192), 0o600))
+	lockDir(t, locked)
 
 	res := EnforceBudget()
 
-	if _, statErr := os.Lstat(locked); statErr != nil {
-		t.Fatalf("locked entry did not survive the reap: %v", statErr)
+	if _, err := os.Lstat(locked); err != nil {
+		t.Fatalf("locked entry did not survive the reap: %v", err)
 	}
-	if !res.Fired || !res.Recorded {
-		t.Fatalf("want Fired and Recorded, got %+v", res)
+	if !res.Fired || !res.Recorded || res.Skipped != 1 {
+		t.Fatalf("want Fired, Recorded and Skipped=1: %+v", res)
 	}
-	if res.Skipped != 1 {
-		t.Errorf("Skipped = %d, want 1 (one locked entry, counted once)", res.Skipped)
-	}
-
-	db, err = openTestDB(filepath.Join(dataHome, "ghost", "ghost.db"))
-	if err != nil {
-		t.Fatalf("reopen db: %v", err)
-	}
-	defer db.Close() //nolint:errcheck
-	var note string
-	if err := db.QueryRow(`SELECT note FROM maintenance_runs`).Scan(&note); err != nil {
-		t.Fatalf("select note: %v", err)
-	}
-	if !strings.Contains(note, "measurement skipped 1 unreadable entries") {
+	if note := noteOf(t, dbPath); !strings.Contains(note, "measurement skipped 1 unreadable entries") {
 		t.Errorf("note = %q, want it to say 1 skipped entry", note)
 	}
 }
 
-// TestEnforceBudget_PartialMeasurementRecordsOncePerOutcome: an entry that
-// stays unreadable under budget fires every spawn's check, but must not add a
-// maintenance_runs row per spawn. The second identical outcome reuses the
-// marker: one row, both runs recorded, and the suppression is warned.
+// TestEnforceBudget_PartialMeasurementRecordsOncePerOutcome: an entry that stays
+// unreadable under budget fires every spawn's check but adds one row per
+// outcome, not per spawn, and the suppression is warned. A changed outcome
+// (within budget, then over budget) gets a second row.
 func TestEnforceBudget_PartialMeasurementRecordsOncePerOutcome(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("permission bits are not enforced the same way on Windows")
-	}
-	root := t.TempDir()
-	t.Setenv("GHOST_SCRATCH_DIR", root)
-	t.Setenv("GHOST_SCRATCH_MAX_BYTES", "1048576") // ample: the partial root reads within budget
-	dataHome := t.TempDir()
-	t.Setenv("XDG_DATA_HOME", dataHome)
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-
-	if err := os.MkdirAll(filepath.Join(dataHome, "ghost"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	db, err := openTestDB(filepath.Join(dataHome, "ghost", "ghost.db"))
-	if err != nil {
-		t.Fatalf("seed db: %v", err)
-	}
-	if err := db.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := os.WriteFile(filepath.Join(root, "small"), []byte("x"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	root, dbPath := budgetEnv(t, "1048576", true)
+	small := filepath.Join(root, "small")
+	must(t, os.WriteFile(small, []byte("x"), 0o600))
 	locked := filepath.Join(root, "locked")
-	if err := os.Mkdir(locked, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(locked, 0o000); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(locked, 0o700) })
+	must(t, os.Mkdir(locked, 0o700))
+	lockDir(t, locked)
 
 	logs := captureLogs(t)
 	first := EnforceBudget()
-	if !first.Fired {
-		t.Fatalf("partial measurement did not fire: %+v", first)
+	if !first.Fired || !first.Recorded || first.OverBudget {
+		t.Fatalf("first run: want fired, recorded and within budget: %+v", first)
 	}
-	if !first.Recorded {
-		t.Fatalf("first partial outcome was not recorded: %+v", first)
-	}
-	second := EnforceBudget()
-	if second.Recorded {
+	if second := EnforceBudget(); second.Recorded {
 		t.Fatalf("suppressed outcome must not claim a row was written: %+v", second)
 	}
 	if !strings.Contains(logs.String(), "already recorded; suppressing repeated rows") {
 		t.Errorf("suppression was not warned:\n%s", logs.String())
 	}
-
-	db, err = openTestDB(filepath.Join(dataHome, "ghost", "ghost.db"))
-	if err != nil {
-		t.Fatalf("reopen db: %v", err)
+	if n := rowCount(t, dbPath); n != 1 {
+		t.Errorf("maintenance_runs rows = %d, want 1 (one per outcome, not per spawn)", n)
 	}
-	defer db.Close() //nolint:errcheck
-	var count int
-	if err := db.QueryRow(`SELECT count(*) FROM maintenance_runs`).Scan(&count); err != nil {
-		t.Fatalf("count maintenance_runs: %v", err)
-	}
-	if count != 1 {
-		t.Errorf("maintenance_runs rows = %d, want 1 (one per outcome, not per spawn)", count)
-	}
-	var note string
-	if err := db.QueryRow(`SELECT note FROM maintenance_runs`).Scan(&note); err != nil {
-		t.Fatalf("select note: %v", err)
-	}
-	if !strings.Contains(note, "not recorded again") {
+	if note := noteOf(t, dbPath); !strings.Contains(note, "not recorded again") {
 		t.Errorf("note = %q, want it to say repeats are not recorded again", note)
 	}
-}
 
-// TestEnforceBudget_PartialOutcomeChangeRecordsNewRow: a partial root that
-// goes from within budget to over budget is a different outcome, so it gets a
-// second row rather than being swallowed by the first.
-func TestEnforceBudget_PartialOutcomeChangeRecordsNewRow(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("permission bits are not enforced the same way on Windows")
-	}
-	root := t.TempDir()
-	t.Setenv("GHOST_SCRATCH_DIR", root)
-	t.Setenv("GHOST_SCRATCH_MAX_BYTES", "1048576")
-	dataHome := t.TempDir()
-	t.Setenv("XDG_DATA_HOME", dataHome)
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-
-	if err := os.MkdirAll(filepath.Join(dataHome, "ghost"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	db, err := openTestDB(filepath.Join(dataHome, "ghost", "ghost.db"))
-	if err != nil {
-		t.Fatalf("seed db: %v", err)
-	}
-	if err := db.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	small := filepath.Join(root, "small")
-	if err := os.WriteFile(small, []byte("x"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	locked := filepath.Join(root, "locked")
-	if err := os.Mkdir(locked, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(locked, 0o000); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(locked, 0o700) })
-
-	first := EnforceBudget()
-	if !first.Recorded || first.OverBudget {
-		t.Fatalf("first run: want recorded and within budget: %+v", first)
-	}
-	// The measurable portion now exceeds the budget; nothing is stale, so the
-	// reap cannot bring it back under.
-	if err := os.WriteFile(small, make([]byte, 4096), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	// Nothing is stale, so the reap cannot bring the root back under budget.
+	must(t, os.WriteFile(small, make([]byte, 4096), 0o600))
 	t.Setenv("GHOST_SCRATCH_MAX_BYTES", "1024")
-	second := EnforceBudget()
-	if !second.OverBudget {
-		t.Fatalf("second run: want over budget: %+v", second)
+	third := EnforceBudget()
+	if !third.OverBudget || !third.Recorded {
+		t.Fatalf("a changed partial outcome must be over budget and recorded: %+v", third)
 	}
-	if !second.Recorded {
-		t.Fatalf("a changed partial outcome must be recorded: %+v", second)
-	}
-
-	db, err = openTestDB(filepath.Join(dataHome, "ghost", "ghost.db"))
-	if err != nil {
-		t.Fatalf("reopen db: %v", err)
-	}
-	defer db.Close() //nolint:errcheck
-	var count int
-	if err := db.QueryRow(`SELECT count(*) FROM maintenance_runs`).Scan(&count); err != nil {
-		t.Fatalf("count maintenance_runs: %v", err)
-	}
-	if count != 2 {
-		t.Errorf("maintenance_runs rows = %d, want 2 (within budget, then over budget)", count)
+	if n := rowCount(t, dbPath); n != 2 {
+		t.Errorf("maintenance_runs rows = %d, want 2 (within budget, then over budget)", n)
 	}
 }

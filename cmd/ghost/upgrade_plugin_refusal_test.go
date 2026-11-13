@@ -1,20 +1,10 @@
 package main
 
-// `ghost upgrade` run from a plugin-managed binary used to print its refusal
-// on stdout and exit 0. Every other path in the command that does not upgrade
-// because something stopped it exits 1 — a bad argument, an unknown binary
-// path, a downgrade, a prerelease, an attestation that is missing, unreachable
-// or unverifiable — and this one installed nothing, verified nothing and
-// replaced nothing, so a caller branching on the exit status saw success.
-//
-// The test drives the built binary, because the exit status and the stream are
-// the contract: an in-process call cannot read either, and the refusal is the
-// one thing this command does that a user reaches from a terminal rather than
-// from a script.
-//
-// The environment is built rather than filtered, and the plugin root is a
-// directory under the test's own sandbox: the signal the refusal reads is
-// CLAUDE_PLUGIN_ROOT, and a real one would point at a real plugin cache.
+// `ghost upgrade` from a plugin-managed binary used to print its refusal on stdout
+// and exit 0, though every other path that stops an upgrade exits 1. The test
+// drives the built binary because the exit status and the stream are the
+// contract, with a built environment whose plugin root is under the sandbox (the
+// signal is CLAUDE_PLUGIN_ROOT, and a real one would point at a real plugin cache).
 
 import (
 	"bytes"

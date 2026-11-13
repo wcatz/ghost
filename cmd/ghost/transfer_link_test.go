@@ -14,9 +14,8 @@ import (
 )
 
 // transferTestStoreWithDB opens a store over a temp-dir database and hands back
-// the database handle as well. The handle is what makes planting possible: the
-// store exposes no exec, and the edges this file plants are states no writer in
-// this build produces.
+// the handle too: the store exposes no exec, and the edges planted here are
+// states no writer in this build produces.
 func transferTestStoreWithDB(t *testing.T) (*sql.DB, *memory.Store) {
 	t.Helper()
 	db, err := memory.OpenDB(filepath.Join(t.TempDir(), "ghost.db"))
@@ -27,29 +26,54 @@ func transferTestStoreWithDB(t *testing.T) (*sql.DB, *memory.Store) {
 	return db, memory.NewStore(db, slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})))
 }
 
-// TestTheExportAndImportReportsNameTheEdges: the two reports are where an
-// operator learns what an artifact holds, and an edge that travelled is a
-// record like any other — so the summary counts it, the per-record line names
-// it, and an edge that did NOT travel is counted rather than dropped in
-// silence.
+// seedMemories creates one fact per content in project and returns their ids.
+func seedMemories(t *testing.T, store *memory.Store, project string, contents ...string) []string {
+	t.Helper()
+	ctx := context.Background()
+	if err := store.EnsureProject(ctx, project, "/src/"+project, project); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	var ids []string
+	for _, c := range contents {
+		id, err := store.Create(ctx, project, memory.Memory{Category: "fact", Content: c, Source: "mcp"})
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+// plantBadEdge inserts a supersedes edge with a created_at the importer refuses.
+func plantBadEdge(t *testing.T, db *sql.DB, source, target string) {
+	t.Helper()
+	if _, err := db.Exec(
+		`INSERT INTO memory_links (source_id, target_id, relation, strength, source, created_at) VALUES (?, ?, 'supersedes', 0.95, 'llm', 'not a stamp')`,
+		source, target); err != nil {
+		t.Fatalf("plant the edge: %v", err)
+	}
+}
+
+func artifactCarriesNoLink(t *testing.T, path string) {
+	t.Helper()
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read the artifact: %v", err)
+	}
+	if strings.Contains(string(body), `"type":"link"`) {
+		t.Errorf("the artifact carries an edge it must not:\n%s", body)
+	}
+}
+
+// TestTheExportAndImportReportsNameTheEdges: an edge that travelled is counted in
+// the summary and named per record; one that did not is counted, not dropped.
 func TestTheExportAndImportReportsNameTheEdges(t *testing.T) {
 	ctx := context.Background()
 	src := transferTestStore(t)
-	if err := src.EnsureProject(ctx, "p1", "/src/p1", "one"); err != nil {
-		t.Fatalf("EnsureProject: %v", err)
-	}
-	older, err := src.Create(ctx, "p1", memory.Memory{Category: "fact", Content: "the old answer", Source: "mcp"})
-	if err != nil {
-		t.Fatalf("Create(older): %v", err)
-	}
-	newer, err := src.Create(ctx, "p1", memory.Memory{Category: "fact", Content: "the new answer", Source: "mcp"})
-	if err != nil {
-		t.Fatalf("Create(newer): %v", err)
-	}
-	if err := src.CreateLink(ctx, newer, older, "supersedes", 0.95, "llm"); err != nil {
+	ids := seedMemories(t, src, "p1", "the new answer", "the old answer")
+	if err := src.CreateLink(ctx, ids[0], ids[1], "supersedes", 0.95, "llm"); err != nil {
 		t.Fatalf("CreateLink: %v", err)
 	}
-
 	path := filepath.Join(t.TempDir(), "artifact.jsonl")
 	var summary, warn strings.Builder
 	if err := runExportCore(ctx, src, &summary, &warn, path, ""); err != nil {
@@ -58,95 +82,63 @@ func TestTheExportAndImportReportsNameTheEdges(t *testing.T) {
 	if !strings.Contains(summary.String(), "1 link") {
 		t.Errorf("the export summary does not count the edge it carried:\n%s", summary.String())
 	}
-
 	var report strings.Builder
 	if err := runImportCore(ctx, transferTestStore(t), path, portable.ImportOptions{Apply: true}, &report); err != nil {
 		t.Fatalf("runImportCore: %v", err)
 	}
-	if !strings.Contains(report.String(), "1 link") {
-		t.Errorf("the import summary does not count the edge it restored:\n%s", report.String())
-	}
-	if !strings.Contains(report.String(), "link:") {
-		t.Errorf("the import report has no per-record line for the edge:\n%s", report.String())
+	if !strings.Contains(report.String(), "1 link") || !strings.Contains(report.String(), "link:") {
+		t.Errorf("the import report does not count and name the edge:\n%s", report.String())
 	}
 }
 
-// TestTheExportReportNamesAnEdgeItLeftOut: an edge the importer would refuse
-// is left out of the artifact and NAMED, the way a project, a memory, a task
-// and a decision are. The report also has to give the edge its own advice —
-// the advice for the kinds that have no delete surface names a command per
-// KIND, and an edge in that bucket would leave it naming nothing at all.
+// TestTheExportReportNamesAnEdgeItLeftOut: an edge the importer would refuse is
+// left out and NAMED, with its own advice, and each refused edge gets a distinct
+// line (source, relation and its own target) so two from one source differ.
 func TestTheExportReportNamesAnEdgeItLeftOut(t *testing.T) {
-	ctx := context.Background()
 	db, src := transferTestStoreWithDB(t)
-	if err := src.EnsureProject(ctx, "p1", "/src/p1", "one"); err != nil {
-		t.Fatalf("EnsureProject: %v", err)
-	}
-	newer, err := src.Create(ctx, "p1", memory.Memory{Category: "fact", Content: "the new answer", Source: "mcp"})
-	if err != nil {
-		t.Fatalf("Create(newer): %v", err)
-	}
-	older, err := src.Create(ctx, "p1", memory.Memory{Category: "fact", Content: "the old answer", Source: "mcp"})
-	if err != nil {
-		t.Fatalf("Create(older): %v", err)
-	}
-	if _, err := db.Exec(
-		`INSERT INTO memory_links (source_id, target_id, relation, strength, source, created_at) VALUES (?, ?, 'supersedes', 0.95, 'llm', 'not a stamp')`,
-		newer, older); err != nil {
-		t.Fatalf("plant the edge: %v", err)
-	}
+	ids := seedMemories(t, src, "p1", "the new answer", "the first old answer", "the second old answer")
+	plantBadEdge(t, db, ids[0], ids[1])
+	plantBadEdge(t, db, ids[0], ids[2])
 
 	path := filepath.Join(t.TempDir(), "artifact.jsonl")
 	var summary, warn strings.Builder
-	err = runExportCore(ctx, src, &summary, &warn, path, "")
-	if err == nil {
-		t.Error("the export exited zero with an edge it left out of the artifact")
+	if err := runExportCore(context.Background(), src, &summary, &warn, path, ""); err == nil {
+		t.Error("the export exited zero with edges it left out of the artifact")
 	}
 	report := warn.String()
-	if !strings.Contains(report, "! left out: link ") {
-		t.Errorf("the report does not name the edge it left out:\n%s", report)
+	for _, want := range []string{"created_at", "An edge left out"} {
+		if !strings.Contains(report, want) {
+			t.Errorf("the report does not say %q:\n%s", want, report)
+		}
 	}
-	if !strings.Contains(report, "created_at") {
-		t.Errorf("the report does not name the field that stopped the edge:\n%s", report)
+	var lines []string
+	for _, line := range strings.Split(report, "\n") {
+		if strings.Contains(line, "! left out: link ") {
+			lines = append(lines, line)
+		}
 	}
-	if !strings.Contains(report, "An edge left out") {
-		t.Errorf("the report gives no advice for the edge it left out:\n%s", report)
+	if len(lines) != 2 || lines[0] == lines[1] {
+		t.Fatalf("want 2 distinct left-out link lines, got %d:\n%s", len(lines), report)
 	}
-	// And the artifact carries no edge at all.
-	body, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read the artifact: %v", err)
+	for i, line := range lines {
+		if !strings.Contains(line, ids[0]) || !strings.Contains(line, "supersedes") || !strings.Contains(line, ids[1+i]) && !strings.Contains(line, ids[2-i]) {
+			t.Errorf("the left-out line names the wrong source, relation or target:\n%s", line)
+		}
 	}
-	if strings.Contains(string(body), `"type":"link"`) {
-		t.Errorf("the artifact carries the edge its own importer would refuse:\n%s", body)
-	}
+	artifactCarriesNoLink(t, path)
 }
 
 // TestTheExportReportNamesTheEdgesItLeftOut: an edge travels only when both
-// its endpoints are memories the artifact carries. An edge that reaches out of
-// the export's scope is not carried, and the count is what says so — the
-// demotion the edge caused is lost with it, and nothing else in the report
-// would say so.
+// endpoints are in the artifact; one reaching out of the export's scope is
+// counted, since the demotion it caused is lost with it.
 func TestTheExportReportNamesTheEdgesItLeftOut(t *testing.T) {
 	ctx := context.Background()
 	src := transferTestStore(t)
-	for _, p := range []struct{ id, path string }{{"p1", "/src/p1"}, {"p2", "/src/p2"}} {
-		if err := src.EnsureProject(ctx, p.id, p.path, p.id); err != nil {
-			t.Fatalf("EnsureProject(%s): %v", p.id, err)
-		}
-	}
-	inside, err := src.Create(ctx, "p1", memory.Memory{Category: "fact", Content: "inside the export", Source: "mcp"})
-	if err != nil {
-		t.Fatalf("Create(inside): %v", err)
-	}
-	outside, err := src.Create(ctx, "p2", memory.Memory{Category: "fact", Content: "outside the export", Source: "mcp"})
-	if err != nil {
-		t.Fatalf("Create(outside): %v", err)
-	}
+	inside := seedMemories(t, src, "p1", "inside the export")[0]
+	outside := seedMemories(t, src, "p2", "outside the export")[0]
 	if err := src.CreateLink(ctx, inside, outside, "supersedes", 0.95, "llm"); err != nil {
 		t.Fatalf("CreateLink: %v", err)
 	}
-
 	path := filepath.Join(t.TempDir(), "artifact.jsonl")
 	var summary, warn strings.Builder
 	if err := runExportCore(ctx, src, &summary, &warn, path, "p1"); err != nil {
@@ -155,85 +147,5 @@ func TestTheExportReportNamesTheEdgesItLeftOut(t *testing.T) {
 	if !strings.Contains(summary.String(), "1 link left out") {
 		t.Errorf("the export summary does not say that an edge was left out:\n%s", summary.String())
 	}
-	body, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read the artifact: %v", err)
-	}
-	if strings.Contains(string(body), `"type":"link"`) {
-		t.Errorf("the artifact carries an edge whose endpoint it does not:\n%s", body)
-	}
-}
-
-// TestTheExportReportNamesEachRefusedEdgeDistinctly: two refused supersedes
-// edges from one source must not print the same left-out line. The report names
-// the source, the relation and each edge's own target, so the two lines differ.
-func TestTheExportReportNamesEachRefusedEdgeDistinctly(t *testing.T) {
-	ctx := context.Background()
-	db, src := transferTestStoreWithDB(t)
-	if err := src.EnsureProject(ctx, "p1", "/src/p1", "one"); err != nil {
-		t.Fatalf("EnsureProject: %v", err)
-	}
-	newer, err := src.Create(ctx, "p1", memory.Memory{Category: "fact", Content: "the new answer", Source: "mcp"})
-	if err != nil {
-		t.Fatalf("Create(newer): %v", err)
-	}
-	older1, err := src.Create(ctx, "p1", memory.Memory{Category: "fact", Content: "the first old answer", Source: "mcp"})
-	if err != nil {
-		t.Fatalf("Create(older1): %v", err)
-	}
-	older2, err := src.Create(ctx, "p1", memory.Memory{Category: "fact", Content: "the second old answer", Source: "mcp"})
-	if err != nil {
-		t.Fatalf("Create(older2): %v", err)
-	}
-	if _, err := db.Exec(
-		`INSERT INTO memory_links (source_id, target_id, relation, strength, source, created_at) VALUES (?, ?, 'supersedes', 4.2, 'llm', 'not a stamp')`,
-		newer, older1); err != nil {
-		t.Fatalf("plant the first edge: %v", err)
-	}
-	if _, err := db.Exec(
-		`INSERT INTO memory_links (source_id, target_id, relation, strength, source, created_at) VALUES (?, ?, 'supersedes', 4.2, 'llm', 'not a stamp')`,
-		newer, older2); err != nil {
-		t.Fatalf("plant the second edge: %v", err)
-	}
-
-	path := filepath.Join(t.TempDir(), "artifact.jsonl")
-	var summary, warn strings.Builder
-	err = runExportCore(ctx, src, &summary, &warn, path, "")
-	if err == nil {
-		t.Fatal("the export exited zero with edges it left out of the artifact")
-	}
-	report := warn.String()
-
-	var linkLines []string
-	for _, line := range strings.Split(report, "\n") {
-		if strings.Contains(line, "! left out: link ") {
-			linkLines = append(linkLines, line)
-		}
-	}
-	if len(linkLines) != 2 {
-		t.Fatalf("got %d left-out link lines, want 2:\n%s", len(linkLines), report)
-	}
-	if linkLines[0] == linkLines[1] {
-		t.Fatalf("the two left-out link lines are identical:\n%s", report)
-	}
-	for _, target := range []string{older1, older2} {
-		found := false
-		for _, line := range linkLines {
-			if strings.Contains(line, target) {
-				found = true
-				break
-			}
-		}
-		if !found {
-			t.Errorf("no left-out link line names target %s:\n%s", target, report)
-		}
-	}
-	for _, line := range linkLines {
-		if !strings.Contains(line, newer) {
-			t.Errorf("a left-out link line does not name the source %s:\n%s", newer, line)
-		}
-		if !strings.Contains(line, "supersedes") {
-			t.Errorf("a left-out link line does not name the relation:\n%s", line)
-		}
-	}
+	artifactCarriesNoLink(t, path)
 }
