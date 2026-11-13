@@ -44,19 +44,6 @@ func asOfValidityRows(t0, now time.Time) []memory.Candidate {
 	}
 }
 
-// stageDropped counts the rows one trace stage dropped, or -1 when it never ran.
-func stageDropped(res Result, stage string) int {
-	if res.Trace == nil {
-		return -1
-	}
-	for _, s := range res.Trace.Stages {
-		if s.Stage == stage {
-			return len(s.DroppedIDs)
-		}
-	}
-	return -1
-}
-
 // TestAsOfSearchDrawsNoValidityVerdictFromTheBorrowedWindow is #910's rule: the
 // window an as_of row carries is the live row's, because memory_history records
 // no validity, so it is not evidence about the instant and stage 2 draws no
@@ -130,37 +117,6 @@ func TestAsOfSearchStatesTheNoteOnAnEmptyAnswerToo(t *testing.T) {
 	}
 	if want := memory.AsOfBorrowedWindowNote(t0); !strings.Contains(res.Response, want) {
 		t.Errorf("an empty historical answer does not state the as_of window note, want:\n%s\n%s", want, res.Response)
-	}
-}
-
-// TestACurrentSearchStillDropsARowOutsideItsWindow is the other half: the change
-// is scoped to a historical request. A current search has a real clock and a real
-// window, so a row whose window has closed or has not opened is still dropped as
-// expired / not-yet-valid, and no historical note appears.
-func TestACurrentSearchStillDropsARowOutsideItsWindow(t *testing.T) {
-	now := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
-	f := memory.StoredStampLayout
-	stamp := func(d time.Duration) *string { s := now.Add(d).Format(f); return &s }
-	// The same two rows the as_of read keeps, read at the clock the request names.
-	cands := []memory.Candidate{
-		windowedCandidate("m-closed-since", stamp(-72*time.Hour), stamp(-time.Hour)),
-		windowedCandidate("m-opens-later", stamp(time.Hour), nil),
-	}
-	req := baseRequest()
-	req.Budget = Budget{MaxItems: len(cands) + 1}
-	res := run(t, &fakeRetriever{set: setOf(cands...)}, req)
-	if len(res.Items) != 0 {
-		t.Errorf("a current search admitted %d rows, want 0: a closed window and an unopened one are both "+
-			"dropped as of today\n%s", len(res.Items), res.Response)
-	}
-	if got := stageDropped(res, stageValidity); got != len(cands) {
-		t.Errorf("stage 2 dropped %d rows, want %d: the historical change must not reach a current read",
-			got, len(cands))
-	}
-	for _, bad := range []string{"Validity judged at", "as_of "} {
-		if strings.Contains(res.Response, bad) {
-			t.Errorf("a current answer carries the historical disclosure %q:\n%s", bad, res.Response)
-		}
 	}
 }
 

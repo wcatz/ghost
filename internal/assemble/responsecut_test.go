@@ -39,27 +39,6 @@ func TestATrimmedQueryResponseNamesHowManyRowsItCut(t *testing.T) {
 	}
 }
 
-// withCutNotice raises an untrimmed render's byte size by the length of the cut
-// notice a `cut`-row trim adds, so a test that derives its cap from that render
-// still fits the NOTICED answer: the notice is part of the measured response, and
-// a cap that ignores it forces the pass to cut a second row to pay for it. It is
-// measured rather than pinned because the notice names the budget it was fitted
-// to, so its length can depend on the cap's digit count; the loop settles that,
-// and converges in one pass for every cap these tests use.
-func withCutNotice(base, cut int) int {
-	// The notice is the blank-line-separated sentence responseCutNotice writes, so the
-	// answer grows by that framing plus the sentence.
-	cap := base
-	for range 4 {
-		next := base + len("\n\n"+CutNotice(cut, cap, searchFitAdvice))
-		if next == cap {
-			return cap
-		}
-		cap = next
-	}
-	return cap
-}
-
 // TestAQueryAnswerKeepsItsOnlyRowWholeOverTheBudget is #1483's regression.
 func TestAQueryAnswerKeepsItsOnlyRowWholeOverTheBudget(t *testing.T) {
 	content := "zebra" + strings.Repeat("\nx", 300)

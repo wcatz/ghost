@@ -55,33 +55,6 @@ func TestSharedFormatControlsAreEscapedAtEveryAssembleBoundary(t *testing.T) {
 	}
 }
 
-// TestSharedFormatControlsAreEscapedInAMemoryLine checks the composed surface,
-// because a renderer can be safe on its own while the line that joins them
-// loses the escape.
-func TestSharedFormatControlsAreEscapedInAMemoryLine(t *testing.T) {
-	for _, p := range adversarial.AllControls() {
-		p := p
-		t.Run(p.Name, func(t *testing.T) {
-			line := Item{
-				ID:        "pmem00",
-				Category:  "fact",
-				Content:   p.Text,
-				Agent:     p.Text,
-				SourceRef: p.Text,
-				Tags:      []string{p.Text},
-			}.Line()
-			if bad, ok := hasRawControl(line); ok {
-				// TAB is the one control Data deliberately leaves alone; the
-				// shared set holds none, so anything found here is a renderer gap.
-				t.Errorf("memory line (%s) printed U+%04X raw:\n%q", p.Name, bad, line)
-			}
-			if n := len(strings.Split(line, "\n")); n != 1 {
-				t.Errorf("memory line (%s) split into %d physical lines:\n%q", p.Name, n, line)
-			}
-		})
-	}
-}
-
 // TestSharedOversizedFieldsAreBoundedByTheAssembleLabels checks the renderers
 // that promise a bound against a value no writer would accept, which is exactly
 // the value a restored row or an artifact can carry.

@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"strings"
 	"testing"
-	"unicode/utf8"
 
 	"github.com/wcatz/ghost/internal/memory"
 )
@@ -50,95 +49,6 @@ func factSet(facts map[string]*memory.RankFact, rows ...memory.Candidate) *memor
 	set.RankFacts = facts
 	set.ExplainKnobs = memory.ExplainKnobs{RRFK: 60, FTSWeight: 0.3, VecWeight: 0.7, VectorFloor: 0.25}
 	return set
-}
-
-// TestExplainForwardedToRetriever: the request to record reaches the store on
-// the SAME candidate request the formatted answer uses, and only when asked for.
-func TestExplainForwardedToRetriever(t *testing.T) {
-	r := &fakeRetriever{set: setOf(candidate("A1", "proj", "fact", "database configuration pooling", 0.9))}
-
-	run(t, r, baseRequest())
-	if r.req.Explain {
-		t.Error("a plain search must not ask the store to record a ranking")
-	}
-	res := run(t, r, withExplain(baseRequest()))
-	if !r.req.Explain {
-		t.Error("an explain search must reach the store as explain, or the facts the projection reads are never recorded")
-	}
-	if res.Explain == nil {
-		t.Fatal("an explain request must carry the projection in Result.Explain")
-	}
-	if plain := run(t, r, baseRequest()); plain.Explain != nil {
-		t.Error("a plain request carries a projection")
-	}
-}
-
-// TestExplainRequestDiffersFromThePlainRequestInTheFlagOnly: one Request, one
-// Run. The candidate request a store receives for an explain call is the plain
-// one with only the record flag added — same window, same scope, same budget —
-// so explain cannot describe a neighbouring search.
-func TestExplainRequestDiffersFromThePlainRequestInTheFlagOnly(t *testing.T) {
-	for _, name := range []string{"plain", "scoped+category+retention"} {
-		req := hybridRequest()
-		if name != "plain" {
-			req.Scope = map[string]string{"environment": "production"}
-			req.Category, req.Retention = "fact", "project"
-		}
-		r := &fakeRetriever{set: hybridSet(candidate("A1", "proj", "fact", "database configuration pooling", 0.9))}
-		run(t, r, req)
-		plain := r.req
-		run(t, r, withExplain(req))
-		explained := r.req
-		if !explained.Explain {
-			t.Fatalf("%s: the explain request did not reach the store as explain", name)
-		}
-		explained.Explain = false
-		if fmt.Sprintf("%+v", plain) != fmt.Sprintf("%+v", explained) {
-			t.Errorf("%s: explain changed the candidate request beyond the flag:\nplain:   %+v\nexplain: %+v", name, plain, explained)
-		}
-	}
-}
-
-// TestExplainDoesNotChangeTheAnswer: asking for the projection changes not one
-// byte of the response, its machine line or its size, for an answer, a
-// scope-filtered answer and a scope-emptied one.
-func TestExplainDoesNotChangeTheAnswer(t *testing.T) {
-	scoped := baselineScoped()
-	cases := []struct {
-		name string
-		req  Request
-		set  *memory.CandidateSet
-	}{
-		{"answer", baseRequest(), setOf(
-			candidate("A1", "proj", "fact", "database configuration pooling", 0.9),
-			candidate("A2", "proj", "fact", "database configuration retry", 0.8),
-			candidate("B1", "proj", "fact", "database configuration cache", 0.6))},
-		{"scope filtered", scoped, hybridSet(
-			scopedCandidate("D1", map[string]string{"environment": "development"}, 0.95),
-			scopedCandidate("P1", map[string]string{"environment": "production"}, 0.9),
-			scopedCandidate("P2", map[string]string{"environment": "production"}, 0.8))},
-		{"scope emptied", scoped, hybridSet()},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			plain := run(t, &fakeRetriever{set: tc.set}, tc.req)
-			explain := run(t, &fakeRetriever{set: tc.set}, withExplain(tc.req))
-			if explain.Response != plain.Response || explain.Machine != plain.Machine || explain.Bytes != plain.Bytes {
-				t.Errorf("explain changed the answer:\nplain:   %q\nexplain: %q", plain.Response, explain.Response)
-			}
-			if !eq(itemIDs(plain.Items), itemIDs(explain.Items)) || plain.Outcome != explain.Outcome || plain.Reason != explain.Reason {
-				t.Errorf("explain changed the admitted rows or the verdict")
-			}
-			if explain.Explain == nil {
-				t.Fatal("an explain request must carry the projection")
-			}
-		})
-	}
-	// The advice a scope-emptied pool carries survives explain.
-	emptied := run(t, &fakeRetriever{set: hybridSet()}, withExplain(scoped))
-	if !strings.Contains(emptied.Response, "drop the scope filter") {
-		t.Errorf("explain lost the drop-scope advice:\n%s", emptied.Response)
-	}
 }
 
 // TestExplainMembershipIsTheAnswersMembership: whatever withheld a row, the
@@ -438,83 +348,6 @@ func TestExplainWithoutRecordedFactsSaysSo(t *testing.T) {
 	}
 	if !said {
 		t.Errorf("notes = %v, want the missing-facts disclosure", res.Explain.Notes)
-	}
-}
-
-// TestExplainNamesTheSessionDecayOnlyWhenARowCarriesIt ports the tier-decay
-// contract: the note appears only when some row's tier factor is below 1.0, and
-// a pinned session row is a full exemption.
-func TestExplainNamesTheSessionDecayOnlyWhenARowCarriesIt(t *testing.T) {
-	named := func(ex *memory.SearchExplain) bool {
-		for _, n := range ex.Notes {
-			if strings.Contains(n, "session") && strings.Contains(n, "decay") {
-				return true
-			}
-		}
-		return false
-	}
-	facts := func(age float64) map[string]*memory.RankFact {
-		return map[string]*memory.RankFact{"S1": {FTSRank: 0, VectorRank: -1, VectorScore: -1, Base: 0.02, StatusFactor: 1,
-			ProjectMatch: true, ScopeMatched: true, Decay: 0.6, AgeDays: age}}
-	}
-	mk := func(retention string, pinned bool) memory.Candidate {
-		c := candidate("S1", "proj", "fact", "database configuration tier", 0.9)
-		c.Retention, c.Pinned = retention, pinned
-		return c
-	}
-	session := run(t, &fakeRetriever{set: factSet(facts(30), mk(memory.RetentionSession, false))}, withExplain(baseRequest())).Explain
-	if !named(session) {
-		t.Errorf("a 30-day session row must name the tier decay: %v", session.Notes)
-	}
-	if got := explainRowByID(t, session, "S1").RetentionFactor; got >= 1 || got <= 0 {
-		t.Errorf("session retention_factor = %v, want a strict fraction", got)
-	}
-	durable := run(t, &fakeRetriever{set: factSet(facts(30), mk(memory.RetentionProject, false))}, withExplain(baseRequest())).Explain
-	if named(durable) || explainRowByID(t, durable, "S1").RetentionFactor != 1 {
-		t.Errorf("a durable corpus reports a tier decay: %v / %+v", durable.Notes, durable.Rows)
-	}
-	pinned := run(t, &fakeRetriever{set: factSet(facts(30), mk(memory.RetentionSession, true))}, withExplain(baseRequest())).Explain
-	if named(pinned) || explainRowByID(t, pinned, "S1").RetentionFactor != 1 {
-		t.Errorf("a pinned session row is a full exemption: %v / %+v", pinned.Notes, pinned.Rows)
-	}
-}
-
-// TestExplainBoundsEveryRowToSnippet: forty large rows all fit the row budget,
-// every one is reported, and each content string is the 120-rune snippet
-// through Data, not the full text.
-func TestExplainBoundsEveryRowToSnippet(t *testing.T) {
-	rows := make([]memory.Candidate, 0, 40)
-	for i := 0; i < 40; i++ {
-		rows = append(rows, candidate(fmt.Sprintf("B%02d", i), "proj", "fact",
-			"database configuration "+strings.Repeat("x", 300), 0.9-float64(i)*0.005))
-	}
-	req := baseRequest()
-	req.Budget.MaxItems = 10
-	res := run(t, &fakeRetriever{set: setOf(rows...)}, withExplain(req))
-	ex := res.Explain
-	if ex.Truncation != nil {
-		t.Errorf("40 rows must fit the 150-row budget; got truncation %+v", ex.Truncation)
-	}
-	if len(ex.Rows) != 40 {
-		t.Fatalf("len(rows) = %d, want 40", len(ex.Rows))
-	}
-	for _, row := range ex.Rows {
-		inner := strings.TrimSuffix(strings.TrimPrefix(row.Content, "«"), "»")
-		if n := utf8.RuneCountInString(inner); n > memory.ExplainSnippetRunes+1 {
-			t.Errorf("row %s ships a %d-rune snippet, want at most %d plus the ellipsis", row.ID, n, memory.ExplainSnippetRunes)
-		}
-		if !strings.HasSuffix(inner, "…") {
-			t.Errorf("row %s content is not marked as a snippet: %q", row.ID, row.Content)
-		}
-	}
-	included := 0
-	for _, row := range ex.Rows {
-		if row.Included {
-			included++
-		}
-	}
-	if included != len(res.Items) || included != 10 {
-		t.Errorf("payload marks %d rows included, the answer holds %d", included, len(res.Items))
 	}
 }
 

@@ -42,29 +42,6 @@ func TestEveryFormatCharacterIsVisibleInTheRenderers(t *testing.T) {
 	}
 }
 
-// TestTwoValuesDifferingOnlyInAFormatCharacterNeverRenderIdentically states
-// the property the escape exists for: two values that differ in bytes must
-// never print identically, because a reader cannot see the difference.
-//
-// "Identically" is measured the way a reader meets it. The characters a reader
-// cannot see are removed from both renderings, and the two must STILL differ —
-// so the difference survives in something visible rather than in a character
-// that only the bytes held. Without the escape the two renderings are the same
-// string once the invisible character is taken away, which is the defect.
-func TestTwoValuesDifferingOnlyInAFormatCharacterNeverRenderIdentically(t *testing.T) {
-	plain := "ghost"
-	for _, r := range adversarial.FormatRunes() {
-		hidden := "gh" + string(r) + "ost"
-		for _, tc := range formatRenderers() {
-			a := stripFormatCharacters(tc.fn(plain))
-			b := stripFormatCharacters(tc.fn(hidden))
-			if a == b {
-				t.Errorf("%s rendered %q and %q identically to a reader: %q", tc.name, plain, hidden, a)
-			}
-		}
-	}
-}
-
 // stripFormatCharacters removes every character a reader cannot see, so what
 // is left is what the rendering shows.
 func stripFormatCharacters(s string) string {

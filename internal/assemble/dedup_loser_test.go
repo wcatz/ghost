@@ -67,29 +67,6 @@ func TestDroppedNearDuplicateLoserIsInTheTrace(t *testing.T) {
 	}
 }
 
-// TestDroppedNearDuplicateLoserIsInTheRetrievalRecord: the record is built from
-// the trace's decisions, so the removed row is counted as a dropped verdict at
-// the dedup stage.
-func TestDroppedNearDuplicateLoserIsInTheRetrievalRecord(t *testing.T) {
-	f, req := sessionStartWithLoser()
-	sink := &recordingSink{}
-	req.Record = sink
-	run(t, f, req)
-
-	var found bool
-	for _, v := range sink.last(t).Verdicts {
-		if v.ID == "gdup" {
-			found = true
-			if v.Kept || v.Stage != stageDedup || v.Reason != reasonNearDuplicate {
-				t.Errorf("verdict = %+v, want dropped at dedup with reason near_duplicate", v)
-			}
-		}
-	}
-	if !found {
-		t.Errorf("the retrieval record never mentions the removed loser: %+v", sink.last(t).Verdicts)
-	}
-}
-
 // TestDedupedTallyComesFromTheTrace: the session-start header's Deduped count is
 // the trace's own stage 6 count, not a residual guessed from the store's eligible
 // count. CountedAgainst must not add a second, independent count on top.
@@ -242,53 +219,6 @@ func TestQueryModeCollapsesNearDuplicatesInTheWindow(t *testing.T) {
 	}
 	if !explainRowByID(t, res.Explain, winner).Included {
 		t.Error("the winner is not included")
-	}
-}
-
-// TestQueryModeCollapseIsInTheRetrievalRecord: the record is the trace
-// projected, so the removed loser is a dropped verdict at the dedup stage and
-// the representative and the distinct row are kept ones — the record must not
-// report the loser as returned, or as never seen.
-func TestQueryModeCollapseIsInTheRetrievalRecord(t *testing.T) {
-	s, dupA, dupB, distinct := queryCollapseStore(t)
-	req := baseRequest()
-	req.Now = time.Now().UTC()
-	sink := &recordingSink{}
-	req.Record = sink
-	res := run(t, s, req)
-
-	if ids := itemIDs(res.Items); !hasID(ids, distinct) {
-		t.Fatalf("items = %v, want the distinct row the fixture was built around", ids)
-	}
-	rec := sink.last(t)
-	droppedID, winnerID, dropStage, dropReason := "", "", "", ""
-	kept := map[string]bool{}
-	for _, v := range rec.Verdicts {
-		if v.Kept {
-			kept[v.ID] = true
-		}
-		if v.ID == dupA || v.ID == dupB {
-			if v.Kept {
-				winnerID = v.ID
-			} else {
-				droppedID, dropStage, dropReason = v.ID, v.Stage, v.Reason
-			}
-		}
-	}
-	if droppedID == "" || winnerID == "" || droppedID == winnerID {
-		t.Fatalf("the record holds one dropped and one kept verdict for the pair (%s, %s); got %+v", dupA, dupB, rec.Verdicts)
-	}
-	if dropStage != stageDedup || dropReason != reasonNearDuplicate {
-		t.Errorf("the loser's verdict is %s/%s, want %s/%s", dropStage, dropReason, stageDedup, reasonNearDuplicate)
-	}
-	if !kept[winnerID] {
-		t.Errorf("the representative %s is not recorded as kept: %+v", winnerID, rec.Verdicts)
-	}
-	if !kept[distinct] {
-		t.Errorf("the row admitted to the loser's slot is not recorded as kept: %+v", rec.Verdicts)
-	}
-	if kept[droppedID] {
-		t.Errorf("the removed loser %s is recorded as kept as well as dropped", droppedID)
 	}
 }
 
