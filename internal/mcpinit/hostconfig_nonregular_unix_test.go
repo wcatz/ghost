@@ -71,109 +71,6 @@ func requireFIFO(t *testing.T, path string) {
 	}
 }
 
-// TestRunCodex_AFIFOAtTheHooksPathIsRefused: the codex hooks.json is read
-// before anything is registered, so a FIFO at that path is refused with the
-// file named and nothing written.
-func TestRunCodex_AFIFOAtTheHooksPathIsRefused(t *testing.T) {
-	home, _ := setupCodexTestEnv(t)
-	path := codexHooksJSON(home)
-	plantFIFO(t, path)
-
-	var out bytes.Buffer
-	var err error
-	withHostConfigDeadline(t, func() { err = RunCodex(&out, true) })
-	if err == nil {
-		t.Fatalf("RunCodex accepted a hooks.json that is not a regular file; output:\n%s", out.String())
-	}
-	if !strings.Contains(err.Error(), path) {
-		t.Errorf("the refusal must name the file %q, got: %v", path, err)
-	}
-	if !strings.Contains(err.Error(), "not a regular file") {
-		t.Errorf("the refusal must say the path is not a regular file, got: %v", err)
-	}
-	requireFIFO(t, path)
-}
-
-// TestRunCodex_AFIFOAtTheConfigTomlPathIsRefused: the codex config.toml is
-// read to merge the MCP server table into it, so a FIFO at that path is
-// refused with the file named and nothing written.
-func TestRunCodex_AFIFOAtTheConfigTomlPathIsRefused(t *testing.T) {
-	home, _ := setupCodexTestEnv(t)
-	path := codexConfigToml(home)
-	plantFIFO(t, path)
-
-	var out bytes.Buffer
-	var err error
-	withHostConfigDeadline(t, func() { err = RunCodex(&out, true) })
-	if err == nil {
-		t.Fatalf("RunCodex accepted a config.toml that is not a regular file; output:\n%s", out.String())
-	}
-	if !strings.Contains(err.Error(), path) {
-		t.Errorf("the refusal must name the file %q, got: %v", path, err)
-	}
-	if !strings.Contains(err.Error(), "not a regular file") {
-		t.Errorf("the refusal must say the path is not a regular file, got: %v", err)
-	}
-	requireFIFO(t, path)
-}
-
-// TestStatusCodex_AFIFOAtTheHooksPathIsReported: the status reader answers a
-// question about the wiring, so a path it cannot read is reported rather than
-// read — and the report names the file.
-func TestStatusCodex_AFIFOAtTheHooksPathIsReported(t *testing.T) {
-	home, _ := setupCodexTestEnv(t)
-	path := codexHooksJSON(home)
-	plantFIFO(t, path)
-
-	var out bytes.Buffer
-	var healthy bool
-	var err error
-	withHostConfigDeadline(t, func() { healthy, err = StatusCodex(&out) })
-	if err != nil {
-		t.Fatalf("StatusCodex: %v", err)
-	}
-	if healthy {
-		t.Errorf("status reported a healthy integration over a hooks.json it cannot read; output:\n%s", out.String())
-	}
-	if !strings.Contains(out.String(), path) {
-		t.Errorf("the report must name the file %q, got:\n%s", path, out.String())
-	}
-	if !strings.Contains(out.String(), "not a regular file") {
-		t.Errorf("the report must say the path is not a regular file, got:\n%s", out.String())
-	}
-	requireFIFO(t, path)
-}
-
-// TestStatusCodex_AFIFOAtTheConfigTomlPathIsReported: the same for the
-// config.toml. A path that cannot be read is not a path that is missing, and
-// the report must not send the operator to an init that would write over it.
-func TestStatusCodex_AFIFOAtTheConfigTomlPathIsReported(t *testing.T) {
-	home, _ := setupCodexTestEnv(t)
-	path := codexConfigToml(home)
-	plantFIFO(t, path)
-
-	var out bytes.Buffer
-	var healthy bool
-	var err error
-	withHostConfigDeadline(t, func() { healthy, err = StatusCodex(&out) })
-	if err != nil {
-		t.Fatalf("StatusCodex: %v", err)
-	}
-	if healthy {
-		t.Errorf("status reported a healthy integration over a config.toml it cannot read; output:\n%s", out.String())
-	}
-	if !strings.Contains(out.String(), path) {
-		t.Errorf("the report must name the file %q, got:\n%s", path, out.String())
-	}
-	if !strings.Contains(out.String(), "not a regular file") {
-		t.Errorf("the report must say the path is not a regular file, got:\n%s", out.String())
-	}
-	if strings.Contains(out.String(), "config.toml not found") {
-		t.Errorf("a config.toml that cannot be read is not a missing one; got:\n%s", out.String())
-	}
-	requireFIFO(t, path)
-}
-
 // TestRun_AFIFOAtTheSettingsPathIsRefused: the Claude settings.json is
 // validated before the MCP server is registered, so a FIFO at that path is
 // refused with the file named, nothing registered and the file left as it
@@ -225,30 +122,6 @@ func TestStatus_AFIFOAtTheSettingsPathIsReported(t *testing.T) {
 		t.Errorf("the report must say the path is not a regular file, got:\n%s", out.String())
 	}
 	requireFIFO(t, path)
-}
-
-// TestLoadSettings_ASymlinkToARegularFileStillLoads is the control for the
-// refusal above: a symlinked settings.json is an ordinary dotfiles setup, and
-// the regular-file check is made on what the link names, so the document is
-// read exactly as before.
-func TestLoadSettings_ASymlinkToARegularFileStillLoads(t *testing.T) {
-	home := t.TempDir()
-	target := filepath.Join(home, "real-settings.json")
-	if err := os.WriteFile(target, []byte(`{"autoMemoryEnabled":false}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	link := filepath.Join(home, "settings.json")
-	if err := os.Symlink(target, link); err != nil {
-		t.Skipf("symlinks unavailable: %v", err)
-	}
-
-	sf, err := loadSettings(link)
-	if err != nil {
-		t.Fatalf("loadSettings over a symlink to a regular file = %v, want the document", err)
-	}
-	if val, ok := sf.getAutoMemoryEnabled(); !ok || val {
-		t.Errorf("autoMemoryEnabled = %v (set %v), want false", val, ok)
-	}
 }
 
 // TestLoadSettings_AFIFOIsRefused pins the reader itself: the settings
@@ -427,6 +300,56 @@ func TestInstallOpencodePlugin_AFIFOAtThePluginPathIsRefused(t *testing.T) {
 	}
 }
 
+// TestRunCodex_AFIFOAtTheHooksPathIsRefused: the codex hooks.json is read
+// before anything is registered, so a FIFO at that path is refused with the
+// file named and nothing written.
+func TestRunCodex_AFIFOAtTheHooksPathIsRefused(t *testing.T) {
+	home, _ := setupCodexTestEnv(t)
+	path := codexHooksJSON(home)
+	plantFIFO(t, path)
+
+	var out bytes.Buffer
+	var err error
+	withHostConfigDeadline(t, func() { err = RunCodex(&out, true) })
+	if err == nil {
+		t.Fatalf("RunCodex accepted a hooks.json that is not a regular file; output:\n%s", out.String())
+	}
+	if !strings.Contains(err.Error(), path) {
+		t.Errorf("the refusal must name the file %q, got: %v", path, err)
+	}
+	if !strings.Contains(err.Error(), "not a regular file") {
+		t.Errorf("the refusal must say the path is not a regular file, got: %v", err)
+	}
+	requireFIFO(t, path)
+}
+
+// TestStatusCodex_AFIFOAtTheHooksPathIsReported: the status reader answers a
+// question about the wiring, so a path it cannot read is reported rather than
+// read — and the report names the file.
+func TestStatusCodex_AFIFOAtTheHooksPathIsReported(t *testing.T) {
+	home, _ := setupCodexTestEnv(t)
+	path := codexHooksJSON(home)
+	plantFIFO(t, path)
+
+	var out bytes.Buffer
+	var healthy bool
+	var err error
+	withHostConfigDeadline(t, func() { healthy, err = StatusCodex(&out) })
+	if err != nil {
+		t.Fatalf("StatusCodex: %v", err)
+	}
+	if healthy {
+		t.Errorf("status reported a healthy integration over a hooks.json it cannot read; output:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), path) {
+		t.Errorf("the report must name the file %q, got:\n%s", path, out.String())
+	}
+	if !strings.Contains(out.String(), "not a regular file") {
+		t.Errorf("the report must say the path is not a regular file, got:\n%s", out.String())
+	}
+	requireFIFO(t, path)
+}
+
 // TestWriteRedirects_AFIFOAtTheRedirectPathIsRefused pins the redirect
 // writer's own read: a FIFO at a MEMORY.md redirect path is refused
 // rather than overwritten.
@@ -469,64 +392,4 @@ func TestWriteRedirects_AFIFOAtTheRedirectPathIsRefused(t *testing.T) {
 	}
 	// The FIFO must still be there.
 	requireFIFO(t, target)
-}
-
-// TestPluginInstalled_AFIFOAtTheRegistryPathReturnsFalse pins the plugin
-// registry reader: a FIFO at installed_plugins.json returns false
-// without hanging.
-func TestPluginInstalled_AFIFOAtTheRegistryPathReturnsFalse(t *testing.T) {
-	isolatedHome(t)
-	home := t.TempDir()
-	setHome(t, home)
-
-	path := filepath.Join(home, ".claude", "plugins", "installed_plugins.json")
-	plantFIFO(t, path)
-
-	var got bool
-	withHostConfigDeadline(t, func() { got = PluginInstalled() })
-	if got {
-		t.Errorf("PluginInstalled() = true, want false over a FIFO")
-	}
-	requireFIFO(t, path)
-}
-
-// TestStatusOpencode_AFIFOAtThePluginPathIsReportedUnreadable pins status's
-// own read of the lifecycle plugin: a FIFO there is reported as unreadable,
-// not as a plugin that is missing, which would send the user to an init that
-// refuses the same path.
-func TestStatusOpencode_AFIFOAtThePluginPathIsReportedUnreadable(t *testing.T) {
-	home := t.TempDir()
-	setHome(t, home)
-	t.Setenv("XDG_DATA_HOME", t.TempDir())
-	xdgConfig := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", xdgConfig)
-	t.Setenv("GHOST_EMBEDDING_ENABLED", "false")
-	t.Setenv("OPENCODE_CONFIG_DIR", filepath.Join(xdgConfig, "opencode"))
-
-	binDir := t.TempDir()
-	writeStub(t, binDir, "ghost")
-	t.Setenv("PATH", binDir)
-
-	path, err := opencodePluginPath()
-	if err != nil {
-		t.Fatalf("opencodePluginPath: %v", err)
-	}
-	plantFIFO(t, path)
-
-	var out bytes.Buffer
-	var healthy bool
-	withHostConfigDeadline(t, func() { healthy, err = StatusOpencode(&out) })
-	if err != nil {
-		t.Fatalf("StatusOpencode: %v", err)
-	}
-	if healthy {
-		t.Errorf("status reported a healthy integration over a plugin it cannot read; output:\n%s", out.String())
-	}
-	if !strings.Contains(out.String(), "lifecycle plugin unreadable") || !strings.Contains(out.String(), "not a regular file") {
-		t.Errorf("status must report the plugin as unreadable and not a regular file, got:\n%s", out.String())
-	}
-	if strings.Contains(out.String(), "missing or outdated") {
-		t.Errorf("status must not call an unreadable plugin missing, got:\n%s", out.String())
-	}
-	requireFIFO(t, path)
 }

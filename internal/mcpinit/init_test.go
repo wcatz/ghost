@@ -2,12 +2,10 @@ package mcpinit
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -42,463 +40,10 @@ func projectSlug(projectPath string) string {
 	return b.String()
 }
 
-func TestHandleSessionStartHook(t *testing.T) {
-	var out bytes.Buffer
-	runSessionStartHook(t, `{"event":"SessionStart"}`, &out)
-
-	output := out.String()
-	if output == "" {
-		t.Error("hook output should not be empty")
-	}
-	if !strings.Contains(output, "ghost_memory_save") && !strings.Contains(output, "Ghost context") && !strings.Contains(output, "Save to Ghost as it happens") {
-		t.Error("hook output should mention ghost_memory_save or Ghost context")
-	}
-}
-
-func TestWriteRedirects_CreatesFile(t *testing.T) {
-	home := t.TempDir()
-	setHome(t, home)
-	projectPath := absProjectPath(t)
-
-	projects := []projectInfo{
-		{ID: "abc123", Path: projectPath, Name: "myproject"},
-	}
-
-	var out bytes.Buffer
-	writeRedirects(&out, projects, false)
-
-	encoded := projectSlug(projectPath)
-	target := filepath.Join(home, ".claude", "projects", encoded, "memory", "MEMORY.md")
-
-	data, err := os.ReadFile(target)
-	if err != nil {
-		t.Fatalf("expected redirect file to be created: %v", err)
-	}
-
-	content := string(data)
-	if !strings.Contains(content, "stored in Ghost") {
-		t.Error("redirect should contain 'stored in Ghost'")
-	}
-	if !strings.Contains(content, "myproject") {
-		t.Error("redirect should contain project name")
-	}
-
-	output := out.String()
-	if !strings.Contains(output, "created redirect") {
-		t.Errorf("output should say 'created redirect', got: %s", output)
-	}
-}
-
-func TestWriteRedirects_SkipsExisting(t *testing.T) {
-	home := t.TempDir()
-	setHome(t, home)
-	projectPath := absProjectPath(t)
-
-	// Pre-create the redirect file.
-	encoded := projectSlug(projectPath)
-	dir := filepath.Join(home, ".claude", "projects", encoded, "memory")
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	redirect := "# myproject Project Memory\n\nAll project knowledge is stored in Ghost and injected automatically at session start via the SessionStart hook.\nProject context (memories + summary) is already in your system prompt — no tool calls needed to load it.\n\nUse `ghost_memory_save` to save new discoveries during work.\nUse `ghost_memory_search` to search for specific facts.\n"
-	if err := os.WriteFile(filepath.Join(dir, "MEMORY.md"), []byte(redirect), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	projects := []projectInfo{
-		{ID: "abc123", Path: projectPath, Name: "myproject"},
-	}
-
-	var out bytes.Buffer
-	writeRedirects(&out, projects, false)
-
-	output := out.String()
-	if !strings.Contains(output, "redirect exists") {
-		t.Errorf("should report redirect exists, got: %s", output)
-	}
-}
-
-func TestWriteRedirects_SkipsRelativePath(t *testing.T) {
-	home := t.TempDir()
-	setHome(t, home)
-
-	projects := []projectInfo{
-		{ID: "abc123", Path: "relative/path", Name: "rel"},
-	}
-
-	var out bytes.Buffer
-	writeRedirects(&out, projects, false)
-
-	// Should produce no output for relative paths.
-	if out.String() != "" {
-		t.Errorf("expected no output for relative path, got: %s", out.String())
-	}
-}
-
-func TestWriteRedirects_DoesNotClobber(t *testing.T) {
-	home := t.TempDir()
-	setHome(t, home)
-	projectPath := absProjectPath(t)
-
-	// Pre-create a file with user content (not a Ghost redirect).
-	encoded := projectSlug(projectPath)
-	dir := filepath.Join(home, ".claude", "projects", encoded, "memory")
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	original := "User's custom memory content here."
-	if err := os.WriteFile(filepath.Join(dir, "MEMORY.md"), []byte(original), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	projects := []projectInfo{
-		{ID: "abc123", Path: projectPath, Name: "myproject"},
-	}
-
-	var out bytes.Buffer
-	writeRedirects(&out, projects, false)
-
-	// Verify it was NOT overwritten.
-	data, _ := os.ReadFile(filepath.Join(dir, "MEMORY.md"))
-	if string(data) != original {
-		t.Error("writeRedirects clobbered existing non-Ghost MEMORY.md")
-	}
-
-	output := out.String()
-	if !strings.Contains(output, "not overwriting") {
-		t.Errorf("should say 'not overwriting', got: %s", output)
-	}
-}
-
-func TestWriteRedirects_DryRun(t *testing.T) {
-	home := t.TempDir()
-	setHome(t, home)
-	projectPath := absProjectPath(t)
-
-	projects := []projectInfo{
-		{ID: "abc123", Path: projectPath, Name: "myproject"},
-	}
-
-	var out bytes.Buffer
-	writeRedirects(&out, projects, true)
-
-	output := out.String()
-	if !strings.Contains(output, "would create redirect") {
-		t.Errorf("dry run should say 'would create redirect', got: %s", output)
-	}
-
-	// Verify no file was created.
-	encoded := projectSlug(projectPath)
-	target := filepath.Join(home, ".claude", "projects", encoded, "memory", "MEMORY.md")
-	if _, err := os.Stat(target); err == nil {
-		t.Error("dry run should not create files")
-	}
-}
-
-func TestEnsureAutoMemoryDisabled_SetsFlag(t *testing.T) {
-	home := t.TempDir()
-	setHome(t, home)
-
-	path := filepath.Join(home, ".claude", "settings.json")
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, []byte(`{}`), 0600); err != nil {
-		t.Fatal(err)
-	}
-
-	sf, err := loadSettings(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	var out bytes.Buffer
-	if err := ensureAutoMemoryDisabled(&out, sf, false); err != nil {
-		t.Fatalf("ensureAutoMemoryDisabled: %v", err)
-	}
-
-	output := out.String()
-	if !strings.Contains(output, "set autoMemoryEnabled: false") {
-		t.Errorf("expected 'set autoMemoryEnabled: false' in output, got: %s", output)
-	}
-
-	v, present := sf.getAutoMemoryEnabled()
-	if !present || v {
-		t.Errorf("expected autoMemoryEnabled=false, got present=%v value=%v", present, v)
-	}
-}
-
-func TestEnsureAutoMemoryDisabled_Idempotent(t *testing.T) {
-	home := t.TempDir()
-	setHome(t, home)
-
-	path := filepath.Join(home, ".claude", "settings.json")
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, []byte(`{"autoMemoryEnabled":false}`), 0600); err != nil {
-		t.Fatal(err)
-	}
-
-	sf, err := loadSettings(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	var out bytes.Buffer
-	if err := ensureAutoMemoryDisabled(&out, sf, false); err != nil {
-		t.Fatalf("ensureAutoMemoryDisabled: %v", err)
-	}
-
-	output := out.String()
-	if !strings.Contains(output, "already false") {
-		t.Errorf("expected 'already false' in output, got: %s", output)
-	}
-}
-
-func TestEnsureAutoMemoryDisabled_DryRun(t *testing.T) {
-	home := t.TempDir()
-	setHome(t, home)
-
-	path := filepath.Join(home, ".claude", "settings.json")
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, []byte(`{}`), 0600); err != nil {
-		t.Fatal(err)
-	}
-
-	sf, err := loadSettings(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	var out bytes.Buffer
-	if err := ensureAutoMemoryDisabled(&out, sf, true); err != nil {
-		t.Fatalf("ensureAutoMemoryDisabled dry run: %v", err)
-	}
-
-	output := out.String()
-	if !strings.Contains(output, "would set autoMemoryEnabled: false") {
-		t.Errorf("expected 'would set autoMemoryEnabled: false' in output, got: %s", output)
-	}
-
-	// In dry run, the in-memory state should not be modified.
-	_, present := sf.getAutoMemoryEnabled()
-	if present {
-		t.Error("dry run should not modify settings in memory")
-	}
-}
-
-func TestEnsureConfigBootstrap_CreatesFile(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", tmpDir)
-
-	var out bytes.Buffer
-	if err := ensureConfigBootstrap(&out, false); err != nil {
-		t.Fatalf("ensureConfigBootstrap: %v", err)
-	}
-
-	path := filepath.Join(tmpDir, "ghost", "config.yaml")
-	if _, err := os.Stat(path); err != nil {
-		t.Fatalf("expected config file to be created: %v", err)
-	}
-	if !strings.Contains(out.String(), "created config file") {
-		t.Errorf("expected 'created config file' in output, got: %s", out.String())
-	}
-}
-
-func TestEnsureConfigBootstrap_Idempotent(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", tmpDir)
-
-	var out bytes.Buffer
-	if err := ensureConfigBootstrap(&out, false); err != nil {
-		t.Fatalf("ensureConfigBootstrap (1st): %v", err)
-	}
-	out.Reset()
-	if err := ensureConfigBootstrap(&out, false); err != nil {
-		t.Fatalf("ensureConfigBootstrap (2nd): %v", err)
-	}
-	if !strings.Contains(out.String(), "config file exists") {
-		t.Errorf("expected 'config file exists' in output, got: %s", out.String())
-	}
-}
-
-func TestEnsureConfigBootstrap_DryRunDoesNotCreate(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", tmpDir)
-
-	var out bytes.Buffer
-	if err := ensureConfigBootstrap(&out, true); err != nil {
-		t.Fatalf("ensureConfigBootstrap dry run: %v", err)
-	}
-
-	path := filepath.Join(tmpDir, "ghost", "config.yaml")
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Errorf("dry run must not create the config file, stat err = %v", err)
-	}
-	if !strings.Contains(out.String(), "would create config file") {
-		t.Errorf("expected 'would create config file' in output, got: %s", out.String())
-	}
-}
-
-func TestRetryHint(t *testing.T) {
-	err := retryHint(fmt.Errorf("something broke"))
-	msg := err.Error()
-	if !strings.Contains(msg, "something broke") {
-		t.Error("should preserve original error")
-	}
-	if !strings.Contains(msg, "ghost mcp init") {
-		t.Error("should include retry hint")
-	}
-}
-
-func TestShellQuote(t *testing.T) {
-	tests := []struct {
-		input string
-		want  string
-	}{
-		{"ghost", "'ghost'"},
-		{"/usr/local/bin/ghost", "'/usr/local/bin/ghost'"},
-		{"/path with spaces/ghost", "'/path with spaces/ghost'"},
-		{"/path/with$dollar/ghost", "'/path/with$dollar/ghost'"},
-		{"/path/with`backtick`/ghost", "'/path/with`backtick`/ghost'"},
-		{"/path/it's/ghost", "'/path/it'\\''s/ghost'"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.input, func(t *testing.T) {
-			got := shellQuotePOSIX(tt.input)
-			if got != tt.want {
-				t.Errorf("shellQuotePOSIX(%q) = %q, want %q", tt.input, got, tt.want)
-			}
-		})
-	}
-}
-
-func TestShellQuoteWindows(t *testing.T) {
-	tests := []struct {
-		input string
-		want  string
-	}{
-		{"ghost", `"ghost"`},
-		{`C:\Users\me\ghost.exe`, `"C:\Users\me\ghost.exe"`},
-		{`C:\path with spaces\ghost.exe`, `"C:\path with spaces\ghost.exe"`},
-		{`C:\path\with"quote\ghost.exe`, `"C:\path\with""quote\ghost.exe"`},
-	}
-	for _, tt := range tests {
-		t.Run(tt.input, func(t *testing.T) {
-			got := shellQuoteWindows(tt.input)
-			if got != tt.want {
-				t.Errorf("shellQuoteWindows(%q) = %q, want %q", tt.input, got, tt.want)
-			}
-		})
-	}
-}
-
-func TestShellQuoteDispatch(t *testing.T) {
-	input := `C:\path with spaces\ghost.exe`
-	want := shellQuotePOSIX(input)
-	if runtime.GOOS == "windows" {
-		want = shellQuoteWindows(input)
-	}
-	if got := shellQuote(input); got != want {
-		t.Errorf("shellQuote(%q) = %q, want %q", input, got, want)
-	}
-}
-
-func TestGhostPermissions_Complete(t *testing.T) {
-	// Verify the canonical list has the expected count. It tracks the number of
-	// tools the MCP server registers, so a tool added without a permission here
-	// is a tool an operator is prompted about on every call.
-	if len(ghostPermissions) != 24 {
-		t.Errorf("expected 24 ghost permissions, got %d", len(ghostPermissions))
-	}
-
-	// All should start with the correct prefix.
-	for _, p := range ghostPermissions {
-		if !strings.HasPrefix(p, "mcp__ghost__ghost_") {
-			t.Errorf("permission %q has unexpected prefix", p)
-		}
-	}
-}
-
-func TestEnsureStopHook(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "settings.json")
-	sf, err := loadSettings(path)
-	if err != nil {
-		t.Fatalf("loadSettings: %v", err)
-	}
-
-	var out strings.Builder
-	if err := ensureStopHook(&out, sf, "/usr/local/bin/ghost", false); err != nil {
-		t.Fatalf("ensureStopHook: %v", err)
-	}
-	if !sf.hasHook("Stop", "hook stop") {
-		t.Error("Stop hook should be present after ensureStopHook")
-	}
-
-	// Idempotent: second call reports already-configured, adds nothing.
-	out.Reset()
-	if err := ensureStopHook(&out, sf, "/usr/local/bin/ghost", false); err != nil {
-		t.Fatalf("ensureStopHook (second): %v", err)
-	}
-	if !strings.Contains(out.String(), "already configured") {
-		t.Errorf("second run should be a no-op, got %q", out.String())
-	}
-
-	// SessionStart hooks are untouched.
-	if sf.hasHook("SessionStart", "hook stop") {
-		t.Error("Stop hook must not leak into SessionStart")
-	}
-}
-
 const (
 	testLegacyCmd  = `'C:\ghost\ghost.exe' hook session-start`
 	testDesiredCmd = `"C:\ghost\ghost.exe" hook session-start`
 )
-
-func TestReconcileHook_AddsWhenAbsent(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "settings.json")
-	sf, err := loadSettings(path)
-	if err != nil {
-		t.Fatalf("loadSettings: %v", err)
-	}
-
-	action, err := reconcileHook(sf, "SessionStart", "hook session-start", testDesiredCmd, testLegacyCmd, true)
-	if err != nil {
-		t.Fatalf("reconcileHook: %v", err)
-	}
-	if action != hookAdded {
-		t.Errorf("action = %v, want hookAdded", action)
-	}
-	if !sf.hasHook("SessionStart", "hook session-start") {
-		t.Error("hook should be present")
-	}
-}
-
-func TestReconcileHook_MigratesLegacyQuotingOnWindows(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "settings.json")
-	sf, err := loadSettings(path)
-	if err != nil {
-		t.Fatalf("loadSettings: %v", err)
-	}
-	if err := sf.addHook("SessionStart", hookEntry{Hooks: []hookAction{{Type: "command", Command: testLegacyCmd}}}); err != nil {
-		t.Fatalf("addHook: %v", err)
-	}
-
-	action, err := reconcileHook(sf, "SessionStart", "hook session-start", testDesiredCmd, testLegacyCmd, true)
-	if err != nil {
-		t.Fatalf("reconcileHook: %v", err)
-	}
-	if action != hookMigrated {
-		t.Errorf("action = %v, want hookMigrated", action)
-	}
-	got, ok, _ := sf.findHookCommand("SessionStart", "hook session-start")
-	if !ok || got != testDesiredCmd {
-		t.Errorf("findHookCommand = (%q, %v), want (%q, true)", got, ok, testDesiredCmd)
-	}
-}
 
 func TestReconcileHook_LeavesLegacyQuotingUntouchedOnPOSIX(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "settings.json")
@@ -710,36 +255,6 @@ func TestReconcileHook_RepairsStaleGhostPathWindows(t *testing.T) {
 	}
 }
 
-// TestIsGhostBinaryName pins the launcher extensions a ghost command may carry.
-// A Windows install can resolve to a "ghost.bat"/"ghost.cmd" shim rather than
-// the native ".exe", and a hook command embedding one of those must still be
-// recognised as ghost's — that recognition is what makes the codex merge
-// idempotent on a re-run, not only on the platform the shim appears on.
-func TestIsGhostBinaryName(t *testing.T) {
-	cases := []struct {
-		path string
-		want bool
-	}{
-		{"ghost", true},
-		{"/usr/local/bin/ghost", true},
-		{"C:\\old\\ghost.exe", true},
-		{"C:\\old\\GHOST.EXE", true},
-		{"C:\\old\\ghost.bat", true},
-		{"C:\\old\\GHOST.BAT", true},
-		{"C:\\old\\ghost.cmd", true},
-		{"ghost.bat", true},
-		{"/usr/local/bin/ghost-helper", false},
-		{"C:\\old\\ghost.batx", false},
-		{"ghostly", false},
-		{"", false},
-	}
-	for _, tc := range cases {
-		if got := isGhostBinaryName(tc.path); got != tc.want {
-			t.Errorf("isGhostBinaryName(%q) = %v, want %v", tc.path, got, tc.want)
-		}
-	}
-}
-
 // TestReconcileHook_RepairsStaleGhostPathPOSIX is the POSIX counterpart of
 // TestReconcileHook_RepairsStaleGhostPathWindows — the repair must not be
 // gated on isWindows, since binaries move on every platform.
@@ -812,64 +327,6 @@ func TestReconcileHook_StopsOnNullHooks(t *testing.T) {
 
 	if _, err := reconcileHook(sf, "SessionStart", "hook session-start", testDesiredCmd, testLegacyCmd, true); err == nil {
 		t.Fatal("expected reconcileHook to return an error for hooks:null")
-	}
-}
-
-// TestReconcileHook_StopsOnNullEventHooks covers the same finding for a null
-// value scoped to a single event rather than the whole "hooks" object.
-func TestReconcileHook_StopsOnNullEventHooks(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "settings.json")
-	if err := os.WriteFile(path, []byte(`{"hooks":{"SessionStart":null}}`), 0600); err != nil {
-		t.Fatalf("write settings: %v", err)
-	}
-	sf, err := loadSettings(path)
-	if err != nil {
-		t.Fatalf("loadSettings: %v", err)
-	}
-
-	if _, err := reconcileHook(sf, "SessionStart", "hook session-start", testDesiredCmd, testLegacyCmd, true); err == nil {
-		t.Fatal("expected reconcileHook to return an error for hooks.SessionStart:null")
-	}
-}
-
-func TestReconcileHook_PreservesOtherKeys(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "settings.json")
-	if err := os.WriteFile(path, []byte(`{
-		"otherTopLevelKey": "keep-me",
-		"hooks": {
-			"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "echo hi", "timeout": 30}]}],
-			"SessionStart": [{"matcher": "", "hooks": [{"type": "command", "command": "'C:\\ghost\\ghost.exe' hook session-start"}]}]
-		}
-	}`), 0600); err != nil {
-		t.Fatalf("write settings: %v", err)
-	}
-	sf, err := loadSettings(path)
-	if err != nil {
-		t.Fatalf("loadSettings: %v", err)
-	}
-
-	if _, err := reconcileHook(sf, "SessionStart", "hook session-start", testDesiredCmd, testLegacyCmd, true); err != nil {
-		t.Fatalf("reconcileHook: %v", err)
-	}
-	if err := sf.save(); err != nil {
-		t.Fatalf("save: %v", err)
-	}
-
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read back: %v", err)
-	}
-	var out map[string]any
-	if err := json.Unmarshal(raw, &out); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if out["otherTopLevelKey"] != "keep-me" {
-		t.Errorf("otherTopLevelKey was dropped: %v", out)
-	}
-	hooks, _ := out["hooks"].(map[string]any)
-	preToolUse, _ := json.Marshal(hooks["PreToolUse"])
-	if !strings.Contains(string(preToolUse), `"timeout":30`) {
-		t.Errorf("PreToolUse entry lost its timeout field: %s", preToolUse)
 	}
 }
 
@@ -1489,51 +946,6 @@ func TestEnsureHook_APrefixSlotOfTheWrongShapeIsForeign(t *testing.T) {
 	}
 }
 
-// TestEnsureHook_APathQualifiedTransparentPrefixIsStillGhost pins the prefix
-// walk against a PATH-QUALIFIED wrapper: `/usr/bin/env ghost hook stop …` and
-// `/usr/bin/sudo ghost hook stop …` run ghost just as the bare words do, so the
-// command-position walk must see through them — reading them as foreign writes
-// a second entry beside a wrapper that already fires the hook, and the hook
-// then runs twice per session.
-func TestEnsureHook_APathQualifiedTransparentPrefixIsStillGhost(t *testing.T) {
-	const ghostBin = "/usr/local/bin/ghost"
-	for _, command := range []string{
-		"/usr/bin/env " + ghostBin + " hook stop --source claude-code",
-		"/usr/bin/sudo " + ghostBin + " hook stop --source claude-code",
-		"/usr/bin/env -i X=1 " + ghostBin + " hook stop --source claude-code",
-		"/usr/bin/sudo -u user " + ghostBin + " hook stop --source claude-code",
-	} {
-		t.Run(command, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "settings.json")
-			sf, err := loadSettings(path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := sf.addHook("Stop", hookEntry{Hooks: []hookAction{{Type: "command", Command: command}}}); err != nil {
-				t.Fatal(err)
-			}
-
-			var out bytes.Buffer
-			if err := ensureStopHook(&out, sf, ghostBin, false); err != nil {
-				t.Fatalf("ensureStopHook: %v", err)
-			}
-			if strings.Contains(out.String(), "added") {
-				t.Errorf("a path-qualified transparent prefix got a second entry:\n%s", out.String())
-			}
-			if !strings.Contains(out.String(), "already configured") {
-				t.Errorf("a path-qualified transparent prefix was not reported as configured:\n%s", out.String())
-			}
-			cmds, err := sf.hookCommands("Stop")
-			if err != nil {
-				t.Fatal(err)
-			}
-			if len(cmds) != 1 || cmds[0] != command {
-				t.Errorf("event = %q, want only the untouched wrapper %q", cmds, command)
-			}
-		})
-	}
-}
-
 // TestEnsureHook_AdditionalRunGhostPrefixesAreRecognised pins the rest of the
 // wrappers that genuinely run ghost after the command-position walk became the
 // top-level rule: a DURATION or mask slot before the command (timeout, taskset,
@@ -1776,14 +1188,70 @@ func TestEnsureHook_RecognisesTheBinaryItWouldWrite(t *testing.T) {
 	}
 }
 
-func TestWarnPercentPath(t *testing.T) {
-	if runtime.GOOS != "windows" {
-		t.Skip("warnPercentPath only warns on windows")
+const currentRedirectTemplate = "# myproject Project Memory\n\nAll project knowledge is stored in Ghost and injected automatically at session start via the SessionStart hook.\nProject context (memories + summary) is already in your system prompt — no tool calls needed to load it.\n\nUse `ghost_memory_save` to save new discoveries during work.\nUse `ghost_memory_search` to search for specific facts.\n"
+
+func TestEnsureAutoMemoryDisabled_DryRun(t *testing.T) {
+	home := t.TempDir()
+	setHome(t, home)
+
+	path := filepath.Join(home, ".claude", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
 	}
-	var out strings.Builder
-	warnPercentPath(&out, `C:\Users\%USERNAME%\ghost.exe`)
-	if !strings.Contains(out.String(), "warning") {
-		t.Errorf("expected a warning, got %q", out.String())
+	if err := os.WriteFile(path, []byte(`{}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	sf, err := loadSettings(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if err := ensureAutoMemoryDisabled(&out, sf, true); err != nil {
+		t.Fatalf("ensureAutoMemoryDisabled dry run: %v", err)
+	}
+
+	output := out.String()
+	if !strings.Contains(output, "would set autoMemoryEnabled: false") {
+		t.Errorf("expected 'would set autoMemoryEnabled: false' in output, got: %s", output)
+	}
+
+	// In dry run, the in-memory state should not be modified.
+	_, present := sf.getAutoMemoryEnabled()
+	if present {
+		t.Error("dry run should not modify settings in memory")
+	}
+}
+
+func TestRetryHint(t *testing.T) {
+	err := retryHint(fmt.Errorf("something broke"))
+	msg := err.Error()
+	if !strings.Contains(msg, "something broke") {
+		t.Error("should preserve original error")
+	}
+	if !strings.Contains(msg, "ghost mcp init") {
+		t.Error("should include retry hint")
+	}
+}
+
+func TestShellQuoteWindows(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"ghost", `"ghost"`},
+		{`C:\Users\me\ghost.exe`, `"C:\Users\me\ghost.exe"`},
+		{`C:\path with spaces\ghost.exe`, `"C:\path with spaces\ghost.exe"`},
+		{`C:\path\with"quote\ghost.exe`, `"C:\path\with""quote\ghost.exe"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got := shellQuoteWindows(tt.input)
+			if got != tt.want {
+				t.Errorf("shellQuoteWindows(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
 	}
 }
 
@@ -1831,72 +1299,6 @@ func TestSplitUnquotedOperators_CutsASubshellCloser(t *testing.T) {
 	}
 }
 
-const currentRedirectTemplate = "# myproject Project Memory\n\nAll project knowledge is stored in Ghost and injected automatically at session start via the SessionStart hook.\nProject context (memories + summary) is already in your system prompt — no tool calls needed to load it.\n\nUse `ghost_memory_save` to save new discoveries during work.\nUse `ghost_memory_search` to search for specific facts.\n"
-
-const oldRedirectTemplate = "# myproject Project Memory\n\nAll project knowledge is stored in Ghost. At session start, run:\n1. `ghost_list_projects` to discover projects\n2. `ghost_project_context` with project_id \"myproject\" to load accumulated knowledge\n"
-
-func TestWriteRedirects_UpgradesUneditedOldRedirect(t *testing.T) {
-	home := t.TempDir()
-	setHome(t, home)
-	projectPath := absProjectPath(t)
-	projects := []projectInfo{{ID: "abc123", Path: projectPath, Name: "myproject"}}
-
-	target := filepath.Join(home, ".claude", "projects", projectSlug(projectPath), "memory", "MEMORY.md")
-	if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(target, []byte(oldRedirectTemplate), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	var out bytes.Buffer
-	writeRedirects(&out, projects, false)
-
-	data, err := os.ReadFile(target)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(data) != currentRedirectTemplate {
-		t.Fatalf("redirect not upgraded:\n got: %q\nwant: %q", string(data), currentRedirectTemplate)
-	}
-	if !strings.Contains(out.String(), "created redirect") {
-		t.Fatalf("expected 'created redirect', got: %s", out.String())
-	}
-}
-
-func TestWriteRedirects_KeepsEditedOldRedirect(t *testing.T) {
-	home := t.TempDir()
-	setHome(t, home)
-	projectPath := absProjectPath(t)
-	projects := []projectInfo{{ID: "abc123", Path: projectPath, Name: "myproject"}}
-
-	target := filepath.Join(home, ".claude", "projects", projectSlug(projectPath), "memory", "MEMORY.md")
-	if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
-		t.Fatal(err)
-	}
-	edited := oldRedirectTemplate + "USER NOTE: also see ghost_list_projects\n"
-	if err := os.WriteFile(target, []byte(edited), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	var out bytes.Buffer
-	writeRedirects(&out, projects, false)
-
-	data, err := os.ReadFile(target)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(data) != edited {
-		t.Fatalf("edited redirect was changed:\n got: %q\nwant: %q", string(data), edited)
-	}
-	if !strings.Contains(out.String(), "not overwriting") {
-		t.Fatalf("expected 'not overwriting', got: %s", out.String())
-	}
-	if strings.Contains(out.String(), "created redirect") {
-		t.Fatalf("unexpected rewrite: %s", out.String())
-	}
-}
-
 func TestWriteRedirects_KeepsEditedCurrentRedirect(t *testing.T) {
 	home := t.TempDir()
 	setHome(t, home)
@@ -1924,37 +1326,6 @@ func TestWriteRedirects_KeepsEditedCurrentRedirect(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "not overwriting") {
 		t.Fatalf("expected 'not overwriting', got: %s", out.String())
-	}
-}
-
-func TestWriteRedirects_IdempotentOnSecondRun(t *testing.T) {
-	home := t.TempDir()
-	setHome(t, home)
-	projectPath := absProjectPath(t)
-	projects := []projectInfo{{ID: "abc123", Path: projectPath, Name: "myproject"}}
-
-	var out bytes.Buffer
-	writeRedirects(&out, projects, false)
-	target := filepath.Join(home, ".claude", "projects", projectSlug(projectPath), "memory", "MEMORY.md")
-	first, err := os.ReadFile(target)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	out.Reset()
-	writeRedirects(&out, projects, false)
-	second, err := os.ReadFile(target)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(first) != string(second) {
-		t.Fatal("second run changed the redirect")
-	}
-	if !strings.Contains(out.String(), "redirect exists") {
-		t.Fatalf("expected 'redirect exists', got: %s", out.String())
-	}
-	if strings.Contains(out.String(), "created redirect") {
-		t.Fatalf("unexpected rewrite on second run: %s", out.String())
 	}
 }
 

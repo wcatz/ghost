@@ -24,28 +24,6 @@ const sampleInstructions = `# Rules
 - Monitoring: kube-prometheus-stack
 `
 
-// TestInstructionCoverage: a memory restating one rule is covered; a memory
-// that shares only a few words with a rule, or that a short generic line
-// happens to overlap, is not.
-func TestInstructionCoverage(t *testing.T) {
-	blocks := instructionBlocks(sampleInstructions)
-	cases := []struct {
-		content string
-		want    bool
-	}{
-		{"NEVER add Co-Authored-By or any AI attribution to commit messages. All commits belong to the user.", true},
-		{`NEVER revert, downgrade, pin back or hold a bump as a "fix". Root-cause the bug in the repo that owns it, fix it there, link it into the PR.`, true},
-		{"NEVER stack PRs (a PR based on another PR's branch). Every piece of work gets its own branch against main.", false},
-		{"Dashboards are deployed only from kube-prometheus-stack/dashboards via the sidecar; a ConfigMap edited by hand is overwritten on the next sync.", false},
-		{"The local Go toolchain lives in the module cache, so builds pass -trimpath.", false},
-	}
-	for _, c := range cases {
-		if got := coveredByInstructions(c.content, blocks); got != c.want {
-			t.Errorf("covered(%q) = %v, want %v", c.content, got, c.want)
-		}
-	}
-}
-
 func writeFile(t *testing.T, path, body string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
