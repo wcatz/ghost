@@ -35,12 +35,6 @@ const bandFramingMargin = 300
 // session-start block has a FRAMING — everything but the memory rows — within a
 // few hundred bytes of the host's 10,000-character limit, with rows in it that
 // are over the 9,000-byte cap.
-//
-// The rows are deliberately inside their bucket caps (15 project, 8 global) and
-// spread across categories, so no stage withholds or defers one: the block the
-// fixture measures is shaped only by the byte cap and the framing, which is the
-// pair under test. A stage cut would add clauses of its own to the count line
-// and make the framing of the no-row render impossible to state from the test.
 func seedFitBandStore(t *testing.T) (dbPath, projectPath string) {
 	t.Helper()
 	ghostDir := filepath.Join(t.TempDir(), "ghost")
@@ -105,20 +99,6 @@ func seedFitBandStore(t *testing.T) (dbPath, projectPath string) {
 
 // bandFramings renders the fixture the way the hook does, and returns the block
 // beside the two framings the fit pass compares.
-//
-//   - noCut is the framing with no row cut, which is what the pass reads on its
-//     first over-cap iteration. With nothing withheld and nothing cut, no bucket
-//     has a count line and the render is the framing alone.
-//   - allCut is the framing with EVERY row cut, which is what the ceiling decision
-//     is taken against. Each bucket now has byte-cut rows, so the render carries
-//     the Memories heading and the count line naming them — the clause the cuts
-//     earn — and that is what pushes the framing over the limit.
-//
-// Both are rendered through the production formatSessionContext with tallies taken
-// from the production projection (`assemble.CountsFor`) over a trace shaped the
-// way the pass shapes it, so neither number is this test's own arithmetic. The
-// all-cut trace is the one `allCutTrace` hands `Budget.Measure`: one
-// `response_fit` drop per row the answer holds.
 func bandFramings(t *testing.T, dbPath, projectPath string) (block string, noCut, allCut int) {
 	t.Helper()
 	cfg := mustHookConfig(t)
@@ -148,20 +128,6 @@ func bandFramings(t *testing.T, dbPath, projectPath string) (block string, noCut
 }
 
 // TestSessionStartFitPassDecidesTheCeilingOnce is the band edge of issue #987.
-//
-// The fit pass asks "can cutting rows help?" by measuring the framing against
-// Budget.FramingCeiling, and the framing it measured grew with the cuts: every
-// cut adds a clause to the count line, so a block whose framing sat just under
-// the limit passed the check on the first iteration, lost rows, crossed the
-// limit on the count line it had just earned, and stopped — over the byte cap,
-// with rows recorded as cut for nothing and a count line claiming the cut had
-// kept the block under a limit it was still over.
-//
-// The decision is now made ONCE, from a framing that does not depend on the
-// cuts: the framing as it stands if every row were cut, which is the longest the
-// count line can ever be. So a block in this band either fits under the cap or
-// keeps every row, and its count line never claims a cut that did not keep it
-// under the limit.
 func TestSessionStartFitPassDecidesTheCeilingOnce(t *testing.T) {
 	dbPath, projectPath := seedFitBandStore(t)
 	block, noCut, allCut := bandFramings(t, dbPath, projectPath)

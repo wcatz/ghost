@@ -47,15 +47,6 @@ type claudeFake struct {
 // argv of every add-json it accepts in adds and of every remove it accepts in
 // removed. An add-json the fake refuses records nothing, so a case that must not
 // roll back is pinned by the absence of either file.
-//
-// Both scripts are FLAT — no branch nested inside another — and neither expands
-// the add-json argv into a conditional: cmd.exe refuses to parse an `if` whose
-// expansion contains the JSON a re-add passes (quotes that unbalance the line,
-// which is what made the first attempt's nested check silently never fire). The
-// fake tells the two add-json calls apart by ORDER, and each test still pins
-// WHICH config came back by what it recorded: `TestRegisterMCPRestoresThe-
-// PreviousRegistrationOnAddFailure` is the one that catches a rollback that
-// re-adds the new registration instead of the previous one.
 func writeFakeClaude(t *testing.T, dir string, f claudeFake) string {
 	t.Helper()
 	name := "claude"

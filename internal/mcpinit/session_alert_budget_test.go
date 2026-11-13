@@ -34,19 +34,6 @@ var alertBudgetName = strings.Repeat("n", 700)
 // seedAlertBudgetStore builds the store the session-start budget fixture
 // needs: a project the session resolves to, and a block that REACHES the byte
 // cap.
-//
-// The block is over the cap on purpose — the framing (the learned summary,
-// the tasks, the decisions) plus the rows is more than the cap allows — so
-// the fit pass gives up rows until the block fits, which is the state the
-// issue's reproduction is about: a store whose block reaches the cap, with an
-// alert printed ahead of it on the same stdout.
-//
-// The rows are kept small on purpose. The fit pass gives up WHOLE rows, so a
-// row of 200 bytes would leave the block anywhere in the last 200 bytes below
-// the cap, and the fixture would not reliably be the case under test. A small
-// row leaves the block within a few bytes of the cap, and the project name —
-// printed twice in the framing, so two bytes at a time — is the fine lever
-// that puts it there.
 func seedAlertBudgetStore(t *testing.T, xdgHome string) (projectPath string) {
 	t.Helper()
 	projectPath = filepath.Join(t.TempDir(), "alertproj")
@@ -118,18 +105,6 @@ func alertBudgetBlock(t *testing.T, dbPath, projectPath string) string {
 
 // TestSessionStart_AlertAndBlockStayUnderTheHostLimit is the issue's
 // reproduction.
-//
-// The session-start block is capped at sessionStartByteCap, and the margin
-// under the host's 10,000-character limit is meant to cover the alert line
-// printed ahead of the block on the same stdout. The alert was not measured
-// and not bounded: it renders the marker's project twice (300 bytes each) and
-// the error beside it (300 bytes), so the alert alone reached about 1,200
-// bytes — more than the margin — and the block's own cap did not know the
-// alert was there.
-//
-// So a store whose block reaches the cap, plus a marker naming a 300-byte
-// project with a long error, produced a session-start output over the host's
-// limit, and the host replaced the whole block with a preview.
 func TestSessionStart_AlertAndBlockStayUnderTheHostLimit(t *testing.T) {
 	isolatedHome(t)
 	xdgHome := t.TempDir()
@@ -311,16 +286,6 @@ func TestSessionStart_AlertKeepsAnEscapedErrorInsideItsBound(t *testing.T) {
 }
 
 // TestSessionStart_ProjectCutNeverSplitsAnEscape pins the project's cut.
-//
-// The value is cut on the RAW side and the ESCAPED form is what the share is
-// measured against, so the cut is always a whole escape sequence. Cutting the
-// escaped form instead left "\x" where the value held "\x1b", and it could cut
-// a backtick's escape in half — which is the escape that keeps the retry
-// command's own backtick from closing the span early.
-//
-// The value carries a control rune and a pair of backticks, which are the two
-// escapes the renderer writes, and the shares run from the smallest that can
-// hold a character to the one the alert's own budget hands out.
 func TestSessionStart_ProjectCutNeverSplitsAnEscape(t *testing.T) {
 	raw := "proj\x1b`name`tail"
 	label := assemble.Label(raw)
@@ -380,10 +345,6 @@ func TestSessionStart_ProjectCutLeavesTheRetryCommandSpanned(t *testing.T) {
 // entry is cut on the raw value and the rendered entry is what the bound is
 // checked against, so the quoting it carries is never left open and its
 // escapes are never half-written.
-//
-// A space puts the entry inside quotes and a control rune escapes it, and
-// the names carry the escape at a different offset each time, so the cut
-// lands inside one of them somewhere in the list.
 func TestSessionStart_PhaseEntryKeepsItsQuoting(t *testing.T) {
 	for i := range 10 {
 		raw := fmt.Sprintf("phase-%d \x1b[31m", i) + strings.Repeat("x", i*7)
