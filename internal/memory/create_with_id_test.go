@@ -93,39 +93,24 @@ func TestCreateWithIDStillGuardsCredentials(t *testing.T) {
 	}
 }
 
-// TestCreateWithIDRefusesAnIDAlreadyInUse: the id is a primary key, so a second
-// row claiming one is an error rather than a second copy of the row. This is what
-// makes a corpus-derived id safe to build from the item's own name: a fixture
-// that claims the same name twice fails the seed loudly instead of silently
-// halving the corpus.
 func TestCreateWithIDRefusesAnIDAlreadyInUse(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
 	const id = "bench:graded:pledge"
-
 	if _, err := s.CreateWithID(ctx, testProject, id, Memory{Category: "fact", Content: "the pledge is 5000", Source: "mcp"}); err != nil {
 		t.Fatalf("CreateWithID: %v", err)
 	}
-	_, err := s.CreateWithID(ctx, testProject, id, Memory{Category: "fact", Content: "a second row claiming the same id", Source: "mcp"})
-	if err == nil {
+	if _, err := s.CreateWithID(ctx, testProject, id, Memory{Category: "fact", Content: "a second row claiming the same id", Source: "mcp"}); err == nil {
 		t.Fatal("a second row was stored under an id already in use")
 	}
-	if n, err := s.CountMemories(ctx, testProject); err != nil {
-		t.Fatalf("CountMemories: %v", err)
-	} else if n != 1 {
-		t.Errorf("got %d memories, want 1: the duplicate replaced or added a row", n)
+	if n, err := s.CountMemories(ctx, testProject); err != nil || n != 1 {
+		t.Fatalf("CountMemories = %d, %v, want 1", n, err)
 	}
 }
 
-// TestCreateDrawsItsOwnIDFromTheColumn: Create takes no id, and it must keep
-// taking none — the id column's default is what mints it, and that is also what
-// every other writer in the schema relies on. The explicit-id seam is threaded
-// through the same INSERT, so this is the pin on the branch that would take
-// production's id generation down with it.
 func TestCreateDrawsItsOwnIDFromTheColumn(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
-
 	first, err := s.Create(ctx, testProject, Memory{Category: "fact", Content: "a memory created without an id", Source: "mcp"})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -134,10 +119,7 @@ func TestCreateDrawsItsOwnIDFromTheColumn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if first == second {
-		t.Fatalf("Create minted %q for both rows: the id no longer comes from the column default", first)
-	}
-	if first == "" || second == "" {
+	if first == "" || second == "" || first == second {
 		t.Fatalf("Create returned ids %q and %q", first, second)
 	}
 }

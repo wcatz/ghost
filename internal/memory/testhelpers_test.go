@@ -50,10 +50,3 @@ func resetQueryKeyCache() {
 // loaders — so the two reads cannot disagree about what an unreadable column
 // means. It stays nil, rather than failing, for a value it cannot decode.
 func ParseScopeJSON(raw []byte) map[string]string { return parseScopeJSON(raw) }
-
-func (s *vectorScratch) allocationCount() int64 {
-	if s == nil {
-		return 0
-	}
-	return s.allocs.Load()
-}

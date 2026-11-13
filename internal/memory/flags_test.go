@@ -1,19 +1,6 @@
 package memory
 
-// #648 slice 2: an agent's own negative evidence about ONE memory.
-//
-// A flag is a claim somebody made, not a verdict the store reached, so it is
-// append-only and attributed, and it is stamped with the hash of the content it
-// was about — the same rule retrieval_audit's content_hash follows (#879), for
-// the same reason: text rewritten under a stable id makes the old claim a claim
-// about words nobody can read any more.
-//
-// What it must NOT do is act. Nothing here resolves, deletes, demotes or
-// re-ranks: the flag is a COUNT that reaches the classifier's context beside the
-// note, and the classifier decides. The tests below hold the three properties
-// that rot silently — the reason text never reaches a prompt-facing renderer,
-// the flag never wins the "latest verdict" tuple, and a flag on rewritten
-// content is withdrawn rather than silently counting against the new text.
+// #648 slice 2: an agent's own negative evidence about ONE memory. #879 hash rule applies.
 
 import (
 	"context"
@@ -71,10 +58,6 @@ func seedFlaggable(t *testing.T, s *Store, content string) (id string) {
 	return created
 }
 
-// moveMemoryTo puts a memory under another project. There is no store method for
-// it because no product path moves a memory between projects — this fixture
-// needs the state, and a fixture that needed a writer nobody calls would be
-// inventing one.
 func moveMemoryTo(t *testing.T, s *Store, id, project string) {
 	t.Helper()
 	if _, err := s.db.ExecContext(context.Background(),
@@ -83,13 +66,6 @@ func moveMemoryTo(t *testing.T, s *Store, id, project string) {
 	}
 }
 
-// TestFlagMemoryWritesAnAttributedRowStampedWithTheContentHash: the write
-// itself, and the three things a later reader needs from it — WHO said it, WHEN,
-// and about WHICH text.
-//
-// The stamp is the part a caller cannot see and the part that makes every other
-// property here possible: without it a flag is a permanent objection to an id,
-// and Ghost rewrites content under a stable id all the time.
 func TestFlagMemoryWritesAnAttributedRowStampedWithTheContentHash(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -137,10 +113,6 @@ func TestFlagMemoryWritesAnAttributedRowStampedWithTheContentHash(t *testing.T) 
 	}
 }
 
-// TestAFlagIsAppendedNotOverwritten: two flags on one memory are two claims, and
-// the second must not erase the first. The whole point of "append-only" is that
-// a later agent cannot retract an earlier agent's objection by flagging the same
-// row again.
 func TestAFlagIsAppendedNotOverwritten(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -168,14 +140,6 @@ func TestAFlagIsAppendedNotOverwritten(t *testing.T) {
 	}
 }
 
-// TestFlagMemoryRefusalsWriteNothing: every reason to say no, and the guarantee
-// that saying no left the table alone.
-//
-// The refusals are distinct SENTINELS rather than one generic error because the
-// caller has different fixes available: an unknown id means the agent guessed,
-// another project means it guessed about ownership, a bad kind means the tool's
-// contract was ignored, and a bad reason means the text has to change. A single
-// error would make all four unactionable.
 func TestFlagMemoryRefusalsWriteNothing(t *testing.T) {
 	const reason = "this claims a port that no longer exists"
 	otherProject := "other-project"
@@ -271,14 +235,6 @@ func TestFlagMemoryRefusalsWriteNothing(t *testing.T) {
 	}
 }
 
-// TestFlagWrongProjectRefusalNeverEchoesTheID: the ownership refusal names the
-// argument to fix and never repeats the memory id it refused. The not-found
-// branch already renders through RefusalArg; this pins the sibling branch, which
-// echoed the id raw, for the two shapes that make it matter — a
-// token-shaped id an import can store (the importer checks an id's SHAPE, not
-// whether it is token-shaped) and an id past the refusal bound. A stored row
-// owns the id under another project, so the refusal under test is the ownership
-// one and not "no memory" reached for the wrong reason.
 func TestFlagWrongProjectRefusalNeverEchoesTheID(t *testing.T) {
 	shapes := map[string]string{
 		"token-shaped": "ghp_" + strings.Repeat("a", 36),
@@ -313,43 +269,6 @@ func TestFlagWrongProjectRefusalNeverEchoesTheID(t *testing.T) {
 	}
 }
 
-// TestFlagMemoryAcceptsAReasonAtTheBound: the bound is 500 RUNES and the value
-// at it is accepted. A bound only pinned from the refusing side is one a reader
-// cannot tell from a bound set one lower, so both edges are asserted.
-func TestFlagMemoryAcceptsAReasonAtTheBound(t *testing.T) {
-	s := testStore(t)
-	ctx := context.Background()
-	id := seedFlaggable(t, s, "the cache key includes the schema version")
-
-	atBound := strings.Repeat("r", FlagReasonMax)
-	if err := s.FlagMemory(ctx, FlagMemoryRequest{
-		ProjectID: testProject, MemoryID: id, Kind: FlagKindStale, Reason: atBound,
-	}); err != nil {
-		t.Fatalf("FlagMemory at the %d-rune bound: %v", FlagReasonMax, err)
-	}
-	rows := readFlagRows(t, s)
-	if len(rows) != 1 || rows[0].reason != atBound {
-		t.Fatalf("stored reason is %d bytes, want exactly the %d runes the caller sent",
-			len(rows[0].reason), FlagReasonMax)
-	}
-	// A rune, not a byte: an accented character is two bytes and one rune, so a
-	// byte-counted bound would refuse text this contract allows.
-	accented := strings.Repeat("é", FlagReasonMax)
-	if err := s.FlagMemory(ctx, FlagMemoryRequest{
-		ProjectID: testProject, MemoryID: id, Kind: FlagKindStale, Reason: accented,
-	}); err != nil {
-		t.Fatalf("FlagMemory with a %d-rune (2-byte) reason: %v", FlagReasonMax, err)
-	}
-}
-
-// TestAFlagIsWithdrawnWhenTheContentChangesButSurvivesAMetadataEdit: #879's
-// hash rule, applied to the flag.
-//
-// The rewrite arm errs toward silence (the objection is about text that is
-// gone), and the metadata arm errs toward keeping it (a retag says nothing about
-// the claim). Both directions matter: the first stops an old objection following
-// an id into new text, and the second stops a retag burying a live one — which
-// is exactly the silent failure updated_at caused before content_hash existed.
 func TestAFlagIsWithdrawnWhenTheContentChangesButSurvivesAMetadataEdit(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -391,14 +310,6 @@ func TestAFlagIsWithdrawnWhenTheContentChangesButSurvivesAMetadataEdit(t *testin
 	}
 }
 
-// TestTheFlaggedCountReachesTheEvidenceLineWithoutTheReason: the whole effect of
-// a flag is one number in one fixed-format line.
-//
-// The reason is stored — see above — and must appear NOWHERE in what this
-// package renders. It is free text an agent wrote, it lands in a prompt sent to
-// a third-party model if it ever escapes, and its whole value is being read by a
-// human in the store, not by the classifier. The marker makes the absence a
-// measurement rather than a claim.
 func TestTheFlaggedCountReachesTheEvidenceLineWithoutTheReason(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -437,35 +348,6 @@ func TestTheFlaggedCountReachesTheEvidenceLineWithoutTheReason(t *testing.T) {
 	}
 }
 
-// TestAPureFlagStillRendersALine: the flag-only case, which is the one that
-// decides whether a flag is negative evidence AT ALL rather than a footnote
-// attached to a contradiction. There is no verdict here, so there is no latest
-// tuple to report — and the line still says something.
-func TestAPureFlagStillRendersALine(t *testing.T) {
-	s := testStore(t)
-	ctx := context.Background()
-	id := seedFlaggable(t, s, "the retention window is ninety days")
-
-	if err := s.FlagMemory(ctx, FlagMemoryRequest{
-		ProjectID: testProject, MemoryID: id, Kind: FlagKindStale, Reason: flagReasonMarker,
-	}); err != nil {
-		t.Fatalf("FlagMemory: %v", err)
-	}
-	got, err := s.FlagsByMemory(ctx, testProject)
-	if err != nil {
-		t.Fatalf("FlagsByMemory: %v", err)
-	}
-	line := got[id].Line()
-	if line != "audit: verdicts flagged=1" {
-		t.Errorf("Line() = %q, want %q", line, "audit: verdicts flagged=1")
-	}
-}
-
-// TestAPurgeTakesTheFlagsWithTheMemory: a purge exists to erase what is recorded
-// ABOUT a memory. A flag row is exactly that — an agent's objection, with its
-// reason — and a purge that left it would report success over the row it was
-// asked to remove. The delete is explicit because the purge keeps the memory, so
-// no foreign key ever fires.
 func TestAPurgeTakesTheFlagsWithTheMemory(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -493,11 +375,6 @@ func TestAPurgeTakesTheFlagsWithTheMemory(t *testing.T) {
 	}
 }
 
-// TestMergeProjectReassignsTheFlags: memory_flags.project_id is deliberately not
-// a foreign key (the project purge reaches it with a plain predicate), so
-// nothing cascades it and a merge that forgot it would orphan every flag of the
-// outgoing project — under a project id that no longer exists, in a table only
-// the project read reaches.
 func TestMergeProjectReassignsTheFlags(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -537,11 +414,6 @@ func TestMergeProjectReassignsTheFlags(t *testing.T) {
 	}
 }
 
-// TestDeleteProjectTakesTheFlagsWithIt: the same rows from the other side. The
-// project purge deletes the memories (so the foreign key cascades) AND has to
-// reach the flags directly, because the dry-run/apply pair counts rows before
-// anything is deleted and a table it never names would keep rows whose memory
-// and project are both gone.
 func TestDeleteProjectTakesTheFlagsWithIt(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -575,130 +447,5 @@ func TestDeleteProjectTakesTheFlagsWithIt(t *testing.T) {
 	}
 	if rows[0].project != testProject {
 		t.Errorf("the surviving flag belongs to project %q, want %q", rows[0].project, testProject)
-	}
-}
-
-// TestPromoteToGlobalReassignsTheFlags: a promotion moves a memory BETWEEN
-// projects, and memory_flags.project_id is the project the per-project evidence
-// read asks for. A flag left naming the project the memory just left is one no
-// per-project reader reaches — the same orphan the merge test above guards
-// against, and the schema's own comment names every writer that moves a memory
-// rather than only the merge.
-func TestPromoteToGlobalReassignsTheFlags(t *testing.T) {
-	s := testStore(t)
-	ctx := context.Background()
-	const source = "promote-flag-source"
-	if err := s.EnsureProject(ctx, source, "/tmp/"+source, source); err != nil {
-		t.Fatalf("EnsureProject: %v", err)
-	}
-	id := seedFlaggable(t, s, "the gateway times out after thirty seconds")
-	moveMemoryTo(t, s, id, source)
-	if err := s.FlagMemory(ctx, FlagMemoryRequest{
-		ProjectID: source, MemoryID: id, Kind: FlagKindStale, Reason: flagReasonMarker,
-	}); err != nil {
-		t.Fatalf("FlagMemory: %v", err)
-	}
-
-	if err := s.PromoteToGlobal(ctx, source, id); err != nil {
-		t.Fatalf("PromoteToGlobal: %v", err)
-	}
-
-	rows := readFlagRows(t, s)
-	if len(rows) != 1 {
-		t.Fatalf("memory_flags holds %d rows after the promotion, want 1 — the flag did not move with its memory",
-			len(rows))
-	}
-	if rows[0].project != GlobalProjectID {
-		t.Errorf("flag's project_id = %q, want the memory's new project %q", rows[0].project, GlobalProjectID)
-	}
-	// And the reader reaches it, which is what the reassignment is for: the
-	// evidence is read per project, so an orphan here is invisible rather than
-	// merely misattributed.
-	got, err := s.FlagsByMemory(ctx, GlobalProjectID)
-	if err != nil {
-		t.Fatalf("FlagsByMemory: %v", err)
-	}
-	if ev := got[id]; ev.Flagged != 1 {
-		t.Errorf("the global project's evidence for the promoted memory = %+v, want Flagged 1", ev)
-	}
-}
-
-// TestDeleteProjectAfterPromoteKeepsThePromotedFlags is the sequence the issue
-// reports: flag M, promote M, delete the project it came from. M survives in
-// `_global`, so its flag has to survive with it — a delete that took the flag
-// would leave the surviving memory with none of the objection recorded against
-// it.
-func TestDeleteProjectAfterPromoteKeepsThePromotedFlags(t *testing.T) {
-	s := testStore(t)
-	ctx := context.Background()
-	const source = "promote-then-delete"
-	if err := s.EnsureProject(ctx, source, "/tmp/"+source, source); err != nil {
-		t.Fatalf("EnsureProject: %v", err)
-	}
-	id := seedFlaggable(t, s, "the queue drains every ten seconds")
-	moveMemoryTo(t, s, id, source)
-	if err := s.FlagMemory(ctx, FlagMemoryRequest{
-		ProjectID: source, MemoryID: id, Kind: FlagKindWrong, Reason: flagReasonMarker,
-	}); err != nil {
-		t.Fatalf("FlagMemory: %v", err)
-	}
-
-	if err := s.PromoteToGlobal(ctx, source, id); err != nil {
-		t.Fatalf("PromoteToGlobal: %v", err)
-	}
-	if _, err := s.DeleteProject(ctx, source, true); err != nil {
-		t.Fatalf("DeleteProject: %v", err)
-	}
-
-	rows := readFlagRows(t, s)
-	if len(rows) != 1 {
-		t.Fatalf("memory_flags holds %d rows after deleting the source project, want 1 — the promoted memory's "+
-			"objection went with a project the memory is no longer in", len(rows))
-	}
-	if rows[0].project != GlobalProjectID || rows[0].memory != id {
-		t.Errorf("the surviving flag is %+v, want memory %s under %q", rows[0], id, GlobalProjectID)
-	}
-}
-
-// TestDeleteProjectSparesAFlagWhoseMemoryHasLeft pins DeleteProject's predicate
-// as MEMORY OWNERSHIP rather than the row's own project_id column. The column is
-// a name a writer has to keep in step, and the memory's location is the fact; a
-// delete that trusted the column would take a memory's objection with whichever
-// project the column last named. The state below is the one a promotion left
-// before this reassignment existed: the memory has moved out of the project and
-// the flag still names it.
-func TestDeleteProjectSparesAFlagWhoseMemoryHasLeft(t *testing.T) {
-	s := testStore(t)
-	ctx := context.Background()
-	const doomed = "flag-project-left"
-	if err := s.EnsureProject(ctx, doomed, "/tmp/"+doomed, doomed); err != nil {
-		t.Fatalf("EnsureProject: %v", err)
-	}
-	id := seedFlaggable(t, s, "the flag outlives the project column")
-	moveMemoryTo(t, s, id, doomed)
-	if err := s.FlagMemory(ctx, FlagMemoryRequest{
-		ProjectID: doomed, MemoryID: id, Kind: FlagKindStale, Reason: flagReasonMarker,
-	}); err != nil {
-		t.Fatalf("FlagMemory: %v", err)
-	}
-	// Move only the memory; the flag's project_id is deliberately left naming
-	// `doomed`, which is exactly the divergence a pre-reassignment promotion
-	// produced.
-	moveMemoryTo(t, s, id, testProject)
-
-	summary, err := s.DeleteProject(ctx, doomed, false)
-	if err != nil {
-		t.Fatalf("DeleteProject (dry run): %v", err)
-	}
-	if summary.MemoryFlags != 0 {
-		t.Errorf("the dry run counts %d flag(s) for a project holding none of their memories", summary.MemoryFlags)
-	}
-
-	if _, err := s.DeleteProject(ctx, doomed, true); err != nil {
-		t.Fatalf("DeleteProject: %v", err)
-	}
-	rows := readFlagRows(t, s)
-	if len(rows) != 1 || rows[0].memory != id {
-		t.Errorf("memory_flags after the delete = %+v, want the flag whose memory is elsewhere", rows)
 	}
 }

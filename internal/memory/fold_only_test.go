@@ -6,19 +6,6 @@ import (
 )
 
 // TestUpsertFoldOnlyDoesNotInsertTheIncomingText is issue #544.
-//
-// _global accumulated 68 redundant rows in 19 clusters — one "gouroboros PR
-// workflow" fact had nine reflection-sourced paraphrases. Every project scope
-// had zero such clusters, because _global is written by promotion from every
-// project's reflect, while project memories are written once by one project.
-//
-// Upsert's normal fold strengthens the target and then inserts the incoming
-// text as its own row linked as a duplicate. That is right for a save: the
-// caller explicitly asked for this text to be stored, so the new wording is
-// kept. It is wrong for promotion, where the same fact arriving from another
-// project's reflection is a fresh paraphrase of something _global already
-// knows, and a row per paraphrase is pure bloat that still occupies a window
-// slot and feeds resolve and supersede.
 func TestUpsertFoldOnlyDoesNotInsertTheIncomingText(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -61,11 +48,6 @@ func TestUpsertFoldOnlyDoesNotInsertTheIncomingText(t *testing.T) {
 	}
 }
 
-// TestUpsertFoldOnlyStillStrengthens: folding is not discarding. The incoming
-// text is evidence the fact is worth keeping, so the existing row must be
-// strengthened exactly as the ordinary fold path strengthens it — otherwise
-// promotion would silently lose the signal that made the duplicate worth
-// noticing.
 func TestUpsertFoldOnlyStillStrengthens(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -100,9 +82,6 @@ func TestUpsertFoldOnlyStillStrengthens(t *testing.T) {
 	}
 }
 
-// TestUpsertFoldOnlyInsertsWhenThereIsNoDuplicate: fold-only changes what
-// happens on a match, not on a miss. A genuinely new global memory must still
-// be written, or promotion would silently drop facts _global has never seen.
 func TestUpsertFoldOnlyInsertsWhenThereIsNoDuplicate(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -129,9 +108,6 @@ func TestUpsertFoldOnlyInsertsWhenThereIsNoDuplicate(t *testing.T) {
 	}
 }
 
-// TestUpsertDefaultStillInsertsTheDuplicateRow: fold-only is opt-in and scoped
-// to promotion. Ordinary saves must keep inserting the caller's text as its own
-// row, because the caller explicitly asked for that text to be stored.
 func TestUpsertDefaultStillInsertsTheDuplicateRow(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -158,14 +134,6 @@ func TestUpsertDefaultStillInsertsTheDuplicateRow(t *testing.T) {
 	}
 }
 
-// TestUpsertFoldOnlyInsertsInsteadOfFoldingIntoResolvedRow is the case the
-// default fold is allowed to get away with and FoldOnly is not. A default
-// upsert that re-saves the text of a resolved memory strengthens it and leaves
-// it resolved, which is what TestUnresolveOnWrite pins. FoldOnly strengthens the
-// row and then returns WITHOUT storing the incoming wording — so if the target
-// is a resolved _global row, the session-start block's passive read and
-// GetTopMemories both exclude it and the promotion reports success while the
-// memory is in no readable place at all. It has to fall through to the insert.
 func TestUpsertFoldOnlyInsertsInsteadOfFoldingIntoResolvedRow(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()

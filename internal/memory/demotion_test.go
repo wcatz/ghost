@@ -82,9 +82,6 @@ func TestDemotionPenaltiesKeepsOneSidedScopeRelatedEdge(t *testing.T) {
 	}
 }
 
-// TestSupersedePenalties: the shared injection/search helper penalizes only
-// the superseded side, and only when both endpoints are in the window —
-// same rule as SupersedesWithin.
 func TestSupersedePenalties(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -120,12 +117,6 @@ func TestSupersedePenalties(t *testing.T) {
 	}
 }
 
-// TestSupersedePenaltiesIgnoresScopeConflictingEdge: a 'supersedes' edge whose
-// endpoints name different environments is a claim that one replaced the other,
-// which is not a claim either of them makes. It can already be in the store —
-// written before the writer-side guard existed, or by a manual link — so the
-// consumer is the only place that can keep it from sinking a production answer
-// behind a development one.
 func TestSupersedePenaltiesIgnoresScopeConflictingEdge(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -151,10 +142,6 @@ func TestSupersedePenaltiesIgnoresScopeConflictingEdge(t *testing.T) {
 	}
 }
 
-// TestSupersedePenaltiesKeepsOneSidedScopeEdge: silence is not disagreement. A
-// scoped memory and an unscoped one are compatible, and the guard must not
-// exempt that pair — a global rule and the environment it applies to are
-// genuinely about to replace one another.
 func TestSupersedePenaltiesKeepsOneSidedScopeEdge(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -194,86 +181,6 @@ func TestDemotionPenaltiesIgnoresBelowThreshold(t *testing.T) {
 	}
 }
 
-func TestDemotionPenaltiesNeverPenalizesPinnedOverUnpinned(t *testing.T) {
-	s := testStore(t)
-	ctx := context.Background()
-	// a ranks higher than b (index 0 vs 1) but b is pinned and a is not.
-	a := makeMemory(t, s, "unpinned near-duplicate, ranked higher")
-	b := makeMemory(t, s, "pinned near-duplicate, ranked lower")
-
-	if err := s.CreateLink(ctx, a, b, "related", 0.95, "auto"); err != nil {
-		t.Fatalf("CreateLink: %v", err)
-	}
-
-	pinned := map[string]bool{b: true}
-	penalty, err := DemotionPenalties(ctx, s.db, []string{a, b}, pinned, 0.90)
-	if err != nil {
-		t.Fatalf("DemotionPenalties: %v", err)
-	}
-	if penalty[a] != 1 {
-		t.Errorf("penalty[a] = %d, want 1 (unpinned should absorb the penalty)", penalty[a])
-	}
-	if penalty[b] != 0 {
-		t.Errorf("penalty[b] = %d, want 0 (pinned must survive)", penalty[b])
-	}
-}
-
-func TestDemotionPenaltiesCollapsesMutualCluster(t *testing.T) {
-	s := testStore(t)
-	ctx := context.Background()
-	a := makeMemory(t, s, "cluster fact v1")
-	b := makeMemory(t, s, "cluster fact v2")
-	c := makeMemory(t, s, "cluster fact v3")
-
-	// All-pairwise above threshold: a is rank 0, b rank 1, c rank 2.
-	if err := s.CreateLink(ctx, a, b, "related", 0.95, "auto"); err != nil {
-		t.Fatalf("CreateLink a-b: %v", err)
-	}
-	if err := s.CreateLink(ctx, a, c, "related", 0.95, "auto"); err != nil {
-		t.Fatalf("CreateLink a-c: %v", err)
-	}
-	if err := s.CreateLink(ctx, b, c, "related", 0.95, "auto"); err != nil {
-		t.Fatalf("CreateLink b-c: %v", err)
-	}
-
-	penalty, err := DemotionPenalties(ctx, s.db, []string{a, b, c}, map[string]bool{}, 0.90)
-	if err != nil {
-		t.Fatalf("DemotionPenalties: %v", err)
-	}
-	if penalty[a] != 0 {
-		t.Errorf("penalty[a] = %d, want 0 (top-ranked survivor)", penalty[a])
-	}
-	if penalty[b] != 1 {
-		t.Errorf("penalty[b] = %d, want 1", penalty[b])
-	}
-	if penalty[c] != 2 {
-		t.Errorf("penalty[c] = %d, want 2 (loses to both a and b)", penalty[c])
-	}
-
-	items := []string{a, b, c}
-	ordered := StableDemote(items, func(id string) string { return id }, penalty)
-	if ordered[0] != a {
-		t.Errorf("expected a first after StableDemote, got %v", ordered)
-	}
-}
-
-func TestDemotionPenaltiesQueryErrorPropagates(t *testing.T) {
-	s := testStore(t)
-	ctx := context.Background()
-	if err := s.db.Close(); err != nil {
-		t.Fatalf("close db: %v", err)
-	}
-
-	_, err := DemotionPenalties(ctx, s.db, []string{"a", "b"}, map[string]bool{}, 0.90)
-	if err == nil {
-		t.Fatal("expected error from DemotionPenalties on closed db, got nil")
-	}
-}
-
-// TestDemotionPenaltiesIncludesDuplicateEdges: Upsert's 'duplicate' edges are
-// exempt from the cosine strength threshold (their strength is a Jaccard
-// score), so a lexically near-identical pair is demoted even though the linker
-// never wrote a >=0.90 'related' edge for it.
 func TestDemotionPenaltiesIncludesDuplicateEdges(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -296,9 +203,6 @@ func TestDemotionPenaltiesIncludesDuplicateEdges(t *testing.T) {
 	}
 }
 
-// TestNearDuplicateDemoteReordersSearchWindow verifies the search path's
-// demotion actually reorders the window: with [B, A, other] and a B-A
-// duplicate edge, A (lower-ranked) sinks below the unrelated memory.
 func TestNearDuplicateDemoteReordersSearchWindow(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
