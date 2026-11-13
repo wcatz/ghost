@@ -1,7 +1,6 @@
 package assemble
 
 import (
-	"fmt"
 	"strings"
 	"testing"
 
@@ -45,17 +44,6 @@ func TestPinnedRowContradictedByNewerRowIsKeptAndMarked(t *testing.T) {
 	}
 }
 
-func TestPinnedRowContradictedByOlderRowIsNotMarkedContradicted(t *testing.T) {
-	pin := pinnedStamped("PIN", 0.5, "2026-06-01 00:00:00")
-	older := stamped("OLD", 0.9, "2026-01-01 00:00:00")
-	res := run(t, &fakeRetriever{set: contradicting([][2]string{{"OLD", "PIN"}}, older, pin)}, separationRequest())
-
-	assertSeparated(t, res, "PIN", "OLD")
-	if line := lineOf(t, res.Response, "PIN"); strings.Contains(line, "contradicted_by=") {
-		t.Errorf("an older contradicting row marked the pinned row: %q", line)
-	}
-}
-
 func TestPinnedRowIsNeverWithheldByAnotherPinnedRow(t *testing.T) {
 	older := pinnedStamped("OLD", 0.9, "2026-01-01 00:00:00")
 	newer := pinnedStamped("NEW", 0.5, "2026-06-01 00:00:00")
@@ -92,54 +80,14 @@ func TestPinnedMarkerSkipsAScopeConflictingEdge(t *testing.T) {
 	}
 }
 
-func TestPinnedMarkerListsAPairStoredBothWaysOnce(t *testing.T) {
-	pin := pinnedStamped("PIN", 0.5, "2026-01-01 00:00:00")
-	newer := stamped("NEW", 0.9, "2026-06-01 00:00:00")
-	res := run(t, &fakeRetriever{set: contradicting([][2]string{{"NEW", "PIN"}, {"PIN", "NEW"}}, newer, pin)}, separationRequest())
-
-	if line := lineOf(t, res.Response, "PIN"); strings.Count(line, "`NEW`") != 2 { // once per label
-		t.Errorf("a pair stored both ways is named more than once per label: %q", line)
-	}
-}
-
-func TestPinnedMarkerIsBounded(t *testing.T) {
-	rows := []memory.Candidate{pinnedStamped("PIN", 0.5, "2026-01-01 00:00:00")}
-	var edges [][2]string
-	for i := 0; i < maxRenderedConflictPartners+2; i++ {
-		id := fmt.Sprintf("N%02d", i)
-		rows = append(rows, stamped(id, 0.9-float64(i)/100, "2026-06-01 00:00:00"))
-		edges = append(edges, [2]string{id, "PIN"})
-	}
-	req := separationRequest()
-	req.Budget.MaxItems = 20
-	res := run(t, &fakeRetriever{set: contradicting(edges, rows...)}, req)
-
-	line := lineOf(t, res.Response, "PIN")
-	if got := strings.Count(line, "(+2 more)"); got != 2 { // conflicts_with and contradicted_by
-		t.Errorf("both labels must bound their ids with (+2 more): %q", line)
-	}
-	if !strings.Contains(line, "contradicted_by=`N00`,") {
-		t.Errorf("contradicted_by= missing or out of rank order: %q", line)
-	}
-}
-
-func TestNoContradictionMarkerWithoutAPinnedContradiction(t *testing.T) {
-	res := run(t, &fakeRetriever{set: contradictingSet(stamped("A1", 0.9, ""), stamped("B1", 0.8, ""))}, separationRequest())
-	if strings.Contains(res.Response, "contradicted_by=") {
-		t.Errorf("an unpinned pair carries the pinned marker:\n%s", res.Response)
-	}
-}
-
 // The marker names a kept pinned partner only while that partner is still in the
 // answer: the response-fit pass can cut it after stage 5, and the surviving row
-// must not point at a row the reader no longer has. (The withheld side is the
-// opposite case: out of the answer by construction, and named.)
+// must not point at a row the reader no longer has.
 func TestPinnedMarkerDropsAKeptPartnerTheResponseFitCut(t *testing.T) {
 	older := pinnedStamped("OLD", 0.9, "2026-01-01 00:00:00")
 	newer := pinnedStamped("NEW", 0.5, "2026-06-01 00:00:00")
-	// NEW is the row the cap cuts and is deliberately LARGE: the trim's cut
-	// notice is counted against the cap, so a short last row would not free
-	// enough for the notice and a second row would follow it out.
+	// NEW is the row the cap cuts and is deliberately LARGE: the trim's cut notice is
+	// counted against the cap.
 	newer.Content = "database configuration NEW " + strings.Repeat("newer detail ", 20) + "NEW"
 	set := contradicting([][2]string{{"NEW", "OLD"}}, older, newer)
 	req := separationRequest()

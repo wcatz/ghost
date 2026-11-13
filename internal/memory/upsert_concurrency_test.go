@@ -11,22 +11,11 @@ import (
 	"time"
 )
 
-// issue #560: Upsert probed for duplicates and read the fold target's
-// importance OUTSIDE the write transaction, then wrote a value derived from
-// that read. Every other ghost process is a second writer (see
-// TestConcurrentProcessesMixedReadWrite: OpenDB pins one connection per
-// handle, so N handles is the real concurrency N), so between the probe and
-// the write another save could strengthen the very row this save is about to
-// strengthen — and this save then overwrote that increment with its own
-// stale arithmetic. The same window turned two saves of one fact into two
-// unlinked rows, because a probe that reads outside the write lock cannot see
-// the row the other writer has not committed yet.
-//
-// Both tests below drive the interleaving through SQLite's own write lock
-// instead of a timing race: the second handle holds an open write
-// transaction, so a save started underneath it cannot proceed until the lock
-// is released, and a probe that runs BEFORE the lock is taken sees a
-// pre-transaction snapshot while one that runs after sees the committed row.
+// issue #560: Upsert probed for duplicates and read the fold target's importance
+// outside the write transaction, so a concurrent save could be overwritten by
+// stale arithmetic, and two saves of one fact became two unlinked rows. The tests
+// drive the interleaving through SQLite's own write lock: a second handle holds an
+// open write transaction so the save under test queues behind it.
 
 func upsertLockTestStore(t *testing.T, dbPath string) *Store {
 	t.Helper()
@@ -53,10 +42,8 @@ func memoryImportance(t *testing.T, s *Store, id string) float64 {
 	return importance
 }
 
-// holdWriteLock opens a write transaction on handle and returns it with the
-// commit that releases the lock. The transaction has already taken SQLite's
-// write lock (the DSN asks for BEGIN IMMEDIATE), so nothing else can write
-// until it commits.
+// holdWriteLock opens a write transaction on handle (BEGIN IMMEDIATE) and returns
+// it with the commit that releases the lock.
 func holdWriteLock(t *testing.T, handle *Store) (*sql.Tx, func()) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -72,10 +59,8 @@ func holdWriteLock(t *testing.T, handle *Store) (*sql.Tx, func()) {
 	}
 }
 
-// requireBlocked fails when save finished while the write lock was still held.
-// Without this the test could pass for the wrong reason: a save that never
-// reached the lock would run entirely after the commit, see the other
-// writer's row, and look correct against a fix that changed nothing.
+// requireBlocked fails when save finished while the write lock was still held, so
+// the test cannot pass without the interleaving happening.
 func requireBlocked(t *testing.T, done <-chan error) {
 	t.Helper()
 	select {
@@ -98,8 +83,7 @@ func awaitSave(t *testing.T, done <-chan error) {
 }
 
 // TestUpsertStrengthenKeepsAnotherWritersIncrement is the lost-update half of
-// issue #560: two saves of the same fact both count, and neither overwrites
-// the other's importance.
+// issue #560: neither of two saves overwrites the other's importance.
 func TestUpsertStrengthenKeepsAnotherWritersIncrement(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "upsert-increment.sqlite")
 	saving := upsertLockTestStore(t, dbPath)
@@ -115,8 +99,6 @@ func TestUpsertStrengthenKeepsAnotherWritersIncrement(t *testing.T) {
 		t.Fatalf("seed importance = %v, want 0.5", got)
 	}
 
-	// The second handle strengthens the same row inside an open write
-	// transaction: the state a concurrent save leaves behind.
 	held, release := holdWriteLock(t, other)
 	if _, err := held.ExecContext(ctx, `UPDATE memories SET importance = 0.9 WHERE id = ?`, id); err != nil {
 		t.Fatalf("concurrent strengthen: %v", err)
@@ -131,18 +113,15 @@ func TestUpsertStrengthenKeepsAnotherWritersIncrement(t *testing.T) {
 	release()
 	awaitSave(t, done)
 
-	// 0.9 (what the other save left) + 0.5*0.2 (this save's increment),
-	// capped at 1.0. A strengthen that writes back an importance read before
-	// the lock was taken lands on 0.6 and the other save's increment is gone.
+	// 0.9 + 0.5*0.2 capped at 1.0; a stale read lands on 0.6.
 	if got := memoryImportance(t, saving, id); math.Abs(got-1.0) > 1e-6 {
 		t.Errorf("importance = %v, want 1.0: this save discarded the increment a concurrent save had already applied", got)
 	}
 }
 
 // TestUpsertFoldsOntoAConcurrentlyCommittedRow is the duplicate half of issue
-// #560: a save whose probe missed a row another writer committed
-// milliseconds earlier must fold onto it — strengthen it and link the new
-// wording to it — instead of storing an unlinked second copy of the fact.
+// #560: a save whose probe missed a freshly committed row must fold onto it
+// instead of storing an unlinked second copy.
 func TestUpsertFoldsOntoAConcurrentlyCommittedRow(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "upsert-duplicate.sqlite")
 	saving := upsertLockTestStore(t, dbPath)
@@ -151,9 +130,6 @@ func TestUpsertFoldsOntoAConcurrentlyCommittedRow(t *testing.T) {
 	ctx := context.Background()
 	const content = "reflection reuses a row whose content the consolidator re-emitted unchanged"
 
-	// The concurrent writer stores the fact inside an open write transaction.
-	// A probe that reads outside the write lock cannot see this row; a probe
-	// that reads inside the transaction can, once the other writer commits.
 	held, release := holdWriteLock(t, other)
 	var otherID string
 	if err := held.QueryRowContext(ctx, `
@@ -164,8 +140,6 @@ func TestUpsertFoldsOntoAConcurrentlyCommittedRow(t *testing.T) {
 		t.Fatalf("concurrent insert: %v", err)
 	}
 
-	// The outcome is written before the send and read after the receive, so
-	// the channel orders the two.
 	var outcome struct{ id, duplicateOf string }
 	done := make(chan error, 1)
 	go func() {
@@ -192,8 +166,6 @@ func TestUpsertFoldsOntoAConcurrentlyCommittedRow(t *testing.T) {
 		t.Errorf("duplicate links from %s to %s = %d, want 1", outcome.id, otherID, links)
 	}
 
-	// The fold still strengthens the target: the save is evidence the fact
-	// keeps recurring, and the concurrent insert's 0.5 is what it must add to.
 	if imp := memoryImportance(t, saving, otherID); math.Abs(imp-0.6) > 1e-6 {
 		t.Errorf("fold target importance = %v, want 0.6: the save did not strengthen the row it folded onto", imp)
 	}

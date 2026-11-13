@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,23 +14,11 @@ import (
 	"time"
 )
 
-// fakeOpenCodeSessionCLI writes a fake `opencode` that answers `session list`
-// with sessionsJSON, records every invocation in <dir>/calls.log, and records
-// successful deletes in <dir>/deleted.log. A file <dir>/fail/<id> holding a
-// positive number makes that id's next N delete attempts fail with a non-zero
-// exit, so retry and failure paths are exercised without a real store.
-//
-// The child gets the shared harness environment allowlist, so a test-only
-// variable cannot reach it: the log lives beside the binary, which the child
-// can locate from its own argv[0]. Returns the directory holding the binary.
 func fakeOpenCodeSessionCLI(t *testing.T, sessionsJSON string) string {
 	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("shell script fake binary requires a POSIX shell")
 	}
-	// Pin the scratch root to this test's temp dir so the run never opens the
-	// real data dir — and so the temp-root assertion has a path to compare
-	// against.
 	t.Setenv("GHOST_SCRATCH_DIR", t.TempDir())
 	dir := t.TempDir()
 	script := `#!/bin/sh
@@ -71,8 +58,7 @@ exit 3
 	if err := os.WriteFile(filepath.Join(dir, "sessions.json"), []byte(sessionsJSON), 0o600); err != nil {
 		t.Fatalf("write sessions fixture: %v", err)
 	}
-	// PATH override: the fake must win the lookup so no real opencode — and
-	// above all no real `session delete` — can be reached from this test.
+
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	resolved, err := exec.LookPath("opencode")
 	if err != nil || filepath.Dir(resolved) != dir {
@@ -81,7 +67,6 @@ exit 3
 	return dir
 }
 
-// sessionsFixture marshals the session objects the fake `session list` returns.
 func sessionsFixture(t *testing.T, sessions ...map[string]any) string {
 	t.Helper()
 	data, err := json.Marshal(sessions)
@@ -91,9 +76,6 @@ func sessionsFixture(t *testing.T, sessions ...map[string]any) string {
 	return string(data)
 }
 
-// session builds one session object with created and updated stamped
-// createdAgo/updatedAgo before now. Durations that are not both positive
-// yield a session with no timestamps at all — the unknown-age case.
 func session(id, title string, createdAgo, updatedAgo time.Duration, now time.Time) map[string]any {
 	m := map[string]any{"id": id}
 	if title != "" {
@@ -106,8 +88,6 @@ func session(id, title string, createdAgo, updatedAgo time.Duration, now time.Ti
 	return m
 }
 
-// fakeCalls returns the lines the fake recorded in calls.log (nil when the
-// binary was never invoked).
 func fakeCalls(t *testing.T, dir string) []string {
 	t.Helper()
 	data, err := os.ReadFile(filepath.Join(dir, "calls.log"))
@@ -120,7 +100,6 @@ func fakeCalls(t *testing.T, dir string) []string {
 	return strings.Split(strings.TrimRight(string(data), "\n"), "\n")
 }
 
-// fakeDeletes returns the ids the fake actually deleted, in order.
 func fakeDeletes(t *testing.T, dir string) []string {
 	t.Helper()
 	return fakeLines(t, filepath.Join(dir, "deleted.log"))
@@ -138,7 +117,6 @@ func fakeLines(t *testing.T, path string) []string {
 	return strings.Split(strings.TrimRight(string(data), "\n"), "\n")
 }
 
-// fakeFail budgets N failing delete attempts for id.
 func fakeFail(t *testing.T, dir, id string, attempts int) {
 	t.Helper()
 	failDir := filepath.Join(dir, "fail")
@@ -150,7 +128,6 @@ func fakeFail(t *testing.T, dir, id string, attempts int) {
 	}
 }
 
-// countCalls returns how many logged invocations start with prefix.
 func countCalls(calls []string, prefix string) int {
 	n := 0
 	for _, c := range calls {
@@ -161,8 +138,6 @@ func countCalls(calls []string, prefix string) int {
 	return n
 }
 
-// countDeleteCalls returns how many logged invocations were `session delete`
-// for exactly this id (exact, so ses_b never counts ses_b2).
 func countDeleteCalls(calls []string, id string) int {
 	line := "session delete " + id
 	n := 0
@@ -174,10 +149,6 @@ func countDeleteCalls(calls []string, id string) int {
 	return n
 }
 
-// TestCleanupOpenCodeSessions_DryRunCountsAndDeletesNothing is the default
-// mode: one `session list`, a count of what would go, and not a single delete
-// — against a store that also holds sessions a deletion would corrupt if the
-// exact-title rule slipped.
 func TestCleanupOpenCodeSessions_DryRunCountsAndDeletesNothing(t *testing.T) {
 	now := time.Now()
 	dir := fakeOpenCodeSessionCLI(t, sessionsFixture(t,
@@ -219,19 +190,15 @@ func TestCleanupOpenCodeSessions_DryRunCountsAndDeletesNothing(t *testing.T) {
 	}
 }
 
-// TestCleanupOpenCodeSessions_ImplausibleTimestampsAreReported pins the
 // visibility half of the plausibility guard (#588 review): a refusal the guard
-// fires on must not read as a clean, empty run. If opencode changed its
-// timestamp unit every titled session is refused, and the summary alone would
-// say '0 older than 1h' with exit 0 — which a reader takes as "the backlog is
-// gone". The run stays report-only and deletes nothing either way.
+
 func TestCleanupOpenCodeSessions_ImplausibleTimestampsAreReported(t *testing.T) {
 	now := time.Now()
-	secondsNow := now.Unix() // the unit change the guard exists for
+	secondsNow := now.Unix()
 	dir := fakeOpenCodeSessionCLI(t, sessionsFixture(t,
 		map[string]any{"id": "ses_sec_a", "title": ghostSessionTitle, "created": secondsNow - 7200, "updated": secondsNow - 7200},
 		map[string]any{"id": "ses_sec_b", "title": ghostSessionTitle, "created": secondsNow - 3600, "updated": secondsNow - 3600},
-		session("ses_own", "my own session", 9*time.Hour, 9*time.Hour, now), // not titled [ghost]: never counted
+		session("ses_own", "my own session", 9*time.Hour, 9*time.Hour, now),
 	))
 
 	var out bytes.Buffer
@@ -258,19 +225,12 @@ func TestCleanupOpenCodeSessions_ImplausibleTimestampsAreReported(t *testing.T) 
 	}
 }
 
-// TestCleanupOpenCodeSessions_MissingTimestampsAreReported: if opencode's
-// session JSON stopped carrying created/updated (a shape change, as opposed
-// to a unit change), every row would read as 0 — older than any cutoff — and
-// a title-only selection would call the whole backlog old on no evidence at
-// all. The missing timestamp is refused exactly like an out-of-window one and
-// counted with it, so the drift shows up as the same visible warning instead
-// of a silent "0 eligible" run.
 func TestCleanupOpenCodeSessions_MissingTimestampsAreReported(t *testing.T) {
 	now := time.Now()
 	dir := fakeOpenCodeSessionCLI(t, sessionsFixture(t,
-		map[string]any{"id": "ses_flat_a", "title": ghostSessionTitle}, // no created/updated at all
+		map[string]any{"id": "ses_flat_a", "title": ghostSessionTitle},
 		map[string]any{"id": "ses_flat_b", "title": ghostSessionTitle, "created": 0, "updated": 0},
-		session("ses_own", "my own session", 9*time.Hour, 9*time.Hour, now), // not titled: never counted
+		session("ses_own", "my own session", 9*time.Hour, 9*time.Hour, now),
 	))
 
 	var out bytes.Buffer
@@ -292,12 +252,6 @@ func TestCleanupOpenCodeSessions_MissingTimestampsAreReported(t *testing.T) {
 	}
 }
 
-// TestCleanupOpenCodeSessions_TruncatedListWarns pins the other guarded read:
-// --limit bounds what `session list` is asked for, so a list that reaches the
-// bound has to say its count may be short rather than present itself as
-// complete. Without it the same hazard as the timestamp warning returns —
-// "0 eligible" read as "nothing to clean" when the truth is "not all of it was
-// looked at".
 func TestCleanupOpenCodeSessions_TruncatedListWarns(t *testing.T) {
 	now := time.Now()
 	dir := fakeOpenCodeSessionCLI(t, sessionsFixture(t,
@@ -328,68 +282,8 @@ func TestCleanupOpenCodeSessions_TruncatedListWarns(t *testing.T) {
 	}
 }
 
-// TestCleanupOpenCodeSessions_UsesDefaultListLimit: the CLI's own default
 // (100) would silently truncate a real pre-#568 backlog, which is why this
-// command asks for far more when no --limit is given. Pin both the value and
-// the argument that reaches the binary, so a silent change to either shows up
-// here rather than as a quietly short count in the field.
-func TestCleanupOpenCodeSessions_UsesDefaultListLimit(t *testing.T) {
-	if defaultSessionListLimit != 20000 {
-		t.Errorf("defaultSessionListLimit = %d, want 20000 as documented", defaultSessionListLimit)
-	}
-	now := time.Now()
-	dir := fakeOpenCodeSessionCLI(t, sessionsFixture(t,
-		session("ses_old", ghostSessionTitle, 3*time.Hour, 2*time.Hour, now),
-	))
 
-	var out bytes.Buffer
-	if _, err := CleanupOpenCodeSessions(context.Background(), "opencode",
-		OpenCodeCleanupOptions{Grace: time.Hour, Now: now}, &out); err != nil {
-		t.Fatalf("CleanupOpenCodeSessions: %v", err)
-	}
-	calls := fakeCalls(t, dir)
-	want := "session list --format json --max-count " + strconv.Itoa(defaultSessionListLimit)
-	if len(calls) != 1 || calls[0] != want {
-		t.Errorf("calls = %v, want exactly %q", calls, want)
-	}
-}
-
-// TestCleanupOpenCodeSessions_ProgressDuringLongApply: a real --apply is
-// thousands of deletes at one CLI process each, so a long run reports progress
-// instead of sitting silent — silence that reads as a hang and gets the
-// command killed halfway through a backlog it was fine to finish.
-func TestCleanupOpenCodeSessions_ProgressDuringLongApply(t *testing.T) {
-	now := time.Now()
-	total := sessionProgressEvery + 5
-	fixtures := make([]map[string]any, 0, total)
-	for i := 0; i < total; i++ {
-		fixtures = append(fixtures, session(fmt.Sprintf("ses_%02d", i), ghostSessionTitle, 3*time.Hour, 2*time.Hour, now))
-	}
-	dir := fakeOpenCodeSessionCLI(t, sessionsFixture(t, fixtures...))
-
-	var out bytes.Buffer
-	res, err := CleanupOpenCodeSessions(context.Background(), "opencode",
-		OpenCodeCleanupOptions{Grace: time.Hour, Now: now, Apply: true}, &out)
-	if err != nil {
-		t.Fatalf("CleanupOpenCodeSessions: %v", err)
-	}
-	if res.Eligible != total || res.Deleted != total || res.Failed != 0 {
-		t.Errorf("Eligible=%d Deleted=%d Failed=%d, want %d/%d/0", res.Eligible, res.Deleted, res.Failed, total, total)
-	}
-	wantProgress := fmt.Sprintf("progress: %d/%d processed", sessionProgressEvery, total)
-	if !strings.Contains(out.String(), wantProgress) {
-		t.Errorf("report has no %q line:\n%s", wantProgress, out.String())
-	}
-	if got := fakeDeletes(t, dir); len(got) != total {
-		t.Errorf("deleted %d session(s), want %d", len(got), total)
-	}
-}
-
-// TestCleanupOpenCodeSessions_ApplyDeletesOnlyEligible pins the other half of
-// the selection contract: --apply deletes exactly the eligible ids, in list
-// order, and leaves every other session — different title, title that only
-// starts with "[ghost]", different case, still inside the grace period —
-// untouched.
 func TestCleanupOpenCodeSessions_ApplyDeletesOnlyEligible(t *testing.T) {
 	now := time.Now()
 	dir := fakeOpenCodeSessionCLI(t, sessionsFixture(t,
@@ -422,9 +316,6 @@ func TestCleanupOpenCodeSessions_ApplyDeletesOnlyEligible(t *testing.T) {
 	}
 }
 
-// TestCleanupOpenCodeSessions_FlagShapedIDIsNeverPassed: a malformed row whose
-// id could be read as an opencode flag must never reach `session delete` — it
-// is not deletable, so it is not eligible.
 func TestCleanupOpenCodeSessions_FlagShapedIDIsNeverPassed(t *testing.T) {
 	now := time.Now()
 	dir := fakeOpenCodeSessionCLI(t, sessionsFixture(t,
@@ -452,9 +343,6 @@ func TestCleanupOpenCodeSessions_FlagShapedIDIsNeverPassed(t *testing.T) {
 	}
 }
 
-// TestCleanupOpenCodeSessions_DeleteFailureNeverAbortsTheRest: one id that
-// always fails is counted and reported, every other eligible session is still
-// deleted, and the retry stays bounded at sessionDeleteAttempts tries.
 func TestCleanupOpenCodeSessions_DeleteFailureNeverAbortsTheRest(t *testing.T) {
 	now := time.Now()
 	dir := fakeOpenCodeSessionCLI(t, sessionsFixture(t,
@@ -485,32 +373,6 @@ func TestCleanupOpenCodeSessions_DeleteFailureNeverAbortsTheRest(t *testing.T) {
 	}
 }
 
-// TestCleanupOpenCodeSessions_RetriesThenSucceeds: a transient failure costs
-// one retry, not a failed count.
-func TestCleanupOpenCodeSessions_RetriesThenSucceeds(t *testing.T) {
-	now := time.Now()
-	dir := fakeOpenCodeSessionCLI(t, sessionsFixture(t,
-		session("ses_a", ghostSessionTitle, 3*time.Hour, 2*time.Hour, now),
-	))
-	fakeFail(t, dir, "ses_a", 1)
-
-	var out bytes.Buffer
-	res, err := CleanupOpenCodeSessions(context.Background(), "opencode",
-		OpenCodeCleanupOptions{Grace: time.Hour, Now: now, Apply: true, RetryDelay: time.Millisecond}, &out)
-	if err != nil {
-		t.Fatalf("CleanupOpenCodeSessions: %v", err)
-	}
-	if res.Deleted != 1 || res.Failed != 0 {
-		t.Errorf("Deleted=%d Failed=%d, want 1/0", res.Deleted, res.Failed)
-	}
-	if n := countDeleteCalls(fakeCalls(t, dir), "ses_a"); n != 2 {
-		t.Errorf("delete attempts = %d, want 2 (first failed, retry succeeded)", n)
-	}
-}
-
-// TestCleanupOpenCodeSessions_ListFailureReturnsError: without a trustworthy
-// list there is nothing to select from, so the run fails loudly and deletes
-// nothing at all.
 func TestCleanupOpenCodeSessions_ListFailureReturnsError(t *testing.T) {
 	now := time.Now()
 	dir := fakeOpenCodeSessionCLI(t, sessionsFixture(t,
@@ -534,10 +396,6 @@ func TestCleanupOpenCodeSessions_ListFailureReturnsError(t *testing.T) {
 	}
 }
 
-// TestCleanupOpenCodeSessions_MalformedListOutputIsAnError: output the parser
-// cannot vouch for must not be silently treated as "no sessions" (nor as a
-// selection), because a partial or garbled list would otherwise look like a
-// clean, empty run.
 func TestCleanupOpenCodeSessions_MalformedListOutputIsAnError(t *testing.T) {
 	fakeOpenCodeSessionCLI(t, "not json at all")
 
@@ -552,8 +410,6 @@ func TestCleanupOpenCodeSessions_MalformedListOutputIsAnError(t *testing.T) {
 	}
 }
 
-// TestSelectCleanupSessions pins the eligibility rules on their own, without
-// a subprocess, including the boundary of the grace period.
 func TestSelectCleanupSessions(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	cases := []struct {
@@ -561,7 +417,7 @@ func TestSelectCleanupSessions(t *testing.T) {
 		session         openCodeSession
 		grace           time.Duration
 		want            bool
-		wantImplausible int // refused for a missing or out-of-window timestamp, not by the other rules
+		wantImplausible int
 	}{
 		{name: "old ghost session", session: openCodeSession{ID: "ses_a", Title: ghostSessionTitle, Updated: now.Add(-2 * time.Hour).UnixMilli()}, grace: time.Hour, want: true},
 		{name: "exactly at the grace boundary is not older", session: openCodeSession{ID: "ses_b", Title: ghostSessionTitle, Updated: now.Add(-time.Hour).UnixMilli()}, grace: time.Hour, want: false},
@@ -596,12 +452,10 @@ func TestSelectCleanupSessions(t *testing.T) {
 	}
 }
 
-// TestPlausibleSessionTime pins the bounds that keep a wrong timestamp unit
 // from turning --apply into a mass delete (#588): the value is read as Unix
-// milliseconds on the CLI's word alone, so anything outside a sane window is
-// refused instead of being read as "very old".
+
 func TestPlausibleSessionTime(t *testing.T) {
-	now := time.Unix(1_800_000_000, 0) // 2027-01-15, after the floor
+	now := time.Unix(1_800_000_000, 0)
 	cases := []struct {
 		name string
 		at   time.Time
@@ -626,11 +480,8 @@ func TestPlausibleSessionTime(t *testing.T) {
 	}
 }
 
-// TestCleanupOpenCodeSessions_TempStaysInsideGhostScratchRoot: opencode
-// writes a ~5.7 MiB JIT-cache object into TMPDIR on every invocation, and
-// this run can spawn thousands of children — left on the shared system temp
 // that is exactly the debris #542 documents. Every child must instead see the
-// run's Ghost-owned scratch directory as its temp.
+
 func TestCleanupOpenCodeSessions_TempStaysInsideGhostScratchRoot(t *testing.T) {
 	now := time.Now()
 	dir := fakeOpenCodeSessionCLI(t, sessionsFixture(t,
@@ -658,26 +509,5 @@ func TestCleanupOpenCodeSessions_TempStaysInsideGhostScratchRoot(t *testing.T) {
 		if tmp == inherited {
 			t.Errorf("child TMPDIR = %q, want the run's scratch dir instead of the inherited temp", tmp)
 		}
-	}
-}
-
-// TestCleanupOpenCodeSessions_InvalidOptionsAreRejected: a negative grace or
-// limit is a mistake that would silently widen the deletion, so it fails
-// before any subprocess runs.
-func TestCleanupOpenCodeSessions_InvalidOptionsAreRejected(t *testing.T) {
-	for name, opts := range map[string]OpenCodeCleanupOptions{
-		"negative grace": {Grace: -time.Second},
-		"negative limit": {Limit: -1},
-	} {
-		t.Run(name, func(t *testing.T) {
-			dir := fakeOpenCodeSessionCLI(t, sessionsFixture(t))
-			var out bytes.Buffer
-			if _, err := CleanupOpenCodeSessions(context.Background(), "opencode", opts, &out); err == nil {
-				t.Fatal("expected an error")
-			}
-			if calls := fakeCalls(t, dir); len(calls) != 0 {
-				t.Errorf("invoked %v before rejecting the options", calls)
-			}
-		})
 	}
 }

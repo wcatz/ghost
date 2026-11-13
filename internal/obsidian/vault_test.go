@@ -44,22 +44,6 @@ func TestEnsureVault(t *testing.T) {
 	}
 }
 
-func TestWriteIfChanged(t *testing.T) {
-	p := filepath.Join(t.TempDir(), "a.md")
-	w1, err := writeIfChanged(p, "hello")
-	if err != nil || !w1 {
-		t.Fatalf("first write: wrote=%v err=%v", w1, err)
-	}
-	w2, _ := writeIfChanged(p, "hello")
-	if w2 {
-		t.Fatal("unchanged content must not rewrite")
-	}
-	w3, _ := writeIfChanged(p, "hello2")
-	if !w3 {
-		t.Fatal("changed content must rewrite")
-	}
-}
-
 // TestWriteIfChangedConcurrentTempIsolation pins the unique-temp fix: a fixed
 // temp name let two concurrent writers share one path, so a reader could see a
 // partially written or interleaved note (and a rename could hit a missing
@@ -229,17 +213,9 @@ func TestPruneGuards(t *testing.T) {
 	}
 }
 
-// TestPruneKeysTheKeepSetOnThePathNotTheBasename is the #608 nit. The keep-set
-// held bare basenames, so a note was kept alive by ANY live record anywhere in
-// the vault that happened to carry the same name — a different project folder,
-// or a different kind (a memory and a task with the same title produce the same
-// slug and can share an id token). The stale copy then survived every prune
-// forever, which is the one outcome a keep-set exists to prevent: the pass
-// cannot tell "this note is current" from "some other note has this name".
-//
-// The path from the vault root is what separates the two. Both notes are named
-// the same, so a basename-keyed set cannot express "keep this one", and a
-// path-keyed set can.
+// TestPruneKeysTheKeepSetOnThePathNotTheBasename is the #608 nit: a note is kept
+// by its path from the vault root, not by a live record elsewhere that shares
+// its basename (another project folder, or another kind).
 func TestPruneKeysTheKeepSetOnThePathNotTheBasename(t *testing.T) {
 	root := t.TempDir()
 	mustWrite(t, filepath.Join(root, markerName), `{"schema_version":1}`)

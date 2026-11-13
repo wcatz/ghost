@@ -10,15 +10,6 @@ import (
 )
 
 // supersedesEverything answers SUPERSEDES to every pair, in whichever
-// orientation it is handed, and records every orientation it was asked about.
-//
-// It is the hostile input #778 measured, not a strawman: a classifier that
-// cannot decline a direction is exactly the failure that wrote both
-// `02EA044F supersedes 74CE9D10` and `74CE9D10 supersedes 02EA044F` in one
-// pass. The invariant under test is therefore STRUCTURAL — one pass judges a
-// pair once, in one direction — and this fake is the way to show it: a correct
-// pass asks it the same question at most once, and the graph it leaves behind
-// never holds a cycle.
 type supersedesEverything struct {
 	judged [][2]string // every {newer, older} the pass handed the classifier
 }
@@ -33,9 +24,6 @@ func (c *supersedesEverything) ClassifyBatch(_ context.Context, pairs []Candidat
 }
 
 // unorderedProjections collapses orientations onto the pair they both name, so
-// a test can ask "was this pair judged once?" without caring which way round it
-// was put — and can read the answer off the same pairKey the pass reconciles on
-// rather than a second, test-local spelling of the rule.
 func unorderedProjections(dirs [][2]string) map[pairKey]int {
 	out := make(map[pairKey]int, len(dirs))
 	for _, d := range dirs {
@@ -45,11 +33,6 @@ func unorderedProjections(dirs [][2]string) map[pairKey]int {
 }
 
 // backdateLink rewinds one edge's own stamp, because CreateLink writes
-// created_at = now and skip-if-unchanged compares each endpoint's updated_at
-// against it: a link written "now" is silent about the endpoint edits that
-// would re-arm the reclassify half, and a fixture that has to fake those edits
-// afterwards is asserting the wrong thing. Every test here wants the reclassify
-// half armed, since that is the half the fix changes.
 func backdateLink(t *testing.T, db *sql.DB, source, target string) {
 	t.Helper()
 	if _, err := db.ExecContext(context.Background(),
@@ -61,9 +44,6 @@ func backdateLink(t *testing.T, db *sql.DB, source, target string) {
 }
 
 // liveSupersedesEdges reads the live 'supersedes' edges among ids as the graph
-// holds them, not as the pass's Result claims them: a pass's own counters are
-// what these tests are checking, so the graph is the only independent witness
-// that a cycle was or was not written.
 func liveSupersedesEdges(t *testing.T, store *memory.Store, ids ...string) [][2]string {
 	t.Helper()
 	pairs, err := store.SupersedesWithin(context.Background(), ids)
@@ -74,25 +54,11 @@ func liveSupersedesEdges(t *testing.T, store *memory.Store, ids ...string) [][2]
 }
 
 // TestRunJudgesOneDirectionForAPairTheScanAndALiveLinkDisagreeAbout is #778's
-// same-run bidirectional proposal, reduced to the two things that cause it.
-//
-// The fixture is the #641 damage already in the graph: a stale bug list carries
-// a 'supersedes' link ONTO the fix that replaced it, so the link says
-// stale→fix. The scan reads the timestamps and orients the same pair the other
-// way (fix→stale), which is the direction a fresh note deserves. Nothing
-// reconciled the two — the two sources were keyed by the ORDERED pair, so a
-// disagreement matched nothing — and one pass carried the pair twice, once per
-// source. A classifier that answers SUPERSEDES to both then writes a CYCLE, and
-// a cycle is worse than a backwards edge: both of its edges demote, so BOTH
-// memories of the pair drop out of ranking and neither edge withdraws the other.
 func TestRunJudgesOneDirectionForAPairTheScanAndALiveLinkDisagreeAbout(t *testing.T) {
 	store, db := seed(t)
 	ctx := context.Background()
 
 	// The stale note, and the fix that replaced it. updated_at is what orients
-	// the pair, so the fix is the newer endpoint even though the LINK says
-	// otherwise — the graph is wrong here, and this pass is the wrong-direction
-	// edge #641 found in the wild.
 	stale := add(t, store, db, "bug: the relay stalls on every consumer rebalance", []float32{1, 0, 0}, "2026-01-01 00:00:00")
 	fix := add(t, store, db, "the relay rebalance stall is fixed: pin the consumer", []float32{0.98, 0.02, 0}, "2026-09-01 00:00:00")
 	if err := store.CreateLink(ctx, stale, fix, "supersedes", 0.95, "llm"); err != nil {
@@ -121,19 +87,10 @@ func TestRunJudgesOneDirectionForAPairTheScanAndALiveLinkDisagreeAbout(t *testin
 		t.Errorf("Result.Candidates = %d, want 1: the scan and the live edge are one pair, not two", res.Candidates)
 	}
 	// (2) The refusal is COUNTED and NAMED. A pass that declined a proposal and
-	// reported the same totals as one that found nothing reads as "nothing was
-	// skipped". It counts a refused ORIENTATION, not a classification: the pair
-	// then faces skip-if-unchanged like any live edge, and this fixture's link is
-	// backdated precisely so it survives that and reaches the classifier — which
-	// (1) above already showed it does.
 	if res.OppositeLive != 1 {
 		t.Errorf("Result.OppositeLive = %d, want 1: the scan proposed the reverse of a live supersedes edge and the pass refused that orientation", res.OppositeLive)
 	}
 	// (3) No cycle. The edge that was already live is the one this pass may
-	// write, and its reverse must never appear. This is the assertion the
-	// Result counters alone could not make: a pass can report one creation and
-	// still leave a cycle behind, because the two orientations are two
-	// candidates and each one is counted honestly.
 	edges := liveSupersedesEdges(t, store, stale, fix)
 	if len(edges) != 1 || edges[0] != [2]string{stale, fix} {
 		t.Errorf("live supersedes edges = %v, want exactly [%s %s]: a pass must never write both directions of one pair, because a cycle demotes both endpoints",
@@ -149,18 +106,6 @@ func TestRunJudgesOneDirectionForAPairTheScanAndALiveLinkDisagreeAbout(t *testin
 }
 
 // TestRunReportsAWrongLiveEdgeWhoseDirectionTheScanContradicts is the pay-off
-// of keeping the LINK's direction rather than the scan's: a classifier that can
-// decline a direction is handed the edge the graph asserts, so its REVERSED
-// verdict reaches the edge that is actually wrong. Asked the scan's orientation
-// instead, the same model would answer SUPERSEDES and the stale note would keep
-// demoting the fix (#641).
-//
-// It REPORTS that edge rather than withdrawing it, which is #845's trade stated
-// where it costs something: a backwards supersession no longer self-heals in the
-// ordinary pass, so a store carrying #641's damage keeps carrying it until
-// `ghost supersede --reassess --apply` removes it. The orientation rule above is
-// unaffected — it is what makes the verdict reach the wrong edge at all, and the
-// report names the edge it names, so `--reassess` is handed the right pair.
 func TestRunReportsAWrongLiveEdgeWhoseDirectionTheScanContradicts(t *testing.T) {
 	store, db := seed(t)
 	ctx := context.Background()
@@ -196,10 +141,6 @@ func TestRunReportsAWrongLiveEdgeWhoseDirectionTheScanContradicts(t *testing.T) 
 }
 
 // TestRunRefusesAPairTheGraphAlreadyClaimsInBothDirections covers the state a
-// pre-#778 pass leaves behind: both edges of the cycle are live, and the pair
-// must not be judged again in either direction. This pass does not repair that —
-// `--reassess` is what withdraws a wrong edge — so the pair is refused, counted
-// by name, and reported with the repair to run.
 func TestRunRefusesAPairTheGraphAlreadyClaimsInBothDirections(t *testing.T) {
 	store, db := seed(t)
 	ctx := context.Background()
@@ -234,25 +175,12 @@ func TestRunRefusesAPairTheGraphAlreadyClaimsInBothDirections(t *testing.T) {
 		t.Error("WouldWriteLinks() is true for a pass that refused its only pair, so a dry run would promise a link it does not write")
 	}
 	// The pre-existing cycle is left exactly as found — this pass creates links
-	// and `--reassess --apply` is what withdraws one of them — so the report has
-	// to name the repair in its APPLIED form, and cmd/ghost's supersedeReport
-	// test pins that wording there.
 	if edges := liveSupersedesEdges(t, store, newer, older); len(edges) != 2 {
 		t.Errorf("live supersedes edges = %v, want the pre-existing 2 untouched: the creation pass does not withdraw graph history", edges)
 	}
 }
 
 // TestRunRefusesToOrientAPairWhoseTimestampsTie is the bulk-import fixture
-// #778 names: 33 dingo rows share one `2026-09-20 09:26:05` updated_at, so for
-// any pair among them the timestamps carry no chronology at all. orient() used
-// to break that tie by ID, which made the "direction" an accident of two
-// hashes — and a fresh pass's accident disagreed with the live link's direction
-// often enough to produce both directions of one pair in one run.
-//
-// The pair is not proposed, so nothing is spent on it and nothing is cached; it
-// is COUNTED, because "0 candidate pairs" over a corpus whose pairs the pass
-// refused to order is not the same report as "0 candidate pairs" over a corpus
-// with nothing similar in it.
 func TestRunRefusesToOrientAPairWhoseTimestampsTie(t *testing.T) {
 	store, db := seed(t)
 	ctx := context.Background()
@@ -294,10 +222,6 @@ func TestRunRefusesToOrientAPairWhoseTimestampsTie(t *testing.T) {
 }
 
 // TestRunStillReclassifiesATiedPairWhoseEdgeIsLive: the tie refusal is a rule
-// about ORIENTING a fresh proposal, not about the pairs a pass may judge. A live
-// edge already carries its direction, so it is revalidated under the same rules
-// as any other live edge — otherwise a bulk-imported project could never
-// self-heal an edge whose endpoints were edited afterwards.
 func TestRunStillReclassifiesATiedPairWhoseEdgeIsLive(t *testing.T) {
 	store, db := seed(t)
 	ctx := context.Background()
@@ -329,11 +253,6 @@ func TestRunStillReclassifiesATiedPairWhoseEdgeIsLive(t *testing.T) {
 }
 
 // TestSelectCandidatesOrdersATiedUpdatedAtByCreatedAt pins what a tie on
-// updated_at is resolved WITH. It is created_at, because a bulk import that
-// stamps every row's updated_at at once leaves a real chronology in created_at
-// and none in the id column; and it is never the id, which is a hash, not a
-// time. Six rows make fifteen pairs, so a pass that broke the tie by id would
-// have to get all fifteen right (1 in 32,768) to satisfy this by accident.
 func TestSelectCandidatesOrdersATiedUpdatedAtByCreatedAt(t *testing.T) {
 	store, db := seed(t)
 	ctx := context.Background()
@@ -372,12 +291,6 @@ func TestSelectCandidatesOrdersATiedUpdatedAtByCreatedAt(t *testing.T) {
 }
 
 // TestRunKeepsOnePassToOnePairPerDirection states the invariant over a corpus
-// with THREE pairs rather than one, so a rule that special-cases the
-// contradicted pair cannot satisfy it: no pair is judged twice in one pass, no
-// pair is written in both directions, and the pass writes no more edges than it
-// decided on. The two are separate claims and the second is the one a counter
-// could hide — a pass that reported one creation while leaving a cycle in the
-// graph is the #778 shape after the fact.
 func TestRunKeepsOnePassToOnePairPerDirection(t *testing.T) {
 	store, db := seed(t)
 	ctx := context.Background()

@@ -10,12 +10,6 @@ import (
 	"time"
 )
 
-// v18Fixture builds a store at the schema version before retention tiers
-// existed: the current initSQL with the tier's own index and its two columns
-// removed, stamped at the version that migration runs from. The drop is the
-// stand-in for "a v18 store" — a v18 release wrote exactly initSQL-without-those,
-// and the alternative (a hand-copied CREATE TABLE) would be a second copy of the
-// schema that can drift from the one it is claiming to describe.
 func v18Fixture(t *testing.T) (*sql.DB, string) {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "ghost.db")
@@ -28,7 +22,6 @@ func v18Fixture(t *testing.T) (*sql.DB, string) {
 	if _, err := db.Exec(initSQL); err != nil {
 		t.Fatalf("create schema: %v", err)
 	}
-	// The index first: SQLite refuses to drop a column a partial index reads.
 	for _, drop := range []string{
 		`DROP INDEX IF EXISTS idx_memories_session_expiry`,
 		`ALTER TABLE memories DROP COLUMN expires_at`,
@@ -79,12 +72,6 @@ func columnsOf(t *testing.T, db *sql.DB, table string) map[string]string {
 	return out
 }
 
-// TestMigrateV19GivesEveryExistingRowTheProjectTier: a store that predates
-// retention tiers has rows nobody ever classified, and the migration's job is to
-// say so with the one value that is safe — the tier the corpus has always
-// behaved as. A migration that instead wrote session, or left the column
-// nullable, would either schedule a user's own memories for deletion or make
-// every reader carry a NULL case for a value the schema says cannot be NULL.
 func TestMigrateV19GivesEveryExistingRowTheProjectTier(t *testing.T) {
 	db, _ := v18Fixture(t)
 
@@ -119,10 +106,6 @@ func TestMigrateV19GivesEveryExistingRowTheProjectTier(t *testing.T) {
 	}
 }
 
-// TestMigrateV19TouchesNothingButTheTier: "existing rows stay untouched" is a
-// claim about every OTHER column too. A migration that rewrote created_at to
-// now would age a two-year-old memory into a fresh one, and created_at is what
-// decay ranks on.
 func TestMigrateV19TouchesNothingButTheTier(t *testing.T) {
 	db, _ := v18Fixture(t)
 
@@ -154,9 +137,6 @@ func TestMigrateV19TouchesNothingButTheTier(t *testing.T) {
 	}
 }
 
-// TestFreshAndMigratedStoresAgreeOnTheTier: initSQL and migrateV19 are two
-// copies of one DDL, and a fresh install and an upgraded store that disagree
-// are indistinguishable from a bug until something reads the difference.
 func TestFreshAndMigratedStoresAgreeOnTheTier(t *testing.T) {
 	fresh, err := OpenDB(":memory:")
 	if err != nil {
@@ -178,9 +158,6 @@ func TestFreshAndMigratedStoresAgreeOnTheTier(t *testing.T) {
 		}
 	}
 
-	// The index too, for the same reason: a partial index is what keeps a prune
-	// off a full scan of a large corpus, and only a store that already had rows
-	// at the migration would be missing it.
 	for _, db := range []*sql.DB{fresh, migrated} {
 		var n int
 		if err := db.QueryRow(
@@ -191,18 +168,12 @@ func TestFreshAndMigratedStoresAgreeOnTheTier(t *testing.T) {
 	}
 }
 
-// TestRetentionCheckRefusesATierTheVocabularyDoesNotHold: the CHECK is the last
-// line, and it has to refuse the same set the Go vocabulary does — a value the
-// schema accepts but no reader knows is a value nothing can filter.
 func TestRetentionCheckRefusesATierTheVocabularyDoesNotHold(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
 	if err := s.EnsureProject(ctx, "p-check", "/tmp/p-check", "p-check"); err != nil {
 		t.Fatalf("EnsureProject: %v", err)
 	}
-	// The three tiers the vocabulary holds, which the CHECK must accept — the
-	// other half of the same contract, and the half a narrowing CHECK breaks
-	// first.
 	for _, tier := range RetentionValues() {
 		if _, err := s.db.ExecContext(ctx, `
 			INSERT INTO memories (project_id, category, content, source, retention)
@@ -217,7 +188,6 @@ func TestRetentionCheckRefusesATierTheVocabularyDoesNotHold(t *testing.T) {
 			t.Errorf("retention = %q was accepted by the schema; only %v are tiers", tier, RetentionValues())
 		}
 	}
-	// And the omitted column is project, read back rather than assumed.
 	if _, err := s.db.ExecContext(ctx, `
 		INSERT INTO memories (project_id, category, content, source)
 		VALUES ('p-check', 'fact', 'a row nobody classified', 'mcp')`); err != nil {
@@ -232,9 +202,6 @@ func TestRetentionCheckRefusesATierTheVocabularyDoesNotHold(t *testing.T) {
 	}
 }
 
-// TestUpsertRoundTripsTheRetentionTier: the save is the only place a caller
-// states a tier, so a tier that does not come back out of the store is a tier
-// nothing can filter on, decay by, or exempt.
 func TestUpsertRoundTripsTheRetentionTier(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -257,9 +224,6 @@ func TestUpsertRoundTripsTheRetentionTier(t *testing.T) {
 			if got[0].Retention != tier {
 				t.Errorf("retention = %q, want %q", got[0].Retention, tier)
 			}
-			// expires_at is derived for a session row and stated by nobody else:
-			// a durable row carrying an expiry is a claim nobody made about when
-			// the user stops wanting it, and prune reads the column.
 			switch tier {
 			case RetentionSession:
 				if got[0].ExpiresAt == nil {
@@ -281,8 +245,6 @@ func TestUpsertRoundTripsTheRetentionTier(t *testing.T) {
 	}
 }
 
-// TestUpsertDefaultsToTheProjectTier: the zero UpsertOptions is what every
-// caller that predates tiers passes, and it has to keep meaning what it meant.
 func TestUpsertDefaultsToTheProjectTier(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -302,11 +264,6 @@ func TestUpsertDefaultsToTheProjectTier(t *testing.T) {
 	}
 }
 
-// TestUpsertRefusesAnUnknownTierBeforeWritingAnything: a bad tier is a caller's
-// typo, and the answer has to name the vocabulary rather than failing the whole
-// transaction with SQLite's own wording. Nothing may be written on the way to
-// that error — not the row, and not the near-duplicate link a fold would have
-// made.
 func TestUpsertRefusesAnUnknownTierBeforeWritingAnything(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -335,10 +292,6 @@ func TestUpsertRefusesAnUnknownTierBeforeWritingAnything(t *testing.T) {
 	}
 }
 
-// TestUpsertRefusesAnUnknownTierOnAFoldToo: the fold path returns an existing id
-// and writes a linked copy, so a refusal has to happen before either — a tier
-// the fold silently dropped is a protection the caller was told about and did
-// not get.
 func TestUpsertRefusesAnUnknownTierOnAFold(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -369,12 +322,6 @@ func firstID(mems []Memory) string {
 	return mems[0].ID
 }
 
-// TestAFoldRaisesTheTiersItFoldsIntoAndNeverLowersIt: a near-duplicate save
-// strengthens the row the corpus already holds and returns a new id, so the tier
-// the caller stated has to reach the SURVIVING row or the protection is on a
-// copy consolidation will absorb. It may only ever raise it: a session-scoped
-// save that lowered a durable memory to its own tier would be a caller
-// scheduling somebody else's memory for deletion.
 func TestAFoldRaisesTheTiersItFoldsIntoAndNeverLowersIt(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -449,9 +396,6 @@ func getOne(t *testing.T, s *Store, id string) Memory {
 	return got[0]
 }
 
-// TestRetentionValuesIsTheVocabularyEverySurfaceQuotes: the MCP tool's error
-// text, the CLI usage and the schema CHECK all name the same three values, and
-// they can only stay in step if they are told from one list.
 func TestRetentionValuesIsTheVocabularyEverySurfaceQuotes(t *testing.T) {
 	got := RetentionValues()
 	want := []string{RetentionSession, RetentionProject, RetentionPersistent}
@@ -469,17 +413,12 @@ func TestRetentionValuesIsTheVocabularyEverySurfaceQuotes(t *testing.T) {
 	if IsValidRetention("") {
 		t.Error("IsValidRetention(\"\") = true; the empty value is the default, not a tier")
 	}
-	// A caller that mutates the returned slice must not be able to rewrite the
-	// vocabulary every other surface reads.
 	got[0] = "mutated"
 	if RetentionValues()[0] != RetentionSession {
 		t.Error("RetentionValues hands out the package's own storage")
 	}
 }
 
-// TestNormalizeRetentionIsTheOnlyPlaceTheDefaultIsApplied: "" means the caller
-// said nothing, and there are exactly two readings of that — project, or a
-// refusal. This is the one that reads it, so nothing else has to.
 func TestNormalizeRetentionIsTheOnlyPlaceTheDefaultIsApplied(t *testing.T) {
 	got, err := NormalizeRetention("")
 	if err != nil {
@@ -493,9 +432,6 @@ func TestNormalizeRetentionIsTheOnlyPlaceTheDefaultIsApplied(t *testing.T) {
 	}
 }
 
-// TestInvalidRetentionErrorIsNotAStoreFailure: the MCP save tool reports the
-// refusal, and it must be able to tell a caller's typo from a store that would
-// not open.
 func TestInvalidRetentionErrorIsNotAStoreFailure(t *testing.T) {
 	err := InvalidRetentionError("keep")
 	if err == nil {

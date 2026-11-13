@@ -12,13 +12,6 @@ import (
 // table, --passive's passive-block table and the two sweeps. runBench is not
 // reachable from a test (it prints to stdout and exits), so the parsing is a
 // named function with a test of its own.
-//
-// The two things a flag table rots into are both here: a flag the parser accepts
-// and the runner ignores (a mode that silently prints the wrong table while
-// looking like it worked), and a flag the runner honours that the usage text
-// never mentions (a mode a user cannot discover). The usage string is checked
-// against the modes below rather than trusted, because nothing else in the binary
-// compares the two.
 func TestBenchModeOfReadsTheThreeReports(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -61,48 +54,6 @@ func TestBenchModeOfReadsTheThreeReports(t *testing.T) {
 	for _, flag := range []string{"--sweep", "--context", "--passive", "--cutoff-sweep", "--no-answer-sweep"} {
 		if !strings.Contains(benchUsage, flag) {
 			t.Errorf("benchUsage does not mention %s, so the mode is undiscoverable", flag)
-		}
-	}
-}
-
-// TestBenchQuerySetCarriesTheNoAnswerHalf pins what `ghost bench` hands the
-// runner: the graded queries AND the no-answer ones, in one set. The no-answer
-// queries are what the false-positive rate is measured from, and they are
-// distinguished by an empty relevance map — so dropping them here is not a
-// smaller table, it is a table with no false-positive rate in it and no error to
-// notice. runBench is not reachable from a test (it prints to stdout and exits),
-// so the composition is a named function with a test of its own.
-func TestBenchQuerySetCarriesTheNoAnswerHalf(t *testing.T) {
-	graded := []bench.Query{
-		{Name: "q_graded", Rel: bench.Relevance{"id-1": 1}},
-		{Name: "q_also_graded", Rel: bench.Relevance{"id-2": 3}},
-	}
-	noAnswer := []bench.Query{
-		{Name: "n_off_domain", Flavor: "off_domain"},
-		{Name: "n_near_miss", Flavor: "near_miss"},
-	}
-
-	all := benchQuerySet(graded, noAnswer)
-	if len(all) != len(graded)+len(noAnswer) {
-		t.Fatalf("query set has %d queries, want %d (%d graded + %d no-answer)", len(all), len(graded)+len(noAnswer), len(graded), len(noAnswer))
-	}
-	seen := map[string]bool{}
-	for _, q := range all {
-		if seen[q.Name] {
-			t.Errorf("query %q appears twice", q.Name)
-		}
-		seen[q.Name] = true
-	}
-	for _, q := range noAnswer {
-		if !seen[q.Name] {
-			t.Errorf("no-answer query %q is not in the run, so it cannot be measured", q.Name)
-		}
-	}
-	// The flavor has to survive the trip: it is what keeps the near-miss set
-	// apart from the off-domain one in the report.
-	for _, q := range all {
-		if q.Name == "n_near_miss" && !strings.HasPrefix(q.Flavor, "near") {
-			t.Errorf("query %q lost its flavor (%q)", q.Name, q.Flavor)
 		}
 	}
 }

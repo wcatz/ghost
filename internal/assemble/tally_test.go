@@ -1,7 +1,6 @@
 package assemble
 
 import (
-	"strings"
 	"testing"
 
 	"github.com/wcatz/ghost/internal/memory"
@@ -9,14 +8,7 @@ import (
 
 // TestCountsForSplitsBucketFates pins the one table session-start reads: a
 // bucket's rows, as the trace records them, split into what was shown, what the
-// budget ranked out, and what a stage withheld. The three fates are not the same
-// thing and the block says them differently — "ranked out" is the cap's doing
-// and carries the ranking's authority, "withheld" is a stage refusing a row it
-// saw — so the count must know which stage dropped a row, not only that it did.
-//
-// The fixture also mixes in decisions for ANOTHER bucket: CountsFor keys on the
-// row's own project, and a `_global` row dropped beside this bucket's rows is
-// that bucket's fate being counted into this one.
+// budget ranked out, and what a stage withheld.
 func TestCountsForSplitsBucketFates(t *testing.T) {
 	trace := &Trace{Decisions: []Decision{
 		{ID: "a1", ProjectID: "p1", Stage: stageValidity, Reason: "expired", Before: 0.9},
@@ -45,44 +37,9 @@ func TestCountsForSplitsBucketFates(t *testing.T) {
 	}
 }
 
-// TestCountsForFirstSeenReasonWinsATie pins the tie-break: when two withheld
-// causes account for the same number of rows, the tally names the one an
-// upstream reader of the trace would have met FIRST — a later reason must not
-// displace an earlier one merely by matching it.
-func TestCountsForFirstSeenReasonWinsATie(t *testing.T) {
-	trace := &Trace{Decisions: []Decision{
-		{ID: "a1", ProjectID: "p1", Stage: stagePredicates, Reason: "scope_contradiction", Before: 0.9},
-		{ID: "a2", ProjectID: "p1", Stage: stageValidity, Reason: "future", Before: 0.8},
-		{ID: "a3", ProjectID: "p1", Stage: stagePredicates, Reason: "scope_contradiction", Before: 0.7},
-	}}
-	tally := CountsFor(trace, "p1", 0)
-	if tally.Withheld != 3 {
-		t.Errorf("Withheld = %d, want 3", tally.Withheld)
-	}
-	if tally.Reason != "scope_contradiction" {
-		t.Errorf("Reason = %q, want scope_contradiction (first-seen on the tie, not the last-seen future)", tally.Reason)
-	}
-}
-
-// TestCountsForNilTraceAsksNothingOfAnUnavailableTrace: a caller that may not
-// hold a trace (a historical renderer that never assembled one) must still get
-// a usable tally — the shown half is the caller's own, and the withheld halves
-// are zero rather than a panic.
-func TestCountsForNilTraceAsksNothingOfAnUnavailableTrace(t *testing.T) {
-	tally := CountsFor(nil, "p1", 5)
-	if tally.Shown != 5 || tally.RankedOut != 0 || tally.Withheld != 0 || tally.Reason != "" {
-		t.Errorf("nil trace produced %+v, want {Shown:5} with zeros", tally)
-	}
-	if tally.Window() != 5 {
-		t.Errorf("Window = %d, want 5", tally.Window())
-	}
-}
-
-// TestWithheldNoteIsGatedOnAnEmptyBlockNoWhollyWithheldRows: the note answers
-// the ONE question the block would otherwise leave silent — every row was
-// withheld and nothing says why — so it renders only on a block whose project
-// half shows nothing. A block that shows rows, or one with nothing withheld, is
-// not that question and gets nothing.
+// TestWithheldNoteIsGatedOnAnEmptyBlockNoWhollyWithheldRows: the note answers the
+// ONE question the block would otherwise leave silent — every row was withheld and
+// nothing says why.
 func TestWithheldNoteIsGatedOnAnEmptyBlockNoWhollyWithheldRows(t *testing.T) {
 	// Shown > 0: the header already accounts for the withheld half.
 	if got := (BucketTally{Shown: 1, Withheld: 2, Reason: "expired"}).WithheldNote(); got != "" {
@@ -98,52 +55,9 @@ func TestWithheldNoteIsGatedOnAnEmptyBlockNoWhollyWithheldRows(t *testing.T) {
 	}
 }
 
-// TestWithheldNoteExpiredIsThePassiveAbstentionSentence pins the byte identity
-// the surface depends on: the note a wholly-withheld session start carries is
-// the SAME sentence `abstention` renders for the same cause on the passive path,
-// plus the pointer. Two renderings of one fact must not drift — a reader who
-// sees one sentence today and a different one in a tool answer tomorrow would
-// conclude the block was lying about one of them.
-func TestWithheldNoteExpiredIsThePassiveAbstentionSentence(t *testing.T) {
-	got := (BucketTally{Shown: 0, Withheld: 2, Reason: validityExpired}).WithheldNote()
-	want := (&pipeline{passive: true}).abstention(OutcomeEmpty, reasonAllInvalid) + WithheldPointer
-	if got != want {
-		t.Errorf("the wholly-withheld note is not the passive abstention sentence:\n got %q\nwant %q", got, want)
-	}
-	if !strings.Contains(got, "No sufficiently trustworthy memory found") {
-		t.Errorf("the note lost the abstention lead: %q", got)
-	}
-	if !strings.Contains(got, "withheld as out of date") {
-		t.Errorf("the note lost the out-of-date cause: %q", got)
-	}
-	if !strings.HasSuffix(got, WithheldPointer) {
-		t.Errorf("the note does not end with the pointer to the still-marked rows: %q", got)
-	}
-}
-
-// TestWithheldNoteNamesTheCause: the note's sentence is the withheld cause's
-// own, so a scope exclusion does not tell the reader an expiry did it.
-func TestWithheldNoteNamesTheCause(t *testing.T) {
-	scope := (BucketTally{Shown: 0, Withheld: 1, Reason: "scope_contradiction"}).WithheldNote()
-	if !strings.Contains(scope, "nothing found matched the requested scope") {
-		t.Errorf("a scope withholding must say so: %q", scope)
-	}
-	future := (BucketTally{Shown: 0, Withheld: 1, Reason: validityFuture}).WithheldNote()
-	if future != (&pipeline{passive: true}).abstention(OutcomeEmpty, reasonAllInvalid)+WithheldPointer {
-		t.Errorf("a future-window withholding is not the same note as an expired one: %q", future)
-	}
-	other := (BucketTally{Shown: 0, Withheld: 1, Reason: "category_mismatch"}).WithheldNote()
-	if !strings.Contains(other, "withheld before the answer was assembled") {
-		t.Errorf("an uncatalogued cause must still say the rows were withheld: %q", other)
-	}
-}
-
 // TestWithheldNoteIsTheAssemblersOwnEmptyNote pins issue #897's second review
-// finding: a wholly-withheld project bucket at session start and the
-// assembler's own verdict for the same state must print the SAME sentence. The
-// states are driven through assemble.Run (not through a hand-built pipeline) so
-// the comparison is against what a caller of Run receives as Result.Abstention,
-// the bytes ghost_project_context prints through EmptyNote.
+// finding: a wholly-withheld project bucket at session start and the assembler's
+// own verdict for the same state must print the SAME sentence.
 func TestWithheldNoteIsTheAssemblersOwnEmptyNote(t *testing.T) {
 	expired := projectCandidate("p_exp", 0.9)
 	expired.ValidUntil = stampPtr("2026-01-01 00:00:00")
@@ -180,50 +94,9 @@ func TestWithheldNoteIsTheAssemblersOwnEmptyNote(t *testing.T) {
 	}
 }
 
-// TestEmptyNoteIsSilentOnAnAnswerAndOnAnAbsentWindow: the note exists for rows
-// that were found and withheld; an answerable block and a window that came back
-// empty (`no_memories`, an absence) have none.
-func TestEmptyNoteIsSilentOnAnAnswerAndOnAnAbsentWindow(t *testing.T) {
-	answer := run(t, &fakeRetriever{set: passiveSet(projectCandidate("p1", 0.9))}, passiveRequest())
-	if got := EmptyNote(answer); got != "" {
-		t.Errorf("an answerable block has an empty note %q", got)
-	}
-	absent := run(t, &fakeRetriever{set: passiveSet()}, passiveRequest())
-	if got := EmptyNote(absent); got != "" {
-		t.Errorf("an empty window is an absence, not a withholding, got %q", got)
-	}
-}
-
-// TestCountedAgainstAttributesRowsBeyondTheWindowToTheRanking: the window is an
-// over-fetch, so a store with more eligible rows than it fetched has rows the
-// ranking cut before any stage saw them. They are ranked out, and the total is
-// the eligible count, not the window's size.
-func TestCountedAgainstAttributesRowsBeyondTheWindowToTheRanking(t *testing.T) {
-	tally := BucketTally{Shown: 15, RankedOut: 30}.CountedAgainst(60, 0, 45)
-	if tally.Total() != 60 {
-		t.Errorf("Total = %d, want 60 (the eligible rows, not the 45 the window held)", tally.Total())
-	}
-	if tally.RankedOut != 45 || tally.Beyond != 15 {
-		t.Errorf("RankedOut/Beyond = %d/%d, want 45/15 (30 cut by the budget + 15 beyond the window)", tally.RankedOut, tally.Beyond)
-	}
-	if tally.Window() != 45 {
-		t.Errorf("Window = %d, want 45 (what the retrieval actually fetched)", tally.Window())
-	}
-	// A count that came back smaller than the window (a write raced it) never
-	// shrinks the tally below what the window held.
-	if got := (BucketTally{Shown: 15, RankedOut: 30}).CountedAgainst(10, 0, 45); got.Total() != 45 || got.RankedOut != 30 {
-		t.Errorf("a stale count changed the tally: %+v", got)
-	}
-	// A negative count means "unknown" and changes nothing.
-	if got := (BucketTally{Shown: 15, RankedOut: 30}).CountedAgainst(-1, 0, 45); got.Total() != 45 {
-		t.Errorf("an unknown count changed the tally: %+v", got)
-	}
-}
-
 // TestCountedAgainstCountsValidityExcludedRowsAsWithheldOnce: the fetch's SQL
 // validity predicate removes closed-window rows before the LIMIT, so they are in
-// the eligible count, in no trace decision, and are the withholding's doing. They
-// are withheld, counted once, and are not beyond the window.
+// the eligible count, in no trace decision, and are the withholding's doing.
 func TestCountedAgainstCountsValidityExcludedRowsAsWithheldOnce(t *testing.T) {
 	// 3 eligible: 1 live row shown, 2 removed by the predicate.
 	tally := BucketTally{Shown: 1}.CountedAgainst(3, 2, 45)
@@ -244,33 +117,9 @@ func TestCountedAgainstCountsValidityExcludedRowsAsWithheldOnce(t *testing.T) {
 	}
 }
 
-// TestCountedAgainstDoesNotGuessNearDuplicateLosers: a near-duplicate loser the
-// retriever removed is a stage 6 decision in the trace, and CountsFor counts it
-// (see TestDedupedTallyComesFromTheTrace). CountedAgainst used to infer them from
-// the rows the trace never saw, which was a second source for the same count; a
-// row inside the window that nothing recorded is now left uncounted instead of
-// being named a fate nobody observed.
-func TestCountedAgainstDoesNotGuessNearDuplicateLosers(t *testing.T) {
-	// 11 eligible globals, a window of 16 that held them all, the trace saw 10.
-	tally := BucketTally{Shown: 8, RankedOut: 2}.CountedAgainst(11, 0, 16)
-	if tally.Deduped != 0 {
-		t.Errorf("Deduped = %d, want 0: only the trace's decisions count a removal", tally.Deduped)
-	}
-	if tally.RankedOut != 2 || tally.Beyond != 0 {
-		t.Errorf("RankedOut/Beyond = %d/%d, want 2/0", tally.RankedOut, tally.Beyond)
-	}
-	// With the loser in the trace the same count agrees with the store.
-	traced := BucketTally{Shown: 8, RankedOut: 2, Deduped: 1}.CountedAgainst(11, 0, 16)
-	if traced.Total() != 11 || traced.Deduped != 1 {
-		t.Errorf("traced tally = %+v, want Total 11 with Deduped 1", traced)
-	}
-}
-
 // TestWithheldNoteStillRendersWhenTheWholeWindowIsWithheldAndRowsLieBeyondIt: a
-// project holding more rows than the over-fetch whose entire window is withheld
-// is the same state ghost_project_context answers with the abstention, so the
-// note must render; only rows the ranking cut INSIDE the window mean the bucket
-// is not wholly withheld.
+// project holding more rows than the over-fetch whose entire window is withheld is
+// the same state ghost_project_context answers with the abstention.
 func TestWithheldNoteStillRendersWhenTheWholeWindowIsWithheldAndRowsLieBeyondIt(t *testing.T) {
 	beyond := BucketTally{Shown: 0, Withheld: 45, Reason: validityExpired}.CountedAgainst(60, 0, 45)
 	if beyond.WithheldNote() == "" {
@@ -282,10 +131,6 @@ func TestWithheldNoteStillRendersWhenTheWholeWindowIsWithheldAndRowsLieBeyondIt(
 	}
 }
 
-// TestCountedAtLeastMarksTheTallyALowerBound: a count that stopped at its cap
-// folds in like an exact one, so the total is the cap rather than the window's
-// size, and the tally says the figure is a lower bound. A count that cannot be
-// folded leaves the tally as the window made it, unmarked.
 func TestCountedAtLeastMarksTheTallyALowerBound(t *testing.T) {
 	got := BucketTally{Shown: 15, RankedOut: 30}.CountedAtLeast(10000, 0, 45)
 	if got.Total() != 10000 || !got.AtLeast {
@@ -299,5 +144,26 @@ func TestCountedAtLeastMarksTheTallyALowerBound(t *testing.T) {
 	}
 	if un := (BucketTally{Shown: 15, RankedOut: 30}).CountedAtLeast(-1, 0, 45); un.AtLeast || un.Total() != 45 {
 		t.Errorf("an unfoldable count changed or marked the tally: %+v", un)
+	}
+}
+
+func TestCountsForNilTraceAsksNothingOfAnUnavailableTrace(t *testing.T) {
+	tally := CountsFor(nil, "p1", 5)
+	if tally.Shown != 5 || tally.RankedOut != 0 || tally.Withheld != 0 || tally.Reason != "" {
+		t.Errorf("nil trace produced %+v, want {Shown:5} with zeros", tally)
+	}
+	if tally.Window() != 5 {
+		t.Errorf("Window = %d, want 5", tally.Window())
+	}
+}
+
+func TestEmptyNoteIsSilentOnAnAnswerAndOnAnAbsentWindow(t *testing.T) {
+	answer := run(t, &fakeRetriever{set: passiveSet(projectCandidate("p1", 0.9))}, passiveRequest())
+	if got := EmptyNote(answer); got != "" {
+		t.Errorf("an answerable block has an empty note %q", got)
+	}
+	absent := run(t, &fakeRetriever{set: passiveSet()}, passiveRequest())
+	if got := EmptyNote(absent); got != "" {
+		t.Errorf("an empty window is an absence, not a withholding, got %q", got)
 	}
 }

@@ -2302,7 +2302,7 @@ esac
 // claude-code with a fake `claude` CLI on PATH classifies RESOLVED and
 // apply:true must stamp resolved_at — the CLI is a full-trust primary now that
 // MCP sampling is retired (see
-// docs/superpowers/specs/2026-08-24-resolve-sampling-path-design.md), so the
+// the archived resolve-sampling-path design, in git history at 374ac54e7865), so the
 // seeded memory must no longer be an eligible resolve candidate afterwards.
 func TestGhostResolve_AppliesWithCLI(t *testing.T) {
 	if runtime.GOOS == "windows" {

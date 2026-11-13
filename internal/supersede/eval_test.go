@@ -7,17 +7,8 @@ import (
 )
 
 // The live eval (live_test.go) measures the prompt against a real harness, and
-// this file measures the two deterministic halves of the same decision over the
-// same fixtures, with canned replies: the parser (does a verdict line become the
-// right Relation) and the veto (does a pair never reach the prompt). A green live
-// run on a free model is worth little without these, because both halves decide
-// pairs before the model is ever asked — and both are free.
 
 // TestSupersedeEvalSetCoversBothClasses is the fixture's own contract: the eval
-// is only a measurement of #686's failure if it holds at least a dozen pairs of
-// each class, and a set that drifts to one class silently reports a number that
-// says nothing. Both the count and the mix are pinned here rather than in the
-// live test, which is skipped in CI.
 func TestSupersedeEvalSetCoversBothClasses(t *testing.T) {
 	supersessions, bothTrue, vetoed := 0, 0, 0
 	seen := make(map[string]bool, len(liveSupersedeCases))
@@ -59,9 +50,6 @@ func TestSupersedeEvalSetCoversBothClasses(t *testing.T) {
 }
 
 // TestSupersedeEvalFixturesAgreeWithTheVeto holds the fixtures' veto labels to
-// the production function rather than to the test's own reading of them. A label
-// that drifts from the code would make the live eval quietly misreport what the
-// veto caught, and the drift is invisible in a skipped test.
 func TestSupersedeEvalFixturesAgreeWithTheVeto(t *testing.T) {
 	for _, c := range liveSupersedeCases {
 		_, vetoed := VetoSupersede(evalCandidate(c))
@@ -75,18 +63,6 @@ func TestSupersedeEvalFixturesAgreeWithTheVeto(t *testing.T) {
 }
 
 // TestSupersedeEvalParserOverTheFixtures drives every labeled pair's canned
-// verdict through the parser, on both reply shapes the pass accepts, and asserts
-// the decision the shipped path would reach. The canned replies are the ones a
-// correct model is being asked for:
-//
-//   - a true supersession answers SUPERSEDES with the older note's claim named,
-//     and stays SUPERSEDES;
-//   - a both-true pair answers NEITHER, and stays NEITHER;
-//   - and the reasonless shape — SUPERSEDES with no `replaced:` claim, which is
-//     what a model that only half follows the format produces — reads NEITHER
-//     even for a true supersession. That last one is the KEEP-bias: the pair
-//     keeps its stale note ranked instead of demoting a live one, and it is
-//     scored as a miss here so the recall cost stays visible.
 func TestSupersedeEvalParserOverTheFixtures(t *testing.T) {
 	claims := map[Relation]string{
 		RelationSupersedes: "it runs Redis 6.2",
@@ -95,9 +71,6 @@ func TestSupersedeEvalParserOverTheFixtures(t *testing.T) {
 	for _, shape := range []struct {
 		name string
 		// reply renders the line for pair 1 of a two-pair call, so the batched
-		// shape really goes through parseBatchVerdict — a "1: SUPERSEDES | …"
-		// string handed to Classify would be read by parseRelation and the
-		// batched parser would never run.
 		reply func(Relation, string) string
 		// batched says which parser the shape must reach.
 		batched bool
@@ -176,13 +149,6 @@ func TestSupersedeEvalParserOverTheFixtures(t *testing.T) {
 }
 
 // TestSupersedeEvalFixturesCarryNothingReal: the eval's text is invented, and a
-// real memory pasted into a fixture would put stored note content — and whatever
-// it was about — into the repository, permanently and publicly. Nothing can
-// prove a fixture is invented, but the shapes a pasted note almost always
-// carries can be refused: a filesystem path, a URL, an email address, a private
-// address, and the prompt's own data delimiters (which quoteData would have to
-// rewrite). Each of those is a plausible line in a real note about a real
-// deployment and impossible in a sentence written to be generic.
 func TestSupersedeEvalFixturesCarryNothingReal(t *testing.T) {
 	forbidden := []struct {
 		what  string

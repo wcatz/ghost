@@ -1,19 +1,5 @@
 package supersede
 
-// Every failure in the supersede package that names a stored memory id renders
-// it through `memory.RefusalArg`. A stored id is not token-guarded — `ghost
-// import` writes an artifact's id verbatim — so a pair whose endpoints are
-// imported can carry a `ghp_`-shaped id, and a failure that interpolated it raw
-// would put the whole thing on stderr and, on the detached lifecycle path,
-// `lifecycle.log`.
-//
-// This file drives each converted site through the seam that reaches it, with a
-// token-shaped id in the pair, and asserts the raw id is gone while the
-// placeholder that names its format is present. It is a table rather than one
-// case per site so a site that stops being reached is visible as a failure of
-// exactly one row, and so a reviewer can add a row without restructuring a
-// fixture.
-
 import (
 	"context"
 	"errors"
@@ -23,15 +9,8 @@ import (
 	"github.com/wcatz/ghost/internal/memory"
 )
 
-// errHarnessDown is the failure every fake store returns, so a test asserts on
-// the caller's sentence rather than on a transport detail.
 var errHarnessDown = errors.New("harness down")
 
-// renderStore is a canned store implementing every interface the three entry
-// points take, so one fake can drive the scan, the pass, the repair and the
-// named withdrawal. Each failure switch is a counter or a bool so a site behind
-// an earlier read is reachable: failGetByIDsAt and failInvalidateAt count calls,
-// which is how the second existence check and the second sweep are hit.
 type renderStore struct {
 	mems  []memory.Memory
 	links []memory.Link
@@ -176,9 +155,6 @@ func (s *renderStore) LinksInto(_ context.Context, _, memoryID, relation string)
 	return out, nil
 }
 
-// renderStoreWithPair is the ordinary fixture: one token-shaped newer note and
-// one ordinary older one, so an id rendered raw is the token and a withheld one
-// is detectable.
 func renderStoreWithPair() *renderStore {
 	return &renderStore{mems: []memory.Memory{
 		renderMemory(tokenShapedStoredID, "the retry budget is 3 attempts", "2026-09-01 00:00:00"),
@@ -186,9 +162,6 @@ func renderStoreWithPair() *renderStore {
 	}}
 }
 
-// renderStoreWithLiveSupersedes adds the live edge the repair pass judges. The
-// edge's stamp predates both endpoints, so the ordinary pass re-judges the pair
-// rather than holding it quiet by skip-if-unchanged.
 func renderStoreWithLiveSupersedes() *renderStore {
 	s := renderStoreWithPair()
 	s.links = []memory.Link{{
@@ -199,8 +172,6 @@ func renderStoreWithLiveSupersedes() *renderStore {
 	return s
 }
 
-// renderStoreWithTokenOlder is the same live edge with the token-shaped id on the
-// OLDER end, which is the id the repair pass's causes read names.
 func renderStoreWithTokenOlder() *renderStore {
 	s := renderStoreWithPair()
 	s.links = []memory.Link{{
@@ -211,9 +182,6 @@ func renderStoreWithTokenOlder() *renderStore {
 	return s
 }
 
-// renderStoreWithCausesCycle adds both directions of a 'causes' edge, which is
-// what the pass reads a pair to be when it sweeps the reverse direction. The
-// stamps predate both endpoints so the ordinary pass judges the pair.
 func renderStoreWithCausesCycle() *renderStore {
 	s := renderStoreWithPair()
 	s.links = []memory.Link{
@@ -230,8 +198,6 @@ func renderMemory(id, content, stamp string) memory.Memory {
 	}
 }
 
-// renderFixedClassifier answers every pair with one verdict, so a case can pick
-// the branch it needs without scripting per-content replies.
 type renderFixedClassifier struct{ verdict Relation }
 
 func (c renderFixedClassifier) ClassifyBatch(_ context.Context, pairs []Candidate) ([]Relation, error) {
@@ -242,8 +208,6 @@ func (c renderFixedClassifier) ClassifyBatch(_ context.Context, pairs []Candidat
 	return out, nil
 }
 
-// assertWithheld is the one assertion every row shares: the failure happened, it
-// did not carry the token, and it named the format instead.
 func assertWithheld(t *testing.T, err error) {
 	t.Helper()
 	if err == nil {
@@ -267,7 +231,7 @@ func TestStoredIDRenderingAcrossTheSupersedePackage(t *testing.T) {
 		run  func(t *testing.T) error
 	}{
 		{
-			name: "select candidates search vector", site: "supersede.go SelectCandidates",
+			name: "select candidates search vector", site: "select",
 			run: func(t *testing.T) error {
 				s := renderStoreWithPair()
 				s.failSearchAt = 1
@@ -276,7 +240,7 @@ func TestStoredIDRenderingAcrossTheSupersedePackage(t *testing.T) {
 			},
 		},
 		{
-			name: "run stale check", site: "supersede.go endpointsExist call",
+			name: "run stale check", site: "stale",
 			run: func(t *testing.T) error {
 				s := renderStoreWithPair()
 				s.failGetByIDsAt = 2 // the first is the pre-classify existence read
@@ -285,7 +249,7 @@ func TestStoredIDRenderingAcrossTheSupersedePackage(t *testing.T) {
 			},
 		},
 		{
-			name: "run create supersedes link", site: "supersede.go create supersedes",
+			name: "run create supersedes link", site: "create-supersedes",
 			run: func(t *testing.T) error {
 				s := renderStoreWithPair()
 				s.failCreateSupersedes = true
@@ -294,7 +258,7 @@ func TestStoredIDRenderingAcrossTheSupersedePackage(t *testing.T) {
 			},
 		},
 		{
-			name: "run invalidate causes link", site: "supersede.go supersedes branch causes sweep",
+			name: "run invalidate causes link", site: "sweep1",
 			run: func(t *testing.T) error {
 				s := renderStoreWithPair()
 				s.failInvalidateAt = 1
@@ -303,7 +267,7 @@ func TestStoredIDRenderingAcrossTheSupersedePackage(t *testing.T) {
 			},
 		},
 		{
-			name: "run invalidate reverse causes link", site: "supersede.go supersedes branch reverse sweep",
+			name: "run invalidate reverse causes link", site: "sweep2",
 			run: func(t *testing.T) error {
 				s := renderStoreWithCausesCycle()
 				s.failInvalidateAt = 2
@@ -312,7 +276,7 @@ func TestStoredIDRenderingAcrossTheSupersedePackage(t *testing.T) {
 			},
 		},
 		{
-			name: "run invalidate supersedes link on a causes verdict", site: "supersede.go causes branch",
+			name: "run invalidate supersedes link on a causes verdict", site: "causes-inv",
 			run: func(t *testing.T) error {
 				s := renderStoreWithPair()
 				s.failInvalidateAt = 1
@@ -321,7 +285,7 @@ func TestStoredIDRenderingAcrossTheSupersedePackage(t *testing.T) {
 			},
 		},
 		{
-			name: "run invalidate reverse causes link on a causes verdict", site: "supersede.go causes branch reverse sweep",
+			name: "run invalidate reverse causes link on a causes verdict", site: "causes-rev",
 			run: func(t *testing.T) error {
 				s := renderStoreWithCausesCycle()
 				s.failInvalidateAt = 2
@@ -330,7 +294,7 @@ func TestStoredIDRenderingAcrossTheSupersedePackage(t *testing.T) {
 			},
 		},
 		{
-			name: "run create causes link", site: "supersede.go create causes",
+			name: "run create causes link", site: "create-causes",
 			run: func(t *testing.T) error {
 				s := renderStoreWithPair()
 				s.failCreateCauses = true
@@ -339,7 +303,7 @@ func TestStoredIDRenderingAcrossTheSupersedePackage(t *testing.T) {
 			},
 		},
 		{
-			name: "run invalidate supersedes link on a neither verdict", site: "supersede.go neither branch",
+			name: "run invalidate supersedes link on a neither verdict", site: "neither-inv",
 			run: func(t *testing.T) error {
 				s := renderStoreWithPair()
 				s.failInvalidateAt = 1
@@ -348,7 +312,7 @@ func TestStoredIDRenderingAcrossTheSupersedePackage(t *testing.T) {
 			},
 		},
 		{
-			name: "run invalidate reversed supersedes link", site: "supersede.go reversed branch",
+			name: "run invalidate reversed supersedes link", site: "reversed-inv",
 			run: func(t *testing.T) error {
 				s := renderStoreWithPair()
 				s.failInvalidateAt = 1
@@ -357,7 +321,7 @@ func TestStoredIDRenderingAcrossTheSupersedePackage(t *testing.T) {
 			},
 		},
 		{
-			name: "sweep causes both ways first direction", site: "supersede.go sweepCausesBothWays",
+			name: "sweep causes both ways first direction", site: "sweep-both",
 			run: func(t *testing.T) error {
 				s := renderStoreWithPair()
 				s.failInvalidateAt = 1
@@ -366,7 +330,7 @@ func TestStoredIDRenderingAcrossTheSupersedePackage(t *testing.T) {
 			},
 		},
 		{
-			name: "sweep causes both ways reverse direction", site: "supersede.go sweepCausesBothWays reverse",
+			name: "sweep causes both ways reverse direction", site: "sweep-both-rev",
 			run: func(t *testing.T) error {
 				s := renderStoreWithPair()
 				s.failInvalidateAt = 2
@@ -378,7 +342,7 @@ func TestStoredIDRenderingAcrossTheSupersedePackage(t *testing.T) {
 			},
 		},
 		{
-			name: "reassess load links of", site: "reassess.go liveCausesPairs",
+			name: "reassess load links of", site: "reassess-load",
 			run: func(t *testing.T) error {
 				s := renderStoreWithTokenOlder()
 				s.failGetLinks = true
@@ -387,7 +351,7 @@ func TestStoredIDRenderingAcrossTheSupersedePackage(t *testing.T) {
 			},
 		},
 		{
-			name: "reassess withdraw supersedes link", site: "reassess.go withdraw supersedes",
+			name: "reassess withdraw supersedes link", site: "reassess-ws",
 			run: func(t *testing.T) error {
 				s := renderStoreWithLiveSupersedes()
 				s.failInvalidateAt = 1
@@ -396,7 +360,7 @@ func TestStoredIDRenderingAcrossTheSupersedePackage(t *testing.T) {
 			},
 		},
 		{
-			name: "reassess withdraw causes link", site: "reassess.go withdraw causes",
+			name: "reassess withdraw causes link", site: "reassess-wc",
 			run: func(t *testing.T) error {
 				s := renderStoreWithLiveSupersedes()
 				s.failInvalidateAt = 2
@@ -405,7 +369,7 @@ func TestStoredIDRenderingAcrossTheSupersedePackage(t *testing.T) {
 			},
 		},
 		{
-			name: "withdraw a named link", site: "withdraw.go part-way write failure",
+			name: "withdraw a named link", site: "withdraw-write",
 			run: func(t *testing.T) error {
 				s := renderStoreWithLiveSupersedes()
 				s.failInvalidateAt = 1
@@ -414,7 +378,7 @@ func TestStoredIDRenderingAcrossTheSupersedePackage(t *testing.T) {
 			},
 		},
 		{
-			name: "withdraw a self link", site: "withdraw.go self-link refusal",
+			name: "withdraw a self link", site: "withdraw-self",
 			run: func(t *testing.T) error {
 				s := renderStoreWithLiveSupersedes()
 				_, err := Withdraw(ctx, s, "p", []WithdrawPair{{Source: newer, Target: newer}}, true, nil)
@@ -434,9 +398,6 @@ func TestStoredIDRenderingAcrossTheSupersedePackage(t *testing.T) {
 	}
 }
 
-// TestRelationClassifierWithholdsTokenShapedStoredIDsInChunkErrors drives the two
-// classifier sites the single-pair case above does not reach: the batched chunk
-// prefix in ClassifyBatch and the per-pair fallback inside classifyChunk.
 func TestRelationClassifierWithholdsTokenShapedStoredIDsInChunkErrors(t *testing.T) {
 	t.Run("batched chunk prefix", func(t *testing.T) {
 		cls := NewRelationClassifier(&fakeProvider{err: errHarnessDown})
@@ -471,9 +432,6 @@ func TestRelationClassifierWithholdsTokenShapedStoredIDsInChunkErrors(t *testing
 	})
 }
 
-// flakyClassifyProvider answers the first (batch) call with an unparseable
-// sentence and fails every call after it, so classifyChunk's per-pair fallback is
-// the path that produces the error.
 type flakyClassifyProvider struct{ calls int }
 
 func (p *flakyClassifyProvider) Classify(_ context.Context, _, _ string) (string, error) {

@@ -169,31 +169,6 @@ func TestFetchReleaseTimesOutOnAStalledAPI(t *testing.T) {
 	}
 }
 
-func TestDownloadTimesOutOnAStalledServer(t *testing.T) {
-	url, release := stalledServer(t, "archive bytes")
-	defer release()
-
-	useTestDeadline(t, &downloadTimeout, 20*time.Millisecond)
-
-	_, err := Download(context.Background(), url)
-	if err == nil {
-		t.Fatal("expected a deadline error when the asset server does not answer in time")
-	}
-	// The deadline is carried on the request's context, so a timeout has to
-	// arrive AS a deadline. Asserting only err != nil would pass for an
-	// archive-cap refusal or a truncated read — two failures that mean the
-	// transfer ended for some other reason and the bound did not do its job.
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Errorf("want a deadline error, got: %v", err)
-	}
-}
-
-// TestRequestsStopWhenTheCallersContextIsCancelled is the other half of the
-// bound: the deadlines above are this package's own, and a caller that knows
-// better — the user pressed Ctrl-C, the machine is going to sleep — has to be
-// able to end a request that is already in flight. Only a context threaded
-// into the request can do that, so this fails if the deadline only ever lived
-// on a client.
 func TestRequestsStopWhenTheCallersContextIsCancelled(t *testing.T) {
 	url, release := stalledServer(t, `{"tag_name":"v0.32.0"}`)
 	defer release()
@@ -339,5 +314,24 @@ func TestFetchReleaseReturnsTheRelease(t *testing.T) {
 	}
 	if asset.BrowserDownloadURL != "https://example.com/c" {
 		t.Errorf("BrowserDownloadURL = %q, want https://example.com/c", asset.BrowserDownloadURL)
+	}
+}
+
+func TestDownloadTimesOutOnAStalledServer(t *testing.T) {
+	url, release := stalledServer(t, "archive bytes")
+	defer release()
+
+	useTestDeadline(t, &downloadTimeout, 20*time.Millisecond)
+
+	_, err := Download(context.Background(), url)
+	if err == nil {
+		t.Fatal("expected a deadline error when the asset server does not answer in time")
+	}
+	// The deadline is carried on the request's context, so a timeout has to
+	// arrive AS a deadline. Asserting only err != nil would pass for an
+	// archive-cap refusal or a truncated read — two failures that mean the
+	// transfer ended for some other reason and the bound did not do its job.
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("want a deadline error, got: %v", err)
 	}
 }

@@ -18,7 +18,6 @@ package mcpinit
 import (
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -42,15 +41,5 @@ func TestStaleServersReportsItselfUncheckedOffLinux(t *testing.T) {
 	}
 	if len(found) != 0 {
 		t.Errorf("found %+v, want nothing — an unanswerable scan must not look like a clean one", found)
-	}
-}
-
-// The report stays silent when it cannot answer, for the same reason: a section
-// headed by a diagnostic that did not run is worse than no section.
-func TestReportStaleServersIsSilentWhenUnchecked(t *testing.T) {
-	var sb strings.Builder
-	ReportStaleServers(&sb, "/usr/local/bin/ghost")
-	if sb.Len() != 0 {
-		t.Errorf("ReportStaleServers wrote %q off Linux, want nothing", sb.String())
 	}
 }

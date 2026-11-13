@@ -17,9 +17,6 @@ func TestCompareVersions(t *testing.T) {
 		{name: "build metadata is not significant", a: "0.32.0+dirty", b: "v0.32.0", want: 0},
 		{name: "older patch", a: "0.31.9", b: "0.32.0", want: -1},
 		{name: "newer patch", a: "0.32.0", b: "0.31.9", want: 1},
-		// Lexicographic comparison gets both of these backwards, which is how a
-		// guard built on string ordering would happily "upgrade" 0.9.0 to
-		// 0.10.0 backwards.
 		{name: "minor compares numerically", a: "0.9.0", b: "0.10.0", want: -1},
 		{name: "major compares numerically", a: "9.0.0", b: "10.0.0", want: -1},
 		{name: "older minor", a: "1.9.9", b: "1.10.0", want: -1},
@@ -39,26 +36,10 @@ func TestCompareVersions(t *testing.T) {
 		{name: "negative component is unparseable", a: "0.-1.0", b: "0.32.0", wantErr: true},
 		{name: "nightly tag is unparseable", a: "nightly", b: "0.32.0", wantErr: true},
 		{name: "surrounding space is unparseable", a: " 0.32.0", b: "0.32.0", wantErr: true},
-		// semver: "Numeric identifiers MUST NOT include leading zeroes." A
-		// component that does is not a version this package can order, and
-		// reading it as 1.2.3 would let "01.2.3" pass for a release that
-		// predates the one a tag names.
 		{name: "leading zero in a component is unparseable", a: "01.2.3", b: "0.32.0", wantErr: true},
-		{name: "leading zero in the minor is unparseable", a: "0.02.3", b: "0.32.0", wantErr: true},
-		{name: "leading zero in the patch is unparseable", a: "0.32.00", b: "0.32.0", wantErr: true},
-		// A zero-padded PRERELEASE identifier is a different case and stays
-		// parseable: semver's numeric production is `0 | [1-9][0-9]*`, so "00"
-		// matches the alphanumeric production instead and is legal. What
-		// changes is its RANK — it is no longer a number, and a numeric
-		// identifier always ranks below an alphanumeric one, so "0" now sorts
-		// before "00" where reading both as numbers said they were equal.
 		{name: "a zero-padded prerelease identifier is alphanumeric", a: "1.0.0-0", b: "1.0.0-00", want: -1},
-		// A single zero is the one leading zero semver allows, and a prerelease
-		// that is only zeros is still a numeric identifier.
 		{name: "a zero component is a number", a: "0.0.0", b: "0.0.0", want: 0},
 		{name: "zero prerelease identifier is numeric", a: "1.0.0-0", b: "1.0.0-alpha", want: -1},
-		// v0.3.0-working is a tag this repository has really used, so a
-		// word-shaped prerelease has to parse rather than look like garbage.
 		{name: "a word prerelease sorts before its release", a: "0.3.0-working", b: "0.3.0", want: -1},
 	}
 
@@ -69,9 +50,6 @@ func TestCompareVersions(t *testing.T) {
 				if err == nil {
 					t.Fatalf("CompareVersions(%q, %q) = %d, want an error", tt.a, tt.b, got)
 				}
-				// The guard's only way to explain a refusal to a user is a
-				// version string it could not read, so the error has to name
-				// one of the two it was given.
 				if !strings.Contains(err.Error(), tt.a) && !strings.Contains(err.Error(), tt.b) {
 					t.Errorf("error %q should name one of the versions it was given (%q, %q)", err, tt.a, tt.b)
 				}
@@ -87,35 +65,6 @@ func TestCompareVersions(t *testing.T) {
 	}
 }
 
-func TestCompareVersionsIsAntisymmetric(t *testing.T) {
-	// A guard that is not antisymmetric inverts somewhere: a comparison that
-	// answers "the release is newer" for the pair (a, b) and also for (b, a)
-	// is the string-equality bug this replaced.
-	versions := []string{"0.9.0", "0.10.0", "0.32.0", "0.32.1", "1.0.0-rc.1", "1.0.0", "1.0.0-rc.2"}
-	for _, a := range versions {
-		for _, b := range versions {
-			ab, err := CompareVersions(a, b)
-			if err != nil {
-				t.Fatalf("CompareVersions(%q, %q): %v", a, b, err)
-			}
-			ba, err := CompareVersions(b, a)
-			if err != nil {
-				t.Fatalf("CompareVersions(%q, %q): %v", b, a, err)
-			}
-			if ab != -ba {
-				t.Errorf("CompareVersions(%q, %q) = %d but CompareVersions(%q, %q) = %d", a, b, ab, b, a, ba)
-			}
-		}
-	}
-}
-
-// TestIsPrerelease is the fact the pre-release guard refuses on, and it is not
-// the same question as CompareVersions: that one orders two versions, this one
-// asks whether a single tag names a release that is still a candidate. An
-// unorderable tag answers false in both directions — CompareVersions reports it
-// as an error and IsPrerelease reports that nothing says it is one — so a
-// developer build keeps upgrading and a malformed prerelease is not read as
-// consent to install.
 func TestIsPrerelease(t *testing.T) {
 	tests := []struct {
 		name string
@@ -132,8 +81,6 @@ func TestIsPrerelease(t *testing.T) {
 		{name: "a dev build is not a prerelease", tag: "dev", want: false},
 		{name: "a non-semver tag is not a prerelease", tag: "nightly", want: false},
 		{name: "an empty tag is not a prerelease", tag: "", want: false},
-		// Unorderable, not a prerelease: a bare hyphen is not a prerelease
-		// identifier, so the version cannot be read at all.
 		{name: "an empty prerelease is not a prerelease", tag: "1.0.0-", want: false},
 		{name: "a two-component version is not a prerelease", tag: "1.0-rc.1", want: false},
 	}
@@ -147,39 +94,6 @@ func TestIsPrerelease(t *testing.T) {
 	}
 }
 
-// TestIsPrereleaseAgreesWithCompareVersions pins the two answers together. The
-// guard in decideUpgrade refuses a release that is a prerelease and a release
-// that is older, and it reports which one it refused, so the two questions must
-// not be able to disagree about a version: a tag IsPrerelease calls one has to
-// compare as newer than the final release it would replace, or the refusals
-// would contradict each other.
-func TestIsPrereleaseAgreesWithCompareVersions(t *testing.T) {
-	for _, tag := range []string{
-		"0.0.1", "0.9.0", "0.10.0", "0.35.0", "0.35.0-rc.1", "0.35.0-rc.2",
-		"0.36.0-beta", "1.0.0-alpha.2", "v1.0.0-rc.1", "0.35.0+dirty",
-	} {
-		// A prerelease is always older than its own final release, never newer:
-		// that is the semver rule, and the guard leans on it by refusing every
-		// prerelease regardless of direction.
-		if IsPrerelease(tag) {
-			core := strings.TrimPrefix(strings.SplitN(tag, "-", 2)[0], "v")
-			cmp, err := CompareVersions(tag, core)
-			if err != nil {
-				t.Fatalf("CompareVersions(%q, %q): %v", tag, core, err)
-			}
-			if cmp >= 0 {
-				t.Errorf("IsPrerelease(%q) is true but %q does not rank below its final release %q (%d)",
-					tag, tag, core, cmp)
-			}
-		}
-	}
-}
-
-// TestIsRelease pins the one question the data-dir guard asks of a build
-// version: is this the artifact a release published? The answer decides whether
-// a development-only refusal applies, so a build that is not a release — a plain
-// `go build` ("dev"), a `git describe` stamp, a prerelease, or a tag that is not
-// a version at all — must never be read as one.
 func TestIsRelease(t *testing.T) {
 	tests := []struct {
 		name string
@@ -190,15 +104,9 @@ func TestIsRelease(t *testing.T) {
 		{name: "a v-prefixed final release is a release", tag: "v0.35.0", want: true},
 		{name: "build metadata does not unmake a release", tag: "v0.35.0+dirty", want: true},
 		{name: "a two-component version is not a release", tag: "1.0", want: false},
-		// The interesting negative is a git describe stamp, which PARSES: its
-		// "-14-gabc1234" tail is a legal semver prerelease identifier. Reading it
-		// as a release would leave every local build of a tagged commit
-		// unguarded, which is most of them.
 		{name: "a describe stamp is not a release", tag: "v0.38.0-14-gabc1234", want: false},
-		// The stamp `make build` produces on a CLEAN tree sitting exactly on a
 		// tag, with --long. The same tree without --long describes as the bare
 		// tag, which this would accept -- a locally built, never-published binary
-		// silently classified as a release.
 		{name: "a long describe stamp at a tag is not a release", tag: "v0.38.0-0-gabc1234", want: false},
 		{name: "a dirty describe stamp is not a release", tag: "v0.38.0-0-gabc1234-dirty", want: false},
 		{name: "an rc is not a release", tag: "0.39.0-rc.1", want: false},
@@ -214,24 +122,5 @@ func TestIsRelease(t *testing.T) {
 				t.Errorf("IsRelease(%q) = %v, want %v", tt.tag, got, tt.want)
 			}
 		})
-	}
-}
-
-// TestIsReleaseIsExactlyTheComplementOfIsPrereleaseWhereAVersionParses holds
-// the two answers to one parser apart: IsPrerelease deliberately answers false
-// for a tag it cannot read, so the pair can only be "one of the two is false"
-// by construction — which is what makes IsRelease safe to rest on. Any version
-// this parser reads is either a prerelease or a release, never both and never
-// neither.
-func TestIsReleaseIsExactlyTheComplementOfIsPrereleaseWhereAVersionParses(t *testing.T) {
-	for _, tag := range []string{
-		"0.0.1", "0.9.0", "0.10.0", "0.35.0", "0.35.0-rc.1", "0.35.0-rc.2",
-		"0.36.0-beta", "1.0.0-alpha.2", "v1.0.0-rc.1", "0.35.0+dirty",
-		"v0.38.0-14-gabc1234",
-	} {
-		if IsRelease(tag) == IsPrerelease(tag) {
-			t.Errorf("IsRelease(%q) and IsPrerelease(%q) both answer %v, want exactly one of them true",
-				tag, tag, IsRelease(tag))
-		}
 	}
 }

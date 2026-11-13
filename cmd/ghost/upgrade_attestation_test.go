@@ -26,32 +26,21 @@ import (
 	"github.com/wcatz/ghost/internal/selfupdate"
 )
 
-// The client half of the release-authenticity contract (#694): whether
-// `ghost upgrade` may install a release archive that GitHub's attestation
-// service has not vouched for, and what it says when it may not.
-//
-// The crypto is covered exhaustively in internal/selfupdate. What is untestable
-// there is the DECISION, because that is here: which states the loud flag
-// reaches, which it must never reach, and the order the check runs in relative
-// to unpacking the archive.
-//
-// Every bundle below is minted from a virtual Fulcio and a virtual TSA, so no
-// test in this file reaches GitHub or the Sigstore TUF repository.
+// The client half of the release-authenticity contract (#694): which states
+// `ghost upgrade` may install past a missing attestation, and the order of the
+// check relative to unpacking. The crypto is covered in internal/selfupdate;
+// every bundle here is minted from a virtual Sigstore.
 
-// attestedTag is a release at or after selfupdate.FirstAttestedVersion, and
-// therefore one the release workflow attests.
-const attestedTag = "v0.43.0"
-
-// preAttestationTag is a release published before the release workflow minted
-// any attestation, and therefore one that cannot have one.
-const preAttestationTag = "v0.42.0"
+// attestedTag is at or after selfupdate.FirstAttestedVersion; preAttestationTag
+// predates any attestation.
+const (
+	attestedTag       = "v0.43.0"
+	preAttestationTag = "v0.42.0"
+)
 
 // mintBundle mints a wire-format Sigstore bundle over artifact, signed by
-// identity under issuer, from a virtual Sigstore. It duplicates the minter in
-// internal/selfupdate's tests rather than sharing it, because a Go test helper
-// cannot cross a package boundary and the alternative — a real bundle from
-// GitHub with a real Fulcio certificate — would pin the test to a trust root
-// that has to be embedded and re-pinned every time the public one rotates.
+// identity under issuer. It duplicates the minter in internal/selfupdate's tests
+// because a test helper cannot cross a package boundary.
 func mintBundle(t *testing.T, vs *ca.VirtualSigstore, identity, issuer string, artifact []byte) []byte {
 	t.Helper()
 	sum := sha256.Sum256(artifact)
@@ -78,8 +67,6 @@ func mintBundle(t *testing.T, vs *ca.VirtualSigstore, identity, issuer string, a
 		t.Fatalf("Timestamps: %v", err)
 	}
 
-	// The proto fields are `bytes` and protojson base64-encodes them, so the
-	// base64 strings the DSSE envelope carries have to be decoded first.
 	payload, err := base64.StdEncoding.DecodeString(envelope.Payload)
 	if err != nil {
 		t.Fatalf("decode payload: %v", err)
@@ -119,9 +106,8 @@ func mintBundle(t *testing.T, vs *ca.VirtualSigstore, identity, issuer string, a
 	return wire
 }
 
-// trustRootFrom turns a virtual Sigstore into the kind of value production
-// gets from TUF. sigstore-go already models the trust root as an interface, so
-// no test-only seam is needed to make it injectable.
+// trustRootFrom turns a virtual Sigstore into the trust root production gets
+// from TUF.
 func trustRootFrom(t *testing.T, vs *ca.VirtualSigstore) *root.TrustedRoot {
 	t.Helper()
 	tr, err := root.NewTrustedRoot(root.TrustedRootMediaType01,
@@ -132,27 +118,16 @@ func trustRootFrom(t *testing.T, vs *ca.VirtualSigstore) *root.TrustedRoot {
 	return tr
 }
 
-// attestedUpgrade is a fake release with a fake attestation service behind it:
-// a release server serving the archive, and a verifier pointed at a local
-// attestations endpoint and a virtual trust root. Everything the production
-// path does is real except the network.
+// attestedUpgrade is a fake release with a fake attestation service behind it
+// and a verifier pointed at a virtual trust root; only the network is fake.
 type attestedUpgrade struct {
 	release *releaseServer
 	vs      *ca.VirtualSigstore
-	// mu guards the three fields below. The attestations handler runs on the
-	// server's goroutine while the test sets them on its own, and CI runs this
-	// package under -race.
-	mu sync.Mutex
-	// bundle is what the attestation service hands back, or nil for "holds
-	// none". Set before the run.
-	bundle []byte
-	// serviceStatus, when non-zero, makes the attestations endpoint answer
-	// with that status instead of a bundle.
+	mu      sync.Mutex // guards the fields below (the handler runs on its own goroutine)
+	bundle  []byte     // what the service hands back; nil for "holds none"
+	// serviceStatus, when non-zero, makes the endpoint answer with that status.
 	serviceStatus int
-	// askedFor records the digests the client looked up, so a test can assert
-	// the lookup used the bytes it downloaded rather than anything the
-	// release said about them.
-	askedFor []string
+	askedFor      []string // digests the client looked up
 }
 
 func newAttestedUpgrade(t *testing.T, tag string, binary []byte) *attestedUpgrade {
@@ -164,27 +139,22 @@ func newAttestedUpgrade(t *testing.T, tag string, binary []byte) *attestedUpgrad
 	return &attestedUpgrade{release: newReleaseServer(t, tag, binary), vs: vs}
 }
 
-// archiveBytes is the archive this fake release serves.
 func (a *attestedUpgrade) archiveBytes() []byte {
 	a.release.mu.Lock()
 	defer a.release.mu.Unlock()
 	return a.release.archive
 }
 
-// verifier builds the production-shaped attestation verifier, pointed at a
-// local endpoint. The trust material is a function because a release that needs
-// no attestation must not pay for a TUF round trip to discover that.
+// verifier builds the production-shaped verifier, pointed at a local endpoint.
 func (a *attestedUpgrade) verifier(t *testing.T) func(context.Context, []byte, string) selfupdate.AttestationResult {
 	t.Helper()
 	trusted := trustRootFrom(t, a.vs)
-
 	mux := http.NewServeMux()
 	mux.HandleFunc("/repos/wcatz/ghost/attestations/", func(w http.ResponseWriter, r *http.Request) {
 		a.mu.Lock()
 		a.askedFor = append(a.askedFor, strings.TrimPrefix(r.URL.Path, "/repos/wcatz/ghost/attestations/"))
 		bundle, status := a.bundle, a.serviceStatus
 		a.mu.Unlock()
-
 		if status != 0 {
 			w.WriteHeader(status)
 			_, _ = io.WriteString(w, `{"message":"the attestation service is not answering"}`)
@@ -196,156 +166,91 @@ func (a *attestedUpgrade) verifier(t *testing.T) func(context.Context, []byte, s
 			return
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"attestations": []any{map[string]any{
-			"repository_id": 1,
-			"initiator":     "github",
-			"bundle":        json.RawMessage(bundle),
-			"bundle_url":    nil,
+			"repository_id": 1, "initiator": "github", "bundle": json.RawMessage(bundle), "bundle_url": nil,
 		}}})
 	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
-
 	v := &selfupdate.AttestationVerifier{
-		APIBaseURL: srv.URL,
-		TrustedMaterial: func(context.Context) (root.TrustedMaterial, error) {
-			return trusted, nil
-		},
+		APIBaseURL:      srv.URL,
+		TrustedMaterial: func(context.Context) (root.TrustedMaterial, error) { return trusted, nil },
 	}
 	return v.Check
 }
 
-// lookups lists the digests the attestation service was asked about, in order.
 func (a *attestedUpgrade) lookups() []string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return append([]string(nil), a.askedFor...)
 }
 
-// setBundle is what the tests use to say what the service holds: a bundle, or
-// nil for none.
 func (a *attestedUpgrade) setBundle(b []byte) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.bundle = b
 }
 
-// setServiceStatus makes the attestations endpoint answer with a status instead
-// of a verdict, which is how an outage is simulated.
 func (a *attestedUpgrade) setServiceStatus(status int) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.serviceStatus = status
 }
 
-// attestThisRelease signs the fake release's own archive with this
-// repository's release workflow on this release's tag, which is the one
-// attestation that has to be accepted.
+// attestThisRelease signs the fake release's archive with this repository's
+// release workflow on this release's tag: the one attestation that is accepted.
 func (a *attestedUpgrade) attestThisRelease(t *testing.T, tag string) {
 	t.Helper()
-	version := strings.TrimPrefix(tag, "v")
-	san, issuer := selfupdate.ReleaseWorkflowIdentity(version)
+	san, issuer := selfupdate.ReleaseWorkflowIdentity(strings.TrimPrefix(tag, "v"))
 	a.setBundle(mintBundle(t, a.vs, san, issuer, a.archiveBytes()))
 }
 
-// deps wires a run against this fixture.
 func (a *attestedUpgrade) deps(t *testing.T, target string) upgradeDeps {
 	t.Helper()
-	return upgradeDeps{
-		fetch:   a.release.fetch,
-		install: installOver(target),
-		attest:  a.verifier(t),
-	}
+	return upgradeDeps{fetch: a.release.fetch, install: installOver(target), attest: a.verifier(t)}
 }
 
-// --- the happy path -------------------------------------------------------
+// upgradeFrom runs performUpgrade from the given running version.
+func (a *attestedUpgrade) upgradeFrom(t *testing.T, target, running string, opts upgradeOptions) (string, error) {
+	t.Helper()
+	return performUpgrade(context.Background(), discardStreams(), running, opts, a.deps(t, target))
+}
 
-// TestUpgradeInstallsAnAttestedRelease is the case that has to keep working, and
-// it is an end-to-end one: the real verifier, over a real Sigstore bundle,
-// against the bytes the fake release actually served. It is what catches the
-// wiring being wrong — a lookup by the wrong digest, or a bundle fetched and
-// then never checked — neither of which any state-level test would see.
+// TestUpgradeInstallsAnAttestedRelease is the end-to-end case that has to keep
+// working: the real verifier over a real bundle, looked up by the digest of the
+// bytes the client downloaded.
 func TestUpgradeInstallsAnAttestedRelease(t *testing.T) {
 	binary := []byte("pretend executable")
 	au := newAttestedUpgrade(t, attestedTag, binary)
 	au.attestThisRelease(t, attestedTag)
 	target := installedGhost(t, "the old binary")
 
-	installed, err := performUpgrade(context.Background(), discardStreams(), "0.42.0", upgradeOptions{}, au.deps(t, target))
-	if err != nil {
-		t.Fatalf("performUpgrade: %v", err)
-	}
-	if installed != "0.43.0" {
-		t.Errorf("installed version = %q, want 0.43.0", installed)
+	installed, err := au.upgradeFrom(t, target, "0.42.0", upgradeOptions{})
+	if err != nil || installed != "0.43.0" {
+		t.Fatalf("performUpgrade = %q, %v, want 0.43.0", installed, err)
 	}
 	if got := readFileString(t, target); got != string(binary) {
 		t.Errorf("installed binary holds %q, want %q", got, binary)
 	}
-	if lookups := au.lookups(); len(lookups) != 1 {
-		t.Fatalf("the attestation service was asked %d times, want 1", len(lookups))
-	}
 	sum := sha256.Sum256(au.archiveBytes())
-	if want := "sha256:" + hex.EncodeToString(sum[:]); au.lookups()[0] != want {
-		t.Errorf("looked up %q, want the digest of the bytes the client downloaded (%q)", au.lookups()[0], want)
+	if lookups := au.lookups(); len(lookups) != 1 || lookups[0] != "sha256:"+hex.EncodeToString(sum[:]) {
+		t.Errorf("lookups = %v, want one by the digest of the downloaded bytes", lookups)
 	}
 }
 
-// TestUpgradeLooksUpTheAttestationByTheDownloadedBytes keeps the lookup bound
-// to the archive rather than to what the release claims about it. If the client
-// asked by the reported digest instead, a substituted archive — refused by
-// VerifyAssetDigest, so never reached here — is not the threat; the threat is a
-// client that looks up the attacker's digest and finds an attestation for it.
-// Asking by the downloaded bytes is what makes the lookup unforgeable.
-func TestUpgradeLooksUpTheAttestationByTheDownloadedBytes(t *testing.T) {
-	binary := []byte("pretend executable")
-	au := newAttestedUpgrade(t, attestedTag, binary)
-	// A bundle over bytes that are NOT what the release serves.
-	san, issuer := selfupdate.ReleaseWorkflowIdentity(strings.TrimPrefix(attestedTag, "v"))
-	au.setBundle(mintBundle(t, au.vs, san, issuer, []byte("an attacker's archive")))
-	target := installedGhost(t, "the old binary")
-
-	calls := 0
-	_, err := performUpgrade(context.Background(), discardStreams(), "0.42.0", upgradeOptions{}, upgradeDeps{
-		fetch:   au.release.fetch,
-		install: func([]byte) error { calls++; return nil },
-		attest:  au.verifier(t),
-	})
-	if err == nil {
-		t.Fatal("a bundle over different bytes was accepted")
-	}
-	if calls != 0 {
-		t.Errorf("the installer ran %d time(s) for an unvouched archive", calls)
-	}
-	assertUnchanged(t, target, "the old binary")
-}
-
-// --- absence: the only state the flag reaches -----------------------------
-
-// TestUpgradeRefusesAnUnattestedRelease is the default. From the first attested
-// release onwards, a release with no attestation is refused, and the refusal
-// names the one flag that permits it — the same contract the downgrade and
-// prerelease guards keep.
+// TestUpgradeRefusesAnUnattestedRelease: from the first attested release on, a
+// release with no attestation is refused, naming the release and the one flag.
 func TestUpgradeRefusesAnUnattestedRelease(t *testing.T) {
 	au := newAttestedUpgrade(t, attestedTag, []byte("pretend executable"))
-	// No bundle: the service holds nothing for this digest.
 	target := installedGhost(t, "the old binary")
-
-	_, err := performUpgrade(context.Background(), discardStreams(), "0.42.0", upgradeOptions{}, au.deps(t, target))
-	if err == nil {
-		t.Fatal("an unattested release was installed with no flag given")
-	}
-	if !strings.Contains(err.Error(), "--allow-unattested") {
-		t.Errorf("refusal %q does not name the flag that permits it", err)
-	}
-	if !strings.Contains(err.Error(), "0.43.0") {
-		t.Errorf("refusal %q does not name the release it refused", err)
+	_, err := au.upgradeFrom(t, target, "0.42.0", upgradeOptions{})
+	if err == nil || !strings.Contains(err.Error(), "--allow-unattested") || !strings.Contains(err.Error(), "0.43.0") {
+		t.Fatalf("err = %v, want a refusal naming the flag and the release", err)
 	}
 	assertUnchanged(t, target, "the old binary")
 }
 
-// TestUpgradeInstallsAnUnattestedReleaseWithTheFlag is the escape hatch, and
-// it has to be loud: the flag is how a user proceeds past a check, so the run
-// says on stderr, before the install, that the archive it is about to install
-// has no attestation. Silence would leave the flag looking like a formality.
+// TestUpgradeInstallsAnUnattestedReleaseWithTheFlag: the escape hatch is loud,
+// and says so before the install, not after.
 func TestUpgradeInstallsAnUnattestedReleaseWithTheFlag(t *testing.T) {
 	binary := []byte("pretend executable")
 	au := newAttestedUpgrade(t, attestedTag, binary)
@@ -354,258 +259,109 @@ func TestUpgradeInstallsAnUnattestedReleaseWithTheFlag(t *testing.T) {
 	var out strings.Builder
 	deps := au.deps(t, target)
 	replace := deps.install
-	// What the run had said at the instant it replaced the binary. Asserting on
-	// the stream afterwards cannot tell a warning printed before the install
-	// from one printed after it, which is the whole content of this test.
 	var saidAtInstall string
 	deps.install = func(b []byte) error {
 		saidAtInstall = out.String()
 		return replace(b)
 	}
-
 	installed, err := performUpgrade(context.Background(), upgradeStreams{out: &out, err: &out}, "0.42.0",
 		upgradeOptions{allowUnattested: true}, deps)
-	if err != nil {
-		t.Fatalf("performUpgrade with --allow-unattested: %v", err)
-	}
-	if installed != "0.43.0" {
-		t.Errorf("installed version = %q, want 0.43.0", installed)
+	if err != nil || installed != "0.43.0" {
+		t.Fatalf("performUpgrade with --allow-unattested = %q, %v", installed, err)
 	}
 	if got := readFileString(t, target); got != string(binary) {
 		t.Errorf("installed binary holds %q, want %q", got, binary)
 	}
-	if !strings.Contains(saidAtInstall, "unattested") {
-		t.Errorf("at the moment it installed, the run had said %q, which does not report that it was installing an unattested release", saidAtInstall)
-	}
-	if !strings.Contains(saidAtInstall, "--allow-unattested") {
-		t.Errorf("at the moment it installed, the run had said %q, which does not name the flag that let it proceed", saidAtInstall)
+	if !strings.Contains(saidAtInstall, "unattested") || !strings.Contains(saidAtInstall, "--allow-unattested") {
+		t.Errorf("at the moment it installed, the run had said %q", saidAtInstall)
 	}
 }
 
-// TestUpgradeRefusesWhenTheAttestationServiceIsUnreachable is the outage case,
-// and it is the one that must not be mistaken for absence. A 500 means nobody
-// could be asked, not that the release has no attestation; the run still
-// refuses by default, because refusing is what "offline" has to mean when the
-// alternative is installing on the strength of a digest alone. The flag is
-// named, so the user is not stranded by a transient fault.
+// TestUpgradeRefusesWhenTheAttestationServiceIsUnreachable: an outage is not
+// absence. It refuses by default, names the flag, and must not claim the release
+// publishes no attestation.
 func TestUpgradeRefusesWhenTheAttestationServiceIsUnreachable(t *testing.T) {
 	au := newAttestedUpgrade(t, attestedTag, []byte("pretend executable"))
 	au.setServiceStatus(http.StatusInternalServerError)
 	target := installedGhost(t, "the old binary")
-
-	_, err := performUpgrade(context.Background(), discardStreams(), "0.42.0", upgradeOptions{}, au.deps(t, target))
-	if err == nil {
-		t.Fatal("an upgrade proceeded with the attestation service down")
-	}
-	if !strings.Contains(err.Error(), "--allow-unattested") {
-		t.Errorf("refusal %q does not name the flag that permits it", err)
-	}
-	// The wording has to keep this apart from a release that has no
-	// attestation: a service that answered 500 established nothing, and a user
-	// who reads it as a permanent fact about the release will pass the flag on
-	// every future upgrade for no reason.
-	if strings.Contains(err.Error(), "publishes no build attestation") {
-		t.Errorf("refusal %q reports an outage as a release with no attestation", err)
+	_, err := au.upgradeFrom(t, target, "0.42.0", upgradeOptions{})
+	if err == nil || !strings.Contains(err.Error(), "--allow-unattested") || strings.Contains(err.Error(), "publishes no build attestation") {
+		t.Fatalf("err = %v, want an outage refusal naming the flag", err)
 	}
 	assertUnchanged(t, target, "the old binary")
-}
-
-// TestUpgradeInstallsWhenTheAttestationServiceIsDownAndTheFlagIsGiven keeps
-// the outage recoverable: a machine behind a proxy that blocks the attestation
-// service must still be able to upgrade, deliberately and noisily.
-func TestUpgradeInstallsWhenTheAttestationServiceIsDownAndTheFlagIsGiven(t *testing.T) {
-	binary := []byte("pretend executable")
-	au := newAttestedUpgrade(t, attestedTag, binary)
-	au.setServiceStatus(http.StatusInternalServerError)
-	target := installedGhost(t, "the old binary")
-
-	var out strings.Builder
-	if _, err := performUpgrade(context.Background(), upgradeStreams{out: &out, err: &out}, "0.42.0",
-		upgradeOptions{allowUnattested: true}, au.deps(t, target)); err != nil {
-		t.Fatalf("performUpgrade with --allow-unattested: %v", err)
-	}
-	if got := readFileString(t, target); got != string(binary) {
-		t.Errorf("installed binary holds %q, want %q", got, binary)
-	}
-	if said := out.String(); !strings.Contains(said, "--allow-unattested") {
-		t.Errorf("the run said %q, which does not name the flag that let it proceed", said)
+	if _, err := au.upgradeFrom(t, target, "0.42.0", upgradeOptions{allowUnattested: true}); err != nil {
+		t.Fatalf("the outage is not recoverable with the flag: %v", err)
 	}
 }
 
-// --- rejection: the state the flag must never reach -----------------------
-
-// TestUpgradeRefusesARejectedBundleWithAndWithoutTheFlag is the most important
-// test in this file. --allow-unattested means "this release has no attestation",
-// and it must never come to mean "the attestation did not check out": that
-// would hand an attacker who can mint one bundle of their own the whole
-// feature. So the flag is set in one case and not the other, and both refuse.
+// TestUpgradeRefusesARejectedBundleWithAndWithoutTheFlag: --allow-unattested
+// means "no attestation", never "the attestation did not check out", so a bundle
+// signed by another repository's workflow, or by a different workflow of this
+// one, is refused with or without the flag and never offers it.
 func TestUpgradeRefusesARejectedBundleWithAndWithoutTheFlag(t *testing.T) {
 	version := strings.TrimPrefix(attestedTag, "v")
-	attacker := "https://github.com/attacker/ghost/.github/workflows/release.yml@refs/tags/v" + version
 	_, issuer := selfupdate.ReleaseWorkflowIdentity(version)
-
-	for _, flag := range []bool{false, true} {
-		name := "without the flag"
-		if flag {
-			name = "with the flag"
+	for _, identity := range map[string]string{
+		"another repository": "https://github.com/attacker/ghost/.github/workflows/release.yml@refs/tags/v" + version,
+		"another workflow":   "https://github.com/wcatz/ghost/.github/workflows/publish.yml@refs/tags/v" + version,
+	} {
+		for _, flag := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s flag=%v", identity, flag), func(t *testing.T) {
+				au := newAttestedUpgrade(t, attestedTag, []byte("pretend executable"))
+				au.setBundle(mintBundle(t, au.vs, identity, issuer, au.archiveBytes()))
+				target := installedGhost(t, "the old binary")
+				_, err := au.upgradeFrom(t, target, "0.42.0", upgradeOptions{allowUnattested: flag})
+				if err == nil {
+					t.Fatal("a bundle signed by the wrong identity was accepted")
+				}
+				if strings.Contains(err.Error(), "--allow-unattested") {
+					t.Errorf("refusal %q names the flag, which does not reach a rejected bundle", err)
+				}
+				assertUnchanged(t, target, "the old binary")
+			})
 		}
-		t.Run(name, func(t *testing.T) {
-			binary := []byte("pretend executable")
-			au := newAttestedUpgrade(t, attestedTag, binary)
-			// A bundle that is present, well-formed, and signed by somebody
-			// else's release workflow.
-			au.setBundle(mintBundle(t, au.vs, attacker, issuer, au.archiveBytes()))
-			target := installedGhost(t, "the old binary")
-
-			_, err := performUpgrade(context.Background(), discardStreams(), "0.42.0",
-				upgradeOptions{allowUnattested: flag}, au.deps(t, target))
-			if err == nil {
-				t.Fatal("a bundle signed by another repository's workflow was accepted")
-			}
-			if strings.Contains(err.Error(), "--allow-unattested") {
-				t.Errorf("refusal %q names the flag, so it reads as a state the flag permits — a rejected bundle is not one", err)
-			}
-			assertUnchanged(t, target, "the old binary")
-		})
 	}
 }
 
-// TestUpgradeRefusesABundleForAnotherWorkflow makes the same point about the
-// narrower failure: a bundle this repository's OWN GitHub account produced, but
-// from a workflow that is not the release workflow. It is the bundle an attacker
-// with a pull request could get minted, and it is refused identically.
-func TestUpgradeRefusesABundleForAnotherWorkflow(t *testing.T) {
-	binary := []byte("pretend executable")
-	au := newAttestedUpgrade(t, attestedTag, binary)
-	otherWorkflow := "https://github.com/wcatz/ghost/.github/workflows/publish.yml@refs/tags/v0.43.0"
-	_, issuer := selfupdate.ReleaseWorkflowIdentity(strings.TrimPrefix(attestedTag, "v"))
-	au.setBundle(mintBundle(t, au.vs, otherWorkflow, issuer, au.archiveBytes()))
-	target := installedGhost(t, "the old binary")
-
-	_, err := performUpgrade(context.Background(), discardStreams(), "0.42.0", upgradeOptions{}, au.deps(t, target))
-	if err == nil {
-		t.Fatal("a bundle from a workflow that is not the release workflow was accepted")
-	}
-	if strings.Contains(err.Error(), "--allow-unattested") {
-		t.Errorf("refusal %q names the flag, which does not reach a rejected bundle", err)
-	}
-	assertUnchanged(t, target, "the old binary")
-}
-
-// --- the cutover ----------------------------------------------------------
-
-// TestUpgradeSkipsTheAttestationBeforeTheCutover is the other half of the
-// boundary. A release published before the release workflow minted any
-// attestation cannot have one, so requiring it would make every upgrade to a
-// pinned old release fail — and the fix a user reaches for would be
-// --allow-unattested, which is a worse habit to teach than the one refusal it
-// would prevent.
-//
-// It runs the REAL verifier rather than a stub that errors if called, so the
-// assertion is the one that matters: the skip is a decision the production
-// verifier makes on the version alone, and it spends no request doing it.
-func TestUpgradeSkipsTheAttestationBeforeTheCutover(t *testing.T) {
-	binary := []byte("pretend executable")
-	au := newAttestedUpgrade(t, preAttestationTag, binary)
-	// No bundle exists for this release, and none could.
-	target := installedGhost(t, "the old binary")
-
-	if _, err := performUpgrade(context.Background(), discardStreams(), "0.41.0", upgradeOptions{}, au.deps(t, target)); err != nil {
-		t.Fatalf("performUpgrade on a pre-cutover release: %v", err)
-	}
-	if got := readFileString(t, target); got != string(binary) {
-		t.Errorf("installed binary holds %q, want %q", got, binary)
-	}
-	if lookups := au.lookups(); len(lookups) != 0 {
-		t.Errorf("the attestation service was asked about %v", lookups)
-	}
-}
-
-// TestUpgradeSaysSoWhenItSkipsTheAttestationBeforeTheCutover is the other half
-// of the previous test. That one pins that the install happens; this pins that
-// the user is TOLD, because AttestationVerified covers two different facts here
-// and only one of them is a proof: a pre-cutover release is verified because
-// nothing could be checked, not because anything vouched for it.
-//
-// The detail is what distinguishes them, and it used to be dropped, so the
-// upgrade reported the same silent success for a release nothing vouched for as
-// for one a signed bundle proved. A warning with nothing in it would be noise on
-// every upgrade from the cutover onwards, so the second half of this test holds
-// that a genuinely verified release stays silent.
+// TestUpgradeSaysSoWhenItSkipsTheAttestationBeforeTheCutover: a pre-cutover
+// release installs without a lookup, and the user is told nothing vouched for
+// it; a genuinely verified release stays silent.
 func TestUpgradeSaysSoWhenItSkipsTheAttestationBeforeTheCutover(t *testing.T) {
-	t.Run("a pre-cutover release says nothing vouched for it", func(t *testing.T) {
-		binary := []byte("pretend executable")
-		au := newAttestedUpgrade(t, preAttestationTag, binary)
+	run := func(t *testing.T, tag, running string, attest bool) (*attestedUpgrade, string, string) {
+		au := newAttestedUpgrade(t, tag, []byte("pretend executable"))
+		if attest {
+			au.attestThisRelease(t, tag)
+		}
 		target := installedGhost(t, "the old binary")
-
 		var warn strings.Builder
-		streams := upgradeStreams{out: io.Discard, err: &warn}
-		// The floor is below the release, so the upgrade actually proceeds and
-		// reaches the attestation check; see the sibling subtest for why that is
-		// not automatic. The warning names the RELEASE being installed, not this
-		// argument, which is why the assertion is against the tag.
-		installed, err := performUpgrade(context.Background(), streams, "0.41.0", upgradeOptions{}, au.deps(t, target))
-		if err != nil {
-			t.Fatalf("performUpgrade on a pre-cutover release: %v", err)
+		installed, err := performUpgrade(context.Background(), upgradeStreams{out: io.Discard, err: &warn}, running, upgradeOptions{}, au.deps(t, target))
+		if err != nil || installed != tag[1:] {
+			t.Fatalf("performUpgrade = %q, %v, want %s installed", installed, err, tag[1:])
 		}
-		if installed != preAttestationTag[1:] {
-			t.Fatalf("installed version = %q, want %q: the upgrade did not run, so the warning below is not being observed where it is written", installed, preAttestationTag[1:])
+		return au, warn.String(), readFileString(t, target)
+	}
+	t.Run("a pre-cutover release says nothing vouched for it", func(t *testing.T) {
+		au, warn, installed := run(t, preAttestationTag, "0.41.0", false)
+		if installed != "pretend executable" || len(au.lookups()) != 0 {
+			t.Errorf("installed %q with lookups %v, want the binary installed with no lookup", installed, au.lookups())
 		}
-		got := warn.String()
-		if got == "" {
-			t.Fatal("the upgrade installed a release nothing vouched for and said nothing, so \"verified\" stands for a release where no check could happen")
-		}
-		// It has to name the boundary, or the user cannot tell which releases
-		// are affected or when this changes.
-		if !strings.Contains(got, selfupdate.FirstAttestedVersion) {
-			t.Errorf("the warning %q does not name the first attested release, so it does not say what to compare the version against", got)
-		}
-		if !strings.Contains(got, preAttestationTag[1:]) {
-			t.Errorf("the warning %q does not name the release being installed", got)
+		if !strings.Contains(warn, selfupdate.FirstAttestedVersion) || !strings.Contains(warn, preAttestationTag[1:]) {
+			t.Errorf("the warning %q does not name the first attested release and the release installed", warn)
 		}
 	})
-
 	t.Run("a genuinely verified release is silent", func(t *testing.T) {
-		binary := []byte("pretend executable")
-		au := newAttestedUpgrade(t, attestedTag, binary)
-		// Both of these, or this subtest proves nothing. Without the bundle the
-		// fake attestations service answers 404, Check returns AttestationAbsent
-		// and the run is REFUSED — so it would fail rather than pass, but for a
-		// reason that has nothing to do with silence. Without a floor below the
-		// release, decideUpgrade answers upgradeCurrent, performUpgrade returns
-		// "Already up to date" and never reaches checkAttestation at all, so warn
-		// would be empty no matter what the warning code does — which is exactly
-		// the way this subtest looked green while asserting nothing.
-		au.attestThisRelease(t, attestedTag)
-		target := installedGhost(t, "the old binary")
-
-		var warn strings.Builder
-		streams := upgradeStreams{out: io.Discard, err: &warn}
-		installed, err := performUpgrade(context.Background(), streams, "0.42.0", upgradeOptions{}, au.deps(t, target))
-		if err != nil {
-			t.Fatalf("performUpgrade on an attested release: %v", err)
-		}
-		// The check the subtest was silently skipping: that the install really
-		// happened, so an empty warn is the absence of a warning rather than the
-		// absence of a run.
-		if installed != "0.43.0" {
-			t.Fatalf("installed version = %q, want 0.43.0: the upgrade did not run, so this subtest never reached the attestation check it is a control for", installed)
-		}
-		if got := warn.String(); got != "" {
-			t.Errorf("a release whose bundle verified printed %q, so the pre-cutover warning is not keyed on anything real", got)
+		if _, warn, _ := run(t, attestedTag, "0.42.0", true); warn != "" {
+			t.Errorf("a release whose bundle verified printed %q", warn)
 		}
 	})
 }
 
-// TestUpgradeRefusesToSkipTheCheckBeforeTheCutoverWithNoTrustMaterial covers
-// the other direction: the cutover is decided from the version alone, and
-// nothing about the running binary, the flag, or the absence of a trust root
-// can talk the client out of it. A release at the boundary with a verifier that
-// would fail on sight is still checked, and still refused when it is absent.
+// TestUpgradeRefusesToSkipTheCheckBeforeTheCutoverWithNoTrustMaterial: the
+// cutover is decided from the version alone; the release at the boundary is
+// still checked, exactly once, and refused when absent.
 func TestUpgradeRefusesToSkipTheCheckBeforeTheCutoverWithNoTrustMaterial(t *testing.T) {
 	au := newAttestedUpgrade(t, selfupdate.FirstAttestedVersion, []byte("pretend executable"))
 	target := installedGhost(t, "the old binary")
-
 	calls := 0
 	_, err := performUpgrade(context.Background(), discardStreams(), "0.42.0", upgradeOptions{}, upgradeDeps{
 		fetch:   au.release.fetch,
@@ -615,35 +371,18 @@ func TestUpgradeRefusesToSkipTheCheckBeforeTheCutoverWithNoTrustMaterial(t *test
 			return selfupdate.AttestationResult{State: selfupdate.AttestationAbsent}
 		},
 	})
-	if err == nil {
-		t.Fatalf("the release at the cutover (v%s) was installed with no attestation", selfupdate.FirstAttestedVersion)
-	}
-	if calls != 1 {
-		t.Errorf("the attestation check ran %d times at the cutover, want exactly 1", calls)
+	if err == nil || calls != 1 {
+		t.Errorf("err = %v with %d calls, want a refusal after exactly one attestation check", err, calls)
 	}
 	assertUnchanged(t, target, "the old binary")
 }
 
-// TestUpgradeRefusesWhenThereIsNoVerifierAtAll covers the one branch the
-// fixture-based tests above cannot reach: a caller that wires no attestation
-// check at all. It is a fail-closed refusal for a release that needs one, never
-// a skip — "nobody checked" must not be able to present as "there is nothing to
-// check", because that single substitution turns the feature into a no-op
-// anywhere the wiring is forgotten.
-//
-// The flag does not reach it, and the message must not offer it. This branch
-// returns before the switch that consults --allow-unattested, so a message
-// ending "re-run with --allow-unattested" would send the user into an
-// identical refusal — and this is the branch whose entire purpose is to be a
-// legible dead end, because it is only reached when ghost's own wiring is
-// broken.
+// TestUpgradeRefusesWhenThereIsNoVerifierAtAll and the unrecognised-state test
+// below are fail-closed branches that never consult --allow-unattested, so
+// neither may offer it; "nobody checked" must not read as "nothing to check".
 func TestUpgradeRefusesWhenThereIsNoVerifierAtAll(t *testing.T) {
 	for _, flag := range []bool{false, true} {
-		name := "without the flag"
-		if flag {
-			name = "with the flag"
-		}
-		t.Run(name, func(t *testing.T) {
+		t.Run(fmt.Sprintf("flag=%v", flag), func(t *testing.T) {
 			rs := newReleaseServer(t, attestedTag, []byte("pretend executable"))
 			rel, err := rs.fetch(context.Background())
 			if err != nil {
@@ -654,44 +393,22 @@ func TestUpgradeRefusesWhenThereIsNoVerifierAtAll(t *testing.T) {
 				t.Fatalf("FindAsset: %v", err)
 			}
 			target := installedGhost(t, "the old binary")
-
 			calls := 0
 			err = installRelease(context.Background(), discardStreams(), rel, asset,
-				upgradeOptions{allowUnattested: flag}, upgradeDeps{
-					install: func([]byte) error { calls++; return nil },
-				})
-			if err == nil {
-				t.Fatal("a post-cutover release was installed with no attestation check wired in at all")
-			}
-			if strings.Contains(err.Error(), "--allow-unattested") {
-				t.Errorf("refusal %q names a flag that this branch never consults, so it sends the user into an identical refusal", err)
-			}
-			// It is a bug in ghost, not a property of the release, and the user
-			// is the only one who can report it.
-			if !strings.Contains(err.Error(), "issue") {
-				t.Errorf("refusal %q does not say this is a ghost bug worth reporting, so a broken build is a dead end with no way out", err)
-			}
-			if calls != 0 {
-				t.Errorf("the installer ran %d time(s) with no verifier in place", calls)
+				upgradeOptions{allowUnattested: flag}, upgradeDeps{install: func([]byte) error { calls++; return nil }})
+			if err == nil || strings.Contains(err.Error(), "--allow-unattested") || !strings.Contains(err.Error(), "issue") || calls != 0 {
+				t.Errorf("err = %v with %d installs, want a refusal that reports a ghost bug and does not offer the flag", err, calls)
 			}
 			assertUnchanged(t, target, "the old binary")
 		})
 	}
 }
 
-// TestUpgradeRefusesAnUnrecognisedAttestationState is the same shape for a state
-// this build has no policy for. It is refused, nothing is offered that would
-// change the answer, and the state is named so a report is actionable.
 func TestUpgradeRefusesAnUnrecognisedAttestationState(t *testing.T) {
 	for _, flag := range []bool{false, true} {
-		name := "without the flag"
-		if flag {
-			name = "with the flag"
-		}
-		t.Run(name, func(t *testing.T) {
+		t.Run(fmt.Sprintf("flag=%v", flag), func(t *testing.T) {
 			au := newAttestedUpgrade(t, attestedTag, []byte("pretend executable"))
 			target := installedGhost(t, "the old binary")
-
 			calls := 0
 			_, err := performUpgrade(context.Background(), discardStreams(), "0.42.0",
 				upgradeOptions{allowUnattested: flag}, upgradeDeps{
@@ -701,97 +418,41 @@ func TestUpgradeRefusesAnUnrecognisedAttestationState(t *testing.T) {
 						return selfupdate.AttestationResult{State: selfupdate.AttestationState(99)}
 					},
 				})
-			if err == nil {
-				t.Fatal("an unrecognised attestation state was treated as a pass")
-			}
-			if strings.Contains(err.Error(), "--allow-unattested") {
-				t.Errorf("refusal %q names a flag that an unrecognised state never reaches", err)
-			}
-			if !strings.Contains(err.Error(), "unknown") {
-				t.Errorf("refusal %q does not name the state it saw, so a report could not be acted on: %v", err, err)
-			}
-			if calls != 0 {
-				t.Errorf("the installer ran %d time(s) for an unrecognised attestation state", calls)
+			if err == nil || strings.Contains(err.Error(), "--allow-unattested") || !strings.Contains(err.Error(), "unknown") || calls != 0 {
+				t.Errorf("err = %v with %d installs, want a refusal naming an unknown state without the flag", err, calls)
 			}
 			assertUnchanged(t, target, "the old binary")
 		})
 	}
 }
 
-// TestUpgradeSkipsTheCheckBeforeTheCutoverWithNoVerifier is the boundary from
-// the other side, and it is why the branch above is a refusal rather than an
-// unconditional one: a release that predates the attestation is not made
-// uninstallable by the absence of a verifier, because none could have been
-// consulted for it anyway.
-func TestUpgradeSkipsTheCheckBeforeTheCutoverWithNoVerifier(t *testing.T) {
-	rs := newReleaseServer(t, preAttestationTag, []byte("pretend executable"))
-	rel, err := rs.fetch(context.Background())
-	if err != nil {
-		t.Fatalf("fetch the fake release: %v", err)
-	}
-	asset, err := selfupdate.FindAsset(rel)
-	if err != nil {
-		t.Fatalf("FindAsset: %v", err)
-	}
-	target := installedGhost(t, "the old binary")
-
-	if err := installRelease(context.Background(), discardStreams(), rel, asset, upgradeOptions{}, upgradeDeps{
-		install: installOver(target),
-	}); err != nil {
-		t.Fatalf("installRelease on a pre-cutover release with no verifier: %v", err)
-	}
-	if got := readFileString(t, target); got != "pretend executable" {
-		t.Errorf("installed binary holds %q, want the release's binary", got)
-	}
-}
-
-// --- ordering -------------------------------------------------------------
-
-// TestUpgradeVerifiesTheAttestationBeforeUnpackingTheArchive pins the order,
-// which is the part of the property the refusals above cannot see. The archive
-// served here is not an archive, and both published digests vouch for it
-// correctly, so the only check that can refuse is one that runs before the
-// bytes are parsed. Without the order, an archive nothing vouched for is handed
-// to a decompressor.
-//
-// It also pins the half that could be got wrong the other way: the archive IS
-// downloaded first, because the lookup is keyed on the downloaded bytes and
-// asking by the digest the release reports would consult the attacker's own
-// metadata about the attacker's own bytes. A check that could refuse before the
-// transfer would be a check that trusts the release's own claim about the
-// archive, which is the thing being checked. The transfer is the cost of doing
-// this without trusting anything; refusing before the unpack is what it buys.
+// TestUpgradeVerifiesTheAttestationBeforeUnpackingTheArchive pins the order: the
+// served archive is not an archive and both published digests vouch for it, so
+// only an attestation check that runs before parsing can refuse. The archive IS
+// downloaded first, because the lookup is keyed on the downloaded bytes.
 func TestUpgradeVerifiesTheAttestationBeforeUnpackingTheArchive(t *testing.T) {
 	notAnArchive := []byte("substituted bytes, not an archive")
 	au := newAttestedUpgrade(t, attestedTag, []byte("pretend executable"))
-	// Both published digests agree with the substituted bytes, so they cannot
-	// be what refuses.
 	au.release.swapManifest(sha256HexDigest(notAnArchive) + "  " + selfupdate.AssetName("0.43.0") + "\n")
 	au.release.swapArchive(notAnArchive)
 	au.release.setDigest("sha256:" + sha256HexDigest(notAnArchive))
-	// And the attestation service has nothing for those bytes either.
 	target := installedGhost(t, "the old binary")
 
-	_, err := performUpgrade(context.Background(), discardStreams(), "0.42.0", upgradeOptions{}, au.deps(t, target))
-	if err == nil {
-		t.Fatal("expected a refusal")
-	}
-	if !strings.Contains(err.Error(), "attestation") {
-		t.Errorf("error %q should name the attestation check, so the archive is never unpacked before something vouches for it", err)
+	_, err := au.upgradeFrom(t, target, "0.42.0", upgradeOptions{})
+	if err == nil || !strings.Contains(err.Error(), "attestation") {
+		t.Fatalf("err = %v, want a refusal from the attestation check", err)
 	}
 	for _, parseFailure := range []string{"gzip: ", "zip: ", "tar: ", "ghost binary not found in archive"} {
 		if strings.Contains(err.Error(), parseFailure) {
-			t.Errorf("error %q came from unpacking the archive, which must happen only after the attestation agrees", err)
+			t.Errorf("error %q came from unpacking the archive", err)
 		}
 	}
-	var downloaded bool
+	downloaded := false
 	for _, p := range au.release.askedFor() {
-		if p == archiveAssetPath {
-			downloaded = true
-		}
+		downloaded = downloaded || p == archiveAssetPath
 	}
 	if !downloaded {
-		t.Error("the archive was never downloaded, so this test would pass on a client that refused for the wrong reason")
+		t.Error("the archive was never downloaded, so the refusal may be for the wrong reason")
 	}
 	assertUnchanged(t, target, "the old binary")
 }

@@ -23,8 +23,6 @@ type cachedEmbedder struct {
 	client    *http.Client
 	cache     map[string][]float32
 	cacheFile *os.File
-	hits      int
-	misses    int
 }
 
 type cacheLine struct {
@@ -73,8 +71,6 @@ func (e *cachedEmbedder) Close() error {
 	return nil
 }
 
-func (e *cachedEmbedder) Stats() (hits, misses int) { return e.hits, e.misses }
-
 func hashContent(s string) string {
 	sum := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(sum[:])
@@ -113,7 +109,6 @@ func (e *cachedEmbedder) ensure(ctx context.Context, inputs []string) error {
 		for i, t := range batch {
 			h := hashContent(t)
 			e.cache[h] = vecs[i]
-			e.misses++
 			if e.cacheFile != nil {
 				line, err := json.Marshal(cacheLine{Hash: h, Vector: vecs[i]})
 				if err != nil {
@@ -140,7 +135,6 @@ func (e *cachedEmbedder) EmbedQuery(ctx context.Context, text string) ([]float32
 
 func (e *cachedEmbedder) embedInput(ctx context.Context, input string) ([]float32, error) {
 	if v, ok := e.cache[hashContent(input)]; ok {
-		e.hits++
 		return v, nil
 	}
 	if err := e.ensure(ctx, []string{input}); err != nil {

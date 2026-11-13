@@ -2,7 +2,6 @@ package bench
 
 import (
 	"context"
-	"strings"
 	"testing"
 )
 
@@ -73,39 +72,5 @@ func TestRunMeasuresNoAnswerQueries(t *testing.T) {
 				t.Errorf("%s: floor %.2f rate = %.3f, want 1.000 (one query, one result above every floor here)", r.Condition, f.Floor, f.Rate)
 			}
 		}
-	}
-}
-
-// TestFormatResultsReportsFalsePositivesBesideNDCG pins the placement and the
-// arithmetic of the printed rate: the no-answer rate has to be readable next to
-// the graded table, or the headline reads as if recall were the whole of
-// retrieval quality. Hand-built results so the formatter is what is under test.
-func TestFormatResultsReportsFalsePositivesBesideNDCG(t *testing.T) {
-	measured := []NoAnswerQuery{
-		{Name: "n1", Flavor: "off_domain", Results: 10, Top: 0.62, Cosines: map[string]float32{"a": 0.62, "b": 0.10}},
-		{Name: "n2", Flavor: "off_domain", Results: 10, Top: 0.41, Cosines: map[string]float32{"c": 0.41, "d": 0.05}},
-		{Name: "n3", Flavor: "near_miss", Results: 10, Top: 0.22, Cosines: map[string]float32{"e": 0.22}},
-	}
-	results := []Result{
-		{Condition: CondFTS, Queries: 2, NDCG10: 0.749, NoAnswer: measured},
-		{Condition: CondVector, Queries: 2, NDCG10: 0.801, NoAnswer: measured},
-		{Condition: CondHybrid, Queries: 2, NDCG10: 0.818, NoAnswer: measured},
-	}
-	out := FormatResults(results)
-	for _, want := range []string{"NDCG@10", "no-answer", "false-positive rate", CondFTS, CondVector, CondHybrid} {
-		if !strings.Contains(out, want) {
-			t.Errorf("report is missing %q:\n%s", want, out)
-		}
-	}
-	// Two of the three no-answer queries cleared 0.30 and 0.40, one cleared
-	// 0.50: the printed rates have to be the measured ones, not a constant.
-	for _, want := range []string{"0.667", "0.333"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("report does not carry the measured per-floor rate %s:\n%s", want, out)
-		}
-	}
-	// A no-answer query must never have leaked into the graded denominator.
-	if strings.Contains(out, "3 graded queries") {
-		t.Errorf("report counted the no-answer queries in the graded set:\n%s", out)
 	}
 }

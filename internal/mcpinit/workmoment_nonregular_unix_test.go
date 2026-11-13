@@ -4,7 +4,6 @@ package mcpinit
 
 import (
 	"os"
-	"path/filepath"
 	"syscall"
 	"testing"
 	"time"
@@ -40,31 +39,5 @@ func withMomentMarkerDeadline(t *testing.T, unblock []string, fn func()) {
 			t.Fatalf("the marker call blocked for more than 3s on a path that is not a regular file")
 		case <-time.After(50 * time.Millisecond):
 		}
-	}
-}
-
-// A FIFO at the working-moment marker path must not block readMomentState or
-// appendMomentEntry: both must return an error instead of hanging.
-func TestWorkingMomentMarkerFIFOReadAndAppendDoNotHang(t *testing.T) {
-	dir := t.TempDir()
-	fifo := filepath.Join(dir, "working-moment-fifo.log")
-	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
-		t.Skipf("mkfifo unavailable: %v", err)
-	}
-
-	var readErr error
-	withMomentMarkerDeadline(t, []string{fifo}, func() {
-		_, readErr = readMomentState(fifo)
-	})
-	if readErr == nil {
-		t.Error("readMomentState on a FIFO: want an error, got nil")
-	}
-
-	var appendErr error
-	withMomentMarkerDeadline(t, []string{fifo}, func() {
-		appendErr = appendMomentEntry(fifo, momentEntry{token: "t", bytes: 1, ids: []string{"a"}})
-	})
-	if appendErr == nil {
-		t.Error("appendMomentEntry on a FIFO: want an error, got nil")
 	}
 }

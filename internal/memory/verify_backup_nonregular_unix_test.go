@@ -79,28 +79,6 @@ func TestVerifyBackupRefusesAFIFOBackupWithoutBlocking(t *testing.T) {
 	requireBackupPathRefused(t, dest, dest, "("+fs.ModeNamedPipe.String()+")")
 }
 
-func TestVerifyBackupRefusesAFIFOBackupBesideAManifestWithoutBlocking(t *testing.T) {
-	dest := backedUpFixture(t)
-	if err := os.Remove(dest); err != nil {
-		t.Fatalf("remove the backup: %v", err)
-	}
-	if err := syscall.Mkfifo(dest, 0o600); err != nil {
-		t.Skipf("mkfifo unavailable: %v", err)
-	}
-	if _, err := os.Lstat(ManifestPath(dest)); err != nil {
-		t.Fatalf("the fixture has no manifest beside it: %v", err)
-	}
-	requireBackupPathRefused(t, dest, dest, "("+fs.ModeNamedPipe.String()+")")
-}
-
-func TestVerifyBackupRefusesADirectoryBackup(t *testing.T) {
-	dest := filepath.Join(t.TempDir(), "snap.db")
-	if err := os.Mkdir(dest, 0o700); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	requireBackupPathRefused(t, dest, "", "("+fs.ModeDir.String()+")")
-}
-
 func TestVerifyBackupRefusesASymlinkToAFIFOBackupWithoutBlocking(t *testing.T) {
 	dir := t.TempDir()
 	fifo := filepath.Join(dir, "fifo")

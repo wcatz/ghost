@@ -7,8 +7,6 @@ import (
 	"time"
 )
 
-// The retired-dependency storyline's pair, word for word: a dependency note, and
-// the note saying that dependency was removed with nothing replacing it.
 const (
 	retireOriginal   = "Order emails go out through SendGrid: internal/mail wraps the sendgrid-go v3 client and reads SENDGRID_API_KEY at boot."
 	retireNote       = "SendGrid was removed from parcel-notify: internal/mail is deleted, nothing reads SENDGRID_API_KEY, and order emails are no longer sent at all."
@@ -16,7 +14,6 @@ const (
 	retireOrigReword = "Order emails go out through SendGrid; internal/mail wraps the sendgrid-go v3 client and reads SENDGRID_API_KEY at boot time."
 )
 
-// countDuplicateLinks counts the 'duplicate' edges from one row to another.
 func countDuplicateLinks(t *testing.T, s *Store, from, to string) int {
 	t.Helper()
 	var n int
@@ -28,13 +25,6 @@ func countDuplicateLinks(t *testing.T, s *Store, from, to string) int {
 	return n
 }
 
-// TestUpsertDoesNotFoldARetirementIntoTheClaimItRetires: a note saying a
-// dependency was removed holds no value token the dependency note lacks, so the
-// value guard let the same-category lookup fold it: the retirement was linked to
-// the retired claim as a 'duplicate' and the retired claim was strengthened
-// (importance 0.70 -> 0.84, access_count 0 -> 1). The controls are true
-// restatements, of the retirement and of the original, which must still fold,
-// so a guard that refused every fold cannot pass.
 func TestUpsertDoesNotFoldARetirementIntoTheClaimItRetires(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -70,13 +60,11 @@ func TestUpsertDoesNotFoldARetirementIntoTheClaimItRetires(t *testing.T) {
 		t.Errorf("the retired claim was strengthened by its retirement: importance %.2f (want 0.70), access_count %d (want 0)", importance, access)
 	}
 
-	// Control: a second wording of the retirement folds into the retirement.
 	if _, dupOf, _, err := s.Upsert(ctx, testProject, "dependency", retireNoteAgain, "mcp", 0.7, nil); err != nil {
 		t.Fatalf("Upsert (retirement restated): %v", err)
 	} else if dupOf != retID {
 		t.Errorf("a restatement of the retirement folded into %q, want the retirement %q", dupOf, retID)
 	}
-	// Control: a second wording of the original is not a retirement and folds.
 	if _, dupOf, _, err := s.Upsert(ctx, testProject, "dependency", retireOrigReword, "mcp", 0.7, nil); err != nil {
 		t.Fatalf("Upsert (original restated): %v", err)
 	} else if dupOf != origID {
@@ -84,10 +72,6 @@ func TestUpsertDoesNotFoldARetirementIntoTheClaimItRetires(t *testing.T) {
 	}
 }
 
-// TestUpsertCrossCategoryDoesNotFoldARetirement: the cross-category lookup asks
-// the same question. One retirement word added to a ten-word note clears its
-// Jaccard bar, so saved under another category the retirement reached that fold.
-// The control is the original restated under a third category, which folds.
 func TestUpsertCrossCategoryDoesNotFoldARetirement(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -133,16 +117,12 @@ func TestUpsertCrossCategoryDoesNotFoldARetirement(t *testing.T) {
 	}
 }
 
-// TestRetires pins the retirement rule. Every row shares a value token with the
-// older text (checked first), so a must-not row is refused by the rule under
-// test and not by a missing anchor, except the rows that pin the anchor itself.
 func TestRetires(t *testing.T) {
 	cases := []struct {
 		name, older, newer string
 		want               bool
 		noAnchor           bool // the row pins the anchor: no shared value token
 	}{
-		// Must trigger.
 		{"storyline retirement", retireOriginal, retireNote, true, false},
 		{"decommissioned host", "Nightly backups run on backup-01.internal and push to the B2 bucket.",
 			"backup-01.internal was decommissioned last week.", true, false},
@@ -159,7 +139,6 @@ func TestRetires(t *testing.T) {
 		{"retired endpoint", "The /v1/orders endpoint serves the mobile app.",
 			"/v1/orders was retired in the 3.0 release.", true, false},
 
-		// Must not trigger.
 		{"plan with once", "The LEGACY_AUTH flag gates the old session login path in internal/auth.",
 			"The LEGACY_AUTH flag is no longer needed once SSO ships.", false, false},
 		{"plan with will", "SendGrid sends order emails via SENDGRID_API_KEY.",
@@ -183,11 +162,8 @@ func TestRetires(t *testing.T) {
 		{"conditional behaviour", "Session keys live in Redis under SESSION_PREFIX.",
 			"A session key under SESSION_PREFIX was deleted when the TTL expired.", false, false},
 		{"restatement", retireOriginal, retireOrigReword, false, false},
-		// The active voice is a documented limit: the bare verb is a change-log
-		// verb with any object, so it is left off the list on purpose.
 		{"active voice", "Order emails go out through SendGrid via SENDGRID_API_KEY.",
 			"We removed SendGrid and deleted SENDGRID_API_KEY.", false, false},
-		// The anchor: no shared value token, no retirement. The plain-word limit.
 		{"plain words only", "we send order emails through the mail provider",
 			"the mail provider was removed and order emails are no longer sent", false, true},
 		{"name at a sentence start", "Caching uses Redis for sessions.",
@@ -201,7 +177,6 @@ func TestRetires(t *testing.T) {
 			if got := retires(tc.newer, tc.older); got != tc.want {
 				t.Errorf("retires(%q, %q) = %v, want %v", tc.newer, tc.older, got, tc.want)
 			}
-			// Never the other way round: the retired claim retires nothing.
 			if tc.want && retires(tc.older, tc.newer) {
 				t.Errorf("the retired claim reads as retiring its retirement")
 			}
@@ -209,9 +184,6 @@ func TestRetires(t *testing.T) {
 	}
 }
 
-// TestLexicalReplacementsPairsARetirement: on the read side a retirement is a
-// replacement pair, newer retirement over older claim, under every rule a value
-// replacement is held to. It is directional, and a plan is no retirement.
 func TestLexicalReplacementsPairsARetirement(t *testing.T) {
 	now := time.Date(2026, 9, 30, 0, 0, 0, 0, time.UTC)
 	const (
@@ -242,12 +214,10 @@ func TestLexicalReplacementsPairsARetirement(t *testing.T) {
 		})
 	}
 
-	// The similarity row is refused by the similarity bar, not by the rule.
 	if !retires("The nightly Jenkins job was removed; nothing uploads to GHCR from it.", "CI runs on GitHub Actions and publishes to GHCR.") {
 		t.Fatalf("fixture: the similarity row is not a retirement, so it pins nothing about the bar")
 	}
 
-	// The rules a value replacement is held to hold here too.
 	rows := func() []Candidate {
 		return []Candidate{lexRow("old", oldDay, retireOriginal), lexRow("new", newDay, retireNote)}
 	}

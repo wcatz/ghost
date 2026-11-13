@@ -17,12 +17,6 @@ var errPruneInterrupted = errors.New("prune: interrupted before the delete")
 
 var pruneBeforeDelete func() error
 
-func setPruneBeforeDelete(fn func() error) (restore func()) {
-	prev := pruneBeforeDelete
-	pruneBeforeDelete = fn
-	return func() { pruneBeforeDelete = prev }
-}
-
 // PruneOptions is what one prune run is doing. The zero value is a dry run over
 // every project with the documented grace, which is the shape a caller gets for
 // asking nothing.

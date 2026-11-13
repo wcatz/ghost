@@ -15,11 +15,9 @@ import (
 
 const editRaceProject = "race-project"
 
-// editingEmbedServer is a fake endpoint that runs onFirst while the FIRST embed
-// request is in flight (after the worker has read the content, before it can
-// store the vector), then answers with vecOld. Every later request is answered
-// with vecNew, the vector of the edited text. No sleeps: the edit happens inside
-// the handler, which is exactly the window the worker is blocked in.
+// editingEmbedServer runs onFirst while the first embed request is in flight
+// (after the worker read the content, before it stores the vector), then answers
+// with vecOld; every later request gets vecNew, the edited text's vector.
 func editingEmbedServer(t *testing.T, vecOld, vecNew []float32, onFirst func()) *httptest.Server {
 	t.Helper()
 	var once sync.Once
@@ -40,12 +38,9 @@ func editingEmbedServer(t *testing.T, vecOld, vecNew []float32, onFirst func()) 
 	return srv
 }
 
-// TestEmbedEditDuringFlightKeepsRowPending: an edit that lands while the
-// endpoint is computing a vector must not be overwritten by that vector. The
-// edit removes the row's embedding; the in-flight vector was computed from the
-// old text, so storing it would leave the wrong vector current, never selected
-// for re-embedding. The write has to be refused, leaving the row pending, so the
-// next pass embeds the new text.
+// TestEmbedEditDuringFlightKeepsRowPending: an edit landing while the endpoint
+// computes a vector must not be overwritten by that (old-text) vector; the write
+// is refused and the row stays pending for the next pass.
 func TestEmbedEditDuringFlightKeepsRowPending(t *testing.T) {
 	vecOld := []float32{1, 0, 0}
 	vecNew := []float32{0, 1, 0}

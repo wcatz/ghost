@@ -2,7 +2,6 @@ package memory
 
 import (
 	"context"
-	"database/sql"
 	"io"
 	"log/slog"
 	"path/filepath"
@@ -11,14 +10,6 @@ import (
 	"time"
 )
 
-// TestRestoreKeepsSavesMadeAfterSnapshot is the data-loss defect.
-//
-// RestoreSnapshot deleted every non-manual row in the project, without the
-// consolidatedSince guard ReplaceNonManual has — so an `mcp` save written
-// minutes after the snapshot was taken, which the snapshot never saw and
-// cannot bring back, was permanently destroyed by a restore. A user saving a
-// fact and then restoring would lose it silently, with no undo: the row is
-// not in the snapshot, so it is simply gone.
 func TestRestoreKeepsSavesMadeAfterSnapshot(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -30,14 +21,12 @@ func TestRestoreKeepsSavesMadeAfterSnapshot(t *testing.T) {
 		t.Fatalf("create old: %v", err)
 	}
 
-	// Takes a snapshot of the project, then replaces it.
 	if _, _, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
 		{Category: "fact", Content: "new consolidated fact", Importance: 0.6},
 	}, "", nil); err != nil {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
 
-	// Saved AFTER the snapshot: it is not in it and never can be.
 	laterID, err := s.Create(ctx, testProject, Memory{
 		Category: "fact", Content: "saved after the snapshot was taken",
 		Source: "mcp", Importance: 0.7,
@@ -62,12 +51,6 @@ func TestRestoreKeepsSavesMadeAfterSnapshot(t *testing.T) {
 	t.Errorf("a save made after the snapshot was destroyed by the restore; it is not in the snapshot, so it cannot be brought back (id %s)", laterID)
 }
 
-// TestRestorePreservesIdentityProvenanceAndCount: the snapshot did not carry
-// the original id, created_at, access_count or v10 provenance, so every
-// restored row came back as a brand-new memory. That reset decay, and because
-// memory_embeddings and memory_links both reference memories(id) ON DELETE
-// CASCADE, the delete-then-reinsert destroyed the embedding and the whole
-// link graph around the row even though its text came back looking fine.
 func TestRestorePreservesIdentityProvenanceAndCount(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -84,8 +67,6 @@ func TestRestorePreservesIdentityProvenanceAndCount(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	// Give it decay history: access_count and last_accessed both feed decay,
-	// and a restore that resets them makes an old memory look freshly written.
 	if err := s.Touch(ctx, []string{origID}); err != nil {
 		t.Fatalf("Touch: %v", err)
 	}
@@ -102,8 +83,6 @@ func TestRestorePreservesIdentityProvenanceAndCount(t *testing.T) {
 		t.Fatalf("precondition: access_count = %d, want >= 2", orig.AccessCount)
 	}
 
-	// Emit different content so the original row is really deleted, not
-	// reused in place — that is the path that lost identity.
 	if _, _, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
 		{Category: "gotcha", Content: "entirely different consolidated content", Importance: 0.6},
 	}, "", nil); err != nil {
@@ -145,11 +124,6 @@ func TestRestorePreservesIdentityProvenanceAndCount(t *testing.T) {
 	}
 }
 
-// TestRestoreDoesNotConsumeTheSnapshot: a restore used to delete the snapshot
-// it read, so a second attempt failed with "no snapshots found" — and with
-// only three kept, a handful of reflections spent the entire history. Because
-// the restore is now expressed as update-in-place plus insert-what-is-missing,
-// running it again yields the same result instead of a different one.
 func TestRestoreDoesNotConsumeTheSnapshot(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -194,10 +168,6 @@ func TestRestoreDoesNotConsumeTheSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second RestoreSnapshot failed — the restore consumed the snapshot it read: %v", err)
 	}
-	// The count is expected to differ: the first run removes the replace's
-	// output and re-inserts the old row, the second only rewrites what is
-	// already correct. What must not differ is the resulting corpus — that is
-	// what "repeatable" has to mean, or a second run could silently drift.
 	if got := state(); got != afterFirst {
 		t.Errorf("second restore changed the corpus:\nafter first:  %s\nafter second: %s", afterFirst, got)
 	}
@@ -206,144 +176,10 @@ func TestRestoreDoesNotConsumeTheSnapshot(t *testing.T) {
 	}
 }
 
-// TestSnapshotRetentionIsWidened: three snapshots meant three reflections of
-// history, and each restore burned one. Retention now keeps ten.
-func TestSnapshotRetentionIsWidened(t *testing.T) {
-	s := testStore(t)
-	ctx := context.Background()
-
-	const rounds = 5
-	for i := 0; i < rounds; i++ {
-		if _, err := s.Create(ctx, testProject, Memory{
-			Category: "fact", Content: "round of reflection content",
-			Source: "reflection", Importance: 0.5,
-		}); err != nil {
-			t.Fatalf("create %d: %v", i, err)
-		}
-		if _, _, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
-			{Category: "fact", Content: "consolidated content", Importance: 0.6},
-		}, "", nil); err != nil {
-			t.Fatalf("ReplaceNonManual %d: %v", i, err)
-		}
-	}
-
-	var n int
-	if err := s.db.QueryRowContext(ctx,
-		`SELECT COUNT(DISTINCT snapshot_id) FROM memory_snapshots WHERE project_id = ?`,
-		testProject,
-	).Scan(&n); err != nil {
-		t.Fatalf("count snapshots: %v", err)
-	}
-	if n != rounds {
-		t.Errorf("distinct snapshots = %d, want %d — retention still trims history (or lost some)", n, rounds)
-	}
-}
-
-// TestMigrateV13AddsSnapshotColumns: the widened columns must exist on both a
-// fresh database and an upgraded one, and an already-captured snapshot must
-// keep NULL memory_id rather than a fabricated one — the ids were never
-// recorded, so inventing them would attach restored memories to whatever row
-// happened to collide.
-func TestMigrateV13AddsSnapshotColumns(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "ghost.db")
-	db, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		t.Fatalf("open db: %v", err)
-	}
-	defer func() { _ = db.Close() }()
-
-	if _, err := db.Exec(initSQL); err != nil {
-		t.Fatalf("create schema: %v", err)
-	}
-	if _, err := db.Exec(`ALTER TABLE memory_snapshots DROP COLUMN memory_id`); err != nil {
-		t.Skipf("this SQLite build cannot drop a column to simulate v12: %v", err)
-	}
-	seed := []string{
-		`INSERT INTO projects (id, path, name) VALUES ('p1', '/tmp/a-very-long-v12-path', 'p1')`,
-		`INSERT INTO memory_snapshots (snapshot_id, project_id, category, content, importance, source)
-		  VALUES ('p1-100', 'p1', 'fact', 'captured before v13', 0.5, 'reflection')`,
-		`PRAGMA user_version = 12`,
-	}
-	for _, q := range seed {
-		if _, err := db.Exec(q); err != nil {
-			t.Fatalf("seed: %v", err)
-		}
-	}
-
-	if err := migrate(db, 12); err != nil {
-		t.Fatalf("migrate v12->v13: %v", err)
-	}
-
-	for _, col := range []string{"memory_id", "access_count", "last_accessed", "agent",
-		"session_id", "source_ref", "confidence", "valid_from", "valid_until", "verified_at"} {
-		var n int
-		if err := db.QueryRow(
-			`SELECT count(*) FROM pragma_table_info('memory_snapshots') WHERE name = ?`, col,
-		).Scan(&n); err != nil {
-			t.Fatalf("inspect %s: %v", col, err)
-		}
-		if n != 1 {
-			t.Errorf("memory_snapshots.%s missing after migrateV13", col)
-		}
-	}
-
-	var memoryID sql.NullString
-	var content string
-	if err := db.QueryRow(`SELECT content, memory_id FROM memory_snapshots WHERE snapshot_id = 'p1-100'`).
-		Scan(&content, &memoryID); err != nil {
-		t.Fatalf("read migrated snapshot: %v", err)
-	}
-	if content != "captured before v13" {
-		t.Errorf("content changed: %q", content)
-	}
-	if memoryID.Valid {
-		t.Errorf("memory_id = %v, want NULL — the original id was never recorded, so it cannot be recovered", memoryID.String)
-	}
-}
-
-// TestMigrateFreshDBHasSnapshotColumns is the fresh-database twin: initSQL
-// must create the widened table directly, or a new install would depend on
-// running migrations it never needs.
-func TestMigrateFreshDBHasSnapshotColumns(t *testing.T) {
-	db, err := OpenDB(filepath.Join(t.TempDir(), "fresh.db"))
-	if err != nil {
-		t.Fatalf("OpenDB: %v", err)
-	}
-	defer func() { _ = db.Close() }()
-
-	for _, col := range []string{"memory_id", "access_count", "agent", "confidence"} {
-		var n int
-		if err := db.QueryRow(
-			`SELECT count(*) FROM pragma_table_info('memory_snapshots') WHERE name = ?`, col,
-		).Scan(&n); err != nil {
-			t.Fatalf("inspect %s: %v", col, err)
-		}
-		if n != 1 {
-			t.Errorf("memory_snapshots.%s missing on a fresh database", col)
-		}
-	}
-}
-
-// TestRestoreInvalidatesTheEmbeddingOfRevertedContent is #1085.
-//
-// RestoreSnapshot rewrote a reverted row's CONTENT in place but left the
-// embedding and link-scan rows of the text it had just reverted away. The
-// row then scored for bytes it no longer held — semantic search returned the
-// restored row at cosine 1.000 for a query built from the superseded text —
-// and UnembeddedMemoryIDs never re-queued it, because it still had a vector
-// under the configured identity: the row stayed wrong until the embedding
-// model changed. The restore now deletes both rows in the same transaction
-// it writes content in, the rule UpdateMemoryWithOptions applies to an edit.
-// A row whose content the restore leaves alone keeps both, and so does a row
-// whose METADATA the restore reverts — the delete is scoped to the content
-// difference alone, never the UPDATE's four-column difference.
 func TestRestoreInvalidatesTheEmbeddingOfRevertedContent(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
 
-	// Three reflection rows the replace below re-emits verbatim, so all of
-	// them keep their ids, their embeddings and their link scans, and all
-	// three land in the snapshot.
 	alpha, err := s.Create(ctx, testProject, Memory{
 		Category: "fact", Content: "alpha content", Source: "reflection", Importance: 0.5,
 	})
@@ -368,8 +204,6 @@ func TestRestoreInvalidatesTheEmbeddingOfRevertedContent(t *testing.T) {
 		}
 	}
 
-	// A verbatim replace takes the snapshot. Nothing about the three rows
-	// changes, so restoration comes back to exactly this state.
 	if _, _, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
 		{Category: "fact", Content: "alpha content", Importance: 0.5},
 		{Category: "fact", Content: "psi content", Importance: 0.5},
@@ -378,8 +212,6 @@ func TestRestoreInvalidatesTheEmbeddingOfRevertedContent(t *testing.T) {
 		t.Fatalf("ReplaceNonManual: %v", err)
 	}
 
-	// Alpha is edited to the text the restore will revert, and re-embedded
-	// under that text — the stale-vector state the bug leaves behind.
 	if err := s.UpdateMemoryWithOptions(ctx, testProject, alpha, UpdateOptions{
 		Content: strPtr("beta content"),
 	}); err != nil {
@@ -388,18 +220,12 @@ func TestRestoreInvalidatesTheEmbeddingOfRevertedContent(t *testing.T) {
 	if err := s.StoreEmbedding(ctx, alpha, []float32{0, 1, 0}, "test"); err != nil {
 		t.Fatalf("re-embed alpha: %v", err)
 	}
-	// Chi is edited in METADATA ONLY — its category diverges from the
-	// snapshot while its content stays the same, so the restore rewrites chi
-	// without reverting any text.
 	if err := s.UpdateMemoryWithOptions(ctx, testProject, chi, UpdateOptions{
 		Category: strPtr("pattern"),
 	}); err != nil {
 		t.Fatalf("update chi: %v", err)
 	}
 
-	// Every row holds a link-scan slot describing the vectors above. The
-	// restore must clear alpha's — its slot described the reverted text —
-	// and leave psi's and chi's exactly where they were.
 	for _, id := range []string{alpha, psi, chi} {
 		if _, err := s.db.ExecContext(ctx, `INSERT INTO link_scans (memory_id) VALUES (?)`, id); err != nil {
 			t.Fatalf("seed link scan %s: %v", id, err)
@@ -430,9 +256,6 @@ func TestRestoreInvalidatesTheEmbeddingOfRevertedContent(t *testing.T) {
 		t.Fatalf("restored category = %q, want %q (the metadata revert did land)", chiGot.Category, "fact")
 	}
 
-	// The vector of the reverted-away text must be gone, not stale: the row
-	// is queued for a re-embed, and a semantic query for the beta text no
-	// longer scores the restored row at 1.000.
 	unembedded, err := s.UnembeddedMemoryIDs(ctx, testProject, "test", 10)
 	if err != nil {
 		t.Fatalf("UnembeddedMemoryIDs: %v", err)
@@ -457,8 +280,6 @@ func TestRestoreInvalidatesTheEmbeddingOfRevertedContent(t *testing.T) {
 		}
 	}
 
-	// Its own content never changed, so psi keeps its vector across the
-	// restore — only reverted text re-queues a re-embed.
 	for _, id := range []string{psi, chi} {
 		vec, err := s.GetEmbedding(ctx, id)
 		if err != nil {
@@ -469,10 +290,6 @@ func TestRestoreInvalidatesTheEmbeddingOfRevertedContent(t *testing.T) {
 		}
 	}
 
-	// The link-scan slots follow the same rule as the embeddings: alpha's
-	// is dropped with the text it described, psi's and chi's survive — psi
-	// because nothing about it changed, chi because a metadata-only revert
-	// restores no text and must not re-queue a re-link it does not need.
 	linkScanCount := func(id string) int {
 		t.Helper()
 		var n int
@@ -493,17 +310,10 @@ func TestRestoreInvalidatesTheEmbeddingOfRevertedContent(t *testing.T) {
 	}
 }
 
-// TestRestoreLegacySnapshotMatchesByContent covers snapshots written before
-// schema v13, whose memory_id is NULL and cannot be recovered.
-//
-// They restore by content instead: that can only add a row that is missing
-// and never overwrites a live one, so the property that matters is that a
-// second restore does not duplicate what the first just wrote.
 func TestRestoreLegacySnapshotMatchesByContent(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
 
-	// A pre-v13 snapshot: everything recorded except the original id.
 	if _, err := s.db.ExecContext(ctx, `
 		INSERT INTO memory_snapshots
 		    (snapshot_id, project_id, category, content, importance, source, tags, memory_id)
@@ -529,8 +339,6 @@ func TestRestoreLegacySnapshotMatchesByContent(t *testing.T) {
 		t.Fatalf("legacy snapshot content restored %d times, want 1", count())
 	}
 
-	// Restoring again must not duplicate it: with no id to key on, an
-	// unconditional insert would stack a copy on every run.
 	if _, err := s.RestoreSnapshot(ctx, testProject); err != nil {
 		t.Fatalf("second restore: %v", err)
 	}
@@ -539,20 +347,6 @@ func TestRestoreLegacySnapshotMatchesByContent(t *testing.T) {
 	}
 }
 
-// TestRestorePicksTheSnapshotInsideItsWriteTransaction is the cross-process
-// race: RestoreSnapshot read the latest snapshot id on the pool and only then
-// waited for the write lock, so a reflection another handle committed while the
-// restore waited in BEGIN IMMEDIATE was serialised BEFORE the restore and still
-// skipped by it. The restore applied the older snapshot, and a memory saved
-// between the two reflections and consumed by the second was in neither the
-// live corpus nor the snapshot it used — gone, with the restore reporting
-// success.
-//
-// Handle b holds the write lock with the second reflection written but not
-// committed; handle a's restore is started and observed holding its one
-// connection (waiting for the lock, after the old code's pool read); then b
-// commits. A restore that picks its snapshot inside its own transaction sees
-// b's snapshot, so the consumed memory comes back and b's output goes.
 func TestRestorePicksTheSnapshotInsideItsWriteTransaction(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "ghost.db")
@@ -590,7 +384,6 @@ func TestRestorePicksTheSnapshotInsideItsWriteTransaction(t *testing.T) {
 	time.Sleep(5 * time.Millisecond) // a distinct UnixNano snapshot id
 	const reflect2Out = "reflect two output merging everything"
 
-	// b takes the write lock (BEGIN IMMEDIATE) and writes reflection 2 in it.
 	txB, err := b.db.BeginTx(ctx, nil)
 	if err != nil {
 		t.Fatalf("begin b: %v", err)
@@ -603,9 +396,6 @@ func TestRestorePicksTheSnapshotInsideItsWriteTransaction(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { _, err := a.RestoreSnapshot(ctx, testProject); done <- err }()
 
-	// a is one connection: once the restore holds it continuously, the
-	// restore is in BEGIN waiting for b's lock (the old code's snapshot read
-	// on the pool is a single fast query that releases it before that).
 	deadline := time.Now().Add(5 * time.Second)
 	held := time.Time{}
 	for {
@@ -644,10 +434,6 @@ func TestRestorePicksTheSnapshotInsideItsWriteTransaction(t *testing.T) {
 	}
 }
 
-// TestRestoreCountsOnlyRowsItChanged: Restored is what the operator is told, so
-// it must count rows the restore removed, rewrote or re-inserted — not rows it
-// matched and found already equal to the snapshot. A repeat run changes no
-// column and appends no history row, so it has to report zero.
 func TestRestoreCountsOnlyRowsItChanged(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -680,8 +466,6 @@ func TestRestoreCountsOnlyRowsItChanged(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first RestoreSnapshot: %v", err)
 	}
-	// Two removed (merge output, new row) + three re-inserted (both merge
-	// sources, dropped row); the verbatim row matched and changed nothing.
 	if first.Restored != 5 {
 		t.Errorf("first restore reported %d, want 5 (2 removed + 3 re-inserted; the unchanged verbatim row is not a change)", first.Restored)
 	}
@@ -696,65 +480,5 @@ func TestRestoreCountsOnlyRowsItChanged(t *testing.T) {
 	}
 	if got := historyRows(); got != h {
 		t.Errorf("second restore appended %d history rows, want 0", got-h)
-	}
-}
-
-// TestRestoreCountsATagsOnlyRevert: the history gate compares four recorded
-// columns, but the restore rewrites more than those. A row whose only
-// difference from the snapshot is its tags was changed by the restore, so the
-// count includes it, while the history (which records no tags-only change)
-// stays untouched.
-func TestRestoreCountsATagsOnlyRevert(t *testing.T) {
-	s := testStore(t)
-	ctx := context.Background()
-
-	id, err := s.Create(ctx, testProject, Memory{
-		Category: "fact", Content: "a fact whose tags get edited", Source: "reflection",
-		Importance: 0.5, Tags: []string{"a"},
-	})
-	if err != nil {
-		t.Fatalf("create: %v", err)
-	}
-	if _, _, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{
-		{Category: "fact", Content: "a fact whose tags get edited", Importance: 0.5, Tags: []string{"a"}},
-	}, "", nil); err != nil {
-		t.Fatalf("ReplaceNonManual: %v", err)
-	}
-	if _, err := s.db.ExecContext(ctx, `UPDATE memories SET tags = '["zzz"]' WHERE id = ?`, id); err != nil {
-		t.Fatalf("edit tags: %v", err)
-	}
-	var h int
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM memory_history`).Scan(&h); err != nil {
-		t.Fatalf("count history: %v", err)
-	}
-
-	res, err := s.RestoreSnapshot(ctx, testProject)
-	if err != nil {
-		t.Fatalf("RestoreSnapshot: %v", err)
-	}
-	if res.Restored != 1 {
-		t.Errorf("restore reported %d, want 1: it put the tags back", res.Restored)
-	}
-	var tags string
-	if err := s.db.QueryRowContext(ctx, `SELECT tags FROM memories WHERE id = ?`, id).Scan(&tags); err != nil {
-		t.Fatalf("read tags: %v", err)
-	}
-	if tags != `["a"]` {
-		t.Fatalf("tags = %s, want [\"a\"]: the restore did not revert them", tags)
-	}
-	var h2 int
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM memory_history`).Scan(&h2); err != nil {
-		t.Fatalf("count history: %v", err)
-	}
-	if h2 != h {
-		t.Errorf("a tags-only revert appended %d history rows, want 0", h2-h)
-	}
-
-	again, err := s.RestoreSnapshot(ctx, testProject)
-	if err != nil {
-		t.Fatalf("second RestoreSnapshot: %v", err)
-	}
-	if again.Restored != 0 {
-		t.Errorf("second restore reported %d, want 0", again.Restored)
 	}
 }

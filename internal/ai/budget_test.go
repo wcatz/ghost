@@ -11,26 +11,14 @@ import (
 	"github.com/wcatz/ghost/internal/memory"
 )
 
-// TestHarnessCommand_EnforcesScratchBudgetBeforeSpawn pins the Phase-3 budget
-// contract at the single funnel every LLM harness spawn goes through
-// (harnessCommand): a root that is over scratch.max_bytes must have its stale
-// entries reaped BEFORE the spawn; if it is STILL over budget after reaping,
-// a loud warning naming the root and the bytes-over must be emitted; and none
-// of it may block the spawn — the command must still be constructed and
-// confined. The budget-check event (scratch bytes + reaped counts) must land
-// in maintenance_runs so `ghost maintenance status` can show it.
-//
-// Fixture math: budget 4096; stale reaped dir 8192 B (markerless, older than
-// the 24h reap age, Open's exact name shape) + a foreign 8192 B file Reap must
-// never collect → 16384 B before, 8192 B after the reap → still over by 4096.
 func TestHarnessCommand_EnforcesScratchBudgetBeforeSpawn(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("GHOST_SCRATCH_DIR", root)
 	t.Setenv("GHOST_SCRATCH_MAX_BYTES", "4096")
-	// Isolate config: a real user config must not inject a different budget.
+
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	// Isolate the database the budget event records into.
+
 	dataHome := t.TempDir()
 	t.Setenv("XDG_DATA_HOME", dataHome)
 	dbPath := filepath.Join(dataHome, "ghost", "ghost.db")
@@ -45,8 +33,6 @@ func TestHarnessCommand_EnforcesScratchBudgetBeforeSpawn(t *testing.T) {
 		t.Fatalf("close seed db: %v", err)
 	}
 
-	// Stale entry the reaper must collect: markerless, Open's exact name shape,
-	// mtime older than the 24h age bound.
 	stale := filepath.Join(root, "123-0123456789abcdef")
 	if err := os.Mkdir(stale, 0o700); err != nil {
 		t.Fatalf("mkdir stale dir: %v", err)
@@ -58,24 +44,17 @@ func TestHarnessCommand_EnforcesScratchBudgetBeforeSpawn(t *testing.T) {
 	if err := os.Chtimes(stale, old, old); err != nil {
 		t.Fatalf("chtimes stale dir: %v", err)
 	}
-	// Foreign entry Reap must never collect — keeps the root over budget after
-	// the reap so the loud-warning path fires too.
+
 	foreign := filepath.Join(root, "foreign.bin")
 	if err := os.WriteFile(foreign, make([]byte, 8192), 0o600); err != nil {
 		t.Fatalf("write foreign file: %v", err)
 	}
 
-	// captureProcessLogs, not a bare bytes.Buffer: this funnel spawns under a
-	// caller that can walk away from an in-flight child (harnessCommand is what
-	// every probe runs under), and scratch.EnforceBudget below warns through the
-	// process default logger from whatever goroutine reaches it. See
-	// lockedBuffer.
 	logs := captureProcessLogs(t)
 
 	cmd, release, err := harnessCommand(context.Background(), "true", nil, nil, harnessClaude)
 	t.Cleanup(release)
 
-	// NEVER BLOCKS: the command is still constructed and confined to the root.
 	if err != nil || cmd == nil {
 		t.Fatalf("budget enforcement blocked the spawn: cmd=%v err=%v", cmd, err)
 	}
@@ -83,16 +62,14 @@ func TestHarnessCommand_EnforcesScratchBudgetBeforeSpawn(t *testing.T) {
 		t.Errorf("cmd.Dir = %q, want a dir under %q (spawn not confined)", cmd.Dir, root)
 	}
 
-	// The stale entry was reaped as part of the pre-spawn check.
 	if _, err := os.Stat(stale); !os.IsNotExist(err) {
 		t.Errorf("stale dir survived the budget reaper (stat err %v)", err)
 	}
-	// The foreign entry was correctly left alone.
+
 	if _, err := os.Stat(foreign); err != nil {
 		t.Errorf("foreign file must survive Reap: %v", err)
 	}
 
-	// STILL over budget after reaping → LOUD warning naming root + over-bytes.
 	out := logs.String()
 	if !strings.Contains(out, "over budget") {
 		t.Errorf("no over-budget warning captured; slog output:\n%s", out)
@@ -107,7 +84,6 @@ func TestHarnessCommand_EnforcesScratchBudgetBeforeSpawn(t *testing.T) {
 		t.Errorf("warning must carry bytes over budget (over_by=4096); slog output:\n%s", out)
 	}
 
-	// The budget-check event landed in maintenance_runs.
 	db, err = memory.OpenDB(dbPath)
 	if err != nil {
 		t.Fatalf("reopen db: %v", err)
@@ -126,8 +102,7 @@ func TestHarnessCommand_EnforcesScratchBudgetBeforeSpawn(t *testing.T) {
 	if count != 1 {
 		t.Errorf("maintenance_runs scratch-budget rows = %d, want 1", count)
 	}
-	// After the reap the root is the foreign 8192 B; the stale dir's 8192 B
-	// (payload; dir inode excluded) were reaped.
+
 	if scratchBytes != 8192 {
 		t.Errorf("recorded scratch_bytes = %d, want 8192 (post-reap root size)", scratchBytes)
 	}

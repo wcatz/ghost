@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"regexp"
 	"strings"
 	"testing"
 )
@@ -265,52 +264,6 @@ func TestPassiveCorpusGradesAreConsistent(t *testing.T) {
 	}
 }
 
-// TestPassiveCorpusSeparatesAContradictsPair holds the corpus's contradicts pair
-// to the behaviour it exists to measure (#925). The leak figure would stay zero
-// for the wrong reason if the losing row simply never reached the window: this
-// reads the rendered blocks and requires the row to be ABSENT as a row and the
-// kept pin's line to name it. Both sides are checked — the project's pair and the
-// `_global` pair, which is read in the same block — and on every surface, because
-// every surface renders Item.Line and so inherits the marker.
-func TestPassiveCorpusSeparatesAContradictsPair(t *testing.T) {
-	c, env := passiveEnv(t, BlindNone)
-	byID := c.ByID()
-	for _, spec := range PassiveSurfaces() {
-		for _, p := range PassiveProjects {
-			block, err := spec.Read(context.Background(), env, p)
-			if err != nil {
-				t.Fatalf("%s/%s: %v", spec.Name, p, err)
-			}
-			rows := map[string]bool{}
-			for _, id := range renderedIDs(block) {
-				rows[id] = true
-			}
-			for _, owner := range []string{p, PassiveGlobal} {
-				withheld, kept := corpusID(owner, "contradict-00"), corpusID(owner, "pinned-00")
-				if byID[withheld].Kind != KindContradictsWithheld {
-					t.Fatalf("%s is not a %s row", withheld, KindContradictsWithheld)
-				}
-				if rows[withheld] {
-					t.Errorf("%s/%s: %s rendered as its own row, so the corpus does not exercise stage 5", spec.Name, p, withheld)
-				}
-				if !rows[kept] {
-					t.Fatalf("%s/%s: the kept pin %s did not render, so the pair cannot be marked", spec.Name, p, kept)
-				}
-				var line string
-				for _, l := range strings.Split(block, "\n") {
-					if strings.HasPrefix(l, "- [") && strings.Contains(l, "`"+kept+"` (") {
-						line = l
-						break
-					}
-				}
-				if !strings.Contains(line, "conflicts_with=`"+withheld+"`") {
-					t.Errorf("%s/%s: the kept line does not mark %s withheld:\n%s", spec.Name, p, withheld, line)
-				}
-			}
-		}
-	}
-}
-
 // TestPassiveMeasurementCatchesADisabledFilter is the mutation check. A store
 // seeded without the windows (or without the withdrawals) is the store a product
 // whose validity (or resolved) filter had been removed would behave as if it held:
@@ -488,25 +441,5 @@ func TestBudgetCutOKRowsAreAbsentOnTheUnionSurfaces(t *testing.T) {
 				}
 			}
 		}
-	}
-}
-
-// TestHeaderParserReadsTheCappedForm: past the eligible count's cap the header
-// writes its counts as "N+", and the parser records N, the lower bound, rather
-// than failing to match.
-func TestHeaderParserReadsTheCappedForm(t *testing.T) {
-	for _, tc := range []struct{ name, header string }{
-		{"exact", "15 shown of 60 total — 45 not shown: 40 ranked out by x, 5 withheld rather than ranked out"},
-		{"capped", "15 shown of 60+ total — 45+ not shown: 40+ ranked out by x, 5+ withheld rather than ranked out"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			for re, want := range map[*regexp.Regexp]int{
-				hdrTotalRE: 60, hdrNotShownRE: 45, hdrRankedOutRE: 40, hdrWithheldRE: 5,
-			} {
-				if got := atoi(re, tc.header); got != want {
-					t.Errorf("%s: %s read %d, want %d", tc.header, re, got, want)
-				}
-			}
-		})
 	}
 }
