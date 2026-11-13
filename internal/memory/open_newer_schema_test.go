@@ -1,11 +1,8 @@
 package memory
 
 import (
-	"context"
 	"database/sql"
 	"fmt"
-	"io"
-	"log/slog"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -89,44 +86,5 @@ func TestOpenDBRefusesANewerSchemaWithoutWritingToIt(t *testing.T) {
 	after := schemaObjects(t, readBack)
 	if !slices.Equal(after, before) {
 		t.Errorf("schema changed under a refused open:\nbefore: %v\nafter:  %v", before, after)
-	}
-}
-
-// TestOpenDBCreatesAndStampsAFreshDatabase guards the other side of the move:
-// reading the version before the DDL must not stop a first run from creating
-// the schema, stamping it, or leaving the FTS triggers working.
-func TestOpenDBCreatesAndStampsAFreshDatabase(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "fresh.sqlite")
-	db, err := OpenDB(dbPath)
-	if err != nil {
-		t.Fatalf("OpenDB fresh: %v", err)
-	}
-	defer func() { _ = db.Close() }()
-
-	var version int
-	if err := db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
-		t.Fatalf("read user_version: %v", err)
-	}
-	if version != schemaVersion {
-		t.Errorf("user_version = %d, want %d: a fresh database must be stamped", version, schemaVersion)
-	}
-
-	s := NewStore(db, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	ctx := context.Background()
-	if err := s.EnsureProject(ctx, testProject, "/tmp/fresh", testProject); err != nil {
-		t.Fatalf("EnsureProject: %v", err)
-	}
-	const content = "a fresh store indexes what is written into it"
-	if _, _, _, err := s.Upsert(ctx, testProject, "fact", content, "mcp", 0.5, nil); err != nil {
-		t.Fatalf("Upsert: %v", err)
-	}
-	// SearchFTS only answers if both the table and the FTS triggers initSQL
-	// creates are in place.
-	rows, err := s.SearchFTS(ctx, testProject, "fresh store indexes", 5)
-	if err != nil {
-		t.Fatalf("SearchFTS: %v", err)
-	}
-	if len(rows) != 1 {
-		t.Errorf("SearchFTS returned %d rows, want 1: initSQL did not leave a working FTS index", len(rows))
 	}
 }

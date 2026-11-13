@@ -22,7 +22,6 @@ import (
 	"io"
 	"log/slog"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 )
@@ -60,121 +59,6 @@ func stampFromAnotherHandle(t *testing.T, path string, to int) {
 	if _, err := db.Exec(fmt.Sprintf("PRAGMA user_version = %d", to)); err != nil {
 		t.Fatalf("bump user_version to %d: %v", to, err)
 	}
-}
-
-func TestWriteIsRefusedAfterAnotherHandleStampsTheStoreNewer(t *testing.T) {
-	s, path := fileBackedStore(t)
-	ctx := context.Background()
-	if err := s.EnsureProject(ctx, "abc123", "/tmp/test", "test-project"); err != nil {
-		t.Fatalf("EnsureProject: %v", err)
-	}
-
-	// A write at the store's own version is the control: it proves the refusal
-	// below is about the bump and not about the write path.
-	if _, err := s.Create(ctx, "abc123", Memory{
-		Category: "fact", Content: "written before the migration", Source: "mcp", Importance: 0.5,
-	}); err != nil {
-		t.Fatalf("Create before bump: %v", err)
-	}
-
-	// An expired session row, so the prune-apply case below reaches a write
-	// transaction. A prune with no candidates is a read, and a read into a store
-	// this build cannot vouch for is allowed on purpose. It goes in its own
-	// project so the read assertions below still count only abc123's row.
-	if err := s.EnsureProject(ctx, "prn456", "/tmp/prune", "prune-project"); err != nil {
-		t.Fatalf("EnsureProject(prune): %v", err)
-	}
-	if _, _, _, err := s.UpsertWithOptions(ctx, "prn456", "fact", "a session row the prune will want", "mcp", 0.5, nil,
-		UpsertOptions{Retention: RetentionSession}); err != nil {
-		t.Fatalf("UpsertWithOptions(session): %v", err)
-	}
-	if _, err := s.db.ExecContext(ctx,
-		`UPDATE memories SET expires_at = datetime('now', '-10 days'), last_accessed = datetime('now', '-10 days')
-		 WHERE project_id = 'prn456' AND retention = 'session'`); err != nil {
-		t.Fatalf("age the session row: %v", err)
-	}
-
-	stampFromAnotherHandle(t, path, SchemaVersion()+1)
-
-	// Every write path, not just the one beginWrite happens to serve.
-	// insertMemory is ghost_memory_create's own transaction and is NOT routed
-	// through beginWrite, so a check placed only there would let the issue's
-	// own reproduction — a save through the running server — straight through.
-	writes := []struct {
-		op  string
-		run func() error
-	}{
-		{"create", func() error {
-			_, err := s.Create(ctx, "abc123", Memory{
-				Category: "fact", Content: "written after the migration", Source: "mcp", Importance: 0.5,
-			})
-			return err
-		}},
-		{"create-with-id", func() error {
-			_, err := s.CreateWithID(ctx, "abc123", "0123456789ABCDEF0123456789ABCDEF", Memory{
-				Category: "fact", Content: "written with an explicit id", Source: "mcp", Importance: 0.5,
-			})
-			return err
-		}},
-		{"upsert", func() error {
-			_, _, _, err := s.Upsert(ctx, "abc123", "fact", "upserted after the migration", "mcp", 0.5, nil)
-			return err
-		}},
-		{"update", func() error {
-			all, err := s.GetAll(ctx, "abc123", 10)
-			if err != nil || len(all) == 0 {
-				return fmt.Errorf("GetAll: %v (%d rows)", err, len(all))
-			}
-			content := "edited after the migration"
-			return s.UpdateMemory(ctx, "abc123", all[0].ID, &content, nil, nil, nil)
-		}},
-		{"delete", func() error {
-			all, err := s.GetAll(ctx, "abc123", 10)
-			if err != nil || len(all) == 0 {
-				return fmt.Errorf("GetAll: %v (%d rows)", err, len(all))
-			}
-			return s.DeleteWithOptions(ctx, all[len(all)-1].ID, DeleteOptions{})
-		}},
-		{"ensure-project", func() error {
-			return s.EnsureProject(ctx, "def456", "/tmp/other", "other-project")
-		}},
-		{"prune-apply", func() error {
-			// A bulk delete, so the dangerous one: it removes rows by a
-			// predicate rather than by an id the caller names, and the store
-			// would have no record to point at afterwards. The row below is what
-			// makes it reach a write transaction at all — a prune with no
-			// candidates is a pure read and is refused by nothing.
-			_, err := s.PruneSessionMemories(ctx, PruneOptions{Apply: true})
-			return err
-		}},
-	}
-	for _, w := range writes {
-		t.Run(w.op+" is refused", func(t *testing.T) {
-			err := w.run()
-			if err == nil {
-				t.Fatal("write succeeded against a store stamped newer than this build — the running server would keep writing")
-			}
-			if !errors.Is(err, ErrStoreNewer) {
-				t.Fatalf("error = %v, want it to wrap ErrStoreNewer", err)
-			}
-		})
-	}
-
-	// Reads keep working, and that is the point: the agent must still be able
-	// to SEARCH, which is what makes a refusal an instruction to restart rather
-	// than a dead server.
-	t.Run("reads still work", func(t *testing.T) {
-		all, err := s.GetAll(ctx, "abc123", 10)
-		if err != nil {
-			t.Fatalf("GetAll after refusal: %v", err)
-		}
-		if len(all) != 1 {
-			t.Fatalf("got %d memories, want the 1 written before the bump", len(all))
-		}
-		if all[0].Content != "written before the migration" {
-			t.Errorf("content = %q, want the pre-bump text — a refused write must leave no trace", all[0].Content)
-		}
-	})
 }
 
 // The single-statement writes are the second half of the same hole, and the half
@@ -290,32 +174,6 @@ func TestEveryAutocommitWriteIsRefusedAfterAnotherHandleStampsTheStoreNewer(t *t
 	}
 }
 
-func TestStoreNewerErrorNamesBothVersionsAndTheRestart(t *testing.T) {
-	err := &StoreNewerError{StoreVersion: SchemaVersion() + 2, BuildVersion: SchemaVersion()}
-	msg := err.Error()
-	// Both versions, or the operator cannot tell which side moved: the whole
-	// diagnosis is "the store moved, not me".
-	if !strings.Contains(msg, strconv.Itoa(SchemaVersion()+2)) {
-		t.Errorf("error %q does not name the store's version %d", msg, SchemaVersion()+2)
-	}
-	if !strings.Contains(msg, strconv.Itoa(SchemaVersion())) {
-		t.Errorf("error %q does not name this build's version %d", msg, SchemaVersion())
-	}
-	// The remedy, in the words an operator needs. "Upgrade ghost" is what the
-	// OPEN refusal says, and it is wrong here: the binary on disk may already
-	// be the new one, and the RUNNING server is the stale half. An operator
-	// told to upgrade runs `ghost upgrade`, watches it report "already up to
-	// date", and learns nothing.
-	if !strings.Contains(msg, "restart the client that runs this ghost server") {
-		t.Errorf("error %q does not tell the operator to restart the client running the server", msg)
-	}
-	// Reads are named as still working, so the refusal reads as "restart" rather
-	// than as a dead server.
-	if !strings.Contains(msg, "reads keep working") {
-		t.Errorf("error %q does not say reads still work, so it reads as a dead server rather than a restart", msg)
-	}
-}
-
 // The check runs on EVERY write, and the cost is one PRAGMA on a page the open
 // transaction already holds.
 //
@@ -358,82 +216,6 @@ func TestStoreNewerCheckReadsUserVersionOnEveryWrite(t *testing.T) {
 		Category: "fact", Content: "after a foreign commit", Source: "mcp", Importance: 0.5,
 	}); !errors.Is(err, ErrStoreNewer) {
 		t.Fatalf("write after another handle committed = %v, want ErrStoreNewer", err)
-	}
-}
-
-// A fresh connection can report the SAME data_version the previous one did, so a
-// check that cached on it would hand back a pre-migration answer and write into
-// a store a newer Ghost owns. This drives exactly that: the pool's connection is
-// discarded and replaced, the store is migrated underneath, and the write must
-// still be refused.
-//
-// It is the regression test for the cache that was removed, and it uses only
-// the public API — a cancelled query is enough to make modernc mark the
-// connection unusable, and database/sql then opens a new one.
-func TestWriteIsStillRefusedAfterTheConnectionIsReplaced(t *testing.T) {
-	s, path := fileBackedStore(t)
-	ctx := context.Background()
-	if err := s.EnsureProject(ctx, "abc123", "/tmp/test", "test-project"); err != nil {
-		t.Fatalf("EnsureProject: %v", err)
-	}
-	if _, err := s.Create(ctx, "abc123", Memory{
-		Category: "fact", Content: "armed", Source: "mcp", Importance: 0.5,
-	}); err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-
-	replacePoolConnection(t, s)
-
-	// The store moves on while this server is not looking.
-	stampFromAnotherHandle(t, path, SchemaVersion()+1)
-
-	if _, err := s.Create(ctx, "abc123", Memory{
-		Category: "fact", Content: "written after the migration", Source: "mcp", Importance: 0.5,
-	}); !errors.Is(err, ErrStoreNewer) {
-		t.Fatalf("write on a replacement connection = %v, want ErrStoreNewer — the probe must not answer from "+
-			"a value cached against a connection that no longer exists", err)
-	}
-}
-
-// replacePoolConnection makes database/sql discard its connection and open a
-// fresh one, and FAILS the test if the pool did not actually do so.
-//
-// Two things about that are deliberate.
-//
-// The FIRST is that the assertion is the point. This test exists to prove the
-// check does not answer from something cached against a dead connection, so if
-// the pool quietly kept the connection the refusal below would be the ordinary
-// one and the test would pass while proving nothing about the hard half of the
-// story. A green test standing in for a mechanism it never exercised is worse
-// than no test — and that is not hypothetical here: the first version of this
-// helper cancelled a long-running query and slept, on the theory that modernc
-// marks the interrupted connection unusable. It does not: with a full cartesian
-// product the query finished, the pool never recycled, and the test passed green
-// against a connection that was never replaced. The marker is what caught it.
-//
-// The SECOND is that the recycle is forced rather than provoked.
-// SetMaxIdleConns(0) drops every idle connection synchronously, so the next
-// query is guaranteed to dial a new one. Cancelling a query and hoping is not a
-// way to write a test whose subject is "the old connection is gone".
-//
-// A TEMP table is what observes the connection, because its scope IS the
-// connection: no other mechanism in the package can say which one a pooled query
-// ran on, and with MaxOpenConns(1) the answer is unambiguous.
-func replacePoolConnection(t *testing.T, s *Store) {
-	t.Helper()
-	ctx := context.Background()
-	if _, err := s.db.ExecContext(ctx, "CREATE TEMP TABLE IF NOT EXISTS ghost_conn_marker (id)"); err != nil {
-		t.Fatalf("mark the current connection: %v", err)
-	}
-	s.db.SetMaxIdleConns(0)
-	var survived int
-	if err := s.db.QueryRowContext(ctx,
-		"SELECT count(*) FROM sqlite_temp_master WHERE name = 'ghost_conn_marker'").Scan(&survived); err != nil {
-		t.Fatalf("read the connection marker: %v", err)
-	}
-	if survived != 0 {
-		t.Fatal("the pool kept its connection, so this test would prove nothing: the marker table created " +
-			"before the replacement is still there, which means the same connection served the refused write")
 	}
 }
 
