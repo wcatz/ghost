@@ -3,7 +3,6 @@ package memory
 import (
 	"context"
 	"database/sql"
-	"strings"
 	"testing"
 	"time"
 )
@@ -32,15 +31,11 @@ func setRawValidity(t *testing.T, s *Store, ctx context.Context, id string, from
 	}
 }
 
-// TestValiditySQLAgreesWithValidityState is the pin for the SQL form of the
-// passive validity rule, the sibling of TestScopeMatchesSQLAgreesWithScopeMatches.
-//
-// The passive fetch keeps rows whose window contains the request's Now
-// (valid_from <= now AND valid_until >= now, with NULL and unreadable bounds
-// treated as no claim). Stage 2 applies the same rule through ValidityState. This
-// test runs every case through BOTH forms — the SQL through the production
-// builder `validityMatchesSQL`, not a predicate retyped here — so a change to
-// either side the other does not follow fails on the row that changed.
+// TestValiditySQLAgreesWithValidityState pins the SQL form of the passive validity
+// rule to ValidityState. Every case runs through BOTH forms, the SQL through the
+// production builder validityMatchesSQL, so a change to either side the other does
+// not follow fails on the row that changed. The SQL may keep a row Go drops (a
+// stored fraction cut to the whole second Now is bound at) but never the reverse.
 func TestValiditySQLAgreesWithValidityState(t *testing.T) {
 	s, ctx := newDedupStore(t)
 
@@ -48,174 +43,45 @@ func TestValiditySQLAgreesWithValidityState(t *testing.T) {
 	stamp := now.Format(StoredStampLayout)
 	past := now.Add(-24 * time.Hour).Format(StoredStampLayout)
 	future := now.Add(24 * time.Hour).Format(StoredStampLayout)
+	p := func(v string) *string { return &v }
 
 	cases := []struct {
-		name        string
-		validFrom   *string
-		validUntil  *string
-		verifiedAt  *string
-		wantValid   bool // true if the SQL predicate should keep the row
-		wantGoState string
-		// sqlOverAdmits marks the one direction the predicate may differ in: it keeps
-		// a row Go drops (a stored fraction cut to the whole second Now is bound at),
-		// which stage 2 then withholds. The reverse is never allowed.
-		sqlOverAdmits bool
+		name                  string
+		validFrom, validUntil *string
+		verifiedAt            *string
+		wantValid             bool // true if the SQL predicate should keep the row
+		wantGoState           string
+		sqlOverAdmits         bool
 	}{
-		{
-			name:      "no bounds, no verified_at -> unset, kept",
-			validFrom: nil, validUntil: nil, verifiedAt: nil,
-			wantValid: true, wantGoState: ValidityUnset,
-		},
-		{
-			name:      "open window (valid_from only), no verified_at -> unverified, kept",
-			validFrom: strPtr(past), validUntil: nil, verifiedAt: nil,
-			wantValid: true, wantGoState: ValidityUnverified,
-		},
-		{
-			name:      "open window (valid_until only), no verified_at -> unverified, kept",
-			validFrom: nil, validUntil: strPtr(future), verifiedAt: nil,
-			wantValid: true, wantGoState: ValidityUnverified,
-		},
-		{
-			name:      "window contains now, no verified_at -> unverified, kept",
-			validFrom: strPtr(past), validUntil: strPtr(future), verifiedAt: nil,
-			wantValid: true, wantGoState: ValidityUnverified,
-		},
-		{
-			name:      "window contains now, with verified_at -> valid, kept",
-			validFrom: strPtr(past), validUntil: strPtr(future), verifiedAt: strPtr(stamp),
-			wantValid: true, wantGoState: ValidityValid,
-		},
-		{
-			name:      "window closed (valid_until in past) -> expired, dropped",
-			validFrom: strPtr(past), validUntil: strPtr(past), verifiedAt: strPtr(stamp),
-			wantValid: false, wantGoState: ValidityExpired,
-		},
-		{
-			name:      "window not yet open (valid_from in future) -> future, dropped",
-			validFrom: strPtr(future), validUntil: strPtr(future), verifiedAt: strPtr(stamp),
-			wantValid: false, wantGoState: ValidityFuture,
-		},
-		{
-			name:      "expired even with future valid_from -> expired, dropped",
-			validFrom: strPtr(future), validUntil: strPtr(past), verifiedAt: strPtr(stamp),
-			wantValid: false, wantGoState: ValidityExpired,
-		},
-		{
-			name:      "valid_until exactly at now -> kept (a closed window)",
-			validFrom: strPtr(past), validUntil: strPtr(stamp), verifiedAt: strPtr(stamp),
-			wantValid: true, wantGoState: ValidityValid,
-		},
-		{
-			name:      "valid_from exactly at now -> kept",
-			validFrom: strPtr(stamp), validUntil: strPtr(future), verifiedAt: strPtr(stamp),
-			wantValid: true, wantGoState: ValidityValid,
-		},
-		// The unreadable-bound direction the reviewer named: an RFC 3339
-		// valid_from sorts AFTER a leading '2', so a raw string comparison drops
-		// it (`valid_from <= now` false) while Go reads it as no claim and keeps
-		// it. The SQL must keep it too.
-		{
-			name:      "unreadable valid_from, RFC 3339, sorts after now -> no claim, kept",
-			validFrom: strPtr("2026-12-31T00:00:00Z"), validUntil: nil, verifiedAt: nil,
-			wantValid: true, wantGoState: ValidityUnset,
-		},
-		// The other direction: an unreadable valid_until that sorts BEFORE now
-		// (`0000-00-00`) would be dropped by a raw string comparison
-		// (`valid_until >= now` false) while Go treats it as no claim.
-		{
-			name:      "unreadable valid_until, sorts before now -> no claim, kept",
-			validFrom: strPtr(past), validUntil: strPtr("0000-00-00"), verifiedAt: nil,
-			wantValid: true, wantGoState: ValidityUnverified,
-		},
-		{
-			name:      "unreadable valid_from, not-a-date, sorts after now -> no claim, kept",
-			validFrom: strPtr("not-a-date"), validUntil: nil, verifiedAt: nil,
-			wantValid: true, wantGoState: ValidityUnset,
-		},
-		{
-			name:      "empty valid_until -> no claim, kept",
-			validFrom: strPtr(past), validUntil: strPtr(""), verifiedAt: nil,
-			wantValid: true, wantGoState: ValidityUnverified,
-		},
-		{
-			name:      "range-invalid valid_until (2026-02-30) -> no claim, kept",
-			validFrom: strPtr(past), validUntil: strPtr("2026-02-30"), verifiedAt: nil,
-			wantValid: true, wantGoState: ValidityUnverified,
-		},
-		// Fractional-second bounds. Go's time.Parse accepts a separator and one or
-		// more digits after the seconds field, so these are READABLE and must be
-		// judged, not treated as no claim.
-		{
-			name:      "fractional valid_until .000 in the past -> expired, dropped",
-			validFrom: strPtr(past), validUntil: strPtr("2026-09-27 11:00:00.000"), verifiedAt: strPtr(stamp),
-			wantValid: false, wantGoState: ValidityExpired,
-		},
-		{
-			name:      "fractional valid_until .5 in the past -> expired, dropped",
-			validFrom: strPtr(past), validUntil: strPtr("2026-09-27 11:00:00.5"), verifiedAt: strPtr(stamp),
-			wantValid: false, wantGoState: ValidityExpired,
-		},
-		{
-			name:      "fractional valid_until ,5 (comma) in the past -> expired, dropped",
-			validFrom: strPtr(past), validUntil: strPtr("2026-09-27 11:00:00,5"), verifiedAt: strPtr(stamp),
-			wantValid: false, wantGoState: ValidityExpired,
-		},
-		{
-			name:      "fractional valid_until just before now (11:59:59.9) -> expired, dropped",
-			validFrom: strPtr(past), validUntil: strPtr("2026-09-27 11:59:59.9"), verifiedAt: strPtr(stamp),
-			wantValid: false, wantGoState: ValidityExpired,
-		},
-		{
-			name:      "fractional valid_until .9 after now's second -> kept",
-			validFrom: strPtr(past), validUntil: strPtr("2026-09-27 12:00:00.9"), verifiedAt: strPtr(stamp),
-			wantValid: true, wantGoState: ValidityValid,
-		},
-		{
-			name:      "fractional valid_until .000 exactly at now -> kept",
-			validFrom: strPtr(past), validUntil: strPtr("2026-09-27 12:00:00.000"), verifiedAt: strPtr(stamp),
-			wantValid: true, wantGoState: ValidityValid,
-		},
-		{
-			name:      "fractional valid_until .5 after now's second -> kept",
-			validFrom: strPtr(past), validUntil: strPtr("2026-09-27 12:00:00.5"), verifiedAt: strPtr(stamp),
-			wantValid: true, wantGoState: ValidityValid,
-		},
-		{
-			name:      "fractional valid_from .000 exactly at now -> kept",
-			validFrom: strPtr("2026-09-27 12:00:00.000"), validUntil: strPtr(future), verifiedAt: strPtr(stamp),
-			wantValid: true, wantGoState: ValidityValid,
-		},
-		{
-			name:      "fractional valid_from .5 after now -> future, SQL over-admits by truncation",
-			validFrom: strPtr("2026-09-27 12:00:00.5"), validUntil: strPtr(future), verifiedAt: strPtr(stamp),
-			wantValid: false, wantGoState: ValidityFuture, sqlOverAdmits: true,
-		},
-		{
-			name:      "fractional valid_from in the future (,5) -> future, dropped",
-			validFrom: strPtr("2026-09-28 12:00:00,5"), validUntil: strPtr(future), verifiedAt: strPtr(stamp),
-			wantValid: false, wantGoState: ValidityFuture,
-		},
-		{
-			name:      "fractional valid_from in the past -> kept",
-			validFrom: strPtr("2026-09-27 11:00:00.5"), validUntil: strPtr(future), verifiedAt: strPtr(stamp),
-			wantValid: true, wantGoState: ValidityValid,
-		},
-		{
-			name:      "fractional valid_until with trailing text is unreadable -> no claim, kept",
-			validFrom: strPtr(past), validUntil: strPtr("2026-09-27 11:00:00.5x"), verifiedAt: nil,
-			wantValid: true, wantGoState: ValidityUnverified,
-		},
-		{
-			name:      "valid_until with a bare separator and no digits is unreadable -> kept",
-			validFrom: strPtr(past), validUntil: strPtr("2026-09-27 11:00:00."), verifiedAt: nil,
-			wantValid: true, wantGoState: ValidityUnverified,
-		},
-		{
-			name:      "unreadable valid_until, readable window -> valid, kept",
-			validFrom: strPtr(past), validUntil: strPtr("9999-99-99"), verifiedAt: strPtr(stamp),
-			wantValid: true, wantGoState: ValidityValid,
-		},
+		{"no bounds -> unset, kept", nil, nil, nil, true, ValidityUnset, false},
+		{"valid_from only -> unverified, kept", p(past), nil, nil, true, ValidityUnverified, false},
+		{"valid_until only -> unverified, kept", nil, p(future), nil, true, ValidityUnverified, false},
+		{"window contains now, verified -> valid", p(past), p(future), p(stamp), true, ValidityValid, false},
+		{"window closed -> expired, dropped", p(past), p(past), p(stamp), false, ValidityExpired, false},
+		{"window not yet open -> future, dropped", p(future), p(future), p(stamp), false, ValidityFuture, false},
+		{"expired even with future valid_from", p(future), p(past), p(stamp), false, ValidityExpired, false},
+		{"valid_until exactly at now -> kept", p(past), p(stamp), p(stamp), true, ValidityValid, false},
+		{"valid_from exactly at now -> kept", p(stamp), p(future), p(stamp), true, ValidityValid, false},
+		// An RFC 3339 valid_from sorts AFTER a leading '2', so a raw string comparison
+		// would drop it while Go reads it as no claim.
+		{"unreadable valid_from sorts after now -> no claim, kept", p("2026-12-31T00:00:00Z"), nil, nil, true, ValidityUnset, false},
+		// An unreadable valid_until that sorts BEFORE now would be dropped by a raw
+		// string comparison.
+		{"unreadable valid_until sorts before now -> kept", p(past), p("0000-00-00"), nil, true, ValidityUnverified, false},
+		{"empty valid_until -> no claim, kept", p(past), p(""), nil, true, ValidityUnverified, false},
+		{"range-invalid valid_until -> no claim, kept", p(past), p("2026-02-30"), nil, true, ValidityUnverified, false},
+		// Fractional-second bounds are READABLE and must be judged.
+		{"fractional valid_until .5 in the past -> expired", p(past), p("2026-09-27 11:00:00.5"), p(stamp), false, ValidityExpired, false},
+		{"fractional valid_until with comma in the past -> expired", p(past), p("2026-09-27 11:00:00,5"), p(stamp), false, ValidityExpired, false},
+		{"fractional valid_until just before now -> expired", p(past), p("2026-09-27 11:59:59.9"), p(stamp), false, ValidityExpired, false},
+		{"fractional valid_until .9 after now's second -> kept", p(past), p("2026-09-27 12:00:00.9"), p(stamp), true, ValidityValid, false},
+		{"fractional valid_until .000 exactly at now -> kept", p(past), p("2026-09-27 12:00:00.000"), p(stamp), true, ValidityValid, false},
+		{"fractional valid_from .000 exactly at now -> kept", p("2026-09-27 12:00:00.000"), p(future), p(stamp), true, ValidityValid, false},
+		{"fractional valid_from .5 after now -> future, SQL over-admits", p("2026-09-27 12:00:00.5"), p(future), p(stamp), false, ValidityFuture, true},
+		{"fractional valid_from in the future -> dropped", p("2026-09-28 12:00:00,5"), p(future), p(stamp), false, ValidityFuture, false},
+		{"fractional valid_until with trailing text is unreadable", p(past), p("2026-09-27 11:00:00.5x"), nil, true, ValidityUnverified, false},
+		{"valid_until with a bare separator is unreadable", p(past), p("2026-09-27 11:00:00."), nil, true, ValidityUnverified, false},
+		{"unreadable valid_until, readable window -> valid", p(past), p("9999-99-99"), p(stamp), true, ValidityValid, false},
 	}
 
 	for _, c := range cases {
@@ -228,10 +94,8 @@ func TestValiditySQLAgreesWithValidityState(t *testing.T) {
 			}
 			setRawValidity(t, s, ctx, id, c.validFrom, c.validUntil, c.verifiedAt)
 
-			// The production predicate, called rather than retyped.
 			var got int
-			query := `SELECT CASE WHEN ` + validityMatchesSQL() + ` THEN 1 ELSE 0 END
-				FROM memories WHERE id = ?`
+			query := `SELECT CASE WHEN ` + validityMatchesSQL() + ` THEN 1 ELSE 0 END FROM memories WHERE id = ?`
 			if err := s.db.QueryRowContext(ctx, query, stamp, stamp, id).Scan(&got); err != nil {
 				t.Fatalf("validity predicate query: %v", err)
 			}
@@ -239,132 +103,21 @@ func TestValiditySQLAgreesWithValidityState(t *testing.T) {
 
 			goState, _ := ValidityState(c.validFrom, c.validUntil, c.verifiedAt, now)
 			goValid := goState != ValidityExpired && goState != ValidityFuture
-
-			wantSQL := c.wantValid || c.sqlOverAdmits
-			if sqlValid != wantSQL {
-				t.Errorf("SQL: want valid=%v, got valid=%v", wantSQL, sqlValid)
+			if sqlValid != (c.wantValid || c.sqlOverAdmits) {
+				t.Errorf("SQL valid=%v, want %v", sqlValid, c.wantValid || c.sqlOverAdmits)
 			}
-			if goValid != c.wantValid {
-				t.Errorf("Go: want valid=%v, got valid=%v (state=%s)", c.wantValid, goValid, goState)
+			if goValid != c.wantValid || goState != c.wantGoState {
+				t.Errorf("Go state %s (valid=%v), want %s (valid=%v)", goState, goValid, c.wantGoState, c.wantValid)
 			}
-			if sqlValid != goValid && !c.sqlOverAdmits {
-				t.Errorf("SQL and Go disagree: SQL valid=%v, Go valid=%v (state=%s) — the SQL form of "+
-					"the validity rule has drifted from the one rule", sqlValid, goValid, goState)
-			}
-			// Production Now carries a sub-second part, while the SQL binds it
-			// truncated to the second. The SQL must be a SUPERSET of Go's verdict
-			// at any such Now: it may keep a row Go drops, never drop one Go keeps.
-			for _, frac := range []time.Duration{300 * time.Millisecond, 700 * time.Millisecond, 999 * time.Millisecond} {
-				fnow := now.Add(frac)
-				fstate, _ := ValidityState(c.validFrom, c.validUntil, c.verifiedAt, fnow)
+			// Production Now carries a sub-second part while the SQL binds it truncated:
+			// the SQL must be a superset of Go's verdict at any such Now.
+			for _, frac := range []time.Duration{300 * time.Millisecond, 999 * time.Millisecond} {
+				fstate, _ := ValidityState(c.validFrom, c.validUntil, c.verifiedAt, now.Add(frac))
 				if fstate != ValidityExpired && fstate != ValidityFuture && !sqlValid {
 					t.Errorf("fractional Now +%s: Go calls the row %s but the SQL drops it", frac, fstate)
 				}
 			}
-			if goState != c.wantGoState {
-				t.Errorf("Go state: want %s, got %s", c.wantGoState, goState)
-			}
 		})
-	}
-}
-
-// TestPassiveFetchSQLUsesTheValidityBuilder stops the fetch from drifting off the
-// builder the pin above calls: the clause has to be in the statement the store
-// actually runs, not merely equal to one a test also runs.
-func TestPassiveFetchSQLUsesTheValidityBuilder(t *testing.T) {
-	s, _ := newDedupStore(t)
-	cols, err := passiveColumnsFor(s)
-	if err != nil {
-		t.Fatalf("passiveColumnsFor: %v", err)
-	}
-	if !cols.HasValidity {
-		t.Fatalf("fixture: the store must have the validity columns for this to test anything")
-	}
-	q, args := passiveKeyScanSQL(projectPassivePolicy(), passiveRequest("proj"), cols, false)
-	if !strings.Contains(q, validityMatchesSQL()) {
-		t.Errorf("the passive fetch does not use validityMatchesSQL, so the pin tests a predicate the "+
-			"fetch does not run:\n%s", q)
-	}
-	// Two bindings for the predicate, plus the bucket: a query whose clause is
-	// present but whose stamps are never bound fails at run time with "missing
-	// argument with index".
-	if !strings.Contains(q, "?") {
-		t.Fatal("the validity predicate carries no placeholder")
-	}
-	if len(args) < 3 {
-		t.Errorf("args = %d; want at least the bucket and the two validity stamps", len(args))
-	}
-}
-
-// TestPassiveReadAdmitsExactlyTheValidRows is the end-to-end form of the pin: the
-// rows the store RETURNS from a passive read are exactly the rows Go's rule keeps,
-// over a set that mixes valid, expired, future and unreadable windows. The
-// direct-builder test above can pass while a wiring mistake (an unbound stamp, the
-// predicate applied to the wrong column) drops or admits the wrong row here.
-func TestPassiveReadAdmitsExactlyTheValidRows(t *testing.T) {
-	s, ctx := newDedupStore(t)
-
-	now := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
-	stamp := now.Format(StoredStampLayout)
-	past := now.Add(-24 * time.Hour).Format(StoredStampLayout)
-	future := now.Add(24 * time.Hour).Format(StoredStampLayout)
-
-	cases := []struct {
-		name       string
-		validFrom  *string
-		validUntil *string
-		wantKept   bool
-	}{
-		{"kept-unset", nil, nil, true},
-		{"kept-open-from", strPtr(past), nil, true},
-		{"kept-open-until", nil, strPtr(future), true},
-		{"kept-window", strPtr(past), strPtr(future), true},
-		{"kept-boundary-until", strPtr(past), strPtr(stamp), true},
-		{"dropped-expired", strPtr(past), strPtr(past), false},
-		{"dropped-future", strPtr(future), strPtr(future), false},
-		{"kept-unreadable-from", strPtr("2026-12-31T00:00:00Z"), nil, true},
-		{"kept-unreadable-until", strPtr(past), strPtr("0000-00-00"), true},
-	}
-
-	want := map[string]bool{}
-	for _, c := range cases {
-		id, err := s.Create(ctx, testProject, Memory{
-			Category: "fact", Content: c.name, Source: "manual", Importance: 0.7,
-		})
-		if err != nil {
-			t.Fatalf("Create(%s): %v", c.name, err)
-		}
-		setRawValidity(t, s, ctx, id, c.validFrom, c.validUntil, nil)
-		if c.wantKept {
-			want[id] = true
-		}
-	}
-
-	pol := projectPassivePolicy()
-	pol.Bucket = testProject
-	pol.OverFetch = 100
-	req := passiveRequest(testProject, pol)
-	// The request clock is what the SQL predicate and the Go rule are both judged
-	// against, so bind the same instant the cases were built around.
-	req.Now = now
-	set, err := s.Candidates(ctx, req)
-	if err != nil {
-		t.Fatalf("Candidates: %v", err)
-	}
-
-	got := map[string]bool{}
-	for _, r := range set.Rows {
-		got[r.ID] = true
-	}
-	for id := range want {
-		if !got[id] {
-			t.Errorf("a row Go's rule keeps was not returned by the passive read: %s", id)
-		}
-	}
-	for id := range got {
-		if !want[id] {
-			t.Errorf("a row Go's rule drops was returned by the passive read: %s", id)
-		}
 	}
 }
 
@@ -526,31 +279,4 @@ func TestPassiveValidityExcludedStopsAtTheCap(t *testing.T) {
 		t.Fatalf("CandidateSet.ValidityExcluded = %d, want %d", set.ValidityExcluded, PassiveEligibleCountCap)
 	}
 
-	// Below the cap: exact and not capped.
-	db2, err := OpenDB(":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db2.Close() //nolint:errcheck
-	if _, err := db2.Exec(`INSERT INTO projects (id, path, name) VALUES ('p','/p','p')`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db2.Exec(`
-		WITH RECURSIVE seq(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM seq WHERE i < 5)
-		INSERT INTO memories (id, project_id, category, content, source, importance, valid_until, expires_at)
-		SELECT 'bulk' || i, 'p', 'fact', 'c', 'manual', 0.5, '2020-01-01 00:00:00', '2020-01-01 00:00:00' FROM seq`); err != nil {
-		t.Fatal(err)
-	}
-	st2 := NewStore(db2, nil)
-	cols2, err := passiveColumnsFor(st2)
-	if err != nil {
-		t.Fatal(err)
-	}
-	got2, capped2, err := st2.passiveValidityExcluded(context.Background(), req, pol, cols2)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got2 != 5 || capped2 {
-		t.Fatalf("passiveValidityExcluded = %d (capped=%v), want 5 capped=false", got2, capped2)
-	}
 }

@@ -54,20 +54,12 @@ func TestSourceFromScriptPath(t *testing.T) {
 	}
 }
 
-// fakeProc is one ancestor served by fakePS. ppid is the raw `ps -o ppid=`
-// output so tests can inject malformed values; command is the raw
-// `ps -o command=` output, empty meaning the process vanished before it could
-// be read.
 type fakeProc struct {
 	ppid    string
 	comm    string
 	command string
 }
 
-// fakePS serves a pid -> fakeProc table for the three ps invocations
-// detectSourceFromPS makes. A pid absent from the table fails like ps does for
-// a process that has already exited; a command request with no recorded
-// command fails the same way.
 func fakePS(t *testing.T, procs map[int]fakeProc) func(name string, args ...string) ([]byte, error) {
 	t.Helper()
 	return func(name string, args ...string) ([]byte, error) {
@@ -162,8 +154,6 @@ func TestDetectSourceFromPS(t *testing.T) {
 		}
 	})
 
-	// Regression pin: a non-JS-runtime command mentioning a harness path must
-	// not be classified as that harness.
 	t.Run("bash command mentioning codex path is not codex", func(t *testing.T) {
 		run := fakePS(t, map[int]fakeProc{
 			500: {ppid: "400", comm: "ghost", command: "/usr/local/bin/ghost supersede"},
@@ -226,8 +216,6 @@ func TestDetectSourceFromPS(t *testing.T) {
 	})
 }
 
-// writeProcEntry creates a fake /proc/<pid> directory: stat with ppid in field
-// 4 (after state) and a comm file. cmdline is empty unless provided.
 func writeProcEntry(t *testing.T, root string, pid, ppid int, comm, cmdline string) {
 	t.Helper()
 	dir := filepath.Join(root, fmt.Sprintf("%d", pid))
@@ -251,7 +239,7 @@ func writeProcEntry(t *testing.T, root string, pid, ppid int, comm, cmdline stri
 func TestDetectSourceFromProc(t *testing.T) {
 	t.Run("finds harness ancestor", func(t *testing.T) {
 		root := t.TempDir()
-		// ghost (500) <- bash (400) <- opencode (300) <- init (1)
+
 		writeProcEntry(t, root, 500, 400, "ghost", "")
 		writeProcEntry(t, root, 400, 300, "bash", "")
 		writeProcEntry(t, root, 300, 1, "opencode", "")
@@ -325,18 +313,13 @@ func TestDetectSourceFromProc(t *testing.T) {
 
 	t.Run("stops at missing stat", func(t *testing.T) {
 		root := t.TempDir()
-		// 60 has no stat file at all.
+
 		if got := detectSourceFromProc(root, 60); got != "" {
 			t.Errorf("detectSourceFromProc() = %q, want %q", got, "")
 		}
 	})
 }
 
-// TestSourceFromProcessName_ExeSuffix: opencode V2's npm package ships its
-// native binary as `opencode.exe` on every platform (bin/opencode.exe), so the
-// harness process's comm is "opencode.exe". Without folding the suffix, an MCP
-// server spawned by an npm-installed V2 — which reports clientInfo "cli", not
-// "opencode" — can't be attributed to opencode at all.
 func TestSourceFromProcessName_ExeSuffix(t *testing.T) {
 	cases := map[string]string{
 		"opencode":     "opencode",
@@ -354,8 +337,6 @@ func TestSourceFromProcessName_ExeSuffix(t *testing.T) {
 	}
 }
 
-// writeProcEnv creates a fake /proc/<pid>/environ file with the given
-// NUL-separated environment variables.
 func writeProcEnv(t *testing.T, root string, pid int, env []string) {
 	t.Helper()
 	dir := filepath.Join(root, fmt.Sprintf("%d", pid))
@@ -369,84 +350,55 @@ func writeProcEnv(t *testing.T, root string, pid int, env []string) {
 }
 
 func TestIsHostSession(t *testing.T) {
-	t.Run("host session: parent lacks CLAUDE_CODE_SESSION_ID", func(t *testing.T) {
-		root := t.TempDir()
-		// ghost (500) <- shell (400) <- init (1)
-		// shell (400) has NO CLAUDE_CODE_SESSION_ID in its initial environ
-		writeProcEntry(t, root, 500, 400, "ghost", "")
-		writeProcEntry(t, root, 400, 1, "bash", "")
-		writeProcEntry(t, root, 1, 0, "systemd", "")
-		writeProcEnv(t, root, 400, []string{"PATH=/usr/bin", "HOME=/home/user"})
-		writeProcEnv(t, root, 1, []string{"PATH=/usr/bin"})
-		if !IsHostSession(root, 500) {
-			t.Error("IsHostSession() = false, want true (parent lacks CLAUDE_CODE_SESSION_ID)")
-		}
-	})
-
-	t.Run("child session: parent has CLAUDE_CODE_SESSION_ID", func(t *testing.T) {
-		root := t.TempDir()
-		// ghost (500) <- claude (400) <- init (1)
-		// claude (400) HAS CLAUDE_CODE_SESSION_ID in its initial environ
-		writeProcEntry(t, root, 500, 400, "ghost", "")
-		writeProcEntry(t, root, 400, 1, "claude", "")
-		writeProcEntry(t, root, 1, 0, "systemd", "")
-		writeProcEnv(t, root, 400, []string{"PATH=/usr/bin", "CLAUDE_CODE_SESSION_ID=abc-123", "HOME=/home/user"})
-		writeProcEnv(t, root, 1, []string{"PATH=/usr/bin"})
-		if IsHostSession(root, 500) {
-			t.Error("IsHostSession() = true, want false (parent has CLAUDE_CODE_SESSION_ID)")
-		}
-	})
-
-	t.Run("missing parent environ file returns false", func(t *testing.T) {
-		root := t.TempDir()
-		// ghost (500) <- missing parent (400)
-		writeProcEntry(t, root, 500, 400, "ghost", "")
-		writeProcEntry(t, root, 1, 0, "systemd", "")
-		writeProcEnv(t, root, 1, []string{"PATH=/usr/bin"})
-		// parent 400 has no environ file
-		if IsHostSession(root, 500) {
-			t.Error("IsHostSession() = true, want false (missing parent environ)")
-		}
-	})
-
-	t.Run("missing parent stat returns false", func(t *testing.T) {
-		root := t.TempDir()
-		// ghost (500) has no parent entry at all
-		if IsHostSession(root, 500) {
-			t.Error("IsHostSession() = true, want false (missing parent stat)")
-		}
-	})
-
-	t.Run("parent pid 1 returns false", func(t *testing.T) {
-		root := t.TempDir()
-		// ghost (500) <- init (1)
-		writeProcEntry(t, root, 500, 1, "ghost", "")
-		writeProcEntry(t, root, 1, 0, "systemd", "")
-		writeProcEnv(t, root, 1, []string{"PATH=/usr/bin"})
-		if IsHostSession(root, 500) {
-			t.Error("IsHostSession() = true, want false (parent is pid 1)")
-		}
-	})
-
-	t.Run("CLAUDE_CODE_SESSION_ID as prefix not match", func(t *testing.T) {
-		root := t.TempDir()
-		// ghost (500) <- shell (400) <- init (1)
-		// shell has a DIFFERENT variable that STARTS WITH the prefix
-		writeProcEntry(t, root, 500, 400, "ghost", "")
-		writeProcEntry(t, root, 400, 1, "bash", "")
-		writeProcEntry(t, root, 1, 0, "systemd", "")
-		writeProcEnv(t, root, 400, []string{"PATH=/usr/bin", "CLAUDE_CODE_SESSION_ID_EXTRA=abc", "HOME=/home/user"})
-		writeProcEnv(t, root, 1, []string{"PATH=/usr/bin"})
-		// Should NOT match because we look for exact "CLAUDE_CODE_SESSION_ID="
-		if !IsHostSession(root, 500) {
-			t.Error("IsHostSession() = false, want true (parent has different var with prefix)")
-		}
-	})
+	cases := []struct {
+		name  string
+		setup func(root string)
+		want  bool
+	}{
+		{"parent lacks CLAUDE_CODE_SESSION_ID", func(root string) {
+			writeProcEntry(t, root, 500, 400, "ghost", "")
+			writeProcEntry(t, root, 400, 1, "bash", "")
+			writeProcEntry(t, root, 1, 0, "systemd", "")
+			writeProcEnv(t, root, 400, []string{"PATH=/usr/bin", "HOME=/home/user"})
+			writeProcEnv(t, root, 1, []string{"PATH=/usr/bin"})
+		}, true},
+		{"parent has CLAUDE_CODE_SESSION_ID", func(root string) {
+			writeProcEntry(t, root, 500, 400, "ghost", "")
+			writeProcEntry(t, root, 400, 1, "claude", "")
+			writeProcEntry(t, root, 1, 0, "systemd", "")
+			writeProcEnv(t, root, 400, []string{"PATH=/usr/bin", "CLAUDE_CODE_SESSION_ID=abc-123", "HOME=/home/user"})
+			writeProcEnv(t, root, 1, []string{"PATH=/usr/bin"})
+		}, false},
+		{"missing parent environ", func(root string) {
+			writeProcEntry(t, root, 500, 400, "ghost", "")
+			writeProcEntry(t, root, 1, 0, "systemd", "")
+			writeProcEnv(t, root, 1, []string{"PATH=/usr/bin"})
+		}, false},
+		{"missing parent stat", func(root string) {}, false},
+		{"parent pid 1", func(root string) {
+			writeProcEntry(t, root, 500, 1, "ghost", "")
+			writeProcEntry(t, root, 1, 0, "systemd", "")
+			writeProcEnv(t, root, 1, []string{"PATH=/usr/bin"})
+		}, false},
+		{"CLAUDE_CODE_SESSION_ID prefix not exact", func(root string) {
+			writeProcEntry(t, root, 500, 400, "ghost", "")
+			writeProcEntry(t, root, 400, 1, "bash", "")
+			writeProcEntry(t, root, 1, 0, "systemd", "")
+			writeProcEnv(t, root, 400, []string{"PATH=/usr/bin", "CLAUDE_CODE_SESSION_ID_EXTRA=abc", "HOME=/home/user"})
+			writeProcEnv(t, root, 1, []string{"PATH=/usr/bin"})
+		}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			tc.setup(root)
+			if got := IsHostSession(root, 500); got != tc.want {
+				t.Errorf("IsHostSession() = %v, want %v", got, tc.want)
+			}
+		})
+	}
 }
 
-// TestIsHostSessionRealProc: on Linux the real /proc is readable for this
-// process's own parent chain and the call completes without panicking; the
-// answer itself depends on how the suite was launched.
 func TestIsHostSessionRealProc(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("needs /proc")

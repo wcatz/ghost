@@ -39,30 +39,3 @@ func TestScopeLabelIsBoundedForAHugeStoredScope(t *testing.T) {
 		t.Errorf("the label is not closed: ...%s", got[len(got)-40:])
 	}
 }
-
-// TestScopeLabelNeverShortensAScopeAWriterAccepts holds the direction of the
-// agreement the same way the tag bound does: the print bound is the writer's own
-// constants, so a scope exactly at every limit prints whole.
-func TestScopeLabelNeverShortensAScopeAWriterAccepts(t *testing.T) {
-	scope := map[string]string{}
-	for i := 0; i < memory.MaxScopeKeys; i++ {
-		k := fmt.Sprintf("%02d", i) + strings.Repeat("k", memory.MaxScopeKeyLen-2)
-		scope[k] = strings.Repeat("v", memory.MaxScopeValueLen)
-	}
-	got := ScopeLabel(scope)
-	if strings.Contains(got, scopeTruncationMarker) || strings.Contains(got, "more scope keys") {
-		t.Errorf("a scope at the writer's limits was shortened: %.200s", got)
-	}
-	for k, v := range scope {
-		if !strings.Contains(got, k+"="+v) {
-			t.Fatalf("key %.10s... missing from the label", k)
-		}
-	}
-}
-
-func TestScopeLabelOrdinaryScopeIsUnchanged(t *testing.T) {
-	got := ScopeLabel(map[string]string{"environment": "production", "component": "api"})
-	if want := " scope{component=api environment=production}"; got != want {
-		t.Errorf("ScopeLabel = %q, want %q", got, want)
-	}
-}

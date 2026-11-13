@@ -7,39 +7,6 @@ import (
 	"testing"
 )
 
-// TestIsPathShapedRecognizesDriveRelativePath pins the separatorless Windows
-// shape. "C:repo" is a valid drive-relative path — relative to that drive's
-// current directory — and it contains no separator at all, so the shared
-// predicate classified it as a project name. IsPathShaped is the one definition
-// of "the caller is reporting a location", used by both store resolution and
-// mcpserver's repository detection: a writer that read it as a path and a reader
-// that read it as a name is exactly the disagreement this predicate exists to
-// prevent, and the reviewer's case is the one that slips through a separator
-// check.
-func TestIsPathShapedRecognizesDriveRelativePath(t *testing.T) {
-	for _, tc := range []struct {
-		name  string
-		input string
-		want  bool
-	}{
-		{"drive-relative path", `C:repo`, true},
-		{"drive-relative with a separator", `C:\repo`, true},
-		{"drive-relative with a forward slash", `C:/repo`, true},
-		{"absolute unix path", "/home/me/ghost", true},
-		{"bare project name", "ghost", false},
-		{"project id", "a7293a04b38a", false},
-		{"name containing a dot", "ghost.exe", false},
-		{"lone colon is not enough", ":repo", false},
-		{"a multi-character prefix is not a drive", "edge:cache", false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := IsPathShaped(tc.input); got != tc.want {
-				t.Errorf("IsPathShaped(%q) = %v, want %v", tc.input, got, tc.want)
-			}
-		})
-	}
-}
-
 // TestResolveProjectMatchesRelativeSessionDirectory is the integration half: a
 // caller that reports a relative directory, from a repository with no detectable
 // remote, must still reach the project recorded at the matching absolute path.

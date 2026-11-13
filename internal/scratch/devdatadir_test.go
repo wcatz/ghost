@@ -10,92 +10,55 @@ import (
 	"github.com/wcatz/ghost/internal/config"
 )
 
-// TestRootRefusesAFollowedDataDirInsteadOfCreatingAScratchRootInIt is the
-// first of four paths an independent review found reaching a forbidden data
-// directory: `ghost lifecycle` calls scratch.Reap before anything else, Reap
-// calls Root, and Root's default root is <dataDir>/scratch — so a dev build
-// created a directory inside the store it was told not to touch, before any
-// store check could run.
-//
-// The override is unset deliberately: GHOST_SCRATCH_DIR is the sandbox's own
-// guard, and with it set Root never resolves the data directory at all, which is
-// exactly why a reproduction that left it set saw nothing here.
-func TestRootRefusesAFollowedDataDirInsteadOfCreatingAScratchRootInIt(t *testing.T) {
-	prev := config.BuildVersion()
-	config.SetBuildVersion("dev")
-	t.Cleanup(func() { config.SetBuildVersion(prev) })
+// TestRootHonoursForbiddenDataDir: a dev build must refuse, rather than create a
+// scratch root inside, a data directory GHOST_DEV_FORBID_DATA_DIR forbids, and
+// Reap (what the lifecycle calls first) must fail the same way. A release build
+// ignores the variable and keeps its scratch root in the real store. The
+// override is unset deliberately: with GHOST_SCRATCH_DIR set Root never
+// resolves the data directory at all.
+func TestRootHonoursForbiddenDataDir(t *testing.T) {
+	for _, tt := range []struct {
+		name, version string
+		refused       bool
+	}{
+		{"dev build refuses", "dev", true},
+		{"release build ignores", "0.39.0", false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			prev := config.BuildVersion()
+			config.SetBuildVersion(tt.version)
+			t.Cleanup(func() { config.SetBuildVersion(prev) })
 
-	root := t.TempDir()
-	dataHome := filepath.Join(root, "data")
-	dataDir := filepath.Join(dataHome, "ghost")
-	if err := os.MkdirAll(dataDir, 0o700); err != nil {
-		t.Fatalf("mkdir %s: %v", dataDir, err)
-	}
-	t.Setenv("XDG_DATA_HOME", dataHome)
-	t.Setenv(envDir, "")
-	t.Setenv(config.DevForbidDataDirEnv, dataDir)
+			dataHome := filepath.Join(t.TempDir(), "data")
+			dataDir := filepath.Join(dataHome, "ghost")
+			must(t, os.MkdirAll(dataDir, 0o700))
+			t.Setenv("XDG_DATA_HOME", dataHome)
+			t.Setenv(envDir, "")
+			t.Setenv(config.DevForbidDataDirEnv, dataDir)
 
-	if _, err := Root(); err == nil {
-		t.Fatal("Root = nil, want a refusal: the data directory is forbidden")
-	} else if !strings.Contains(err.Error(), config.DevForbidDataDirEnv) {
-		t.Errorf("the refusal does not name %s: %v", config.DevForbidDataDirEnv, err)
-	}
-	if _, err := os.Stat(filepath.Join(dataDir, "scratch")); !os.IsNotExist(err) {
-		t.Errorf("Root created a scratch root inside the forbidden data dir (stat error: %v)", err)
-	}
+			got, err := Root()
+			if !tt.refused {
+				if want := filepath.Join(dataDir, "scratch"); err != nil || got != want {
+					t.Fatalf("Root = (%q, %v), want %q", got, err, want)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), config.DevForbidDataDirEnv) {
+				t.Fatalf("Root error = %v, want a refusal naming %s", err, config.DevForbidDataDirEnv)
+			}
+			if _, _, err := Reap(time.Hour); err == nil {
+				t.Error("Reap = nil, want the refusal Root reports")
+			}
+			if entries, err := os.ReadDir(dataDir); err != nil || len(entries) != 0 {
+				t.Errorf("the forbidden data directory holds %d entries (err %v), want none", len(entries), err)
+			}
 
-	// Reap is what the lifecycle calls, and it must fail the same way rather
-	// than report a clean sweep of a root it never had.
-	if _, _, err := Reap(time.Hour); err == nil {
-		t.Error("Reap = nil, want the refusal Root reports")
-	}
-	entries, err := os.ReadDir(dataDir)
-	if err != nil {
-		t.Fatalf("read %s: %v", dataDir, err)
-	}
-	if len(entries) != 0 {
-		t.Errorf("the forbidden data directory now holds %d entries, want none", len(entries))
-	}
-
-	// The control: the same call with the variable unset creates the root it
-	// has always created, so the assertions above are about the guard rather
-	// than about a sandbox that cannot hold a scratch dir.
-	t.Setenv(config.DevForbidDataDirEnv, "")
-	got, err := Root()
-	if err != nil {
-		t.Fatalf("Root with the variable unset = %v, want the scratch root", err)
-	}
-	if want := filepath.Join(dataDir, "scratch"); got != want {
-		t.Errorf("Root = %q, want %q", got, want)
-	}
-	if _, err := os.Stat(got); err != nil {
-		t.Errorf("Root did not create %s: %v", got, err)
-	}
-}
-
-// TestRootIgnoresAFollowedDataDirOnAReleaseBuild is the other half, and the
-// reason a refusal here is a development-only behaviour: a released ghost's
-// lifecycle reaps its scratch root in the real store exactly as it always has.
-func TestRootIgnoresAFollowedDataDirOnAReleaseBuild(t *testing.T) {
-	prev := config.BuildVersion()
-	config.SetBuildVersion("0.39.0")
-	t.Cleanup(func() { config.SetBuildVersion(prev) })
-
-	root := t.TempDir()
-	dataHome := filepath.Join(root, "data")
-	dataDir := filepath.Join(dataHome, "ghost")
-	if err := os.MkdirAll(dataDir, 0o700); err != nil {
-		t.Fatalf("mkdir %s: %v", dataDir, err)
-	}
-	t.Setenv("XDG_DATA_HOME", dataHome)
-	t.Setenv(envDir, "")
-	t.Setenv(config.DevForbidDataDirEnv, dataDir)
-
-	got, err := Root()
-	if err != nil {
-		t.Fatalf("Root on a release build = %v, want the scratch root", err)
-	}
-	if want := filepath.Join(dataDir, "scratch"); got != want {
-		t.Errorf("Root = %q, want %q", got, want)
+			// Control: with the variable unset the same call creates the root, so
+			// the assertions above are about the guard, not the sandbox.
+			t.Setenv(config.DevForbidDataDirEnv, "")
+			if got, err := Root(); err != nil || got != filepath.Join(dataDir, "scratch") {
+				t.Errorf("Root with the variable unset = (%q, %v), want the scratch root", got, err)
+			}
+		})
 	}
 }

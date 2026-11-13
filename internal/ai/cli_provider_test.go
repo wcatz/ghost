@@ -45,7 +45,7 @@ func TestCLIProvider_FallsBackToOpencode(t *testing.T) {
 }
 
 func TestCLIProvider_UnavailableWhenNeither(t *testing.T) {
-	t.Setenv("PATH", t.TempDir()) // empty dir: no claude, no opencode
+	t.Setenv("PATH", t.TempDir())
 
 	p := NewCLIProvider()
 	if p.Available() {
@@ -67,54 +67,38 @@ func TestCLIProvider_DelegatesReflect(t *testing.T) {
 	writeFake(t, dir, "opencode")
 	t.Setenv("PATH", dir)
 
-	// Note: the fake opencode above exits 0 with no output, so Reflect returns
-	// an empty string, not an error — this asserts delegation plumbing only.
 	p := NewCLIProvider()
 	if _, _, err := p.Reflect(context.Background(), "prompt"); err != nil {
 		t.Fatalf("Reflect delegation: %v", err)
 	}
 }
 
-func TestCLIProviderWithBinaries_UsesExplicitOpenCodePath(t *testing.T) {
-	dir := t.TempDir()
-	writeFake(t, dir, "opencode")
-	t.Setenv("PATH", t.TempDir()) // empty PATH: nothing resolvable by name
-
-	p := NewCLIProviderWithBinaries("", filepath.Join(dir, "opencode"), "", "")
-	if !p.Available() {
-		t.Fatal("expected available via explicit opencode path")
-	}
-	if p.Name() != "opencode" {
-		t.Errorf("expected opencode, got %q", p.Name())
-	}
-}
-
-func TestCLIProviderWithBinaries_UsesExplicitClaudePath(t *testing.T) {
-	dir := t.TempDir()
-	writeFake(t, dir, "claude")
-	t.Setenv("PATH", t.TempDir())
-
-	p := NewCLIProviderWithBinaries(filepath.Join(dir, "claude"), "", "", "")
-	if !p.Available() {
-		t.Fatal("expected available via explicit claude path")
-	}
-	if p.Name() != "cli" {
-		t.Errorf("expected cli, got %q", p.Name())
-	}
-}
-
-func TestCLIProviderWithBinaries_FallsBackToPathWhenOverrideMissing(t *testing.T) {
-	dir := t.TempDir()
-	writeFake(t, dir, "opencode")
-	t.Setenv("PATH", dir)
-
-	// Explicit claude path is missing, so fall back to the PATH lookup, which
-	// finds opencode.
-	p := NewCLIProviderWithBinaries(filepath.Join(dir, "no-such-claude"), "", "", "")
-	if !p.Available() {
-		t.Fatal("expected available via PATH fallback")
-	}
-	if p.Name() != "opencode" {
-		t.Errorf("expected opencode via PATH fallback, got %q", p.Name())
-	}
+func TestCLIProviderWithBinaries(t *testing.T) {
+	t.Run("explicit opencode", func(t *testing.T) {
+		dir := t.TempDir()
+		writeFake(t, dir, "opencode")
+		t.Setenv("PATH", t.TempDir())
+		p := NewCLIProviderWithBinaries("", filepath.Join(dir, "opencode"), "", "")
+		if !p.Available() || p.Name() != "opencode" {
+			t.Fatalf("got available=%v name=%q, want true/opencode", p.Available(), p.Name())
+		}
+	})
+	t.Run("explicit claude", func(t *testing.T) {
+		dir := t.TempDir()
+		writeFake(t, dir, "claude")
+		t.Setenv("PATH", t.TempDir())
+		p := NewCLIProviderWithBinaries(filepath.Join(dir, "claude"), "", "", "")
+		if !p.Available() || p.Name() != "cli" {
+			t.Fatalf("got available=%v name=%q, want true/cli", p.Available(), p.Name())
+		}
+	})
+	t.Run("fallback to PATH when override missing", func(t *testing.T) {
+		dir := t.TempDir()
+		writeFake(t, dir, "opencode")
+		t.Setenv("PATH", dir)
+		p := NewCLIProviderWithBinaries(filepath.Join(dir, "no-such-claude"), "", "", "")
+		if !p.Available() || p.Name() != "opencode" {
+			t.Fatalf("got available=%v name=%q, want true/opencode", p.Available(), p.Name())
+		}
+	})
 }

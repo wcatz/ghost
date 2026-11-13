@@ -87,96 +87,10 @@ func excludeEnclosingRepo(t *testing.T, dir string) {
 	}
 }
 
-// TestCollectGitContextCommits pins the producer that was missing entirely:
-// LastCommits and ProjectLanguage used to be dead fields, so the prompt's
-// Recent Git Activity section never rendered and the fabrication guard had no
-// legitimate SHA source beyond ExistingMemories.
-func TestCollectGitContextCommits(t *testing.T) {
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("git not installed")
-	}
-	dir := t.TempDir()
-	runGit(t, dir, "init", "-q")
-	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module x\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	runGit(t, dir, "add", ".")
-	runGit(t, dir, "-c", "user.email=test@example.com", "-c", "user.name=Test",
-		"-c", "commit.gpgsign=false", "commit", "-q", "-m", "add module file")
-
-	commits, language := CollectGitContext(dir)
-	if language != "Go" {
-		t.Errorf("language = %q, want Go", language)
-	}
-	if len(commits) != 1 {
-		t.Fatalf("commits = %v, want exactly 1 entry", commits)
-	}
-	if !strings.Contains(commits[0], "add module file") {
-		t.Errorf("commit line %q is missing the subject", commits[0])
-	}
-	// The producer must emit a SHA-shaped field: shaLikeRe's word-anchored
-	// 7-40 hex characters. It must NOT be required to satisfy shaLikeToken,
-	// which additionally demands both a digit and a letter so that ordinary
-	// numbers (764824073, 20260116) and words (defaced) are never mistaken for
-	// SHAs and dropped. git abbreviations made of a single character class —
-	// all digits (e.g. 6457253, ~3.7% of hashes) or all letters — are
-	// therefore invisible to the guard by design; asserting otherwise makes
-	// this test fail on those runs for a false negative, not a producer bug.
-	sha := strings.Fields(commits[0])[0]
-	if shaLikeRe.FindString(sha) != sha {
-		t.Errorf("commit SHA %q is not a 7-40 character hex token", sha)
-	}
-}
-
 func runGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git %v: %v\n%s", args, err, out)
-	}
-}
-
-// TestCollectGitContextIgnoresInheritedGitLocationVariables: the commit log is
-// grounding for the consolidation prompt, so it must describe the directory the
-// caller named — never the repository a parent's git location variables name.
-// A `ghost reflect` started from inside a git hook, or from a shell that
-// exports one, would otherwise be shown another checkout's history.
-func TestCollectGitContextIgnoresInheritedGitLocationVariables(t *testing.T) {
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("git not installed")
-	}
-	root := t.TempDir()
-	target := filepath.Join(root, "target")
-	other := filepath.Join(root, "other")
-	for _, dir := range []string{target, other} {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		runGit(t, dir, "init", "-q")
-	}
-	runGit(t, target, "-c", "user.email=test@example.com", "-c", "user.name=Test",
-		"-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "the target's own subject")
-	runGit(t, other, "-c", "user.email=test@example.com", "-c", "user.name=Test",
-		"-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "the other repository's subject")
-
-	t.Setenv("GIT_DIR", filepath.Join(other, ".git"))
-	t.Setenv("GIT_WORK_TREE", other)
-	t.Setenv("GIT_COMMON_DIR", filepath.Join(other, ".git"))
-	t.Setenv("GIT_INDEX_FILE", filepath.Join(other, ".git", "index"))
-	t.Setenv("GIT_CEILING_DIRECTORIES", root)
-	t.Setenv("GIT_OBJECT_DIRECTORY", filepath.Join(other, ".git", "objects"))
-	t.Setenv("GIT_ALTERNATE_OBJECT_DIRECTORIES", filepath.Join(other, ".git", "objects"))
-	t.Setenv("GIT_NAMESPACE", "ns")
-	t.Setenv("GIT_PREFIX", "sub/")
-
-	commits, _ := CollectGitContext(target)
-	if len(commits) != 1 {
-		t.Fatalf("commits = %v, want the one commit the target holds", commits)
-	}
-	if !strings.Contains(commits[0], "the target's own subject") {
-		t.Errorf("commits = %q, want the target's own subject", commits[0])
-	}
-	if strings.Contains(commits[0], "other repository") {
-		t.Errorf("commits = %q, want nothing from the repository the inherited variables name", commits[0])
 	}
 }

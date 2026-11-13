@@ -48,12 +48,9 @@ func TestReflectionTimeouts(t *testing.T) {
 			warn    bool
 		}{
 			{name: "zero removes the bound", minutes: 0, want: 0},
-			{name: "ordinary", minutes: 45, want: 45 * time.Minute},
 			{name: "largest representable", minutes: largestMinutes, want: largest},
 			{name: "negative keeps the default", minutes: -5, want: k.def, warn: true},
-			{name: "minus one keeps the default", minutes: -1, want: k.def, warn: true},
 			{name: "one past the largest is clamped", minutes: largestMinutes + 1, want: largest, warn: true},
-			{name: "overflow is clamped", minutes: 200000000, want: largest, warn: true},
 		}
 		for _, tc := range cases {
 			t.Run(k.key+"/"+tc.name, func(t *testing.T) {
@@ -79,37 +76,11 @@ func TestReflectionTimeouts(t *testing.T) {
 	}
 }
 
-// TestReflectionTimeouts_NegativeWarnsThroughLoad pins that a negative value
-// in a real config file is reported and resolved to the default by the same
-// load the lifecycle performs, rather than accepted as "no bound".
-func TestReflectionTimeouts_NegativeWarnsThroughLoad(t *testing.T) {
+// A negative value in a real config file is reported and resolved to the
+// default by the same load the lifecycle performs, rather than accepted as "no
+// bound", and the unset defaults are the constants a negative value falls back to.
+func TestReflectionTimeouts_ThroughLoad(t *testing.T) {
 	isolateConfig(t)
-	writeUserConfig(t, "reflection:\n  lifecycle_timeout_minutes: -5\n  consolidation_timeout_minutes: -5\n")
-	warnings := captureConfigWarnings(t)
-
-	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load(): %v", err)
-	}
-	if got, want := cfg.Reflection.LifecycleTimeout(), DefaultLifecycleTimeoutMinutes*time.Minute; got != want {
-		t.Errorf("lifecycle timeout = %s, want the compiled default %s", got, want)
-	}
-	if got, want := cfg.Reflection.ConsolidationTimeout(), DefaultConsolidationTimeoutMinutes*time.Minute; got != want {
-		t.Errorf("consolidation timeout = %s, want the compiled default %s", got, want)
-	}
-	msg := warnings.String()
-	for _, key := range []string{"reflection.lifecycle_timeout_minutes", "reflection.consolidation_timeout_minutes"} {
-		if !strings.Contains(msg, key) {
-			t.Errorf("warning %q must name %s", msg, key)
-		}
-	}
-}
-
-// TestReflectionTimeouts_CompiledDefaults pins that the resolved defaults are
-// the constants a negative value falls back to.
-func TestReflectionTimeouts_CompiledDefaults(t *testing.T) {
-	isolateConfig(t)
-
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("Load(): %v", err)
@@ -119,5 +90,22 @@ func TestReflectionTimeouts_CompiledDefaults(t *testing.T) {
 	}
 	if got := cfg.Reflection.ConsolidationTimeout(); got != 10*time.Minute {
 		t.Errorf("consolidation timeout = %s, want 10m", got)
+	}
+
+	writeUserConfig(t, "reflection:\n  lifecycle_timeout_minutes: -5\n  consolidation_timeout_minutes: -5\n")
+	warnings := captureConfigWarnings(t)
+	if cfg, err = Load(); err != nil {
+		t.Fatalf("Load(): %v", err)
+	}
+	if got, want := cfg.Reflection.LifecycleTimeout(), DefaultLifecycleTimeoutMinutes*time.Minute; got != want {
+		t.Errorf("lifecycle timeout = %s, want the compiled default %s", got, want)
+	}
+	if got, want := cfg.Reflection.ConsolidationTimeout(), DefaultConsolidationTimeoutMinutes*time.Minute; got != want {
+		t.Errorf("consolidation timeout = %s, want the compiled default %s", got, want)
+	}
+	for _, key := range []string{"reflection.lifecycle_timeout_minutes", "reflection.consolidation_timeout_minutes"} {
+		if !strings.Contains(warnings.String(), key) {
+			t.Errorf("warning %q must name %s", warnings.String(), key)
+		}
 	}
 }

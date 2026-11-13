@@ -15,10 +15,8 @@ const (
 )
 
 // TestRunPassiveOrdersARecategorisedReplacementFirstAndMarksTheOlderRow: a
-// replacement filed under another category than the claim it replaces (a
-// decision replacing a fact) was never paired, so the session start showed the
-// replaced fact unmarked. It is now ordered ahead and the fact is marked, never
-// withheld, as the same texts in one category are.
+// replacement filed under another category than the claim it replaces (a decision
+// replacing a fact) was never paired.
 func TestRunPassiveOrdersARecategorisedReplacementFirstAndMarksTheOlderRow(t *testing.T) {
 	r := newReplacementStore(t)
 	older := r.add(memory.Memory{Category: "fact", Content: cacheFact, Importance: 0.8}, 20)
@@ -39,8 +37,7 @@ func TestRunPassiveOrdersARecategorisedReplacementFirstAndMarksTheOlderRow(t *te
 
 // TestRunQueryOrdersARecategorisedReplacementAheadOfTheRowItReplaced: the
 // storyline's session-3 search ranked the replaced fact first and the decision
-// second, unmarked. The pair is named on the query path too, so the decision is
-// shown directly ahead of the fact, which is marked.
+// second, unmarked.
 func TestRunQueryOrdersARecategorisedReplacementAheadOfTheRowItReplaced(t *testing.T) {
 	r := newReplacementStore(t)
 	older, newer := addPair(r,

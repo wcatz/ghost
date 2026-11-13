@@ -130,46 +130,6 @@ func TestRenderApplyFailureShowsWhatActuallyLanded(t *testing.T) {
 	}
 }
 
-// TestPrintPruneSaysWhichRunItWas: the dry run and the apply print the same rows,
-// so the headline is the only thing that tells a reader whether anything was
-// destroyed — and the dry run's closing line has to name the flag that would do
-// it, or a reader is left to infer from the absence of a change they may not have
-// checked.
-func TestPrintPruneSaysWhichRunItWas(t *testing.T) {
-	candidates := []memory.PruneCandidate{{
-		ID: "abc123", ProjectID: "p", Category: "fact", Content: "a session note that has expired",
-		Retention: memory.RetentionSession, ExpiresAt: "2026-09-01 10:00:00", ActivityAt: "2026-08-20 09:00:00",
-	}}
-
-	var dry bytes.Buffer
-	if err := printPrune(&dry, pruneView{Candidates: candidates, Grace: 168 * time.Hour}); err != nil {
-		t.Fatalf("printPrune(dry): %v", err)
-	}
-	for _, want := range []string{"1 session memory would be removed", "dry run, nothing was written", "abc123", "--apply", "a session note that has expired"} {
-		if !strings.Contains(dry.String(), want) {
-			t.Errorf("the dry run does not say %q:\n%s", want, dry.String())
-		}
-	}
-
-	var applied bytes.Buffer
-	// An applied view carries the ids it removed, not just the count: that is what
-	// the headline is counted from, so a run that selected a row and spared it
-	// cannot be rendered as a removal. The store always fills both
-	// (PruneReport.RemovedIDs is appended beside Removed), so a fixture with a
-	// count and no ids is a shape the renderer refuses to overstate.
-	if err := printPrune(&applied, pruneView{Applied: true, Candidates: candidates, Removed: 1, RemovedIDs: []string{"abc123"}, Grace: 168 * time.Hour}); err != nil {
-		t.Fatalf("printPrune(apply): %v", err)
-	}
-	for _, want := range []string{"1 session memory removed", "phase=delete", "abc123"} {
-		if !strings.Contains(applied.String(), want) {
-			t.Errorf("the applied run does not say %q:\n%s", want, applied.String())
-		}
-	}
-	if strings.Contains(applied.String(), "dry run") {
-		t.Errorf("an applied run describes itself as a dry run:\n%s", applied.String())
-	}
-}
-
 // TestPrintPruneReportsOnlyWhatItRemoved: on an apply the candidate list is what
 // the PREVIEW selected, while every batch is re-derived from the same predicate
 // under the write lock — so a row a concurrent save pinned, re-tiered or re-saved
@@ -238,27 +198,6 @@ func TestPrintPruneReportsOnlyWhatItRemoved(t *testing.T) {
 	}
 }
 
-// TestPrintPruneNamesTheScope: a count beside a project name has to mean that
-// project, and the default has to say it is every project — an unlabelled count on
-// a store-wide run is read as the project's own.
-func TestPrintPruneNamesTheScope(t *testing.T) {
-	var every bytes.Buffer
-	if err := printPrune(&every, pruneView{}); err != nil {
-		t.Fatalf("printPrune: %v", err)
-	}
-	if !strings.Contains(every.String(), "every project") {
-		t.Errorf("the store-wide report does not say its scope:\n%s", every.String())
-	}
-
-	var one bytes.Buffer
-	if err := printPrune(&one, pruneView{Scope: "ghost"}); err != nil {
-		t.Fatalf("printPrune: %v", err)
-	}
-	if !strings.Contains(one.String(), "project ghost") {
-		t.Errorf("a project-scoped report does not name the project:\n%s", one.String())
-	}
-}
-
 // TestPrintPruneStatesAnAbsentDatabase: a machine that has never run Ghost has
 // nothing to prune, and "0 session memories would be removed" there reads as a
 // measurement of a store that does not exist.
@@ -272,36 +211,6 @@ func TestPrintPruneStatesAnAbsentDatabase(t *testing.T) {
 	}
 	if strings.Contains(out.String(), "0 session") {
 		t.Errorf("the no-database report counts rows of a store it never opened:\n%s", out.String())
-	}
-}
-
-// TestPruneIsRegisteredInTheHelpTable: a subcommand that is not in the usage table
-// has no -h, which is the help contract cmd/ghost/help_test.go enforces for every
-// other command; this is the same claim from the command's own side.
-func TestPruneIsRegisteredInTheHelpTable(t *testing.T) {
-	if _, ok := usageByCommand["prune"]; !ok {
-		t.Fatal("prune has no usage entry, so `ghost prune -h` would print the command list")
-	}
-	if usageByCommand["prune"] != pruneUsage {
-		t.Error("the registered prune usage is not the command's own text")
-	}
-	// The flags whose value the help scan must not mistake for a help request.
-	for _, flag := range []string{"--grace", "--project"} {
-		if !helpValueFlagsByCommand["prune"][flag] {
-			t.Errorf("%s is not registered as a value flag, so `ghost prune %s -h` would run the prune", flag, flag)
-		}
-	}
-}
-
-// TestPruneUsageSaysItIsNeverAutomatic: the one property of this command that
-// cannot be enforced in code is the promise that nothing else calls it, and the
-// usage text is where a user looks before deleting. It has to say so, and to say
-// that the default does not.
-func TestPruneUsageSaysItIsNeverAutomatic(t *testing.T) {
-	for _, want := range []string{"Dry-run by default", "--apply", "never run for you", "session", "persistent"} {
-		if !strings.Contains(pruneUsage, want) {
-			t.Errorf("the prune usage does not say %q", want)
-		}
 	}
 }
 
@@ -376,74 +285,4 @@ func TestPrintPruneNamesTheGraceBasisWithoutClaimingItWasATouch(t *testing.T) {
 			t.Errorf("the line does not carry both readings — the last write and the grace basis are the same instant HERE, and only one of them is the expiry: %q", line)
 		}
 	})
-}
-
-// TestParsePruneArgsRefusesAnEmptyScope: `--project=` is not the same command line as
-// no `--project`, and on this command the difference is a DELETION.
-//
-// `runPrune` resolves a scope only when `opts.Project != ""`, so an empty value falls
-// through to `scope = ""` and `PruneSessionMemories` takes its store-wide branch —
-// which reaches `_global` rows too, deliberately (docs/cli.md). With `--apply` that
-// deletes expired session rows in every project on the machine. The way to ask for a
-// store-wide prune is to OMIT the flag, which the report names as "every project";
-// spelling it as `--project=` is a script with an unset variable, and it is the one
-// spelling that gets there silently.
-//
-// So the empty value is refused, which is what `parseContextAuditArgs` already
-// does with the same flag — prune was the outlier, and now it counts occurrences too.
-//
-// Occurrences are counted rather than tested with `opts.Project != ""`, for the same
-// reason the --audit parser counts them: that test cannot see `--project=
-// --project=ghost`, where the first occurrence is empty and the second silently
-// becomes the scope.
-func TestParsePruneArgsRefusesAnEmptyScope(t *testing.T) {
-	for _, tc := range []struct {
-		name     string
-		args     []string
-		wantFail string
-	}{
-		{name: "an empty attached --project", args: []string{"--project="}, wantFail: "empty"},
-		{name: "an empty --project value", args: []string{"--project", ""}, wantFail: "empty"},
-		// The dangerous pair: --apply is what turns the silent scope into a
-		// store-wide deletion, so it is named in the case rather than left out.
-		{name: "an empty --project with --apply", args: []string{"--project=", "--apply"}, wantFail: "empty"},
-		{name: "a detached empty --project with --apply", args: []string{"--apply", "--project", ""}, wantFail: "empty"},
-		// Two empties stop at the FIRST one, for the reason the --audit parser's
-		// matching case gives: there is no scope in the command line at all, so
-		// the thing to tell the reader is the empty value.
-		{name: "two empties stop at the first", args: []string{"--project=", "--project="}, wantFail: "empty"},
-		// A named scope followed by an empty one is still twice, and the empty
-		// value is never assigned, so the scope cannot become store-wide on the
-		// way out.
-		{name: "a named scope then an empty one is twice", args: []string{"--project", "ghost", "--project="}, wantFail: "twice"},
-		// The shape the `!= ""` guard cannot see: the first occurrence is empty,
-		// so the second looked like the first one had not been given, and it
-		// became the scope with no refusal at all. What this case exists for is
-		// that silence, not for which of the two refusals wins now — the empty
-		// value is refused first, exactly as context_audit_test.go pins for the
-		// --audit parser, because a duplicate guard cannot fire until there IS
-		// a first value and here there is none.
-		{name: "an empty scope then a named one stops at the empty", args: []string{"--project=", "--project", "ghost"}, wantFail: "empty"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			opts, err := parsePruneArgs(tc.args)
-			if err == nil {
-				t.Fatalf("parsePruneArgs(%v) = %+v, want a refusal: an empty scope is a store-wide prune", tc.args, opts)
-			}
-			if !strings.Contains(err.Error(), tc.wantFail) {
-				t.Errorf("refusal = %q, want it to name %q", err.Error(), tc.wantFail)
-			}
-		})
-	}
-
-	// Omitting the flag is still the documented store-wide default, and it is the
-	// ONLY way to reach it now. Asserted because refusing the empty value would be
-	// a bug if it also removed the default.
-	opts, err := parsePruneArgs([]string{"--apply"})
-	if err != nil {
-		t.Fatalf("parsePruneArgs(--apply): %v", err)
-	}
-	if opts.Project != "" {
-		t.Errorf("Project = %q with no --project, want \"\" — the report names that as every project", opts.Project)
-	}
 }

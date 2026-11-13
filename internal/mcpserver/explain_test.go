@@ -5,27 +5,22 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/wcatz/ghost/internal/assemble"
+	"github.com/wcatz/ghost/internal/memory"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
-
-	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/wcatz/ghost/internal/assemble"
-	"github.com/wcatz/ghost/internal/memory"
 )
 
-// TestSearchExplainAppliesScope makes explain describe the same membership the
-// formatted scoped search returns. An out-of-scope candidate may remain in the
-// diagnostic union, but it must be marked excluded and carry the scope reason.
 func TestSearchExplainAppliesScope(t *testing.T) {
 	srv, session := newCapSession(t)
 	saveScoped(t, session, "development database uses SQLite", "development")
 	saveScoped(t, session, "production database uses PostgreSQL", "production")
 	saveScoped(t, session, "unscoped database uses the shared service", "")
-
 	res := callTool(t, session, "ghost_memory_search", map[string]any{
 		"project_id": "test-project",
 		"query":      "database",
@@ -43,9 +38,6 @@ func TestSearchExplainAppliesScope(t *testing.T) {
 	if ex.Scope["environment"] != "production" {
 		t.Fatalf("explanation scope = %v, want the requested production scope", ex.Scope)
 	}
-
-	// Content is the 120-rune snippet rendered through Data, exactly as the
-	// formatted answer renders it, so the rows are keyed by that rendering.
 	rows := make(map[string]memory.ExplainRow)
 	for _, row := range ex.Rows {
 		rows[row.Content] = row
@@ -80,7 +72,6 @@ func TestSearchExplainAppliesScope(t *testing.T) {
 	if !sawScopeNote {
 		t.Errorf("scoped explanation did not identify the selection seam: %v", ex.Notes)
 	}
-
 	store, ok := srv.store.(*memory.Store)
 	if !ok {
 		t.Fatalf("test server store = %T, want *memory.Store", srv.store)
@@ -102,7 +93,6 @@ func TestSearchExplainAppliesScope(t *testing.T) {
 			t.Errorf("row %s included=%v, production search membership=%v", row.ID, row.Included, expectedIDs[row.ID])
 		}
 	}
-
 	categoryRes := callTool(t, session, "ghost_memory_search", map[string]any{
 		"project_id": "test-project",
 		"query":      "database",
@@ -123,23 +113,12 @@ func TestSearchExplainAppliesScope(t *testing.T) {
 		hasCategoryNote = hasCategoryNote || strings.Contains(note, "category filter is applied in the same run")
 		hasScopeNote = hasScopeNote || strings.Contains(note, "scope is applied inside hybrid window selection")
 	}
-	// Both filters have to be disclosed, and the category disclosure has to be
-	// the honest one: explain and the formatted path run ONE pipeline, so a row
-	// the category filter excludes is excluded here, and a row marked included
-	// IS in the filtered answer the caller sees.
 	if !hasCategoryNote || !hasScopeNote {
 		t.Errorf("category+scope notes = %v, want both filter disclosures", categoryEx.Notes)
 	}
 }
-
-// TestSearchExplainReturnsDiagnosisThroughTheTool: an agent debugging a bad
-// result must be able to ask for the breakdown through the tool it already
-// calls, not reach into a package. This asserts the argument is accepted, the
-// response is machine-readable, and the fields an agent needs to attribute
-// blame are actually present.
 func TestSearchExplainReturnsDiagnosisThroughTheTool(t *testing.T) {
 	_, session := newCapSession(t)
-
 	for _, c := range []string{
 		"helmfile deploys through sops secrets",
 		"sops age key lives in ci",
@@ -151,7 +130,6 @@ func TestSearchExplainReturnsDiagnosisThroughTheTool(t *testing.T) {
 			"category":   "fact",
 		})
 	}
-
 	res := callTool(t, session, "ghost_memory_search", map[string]any{
 		"project_id": "test-project",
 		"query":      "helmfile sops",
@@ -161,7 +139,6 @@ func TestSearchExplainReturnsDiagnosisThroughTheTool(t *testing.T) {
 	if res.IsError {
 		t.Fatalf("explain search errored: %s", resultText(res))
 	}
-
 	raw := resultText(res)
 	var ex memory.SearchExplain
 	if err := json.Unmarshal([]byte(raw), &ex); err != nil {
@@ -173,15 +150,10 @@ func TestSearchExplainReturnsDiagnosisThroughTheTool(t *testing.T) {
 	if len(ex.Rows) == 0 {
 		t.Fatal("no rows in the explanation; nothing was diagnosed")
 	}
-
-	// The fields that let an agent attribute blame must be present and
-	// meaningful, not silently zero.
 	for _, r := range ex.Rows {
 		if r.FTSRank < -1 {
 			t.Errorf("row %s FTSRank = %d", r.ID, r.FTSRank)
 		}
-		// A row that matched at least one leg must carry a positive fused
-		// score; zero would mean the RRF arithmetic never ran for it.
 		if (r.FTSRank >= 0 || r.VectorRank >= 0) && r.RRFScore <= 0 {
 			t.Errorf("row %s matched a leg (fts=%d vec=%d) but has fused score %v", r.ID, r.FTSRank, r.VectorRank, r.RRFScore)
 		}
@@ -192,9 +164,6 @@ func TestSearchExplainReturnsDiagnosisThroughTheTool(t *testing.T) {
 	if ex.VectorAvailable && !strings.Contains(raw, "vector_rank") {
 		t.Error("vector_rank missing from the payload")
 	}
-
-	// The non-explain path must still return the ordinary formatted list:
-	// explain is an opt-in alternate rendering, not a mode change.
 	plain := callTool(t, session, "ghost_memory_search", map[string]any{
 		"project_id": "test-project",
 		"query":      "helmfile sops",
@@ -208,8 +177,6 @@ func TestSearchExplainReturnsDiagnosisThroughTheTool(t *testing.T) {
 		t.Errorf("plain search returned an unexpected rendering:\n%s", plainText)
 	}
 }
-
-// saveMem stores one memory through the tool and returns its id.
 func saveMem(t *testing.T, session *mcp.ClientSession, content string, extra map[string]any) string {
 	t.Helper()
 	args := map[string]any{
@@ -231,13 +198,8 @@ func saveMem(t *testing.T, session *mcp.ClientSession, content string, extra map
 	return id
 }
 
-// listingIDRe matches the rendered item id in a formatted answer: Item.Line
-// renders every row as `- [category] `<hex id>` (…)`, and that backticked hex
-// run is the only thing the listing shows that a payload row's id maps to.
 var listingIDRe = regexp.MustCompile("`([0-9A-Fa-f]{32})`")
 
-// listingIDs runs the plain formatted search with the given extra args and
-// returns the set of ids the answer actually rendered.
 func listingIDs(t *testing.T, session *mcp.ClientSession, query string, extra map[string]any) map[string]bool {
 	t.Helper()
 	args := map[string]any{"project_id": "test-project", "query": query}
@@ -254,9 +216,6 @@ func listingIDs(t *testing.T, session *mcp.ClientSession, query string, extra ma
 	}
 	return ids
 }
-
-// explainRows runs the explain search with the same args and returns the
-// payload rows by id.
 func explainRows(t *testing.T, session *mcp.ClientSession, query string, extra map[string]any) map[string]memory.ExplainRow {
 	t.Helper()
 	args := map[string]any{"project_id": "test-project", "query": query, "explain": true}
@@ -278,14 +237,6 @@ func explainRows(t *testing.T, session *mcp.ClientSession, query string, extra m
 	return rows
 }
 
-// assertMembershipMatchesListing states the contract bidirectionally: a
-// row the formatted answer renders must appear in the payload marked included,
-// and every payload row must agree with whether the answer rendered it. A row
-// the answer omits is not silence: when the row reached the candidate set at all
-// (filtered by category or tier, out of scope, or cut by the result window) it is
-// an excluded payload row carrying the fields that say which withholding
-// happened. A row the LEGS withhold — out of its validity window — never reaches
-// the candidate set, so the payload has no row for it, which the validity
 // sub-case asserts directly (#1053).
 func assertMembershipMatchesListing(t *testing.T, session *mcp.ClientSession, query string, extra map[string]any) {
 	t.Helper()
@@ -309,38 +260,20 @@ func assertMembershipMatchesListing(t *testing.T, session *mcp.ClientSession, qu
 	}
 }
 
-// TestSearchExplainAttributesNearDuplicateDemotion is checked over the live tool: a
-// window-scoped near-duplicate verdict has to report the penalty AND name the
-// other memory that decided it, so an agent debugging the row is handed the row
 // to read next instead of a count — and since #926 the losing member is
-// REMOVED from the answer, so the payload has to carry it as a row that was not
-// included, with the same attribution, rather than dropping it silently.
 func TestSearchExplainAttributesNearDuplicateDemotion(t *testing.T) {
 	srv, session := newCapSession(t)
 	store, ok := srv.store.(*memory.Store)
 	if !ok {
 		t.Fatalf("test server store = %T, want *memory.Store", srv.store)
 	}
-
-	// A near-duplicate pair linked the way the linker would link it. The two
-	// wordings are kept lexically distinct (below the save-time 0.5 Jaccard
-	// bar) so the tool's own save does not write a second 'duplicate' edge —
-	// the single CreateLink edge below is the one verdict the window sees, and
-	// the payload must report exactly that one demotion.
 	dupA := saveMem(t, session, "the cache warmer runs on the read replica every hour", nil)
 	dupB := saveMem(t, session, "the cache warmer restocks the secondary database nightly", nil)
 	if err := store.CreateLink(context.Background(), dupA, dupB, "related", 0.95, "auto"); err != nil {
 		t.Fatalf("CreateLink(related): %v", err)
 	}
-
-	// The pair is one row of the answer and one removed row, so the payload and
-	// the listing must still agree: the loser is on neither.
 	assertMembershipMatchesListing(t, session, "cache warmer replica", nil)
 	rows := explainRows(t, session, "cache warmer replica", nil)
-
-	// Exactly one member of the pair survived, and it must be the one the search
-	// kept, not an arbitrary one: the removed one is the row the payload carries
-	// as not included.
 	loser, winner := "", ""
 	for _, id := range []string{dupA, dupB} {
 		if rows[id].Included {
@@ -366,29 +299,18 @@ func TestSearchExplainAttributesNearDuplicateDemotion(t *testing.T) {
 		t.Errorf("the winner carries a penalty %d / attribution %v, want neither: only the demoted row moves", rows[winner].NearDuplicatePenalty, rows[winner].NearDuplicateOf)
 	}
 }
-
-// TestSearchExplainMembershipMatchesFormattedAnswer is checked over the live tool:
-// the payload's included set must be exactly the formatted answer's rendered
-// set, across every axis that withholds a row. The old explain answered a
-// DIFFERENT search — a retrieval window that never saw the validity, category,
-// retention or budget filters the formatted path applies — so an expired row
-// or a category mismatch reported included while the answer omitted it.
 func TestSearchExplainMembershipMatchesFormattedAnswer(t *testing.T) {
 	srv, session := newCapSession(t)
-
 	expired := saveMem(t, session, "the cache warmer rotation policy expired long ago", map[string]any{"valid_until": "2020-01-01"})
 	future := saveMem(t, session, "the cache warmer cold storage move begins much later", map[string]any{"valid_from": "2099-01-01"})
 	gotcha := saveMem(t, session, "the cache warmer drains before any deploy", map[string]any{"category": "gotcha"})
 	sessionTier := saveMem(t, session, "an offhand remark about the cache warmer made during this chat", map[string]any{"retention": "session"})
 	saveMem(t, session, "the cache warmer runs on the read replica every hour", nil)
 	saveScoped(t, session, "the cache warmer runs only in the staging environment", "staging")
-	// A resolved row is demoted rather than excluded, so it is in the answer and
-	// must be in the payload as included with its demotion applied.
 	resolved := saveMem(t, session, "the cache warmer was once tuned by hand and that is settled", nil)
 	if n, err := srv.store.(*memory.Store).SetResolved(context.Background(), []string{resolved}); err != nil || n != 1 {
 		t.Fatalf("SetResolved = (%d, %v)", n, err)
 	}
-
 	t.Run("unfiltered validity", func(t *testing.T) {
 		assertMembershipMatchesListing(t, session, "cache warmer", nil)
 		rows := explainRows(t, session, "cache warmer", nil)
@@ -396,21 +318,12 @@ func TestSearchExplainMembershipMatchesFormattedAnswer(t *testing.T) {
 			t.Errorf("resolved row = included=%v status_factor=%v, want the demoted row in the answer with its factor", row.Included, row.StatusFactor)
 		}
 		// #1053: an out-of-window row is withheld in the LEG SQL, before the
-		// window closes, so it is never a candidate — and the explain payload is a
-		// projection of the ranking, so it has no row for it. It is not reported
-		// as `included=false validity_state=expired` any more: it never entered
-		// the ranking to be judged. The browse surfaces still render such a row
-		// marked (`memory.ValidityStateOf`); the query path simply does not offer
-		// it.
 		for _, id := range []string{expired, future} {
 			if _, present := rows[id]; present {
 				t.Errorf("out-of-window row %s appears in the explain payload: the legs must withhold it before the window, so it is not a candidate", id)
 			}
 		}
 	})
-
-	// The gotcha row carries its category into the payload, so the filter that
-	// withheld it is readable from the row itself.
 	t.Run("category filter", func(t *testing.T) {
 		assertMembershipMatchesListing(t, session, "cache warmer", map[string]any{"category": "fact"})
 		rows := explainRows(t, session, "cache warmer", map[string]any{"category": "fact"})
@@ -418,7 +331,6 @@ func TestSearchExplainMembershipMatchesFormattedAnswer(t *testing.T) {
 			t.Errorf("gotcha row = included=%v category=%q, want excluded with its stored category", row.Included, row.Category)
 		}
 	})
-
 	t.Run("retention filter", func(t *testing.T) {
 		assertMembershipMatchesListing(t, session, "cache warmer", map[string]any{"retention": "project"})
 		rows := explainRows(t, session, "cache warmer", map[string]any{"retention": "project"})
@@ -426,18 +338,13 @@ func TestSearchExplainMembershipMatchesFormattedAnswer(t *testing.T) {
 			t.Errorf("session-tier row = included=%v retention=%q, want excluded with its stored tier", row.Included, row.Retention)
 		}
 	})
-
 	t.Run("scope filter", func(t *testing.T) {
 		assertMembershipMatchesListing(t, session, "cache warmer", map[string]any{"scope": map[string]any{"environment": "production"}})
 	})
-
 	t.Run("result window cut", func(t *testing.T) {
 		assertMembershipMatchesListing(t, session, "cache warmer", map[string]any{"limit": 2})
 	})
 }
-
-// explainPayload runs the explain search and returns both the decoded payload
-// and the raw JSON text, so a test can assert on the bytes an agent receives.
 func explainPayload(t *testing.T, session *mcp.ClientSession, args map[string]any) (memory.SearchExplain, string) {
 	t.Helper()
 	call := map[string]any{"project_id": "test-project", "explain": true}
@@ -455,15 +362,6 @@ func explainPayload(t *testing.T, session *mcp.ClientSession, args map[string]an
 	}
 	return ex, raw
 }
-
-// TestSearchExplainRendersStoredTextLikeTheAnswer stores content and a scope
-// value carrying a newline, « and » and a forged verdict line, and asserts every
-// stored string in the payload is exactly what the formatted answer's renderers
-// produce for it: content through Data over its snippet, the scope's key and
-// value through Token. The raw text is nowhere in the bytes an agent receives.
-// The scope is written straight into the column: the save tool now refuses such
-// a value, but a row stored before that still holds one, and this is the proof
-// the renderers neutralise it.
 func TestSearchExplainRendersStoredTextLikeTheAnswer(t *testing.T) {
 	store, dbPath := testStoreWithPath(t)
 	srv := New(store, slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})), "test")
@@ -489,7 +387,6 @@ func TestSearchExplainRendersStoredTextLikeTheAnswer(t *testing.T) {
 	if _, err := raw0.Exec(`UPDATE memories SET scope = ? WHERE id = ?`, string(scopeJSON), id); err != nil {
 		t.Fatalf("seed the stored scope: %v", err)
 	}
-
 	ex, raw := explainPayload(t, session, map[string]any{
 		"query": "hostile database note", "scope": map[string]any{"environment": scopeValue},
 	})
@@ -508,10 +405,6 @@ func TestSearchExplainRendersStoredTextLikeTheAnswer(t *testing.T) {
 	if got, ok := ex.Scope[assemble.Token("environment")]; !ok || got != assemble.Token(scopeValue) || len(ex.Scope) != 1 {
 		t.Errorf("scope = %v, want {Token(key): Token(value)}", ex.Scope)
 	}
-	// The forged verdict line survives only INSIDE the content's own «...» block,
-	// where the formatted answer prints it too: as data, escaped to \n in JSON
-	// so it cannot start a line. The stored delimiters are neutralised and the
-	// scope value, rendered through Token outside any block, is quoted.
 	for _, rawText := range []string{"«instruction»", "»end«", scopeValue} {
 		if strings.Contains(raw, rawText) {
 			t.Errorf("the payload carries the raw stored text %q:\n%s", rawText, raw)
@@ -521,18 +414,9 @@ func TestSearchExplainRendersStoredTextLikeTheAnswer(t *testing.T) {
 		t.Errorf("content %q holds more than its own delimiter pair", row.Content)
 	}
 }
-
-// TestSearchExplainKeepsItsBounds: forty large rows are reported whole under the
-// 150-row budget, with every content string the 120-character snippet.
 func TestSearchExplainKeepsItsBounds(t *testing.T) {
 	_, session := newCapSession(t)
 	for i := 0; i < 40; i++ {
-		// Each row carries seven tokens of its own (the prefix pair plus six
-		// body tokens) over the four shared leading words, which puts every
-		// pair below BOTH save-time merge gates — Jaccard 4/18 and overlap
-		// 4/11, under the 0.5 bars — so the rows are separate memories with no
-		// `duplicate` edge among them rather than one near-duplicate cluster
-		// the retriever would collapse to a single representative.
 		var body strings.Builder
 		for k := 0; k < 6; k++ {
 			fmt.Fprintf(&body, "w%02dx%02d ", i, k)
@@ -563,10 +447,6 @@ func TestSearchExplainKeepsItsBounds(t *testing.T) {
 		t.Errorf("40 rows must not trigger the truncation object: %+v", ex.Truncation)
 	}
 }
-
-// TestSearchExplainSharesTheResponseCap: the response byte cap is the answer's
-// and the explanation's alike, so a row the cap cut from the listing is excluded
-// in the payload.
 func TestSearchExplainSharesTheResponseCap(t *testing.T) {
 	srv, session := newCapSession(t)
 	for _, c := range []string{"alpha", "bravo", "charlie"} {
@@ -580,9 +460,6 @@ func TestSearchExplainSharesTheResponseCap(t *testing.T) {
 	if len(full) != 3 {
 		t.Fatalf("precondition: uncapped answer lists %d rows, want 3", len(full))
 	}
-	// The cap must clear one row AND the cut notice a trim now adds, and still be
-	// too small for two: 900 cleared neither row once the notice was counted, so
-	// the answer went empty and there was no cut to explain.
 	srv.searchMaxBytes = 1200
 	capped := listingIDs(t, session, "capped corpus", nil)
 	if len(capped) == 0 || len(capped) >= 3 {
@@ -603,9 +480,6 @@ func TestSearchExplainSharesTheResponseCap(t *testing.T) {
 		t.Errorf("payload excludes %d rows, the cap cut %d", cut, 3-len(capped))
 	}
 }
-
-// TestSearchExplainWritesNoRetrievalRecord: a plain search appends one retrieval
-// record, an explain call none.
 func TestSearchExplainWritesNoRetrievalRecord(t *testing.T) {
 	srv, session := newCapSession(t)
 	store := srv.store.(*memory.Store)
@@ -628,11 +502,6 @@ func TestSearchExplainWritesNoRetrievalRecord(t *testing.T) {
 		t.Errorf("an explain call wrote %d records, want 0", got-afterPlain)
 	}
 }
-
-// TestSaveRefusesAScopeThatBreaksTheCharacterRules drives the live
-// ghost_memory_save tool: a blank value, a NUL byte, a line break and a blank key
-// are each refused with the field named and the offending text absent, and
-// nothing is stored.
 func TestSaveRefusesAScopeThatBreaksTheCharacterRules(t *testing.T) {
 	srv, session := newCapSession(t)
 	cases := []struct {

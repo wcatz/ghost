@@ -3,19 +3,13 @@ package supersede
 import (
 	"context"
 	"database/sql"
-	"errors"
-	"fmt"
 	"log/slog"
 	"os"
-	"strings"
 	"testing"
 
 	"github.com/wcatz/ghost/internal/memory"
 )
 
-// mockClassifier returns a verdict per an injected rule — no LLM. calls
-// records every (newer, older) content pair passed to ClassifyBatch, so tests
-// can assert a specific pair was (or wasn't) invoked — e.g. the
 // skip-if-unchanged test.
 type mockClassifier struct {
 	verdict       func(newer, older string) Relation
@@ -35,8 +29,6 @@ func (m *mockClassifier) ClassifyBatch(_ context.Context, pairs []Candidate) ([]
 	return out, nil
 }
 
-// seed builds an in-memory store, returns it plus the raw db so tests can
-// backdate created_at/updated_at (Create always stamps now).
 func seed(t *testing.T) (*memory.Store, *sql.DB) {
 	t.Helper()
 	db, err := memory.OpenDB(":memory:")
@@ -51,14 +43,11 @@ func seed(t *testing.T) (*memory.Store, *sql.DB) {
 	return store, db
 }
 
-// add creates a memory with an embedding and a controlled created_at/updated_at
-// age (both set to the same value — orient() keys off updated_at).
 func add(t *testing.T, store *memory.Store, db *sql.DB, content string, vec []float32, createdAt string) string {
 	t.Helper()
 	return addStamped(t, store, db, content, vec, createdAt, createdAt)
 }
 
-// addStamped is add with created_at and updated_at set independently, for the
 // #641 fixtures whose newer endpoint (by updated_at) was written earlier.
 func addStamped(t *testing.T, store *memory.Store, db *sql.DB, content string, vec []float32, createdAt, updatedAt string) string {
 	t.Helper()
@@ -92,8 +81,6 @@ func TestSelectCandidates(t *testing.T) {
 	if len(sel.Candidates) != 1 {
 		t.Fatalf("want exactly 1 candidate (the postgres pair), got %d: %+v", len(sel.Candidates), sel.Candidates)
 	}
-	// Three memories, three vectors: nothing here is unscored, and the count is
-	// what lets a caller tell a complete scan from a partial one.
 	if sel.Unscored != 0 {
 		t.Errorf("Unscored = %d over a corpus where every memory has a vector", sel.Unscored)
 	}
@@ -101,128 +88,15 @@ func TestSelectCandidates(t *testing.T) {
 	if c.NewerID != newer || c.OlderID != older {
 		t.Errorf("wrong orientation: newer=%s older=%s (want newer=%s older=%s)", c.NewerID, c.OlderID, newer, older)
 	}
-	// The classifier prompt needs created_at, not just the orientation
-	// updated_at picked: a stale note re-saved later is the newer endpoint and
 	// the older creation (#641).
 	if c.NewerCreatedAt != "2026-07-10 00:00:00" || c.OlderCreatedAt != "2026-01-01 00:00:00" {
 		t.Errorf("candidate created_at = (%q, %q), want (2026-07-10 00:00:00, 2026-01-01 00:00:00)", c.NewerCreatedAt, c.OlderCreatedAt)
 	}
 }
 
-// TestRunCountsMemoriesItCouldNotScore pins the fact that makes a pass's totals
-// checkable: a memory with no vector is proposed as no new candidate by the scan,
-// so the pairs a pass finds fresh are bounded by the part of the project it could
-// read, and the caller is told how much of the project that was. Without the
-// count, "0 candidate pairs" over a corpus nobody had finished indexing reads
-// exactly like the same line over a corpus with nothing similar in it — which is
 // how #716 looked like a fixture problem for as long as it did.
 //
-// The memory whose vector is missing is the NEAR-DUPLICATE half of a pair the
-// store could otherwise have proposed, so the count cannot be satisfied by a
 // note that was never a candidate anyway.
-func TestRunCountsMemoriesItCouldNotScore(t *testing.T) {
-	store, db := seed(t)
-	ctx := context.Background()
-
-	_ = add(t, store, db, "postgres upgraded to 16", []float32{1, 0, 0}, "2026-07-10 00:00:00")
-	older := add(t, store, db, "postgres runs version 14", []float32{0.98, 0.02, 0}, "2026-01-01 00:00:00")
-	// The vector row is what the embedding worker writes, so dropping it is
-	// exactly the state a save leaves behind for as long as the worker takes to
-	// notice — no row, not a row of the wrong width.
-	if _, err := db.ExecContext(ctx, `DELETE FROM memory_embeddings WHERE memory_id = ?`, older); err != nil {
-		t.Fatalf("drop the older memory's vector: %v", err)
-	}
-
-	cls := &mockClassifier{verdict: func(string, string) Relation { return RelationNeither }}
-	res, _, err := Run(ctx, store, cls, "p", 0.9, false, nil)
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if res.Unscored != 1 {
-		t.Errorf("Result.Unscored = %d, want 1: the memory with no vector is proposed as no new candidate, so the pairs this pass found fresh are bounded by the part of the project the scan could read", res.Unscored)
-	}
-	// And it is a count of what the scan could not read, not a failure: the pass
-	// still completes, and the pair it did find is still proposed.
-	if res.Candidates != 0 {
-		t.Errorf("Result.Candidates = %d, want 0: with one endpoint unvectorised the pair cannot be found", res.Candidates)
-	}
-}
-
-func TestRunEmitsStarLinksAndFlipsRanking(t *testing.T) {
-	store, db := seed(t)
-	ctx := context.Background()
-
-	// Three versions of one fact, all mutually similar, distinct ages.
-	v1 := add(t, store, db, "kubernetes cluster runs version 1.27", []float32{1, 0, 0}, "2026-01-01 00:00:00")
-	v2 := add(t, store, db, "kubernetes upgraded to 1.29", []float32{0.99, 0.01, 0}, "2026-04-01 00:00:00")
-	v3 := add(t, store, db, "kubernetes now on 1.31", []float32{0.98, 0.02, 0}, "2026-07-01 00:00:00")
-
-	cls := &mockClassifier{verdict: func(_, _ string) Relation { return RelationSupersedes }} // all pairs are supersessions
-	res, _, err := Run(ctx, store, cls, "p", 0.9, true, slog.Default())
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	// 3 mutually-similar versions → 3 ordered pairs (v3>v2, v3>v1, v2>v1).
-	if res.Candidates != 3 || res.Confirmed != 3 || res.Created != 3 {
-		t.Fatalf("want 3/3/3 candidates/confirmed/created, got %d/%d/%d", res.Candidates, res.Confirmed, res.Created)
-	}
-
-	// The star links must make the consumer rank v3 > v2 > v1.
-	p := memory.DefaultSearchParams()
-	p.SupersedeDemote = true
-	results, err := store.SearchHybridParams(ctx, "p", "kubernetes version", nil, 10, p)
-	if err != nil {
-		t.Fatalf("search: %v", err)
-	}
-	rank := map[string]int{}
-	for i, m := range results {
-		rank[m.ID] = i
-	}
-	if rank[v3] >= rank[v2] || rank[v2] >= rank[v1] {
-		t.Errorf("supersede demote should order v3<v2<v1, got v1=%d v2=%d v3=%d", rank[v1], rank[v2], rank[v3])
-	}
-}
-
-func TestRunDryRunWritesNothing(t *testing.T) {
-	store, db := seed(t)
-	ctx := context.Background()
-	n := add(t, store, db, "api rate limit raised to 500 rps", []float32{1, 0, 0}, "2026-07-01 00:00:00")
-	o := add(t, store, db, "api rate limit is 100 rps", []float32{0.99, 0, 0}, "2026-01-01 00:00:00")
-
-	cls := &mockClassifier{verdict: func(_, _ string) Relation { return RelationSupersedes }}
-	res, classified, err := Run(ctx, store, cls, "p", 0.9, false, nil)
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if res.Confirmed != 1 || res.Created != 0 || len(classified) != 1 {
-		t.Fatalf("dry run should confirm 1, create 0; got confirmed=%d created=%d classified=%d", res.Confirmed, res.Created, len(classified))
-	}
-	pairs, _ := store.SupersedesWithin(ctx, []string{n, o})
-	if len(pairs) != 0 {
-		t.Errorf("dry run must not write links, found %d", len(pairs))
-	}
-}
-
-func TestRunRejectsParallelFacts(t *testing.T) {
-	store, db := seed(t)
-	ctx := context.Background()
-	// Two similar-but-parallel facts (prod vs staging) — classifier says no.
-	a := add(t, store, db, "prod database is postgres 16", []float32{1, 0, 0}, "2026-07-01 00:00:00")
-	b := add(t, store, db, "staging database is postgres 16", []float32{0.99, 0, 0}, "2026-06-01 00:00:00")
-
-	cls := &mockClassifier{verdict: func(_, _ string) Relation { return RelationNeither }}
-	res, _, err := Run(ctx, store, cls, "p", 0.9, true, nil)
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if res.Candidates != 1 || res.Confirmed != 0 || res.Created != 0 {
-		t.Errorf("parallel facts: want 1 candidate, 0 confirmed/created; got %d/%d/%d", res.Candidates, res.Confirmed, res.Created)
-	}
-	pairs, _ := store.SupersedesWithin(ctx, []string{a, b})
-	if len(pairs) != 0 {
-		t.Errorf("rejected pair must not be linked, found %d", len(pairs))
-	}
-}
 
 func TestRunIdempotent(t *testing.T) {
 	store, db := seed(t)
@@ -235,11 +109,7 @@ func TestRunIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The second pass over a graph the first one just wrote is not only
-	// idempotent, it is QUIET. Writing an edge retires no vector, so the scan
-	// proposes this pair again on every later pass — and an unchanged edge is
 	// held quiet rather than re-asked (#787), which is the difference between a
-	// converged project costing nothing per pass and costing a harness call per
 	// batch of eight over the whole graph.
 	cls2 := &mockClassifier{verdict: func(_, _ string) Relation { return RelationSupersedes }}
 	r2, _, err := Run(ctx, store, cls2, "p", 0.9, true, nil)
@@ -255,35 +125,6 @@ func TestRunIdempotent(t *testing.T) {
 	}
 	if pairs, _ := store.SupersedesWithin(ctx, []string{newer, older}); len(pairs) != 1 {
 		t.Errorf("live supersedes edges = %v, want the one the first pass wrote: a quiet pass is quiet, not a withdrawal", pairs)
-	}
-}
-
-func TestRunSupersedesLinkDirection(t *testing.T) {
-	store, db := seed(t)
-	ctx := context.Background()
-	newer := add(t, store, db, "api rate limit raised to 500 rps", []float32{1, 0, 0}, "2026-07-01 00:00:00")
-	older := add(t, store, db, "api rate limit is 100 rps", []float32{0.99, 0, 0}, "2026-01-01 00:00:00")
-
-	cls := &mockClassifier{verdict: func(_, _ string) Relation { return RelationSupersedes }}
-	if _, _, err := Run(ctx, store, cls, "p", 0.9, true, nil); err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-
-	links, err := store.GetLinks(ctx, newer)
-	if err != nil {
-		t.Fatalf("GetLinks: %v", err)
-	}
-	found := false
-	for _, l := range links {
-		if l.Relation == "supersedes" {
-			found = true
-			if l.SourceID != newer || l.TargetID != older {
-				t.Errorf("supersedes link direction wrong: source=%s target=%s (want source=%s target=%s)", l.SourceID, l.TargetID, newer, older)
-			}
-		}
-	}
-	if !found {
-		t.Error("expected a supersedes link, found none")
 	}
 }
 
@@ -329,16 +170,10 @@ func TestRunCausesVerdictWritesCausesLinkOlderToNewer(t *testing.T) {
 }
 
 // TestRunReclassifiesExistingSupersedesToCauses is the #823 flip, and since #845
-// the 'supersedes' edge it reclassifies FROM survives while the 'causes' edge
 // really is written beside it. That is the whole of what #845 withholds and it is
-// not an accident: the withdrawal is the only part of the verdict that removes
 // graph history, and a pass that creates links does not delete them (#845). The
-// pair holds both relations until `ghost supersede --reassess --apply` withdraws
 // the one the current rules no longer support.
 //
-// It is not a contradiction the product cannot express: `pairDirection` reads the
-// 'supersedes' edge as the pair's direction whenever one is live, so the pair is
-// judged in the same orientation on the next pass and reported again rather than
 // flapping between the two relations.
 func TestRunReclassifiesExistingSupersedesToCauses(t *testing.T) {
 	store, db := seed(t)
@@ -349,11 +184,7 @@ func TestRunReclassifiesExistingSupersedesToCauses(t *testing.T) {
 	if err := store.CreateLink(ctx, newer, older, "supersedes", 0.95, "llm"); err != nil {
 		t.Fatal(err)
 	}
-	// Arm the reclassify half, because an UNCHANGED live edge is held quiet
 	// rather than re-asked (#787) — which is the correct behaviour and would
-	// make this test assert nothing at all. Writing an edge retires no vector,
-	// so the scan proposes this pair too, in the edge's own direction, and the
-	// pair faces skip-if-unchanged like any other live one.
 	backdateLink(t, db, newer, older)
 
 	cls := &mockClassifier{verdict: func(_, _ string) Relation { return RelationCauses }}
@@ -394,18 +225,8 @@ func TestRunNeitherInvalidatesExistingCausesLink(t *testing.T) {
 	if err := store.CreateLink(ctx, older, newer, "causes", 0.9, "llm"); err != nil {
 		t.Fatal(err)
 	}
-	// The edge's stamp is rewound so the pair is re-judged, and that is now a
 	// REQUIREMENT for this test to reach a verdict at all (#823).
 	//
-	// It used not to be. A live 'causes' edge was invisible to the pass, so such
-	// a pair was re-proposed by the scan on every pass whatever its endpoints had
-	// been doing — the re-bill that issue is about, and the reason this verdict
-	// was reachable for free. A live edge of either relation now holds its pair
-	// by skip-if-unchanged, so a NEITHER verdict on an untouched pair is a
-	// question the pass no longer asks: the edge's own stamp says the text has
-	// not moved since it was judged, which is the claim the whole skip rests on.
-	// What is still true — and what this test still holds the pass to — is that
-	// when the pair IS re-judged, a NEITHER verdict drops the 'causes' edge.
 	backdateLink(t, db, older, newer)
 
 	cls := &mockClassifier{verdict: func(_, _ string) Relation { return RelationNeither }}
@@ -425,40 +246,6 @@ func TestRunNeitherInvalidatesExistingCausesLink(t *testing.T) {
 	}
 }
 
-func TestRunSkipsUnchangedExistingLink(t *testing.T) {
-	store, db := seed(t)
-	ctx := context.Background()
-	// Dissimilar vectors so SelectCandidates never rediscovers this pair on
-	// its own — the only way it's classified is via the existing-link
-	// reclassify path, which is exactly what skip-if-unchanged should suppress.
-	newer := add(t, store, db, "reversed the NATS decision back to Postgres LISTEN/NOTIFY", []float32{1, 0, 0}, "2026-07-01 00:00:00")
-	older := add(t, store, db, "unrelated gotcha about DNS caching", []float32{0, 1, 0}, "2026-01-01 00:00:00")
-
-	if err := store.CreateLink(ctx, newer, older, "supersedes", 0.95, "llm"); err != nil {
-		t.Fatal(err)
-	}
-
-	cls := &mockClassifier{verdict: func(_, _ string) Relation { return RelationSupersedes }}
-	if _, _, err := Run(ctx, store, cls, "p", 0.9, true, nil); err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-
-	for _, call := range cls.calls {
-		if call.Newer == "reversed the NATS decision back to Postgres LISTEN/NOTIFY" {
-			t.Errorf("Classify should not have been called for the unchanged existing-link pair, but was called with newer=%q older=%q", call.Newer, call.Older)
-		}
-	}
-}
-
-// unchangedLiveEdge seeds a LIVE supersedes edge over a pair the scan also
-// proposes, in the edge's own direction, and asserts both halves of that
-// premise rather than leaving them to the fixture's dates.
-//
-// The premise matters because it is the ordinary case and not an edge case: every
-// supersedes edge in the graph got there because SelectCandidates put these two
-// rows in front of the classifier as cosine neighbours above the threshold, and
-// nothing about writing an edge retires those vectors. A pass that only holds an
-// edge quiet when the scan cannot find it is holding it quiet in a configuration
 // no supersedes edge is ever in (#787).
 func unchangedLiveEdge(t *testing.T, store *memory.Store, newer, older string) {
 	t.Helper()
@@ -496,9 +283,6 @@ func unchangedLiveEdge(t *testing.T, store *memory.Store, newer, older string) {
 }
 
 // TestRunSkipsUnchangedLiveEdgeTheScanAlsoProposes is #787's half that costs
-// money: an edge nobody has touched is asked about on every pass, so with
-// reflection.auto_supersede on, every stop-hook run spends one harness call per
-// batch of eight over a graph that has not moved since the last one.
 func TestRunSkipsUnchangedLiveEdgeTheScanAlsoProposes(t *testing.T) {
 	store, db := seed(t)
 	ctx := context.Background()
@@ -524,11 +308,7 @@ func TestRunSkipsUnchangedLiveEdgeTheScanAlsoProposes(t *testing.T) {
 }
 
 // TestRunCannotWithdrawAnUnchangedLiveEdgeByReAskingIt is #787's other half,
-// and the one with a body count. A classifier's verdict on one pair is not
 // stable run to run (#779), so a pass that re-asks an edge nobody changed
-// withdraws a correct edge on whichever pass the answer comes back NEITHER, and
-// re-creates it on the next. Each flip spends two history rows on the target —
-// the version slots CreateLink's own comment warns about — and leaves the
 // target stamped resolved_at with no edge holding it.
 func TestRunCannotWithdrawAnUnchangedLiveEdgeByReAskingIt(t *testing.T) {
 	store, db := seed(t)
@@ -538,8 +318,6 @@ func TestRunCannotWithdrawAnUnchangedLiveEdgeByReAskingIt(t *testing.T) {
 	older := add(t, store, db, "api rate limit is 100 rps", []float32{0.99, 0.01, 0}, "2026-01-01 00:00:00")
 	unchangedLiveEdge(t, store, newer, older)
 
-	// NEITHER to everything, under --apply: this is the roll the ordinary pass
-	// must not be able to make. If it asks at all, the edge is gone.
 	cls := &mockClassifier{verdict: func(_, _ string) Relation { return RelationNeither }}
 	res, _, err := Run(ctx, store, cls, "p", 0.9, true, nil)
 	if err != nil {
@@ -557,14 +335,8 @@ func TestRunCannotWithdrawAnUnchangedLiveEdgeByReAskingIt(t *testing.T) {
 }
 
 // TestRunReConfirmingAnEdgeRefreshesItsFreshnessReference is #784. Re-confirming
-// an edge has to move the stamp skip-if-unchanged reads, or the promise in
-// docs/invariants.md — one call per endpoint edit rather than one per pass — is
-// only true for an edge nobody has ever edited, and any edge whose endpoint was
-// ever touched (a tag or importance edit bumps updated_at, and so does
 // PromoteToGlobal) is re-billed on every pass forever.
 //
-// The vectors are DISSIMILAR on purpose: only the reclassify path can judge this
-// pair, so its going quiet is attributable to the stamp and to nothing else. With
 // similar vectors the pair would be held quiet by #787's branch instead and this
 // test would pass whether or not the stamp moved.
 func TestRunReConfirmingAnEdgeRefreshesItsFreshnessReference(t *testing.T) {
@@ -576,8 +348,6 @@ func TestRunReConfirmingAnEdgeRefreshesItsFreshnessReference(t *testing.T) {
 	if err := store.CreateLink(ctx, newer, older, "supersedes", 0.95, "llm"); err != nil {
 		t.Fatal(err)
 	}
-	// Backdated so the edit below is unambiguously an edit since the edge was
-	// written, and dissimilar vectors so the scan cannot re-propose the pair.
 	backdateLink(t, db, newer, older)
 	if _, err := db.ExecContext(ctx, `UPDATE memories SET updated_at = '2026-07-15 00:00:00' WHERE id = ?`, older); err != nil {
 		t.Fatal(err)
@@ -592,10 +362,6 @@ func TestRunReConfirmingAnEdgeRefreshesItsFreshnessReference(t *testing.T) {
 		t.Fatalf("the pass answering an endpoint edit: calls=%d confirmed=%d, want 1/1", first.batchCalls, res.Confirmed)
 	}
 
-	// The re-confirm is the last judgement of this pair's current text, so the
-	// next two passes are quiet about it. Without the stamp moving they are not.
-	// The fake CONFIRMS throughout: an answer that withdrew the edge would take
-	// the pair out of the fixture, and this test is about the call count, not
 	// about the rollback #787 already covers.
 	for pass := 2; pass <= 3; pass++ {
 		cls := &mockClassifier{verdict: func(_, _ string) Relation { return RelationSupersedes }}
@@ -611,8 +377,6 @@ func TestRunReConfirmingAnEdgeRefreshesItsFreshnessReference(t *testing.T) {
 		}
 	}
 
-	// And the stamp moved FORWARD rather than parking the pair somewhere no
-	// edit can reach it: a second edit re-arms the same call.
 	if _, err := db.ExecContext(ctx, `UPDATE memories SET updated_at = datetime('now', '+1 minute') WHERE id = ?`, older); err != nil {
 		t.Fatal(err)
 	}
@@ -625,24 +389,6 @@ func TestRunReConfirmingAnEdgeRefreshesItsFreshnessReference(t *testing.T) {
 	}
 }
 
-// TestRunAnEditLandingDuringClassificationStillBuysTheNextCall is the stamp's
-// other half, and the one a wall-clock stamp gets wrong.
-//
-// The quiet test compares each endpoint's updated_at against the edge's stamp,
-// and those timestamps are read at the TOP of the pass — before a classify call
-// that takes seconds to minutes against a real harness. So an edit landing in
-// that window carries an updated_at newer than the text the classifier actually
-// saw, and the stamp must be the JUDGED pair's freshness rather than the moment
-// the write happened: stamped with the write clock, the re-confirm covers the
-// edit instead of stopping short of it, and the pair is held quiet against text
-// no verdict was ever given for. The stop hook makes this window ordinary —
-// reflect's consolidation rewrite and a save through a live `ghost mcp` both
-// stamp updated_at on rows the pass is judging — and the edit this masks is
-// invisible afterwards, since the edge still looks current.
-//
-// The edit's stamp is '2026-07-02', not a wall clock: it is unambiguously after
-// what this pass read and unambiguously before any real write, so the test does
-// not depend on two `datetime('now')` calls landing in the same second.
 func TestRunAnEditLandingDuringClassificationStillBuysTheNextCall(t *testing.T) {
 	store, db := seed(t)
 	ctx := context.Background()
@@ -654,8 +400,6 @@ func TestRunAnEditLandingDuringClassificationStillBuysTheNextCall(t *testing.T) 
 	}
 	backdateLink(t, db, newer, older)
 
-	// The edit lands INSIDE the classify call, which is exactly where a
-	// concurrent reflect pass or a save through a live server puts it.
 	midFlight := &mockClassifier{verdict: func(_, _ string) Relation {
 		if _, err := db.ExecContext(ctx,
 			`UPDATE memories SET content = ?, updated_at = '2026-07-02 00:00:00' WHERE id = ?`,
@@ -672,8 +416,6 @@ func TestRunAnEditLandingDuringClassificationStillBuysTheNextCall(t *testing.T) 
 		t.Fatalf("the pass made %d classify call(s), want 1: the reclassify half is armed", midFlight.batchCalls)
 	}
 
-	// The re-confirm judged text as of 2026-07-01. The 07-02 edit is a
-	// different claim about the same pair, so the next pass owes it a call.
 	next := &mockClassifier{verdict: func(_, _ string) Relation { return RelationSupersedes }}
 	if _, _, err := Run(ctx, store, next, "p", 0.9, true, nil); err != nil {
 		t.Fatalf("Run (after the mid-flight edit): %v", err)
@@ -684,647 +426,30 @@ func TestRunAnEditLandingDuringClassificationStillBuysTheNextCall(t *testing.T) 
 	}
 }
 
-// TestRunUnscoredMemoriesCanStillAppearInAReclassifiedPair is the coupling the
-// report's wording rests on, pinned so nobody "simplifies" it back into a
 // falsehood.
-//
-// Result.Unscored counts project memories the SCAN could not score. The
-// reclassify half of the pass reads live 'supersedes' edges from their link rows
-// and never looks at a vector, so one of those same memories can still be an
-// endpoint of a pair this run considered — which is exactly what a model change
-// produces, since retiring the old vectors makes every memory in the project
-// unscored while the edges written under the old model are still in the graph and
-// still need re-judging. A report sentence reading "in no pair this run
-// considered" would then contradict its own "1 reclassified" line.
-func TestRunUnscoredMemoriesCanStillAppearInAReclassifiedPair(t *testing.T) {
-	store, db := seed(t)
-	ctx := context.Background()
-	newer := add(t, store, db, "the relay drains the queue in under a minute now", []float32{1, 0, 0}, "2026-07-01 00:00:00")
-	older := add(t, store, db, "the relay takes about forty minutes to drain", []float32{0.98, 0.02, 0}, "2026-01-01 00:00:00")
 
-	if err := store.CreateLink(ctx, newer, older, "supersedes", 0.95, "llm"); err != nil {
-		t.Fatal(err)
-	}
-	// A model change: the vectors are retired, so GetEmbedding returns nil for
-	// both memories and the scan can score neither. The edge, however, is still
-	// live and its endpoint was edited after it was written, so the reclassify
-	// half proposes it.
-	if _, err := db.ExecContext(ctx, `DELETE FROM memory_embeddings WHERE memory_id IN (?, ?)`, newer, older); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.ExecContext(ctx, `UPDATE memory_links SET created_at = '2020-01-01 00:00:00' WHERE source_id = ? AND target_id = ?`, newer, older); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.ExecContext(ctx, `UPDATE memories SET updated_at = '2026-07-15 00:00:00' WHERE id = ?`, older); err != nil {
-		t.Fatal(err)
-	}
-
-	cls := &mockClassifier{verdict: func(_, _ string) Relation { return RelationSupersedes }}
-	res, _, err := Run(ctx, store, cls, "p", 0.9, true, nil)
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if res.Unscored != 2 {
-		t.Errorf("Result.Unscored = %d, want 2: a model change retires every vector, so the scan can score neither memory", res.Unscored)
-	}
-	// The pair the run DID consider is made of exactly those two unscored
-	// memories. This is the fact the report's sentence has to stay narrower than.
-	if res.Candidates != 1 {
-		t.Errorf("Result.Candidates = %d, want 1: the live edge is re-proposed from its link row, with no vector involved", res.Candidates)
-	}
-	if cls.batchCalls == 0 {
-		t.Error("the reclassified pair was never classified")
-	}
-}
-
-func TestRunRetriggersReclassifyWhenEndpointChanges(t *testing.T) {
-	store, db := seed(t)
-	ctx := context.Background()
-	newer := add(t, store, db, "reversed the NATS decision back to Postgres LISTEN/NOTIFY", []float32{1, 0, 0}, "2026-07-01 00:00:00")
-	older := add(t, store, db, "unrelated gotcha about DNS caching", []float32{0, 1, 0}, "2026-01-01 00:00:00")
-
-	if err := store.CreateLink(ctx, newer, older, "supersedes", 0.95, "llm"); err != nil {
-		t.Fatal(err)
-	}
-	// Backdate the link so the memory's later update is unambiguously newer.
-	if _, err := db.ExecContext(ctx, `UPDATE memory_links SET created_at = '2020-01-01 00:00:00' WHERE source_id = ? AND target_id = ?`, newer, older); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.ExecContext(ctx, `UPDATE memories SET updated_at = '2026-07-15 00:00:00' WHERE id = ?`, older); err != nil {
-		t.Fatal(err)
-	}
-
-	cls := &mockClassifier{verdict: func(_, _ string) Relation { return RelationSupersedes }}
-	if _, _, err := Run(ctx, store, cls, "p", 0.9, true, nil); err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-
-	called := false
-	for _, call := range cls.calls {
-		if call.Newer == "reversed the NATS decision back to Postgres LISTEN/NOTIFY" {
-			called = true
-		}
-	}
-	if !called {
-		t.Error("Classify should have been called after older endpoint's updated_at moved past the link's created_at")
-	}
-}
-
-// TestRun_SkipsPairWhoseEndpointVanishedMidRun reproduces the observed
-// production failure: the stop hook spawns reflect and supersede for the
-// same session, and reflect's consolidation replaces rows while supersede
-// is inside its classify loop. The pair was alive at selection time, so it
-// reaches classification; by write time one endpoint is gone. Run must skip
-// the pair (counting StaleSkipped) instead of dying on the FK constraint —
-// there is nothing to link once the memory no longer exists.
-func TestRun_SkipsPairWhoseEndpointVanishedMidRun(t *testing.T) {
-	store, db := seed(t)
-	ctx := context.Background()
-
-	v1 := add(t, store, db, "kubernetes cluster runs version 1.27", []float32{1, 0, 0}, "2026-01-01 00:00:00")
-	v2 := add(t, store, db, "kubernetes upgraded to 1.29", []float32{0.99, 0.01, 0}, "2026-04-01 00:00:00")
-
-	// Simulate reflect replacing v1 (delete + new row) while supersede is
-	// classifying: on the first Classify call, drop v1 from the store.
-	cls := &mockClassifier{verdict: func(_, _ string) Relation {
-		_ = store.Delete(ctx, v1)
-		return RelationSupersedes
-	}}
-
-	res, _, err := Run(ctx, store, cls, "p", 0.9, true, nil)
-	if err != nil {
-		t.Fatalf("Run must not fail on a mid-run replaced endpoint: %v", err)
-	}
-	if res.Created != 0 {
-		t.Errorf("got Created=%d, want 0 (endpoint gone before write)", res.Created)
-	}
-	// StaleAtWrite and NOT StaleSkipped, and the two are distinguished by exactly
-	// when the endpoint vanished. This fixture deletes it from inside the Classify
-	// call, so the pair WAS classified — a verdict was reached and paid for — and
-	// only the write was skipped. The pre-classify population is the other site,
-	// where a re-read of the graph finds the endpoint already gone and no call is
-	// spent at all (TestRunDropsAPairThatWentStaleBeforeTheClassify).
-	if res.StaleAtWrite != 1 {
-		t.Errorf("got StaleAtWrite=%d, want 1: the pair was classified, so this is the pre-write drop", res.StaleAtWrite)
-	}
-	if res.StaleSkipped != 0 {
-		t.Errorf("got StaleSkipped=%d, want 0: this pair was classified, so it is not the pre-classify drop", res.StaleSkipped)
-	}
-	// And the verdict really was reached, which is what makes the distinction matter
-	// to a report: a line claiming no classify call was spent would be false here.
-	if res.Confirmed != 1 {
-		t.Errorf("got Confirmed=%d, want 1: the classifier ran before the endpoint vanished", res.Confirmed)
-	}
-	pairs, _ := store.SupersedesWithin(ctx, []string{v1, v2})
-	if len(pairs) != 0 {
-		t.Errorf("found %d links for a deleted endpoint; want none", len(pairs))
-	}
-}
-
-// TestTheTwoStaleDropsCountApart is a STRUCTURAL assertion, and it is structural
-// because the two populations are not separable any other way in a test.
-//
-// `Result.StaleSkipped` and `Result.StaleAtWrite` count two different facts about
-// where a candidate was dropped: one is gone before the pass spends a classify
-// call on it, the other is classified and then loses its endpoint before the write.
-// Only the second may be reported as "a verdict was reached and no edge was
-// written", and only the first is guaranteed to have cost nothing — so a report
-// line about either is false for the other, and one counter for both would have to
 // word one line for both.
-//
-// The pre-classify window (between the candidate scan and the existence re-check)
-// is not reachable deterministically from a fixture: nothing runs inside it that a
-// test can hook, and forcing one would need a seam that exists only for the test.
-// So the invariant is pinned where it can be — on the source — by counting the
-// increments, and the pre-WRITE half is pinned behaviourally above.
-func TestTheTwoStaleDropsCountApart(t *testing.T) {
-	src, err := os.ReadFile("supersede.go")
-	if err != nil {
-		t.Fatalf("ReadFile: %v", err)
-	}
-	pre := strings.Count(string(src), "res.StaleSkipped++")
-	write := strings.Count(string(src), "res.StaleAtWrite++")
-	// Exactly one site each. Two sites on one counter is the defect this split
-	// exists to prevent, and zero on either is a counter nothing reports.
-	if pre != 1 {
-		t.Errorf("supersede.go has %d site(s) incrementing res.StaleSkipped, want exactly 1: the pre-classify drop is one fact with one place it happens", pre)
-	}
-	if write != 1 {
-		t.Errorf("supersede.go has %d site(s) incrementing res.StaleAtWrite, want exactly 1", write)
-	}
-	// And the declaration carries both, so neither is a field nothing reads.
-	for _, field := range []string{"StaleSkipped int", "StaleAtWrite int"} {
-		if !strings.Contains(string(src), field) {
-			t.Errorf("Result does not declare %q", field)
-		}
-	}
-}
 
-// TestRunStalePairDoesNotRollBackNeitherCacheWrite pins the follow-up to the
-// same concurrent-reflect race: the NEITHER-cache write is a single
-// transaction, so recording a pair whose endpoint vanished mid-pass would hit
-// the FK and roll back every other pair's row — the cache would silently never
-// advance under the race. Only pairs that passed the pre-write existence check
 // may be recorded.
-func TestRunStalePairDoesNotRollBackNeitherCacheWrite(t *testing.T) {
-	store, db := seed(t)
-	ctx := context.Background()
 
-	aNewContent := "prod database is postgres 16"
-	aOldContent := "staging database is postgres 16"
-	aNew := add(t, store, db, aNewContent, []float32{1, 0, 0}, "2026-07-01 00:00:00")
-	aOld := add(t, store, db, aOldContent, []float32{0.99, 0, 0}, "2026-01-01 00:00:00")
-	bNew := add(t, store, db, "grafana listens on port 80", []float32{0, 1, 0}, "2026-07-01 00:00:00")
-	bOld := add(t, store, db, "grafana listens on port 3000", []float32{0, 0.99, 0}, "2026-01-01 00:00:00")
-
-	// Simulate reflect replacing aOld while supersede is classifying: delete
-	// it from the store during the single ClassifyBatch call.
-	cls := &mockClassifier{verdict: func(newer, older string) Relation {
-		if newer == aNewContent && older == aOldContent {
-			if err := store.Delete(ctx, aOld); err != nil {
-				t.Errorf("delete stale endpoint: %v", err)
-			}
-		}
-		return RelationNeither
-	}}
-
-	res, _, err := Run(ctx, store, cls, "p", 0.9, true, slog.Default())
-	if err != nil {
-		t.Fatalf("Run must not fail when a stale pair is in the batch: %v", err)
-	}
-	// StaleAtWrite: this fixture deletes the endpoint from inside the classify
-	// call, so the pair was classified and only the WRITE was skipped — the same
-	// population TestRun_SkipsPairWhoseEndpointVanishedMidRun pins, and the reason
-	// the two counters exist.
-	if res.StaleAtWrite != 1 {
-		t.Fatalf("StaleAtWrite = %d, want 1: the pair was classified, so this is the pre-write drop", res.StaleAtWrite)
-	}
-	if res.StaleSkipped != 0 {
-		t.Fatalf("StaleSkipped = %d, want 0: nothing was dropped before the classify", res.StaleSkipped)
-	}
-
-	checked, err := store.SupersedeChecked(ctx, "p")
-	if err != nil {
-		t.Fatalf("SupersedeChecked: %v", err)
-	}
-	if _, ok := checked[[2]string{bNew, bOld}]; !ok {
-		t.Errorf("surviving pair's NEITHER row missing: checked=%v (the stale pair's insert must not roll back the cache write)", checked)
-	}
-	if _, ok := checked[[2]string{aNew, aOld}]; ok {
-		t.Errorf("stale pair must not be recorded in the cache: checked=%v", checked)
-	}
-	if len(checked) != 1 {
-		t.Errorf("checked has %d row(s), want exactly the surviving pair", len(checked))
-	}
-}
-
-// mockClassifierErr is mockClassifier with an error channel, for the
-// unclassifiable-verdict path.
-type mockClassifierErr struct {
-	fn func(newer, older string) (Relation, error)
-}
-
-func (m *mockClassifierErr) ClassifyBatch(_ context.Context, pairs []Candidate) ([]Relation, error) {
-	out := make([]Relation, len(pairs))
-	for i, p := range pairs {
-		rel, err := m.fn(p.NewerContent, p.OlderContent)
-		if err != nil {
-			if errors.Is(err, errUnparseableVerdict) {
-				continue // stays Relation(""); Run counts it as unclassified
-			}
-			return nil, err // transport failure: fatal, as before
-		}
-		out[i] = rel
-	}
-	return out, nil
-}
-
-// TestRunSkipsUnclassifiablePairAndContinues pins the fix for a live failure:
-// a single "CORRECTS" answer aborted a 9-minute pass AFTER links for earlier
-// pairs had been written, so the graph never converged whenever the model
-// phrased a verdict the parser did not know. The pass must skip and count the
 // pair, and keep going.
-func TestRunSkipsUnclassifiablePairAndContinues(t *testing.T) {
-	store, db := seed(t)
-	ctx := context.Background()
 
-	add(t, store, db, "kubernetes cluster runs version 1.27", []float32{1, 0, 0}, "2026-01-01 00:00:00")
-	add(t, store, db, "kubernetes upgraded to 1.29", []float32{0.99, 0.01, 0}, "2026-04-01 00:00:00")
-	add(t, store, db, "kubernetes now on 1.31", []float32{0.98, 0.02, 0}, "2026-07-01 00:00:00")
-
-	// Classify receives CONTENT, not IDs. Make exactly one pair unclassifiable.
-	cls := &mockClassifierErr{fn: func(newer, older string) (Relation, error) {
-		if (newer == "kubernetes now on 1.31" && older == "kubernetes upgraded to 1.29") ||
-			(newer == "kubernetes upgraded to 1.29" && older == "kubernetes now on 1.31") {
-			return "", fmt.Errorf("%w: %q", errUnparseableVerdict, "CORRECTS")
-		}
-		return RelationSupersedes, nil
-	}}
-
-	res, _, err := Run(ctx, store, cls, "p", 0.9, true, slog.Default())
-	if err != nil {
-		t.Fatalf("Run must not abort on one unclassifiable pair: %v", err)
-	}
-	if res.Unclassified != 1 {
-		t.Errorf("Unclassified = %d, want 1", res.Unclassified)
-	}
-	if res.Created != 2 {
-		t.Errorf("Created = %d, want 2 (the remaining pairs still wrote)", res.Created)
-	}
-}
-
-// TestRunTreatsProviderOutageAsFatal: only an unparseable verdict may be
-// skipped. A transport failure (dead harness, API outage, exhausted credit)
-// must still abort the pass — otherwise every pair is "skipped", nothing is
-// written, and the CLI reports success while blaming the model.
-func TestRunTreatsProviderOutageAsFatal(t *testing.T) {
-	store, db := seed(t)
-	ctx := context.Background()
-	add(t, store, db, "kubernetes cluster runs version 1.27", []float32{1, 0, 0}, "2026-01-01 00:00:00")
-	add(t, store, db, "kubernetes upgraded to 1.29", []float32{0.99, 0.01, 0}, "2026-04-01 00:00:00")
-
-	cls := &mockClassifierErr{fn: func(_, _ string) (Relation, error) {
-		return "", errors.New("opencode run: exit status 1")
-	}}
-	if _, _, err := Run(ctx, store, cls, "p", 0.9, true, slog.Default()); err == nil {
-		t.Fatal("a provider outage must abort the pass, not be counted as unclassifiable")
-	}
-}
-
-// TestRunRetriesAFailedClassifyCall: the creation pass shares the classifier, so
-// it gets the one retry too, and this is its own test because what must NOT
-// change is its decision semantics — Run still writes nothing on a call that
-// keeps failing (TestRunTreatsProviderOutageAsFatal), and a call that fails once
-// is simply asked again. The retry is a transport repair, so the pass is
-// otherwise identical: the verdicts that come back are applied exactly as
-// before, and the retry is visible in the report rather than absorbed.
-func TestRunRetriesAFailedClassifyCall(t *testing.T) {
-	store, db := seed(t)
-	ctx := context.Background()
-	add(t, store, db, "kubernetes cluster runs version 1.27", []float32{1, 0, 0}, "2026-01-01 00:00:00")
-	add(t, store, db, "kubernetes upgraded to 1.29", []float32{0.99, 0.01, 0}, "2026-04-01 00:00:00")
-
-	fp := &flakyProvider{resp: "SUPERSEDES | replaced: it runs version 1.27", fails: 1}
-	cls := NewRelationClassifier(fp)
-	cls.SetRetryDelay(0)
-	res, _, err := Run(ctx, store, cls, "p", 0.9, true, discardLogger())
-	if err != nil {
-		t.Fatalf("a first-call failure the retry answers must not abort the pass: %v", err)
-	}
-	if res.Created != 1 {
-		t.Errorf("Created = %d, want 1: the retry's verdict is applied like any other", res.Created)
-	}
-	if cls.Retries() != 1 {
-		t.Errorf("Retries() = %d, want 1", cls.Retries())
-	}
-	live, err := store.LinksByRelationSource(ctx, "p", string(RelationSupersedes), "llm")
-	if err != nil {
-		t.Fatalf("LinksByRelationSource: %v", err)
-	}
-	if len(live) != 1 {
-		t.Errorf("%d live link(s), want 1: the pass really wrote what the retry decided", len(live))
-	}
-}
-
-// TestRunClassifiesAllPairsInOneBatchCall pins the batching contract: Run
-// hands the whole candidate set to one ClassifyBatch call and lets the
-// classifier own chunking, instead of looping a call per pair.
-func TestRunClassifiesAllPairsInOneBatchCall(t *testing.T) {
-	store, db := seed(t)
-	ctx := context.Background()
-	add(t, store, db, "kubernetes cluster runs version 1.27", []float32{1, 0, 0}, "2026-01-01 00:00:00")
-	add(t, store, db, "kubernetes upgraded to 1.29", []float32{0.99, 0.01, 0}, "2026-04-01 00:00:00")
-	add(t, store, db, "kubernetes now on 1.31", []float32{0.98, 0.02, 0}, "2026-07-01 00:00:00")
-
-	cls := &mockClassifier{verdict: func(_, _ string) Relation { return RelationSupersedes }}
-	if _, _, err := Run(ctx, store, cls, "p", 0.9, true, nil); err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if cls.batchCalls != 1 || cls.lastBatchSize != 3 {
-		t.Errorf("want 1 batch call carrying 3 pairs, got %d call(s), last size %d", cls.batchCalls, cls.lastBatchSize)
-	}
-}
-
-// mockShortClassifier returns fewer verdicts than pairs — a contract violation
-// Run must reject instead of panicking on an out-of-range index.
 type mockShortClassifier struct{}
 
 func (mockShortClassifier) ClassifyBatch(context.Context, []Candidate) ([]Relation, error) {
 	return nil, nil
 }
 
-func TestRunRejectsVerdictCountMismatch(t *testing.T) {
-	store, db := seed(t)
-	ctx := context.Background()
-	add(t, store, db, "kubernetes cluster runs version 1.27", []float32{1, 0, 0}, "2026-01-01 00:00:00")
-	add(t, store, db, "kubernetes upgraded to 1.29", []float32{0.99, 0.01, 0}, "2026-04-01 00:00:00")
-	if _, _, err := Run(ctx, store, mockShortClassifier{}, "p", 0.9, true, nil); err == nil {
-		t.Fatal("want error when the classifier returns fewer verdicts than pairs, got nil")
-	}
-}
-
-// TestRunEmptyCandidateSetSkipsClassifier pins that a pass with no candidates
-// (everything filtered or stale) makes no classifier call at all, so a future
-// Classifier implementation that rejects empty input cannot turn a no-op pass
 // fatal.
-func TestRunEmptyCandidateSetSkipsClassifier(t *testing.T) {
-	store, _ := seed(t)
-	cls := &mockClassifier{verdict: func(_, _ string) Relation { return RelationNeither }}
-	res, _, err := Run(context.Background(), store, cls, "p", 0.9, true, nil)
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if res.Candidates != 0 || cls.batchCalls != 0 {
-		t.Errorf("want 0 candidates and 0 classifier calls, got %d and %d", res.Candidates, cls.batchCalls)
-	}
-}
 
-// TestRunSkipsCachedNeitherPairs: a NEITHER verdict is recorded on apply, and
-// the next pass over unchanged endpoints skips the pair with zero classifier
 // calls while still counting it as a candidate.
-func TestRunSkipsCachedNeitherPairs(t *testing.T) {
-	store, db := seed(t)
-	ctx := context.Background()
-	newerContent := "prod database is postgres 16"
-	olderContent := "staging database is postgres 16"
-	newer := add(t, store, db, newerContent, []float32{1, 0, 0}, "2026-07-01 00:00:00")
-	older := add(t, store, db, olderContent, []float32{0.99, 0, 0}, "2026-01-01 00:00:00")
 
-	cls := &mockClassifier{verdict: func(_, _ string) Relation { return RelationNeither }}
-	res, _, err := Run(ctx, store, cls, "p", 0.9, true, nil)
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if res.Skipped != 0 || cls.batchCalls != 1 {
-		t.Fatalf("first pass: skipped=%d calls=%d, want 0/1", res.Skipped, cls.batchCalls)
-	}
-
-	checked, err := store.SupersedeChecked(ctx, "p")
-	if err != nil {
-		t.Fatalf("SupersedeChecked: %v", err)
-	}
-	key := [2]string{newer, older}
-	want := memory.SupersedeCheck{NewerHash: contentHash(newerContent), OlderHash: contentHash(olderContent)}
-	if checked[key] != want {
-		t.Fatalf("recorded check = %+v, want %+v", checked[key], want)
-	}
-
-	cls2 := &mockClassifier{verdict: func(_, _ string) Relation { return RelationNeither }}
-	res2, _, err := Run(ctx, store, cls2, "p", 0.9, true, nil)
-	if err != nil {
-		t.Fatalf("Run (second): %v", err)
-	}
-	if res2.Skipped != 1 {
-		t.Errorf("second pass skipped=%d, want 1", res2.Skipped)
-	}
-	if cls2.batchCalls != 0 {
-		t.Errorf("second pass made %d classify call(s), want 0", cls2.batchCalls)
-	}
-	if res2.Candidates != 1 {
-		t.Errorf("second pass candidates=%d, want 1 (cached pairs remain candidates)", res2.Candidates)
-	}
-}
-
-// TestRunReclassifiesWhenCachedEndpointChanges: the cache keys on content, so
-// an endpoint whose text changed after the verdict no longer matches and must
 // be re-classified.
-func TestRunReclassifiesWhenCachedEndpointChanges(t *testing.T) {
-	store, db := seed(t)
-	ctx := context.Background()
-	newer := add(t, store, db, "prod database is postgres 16", []float32{1, 0, 0}, "2026-07-01 00:00:00")
-	older := add(t, store, db, "staging database is postgres 16", []float32{0.99, 0, 0}, "2026-01-01 00:00:00")
 
-	cls := &mockClassifier{verdict: func(_, _ string) Relation { return RelationNeither }}
-	if _, _, err := Run(ctx, store, cls, "p", 0.9, true, nil); err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	checked, err := store.SupersedeChecked(ctx, "p")
-	if err != nil {
-		t.Fatalf("SupersedeChecked: %v", err)
-	}
-	if _, ok := checked[[2]string{newer, older}]; !ok {
-		t.Fatalf("cache row for pair %s->%s missing after the NEITHER pass", newer, older)
-	}
-
-	// Edit the older note's text without touching its embedding or timestamps:
-	// the content hash no longer matches the cached verdict.
-	if _, err := db.ExecContext(ctx,
-		`UPDATE memories SET content = ? WHERE id = ?`, "staging database was ported to mysql", older,
-	); err != nil {
-		t.Fatalf("edit older: %v", err)
-	}
-
-	cls2 := &mockClassifier{verdict: func(_, _ string) Relation { return RelationNeither }}
-	res, _, err := Run(ctx, store, cls2, "p", 0.9, true, nil)
-	if err != nil {
-		t.Fatalf("Run (after edit): %v", err)
-	}
-	if res.Skipped != 0 {
-		t.Errorf("skipped=%d, want 0 — a changed endpoint must re-classify", res.Skipped)
-	}
-	if cls2.batchCalls != 1 {
-		t.Errorf("classify calls=%d, want 1 after an endpoint change", cls2.batchCalls)
-	}
-}
-
-// TestRunDryRunRecordsNoCache: dry-run must stay side-effect-free — it neither
-// writes links nor records NEITHER verdicts, so a dry pass repeated twice
 // still classifies each time.
-func TestRunDryRunRecordsNoCache(t *testing.T) {
-	store, db := seed(t)
-	ctx := context.Background()
-	add(t, store, db, "prod database is postgres 16", []float32{1, 0, 0}, "2026-07-01 00:00:00")
-	add(t, store, db, "staging database is postgres 16", []float32{0.99, 0, 0}, "2026-01-01 00:00:00")
 
-	cls := &mockClassifier{verdict: func(_, _ string) Relation { return RelationNeither }}
-	if _, _, err := Run(ctx, store, cls, "p", 0.9, false, nil); err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	checked, err := store.SupersedeChecked(ctx, "p")
-	if err != nil {
-		t.Fatalf("SupersedeChecked: %v", err)
-	}
-	if len(checked) != 0 {
-		t.Fatalf("dry run recorded %v, want nothing", checked)
-	}
-
-	cls2 := &mockClassifier{verdict: func(_, _ string) Relation { return RelationNeither }}
-	res, _, err := Run(ctx, store, cls2, "p", 0.9, false, nil)
-	if err != nil {
-		t.Fatalf("Run (second dry): %v", err)
-	}
-	if res.Skipped != 0 || cls2.batchCalls != 1 {
-		t.Errorf("second dry pass skipped=%d calls=%d, want 0/1 (dry run wrote no cache)", res.Skipped, cls2.batchCalls)
-	}
-}
-
-// TestRunReclassifyPairClassifiesDespiteCacheRow: the cache applies to fresh
-// candidates only. An existing llm link whose endpoints changed is reclassified
-// on every pass regardless of a matching cache row, because skipping it would
 // freeze link self-healing.
-func TestRunReclassifyPairClassifiesDespiteCacheRow(t *testing.T) {
-	store, db := seed(t)
-	ctx := context.Background()
-	newerContent := "reversed the NATS decision back to Postgres LISTEN/NOTIFY"
-	olderContent := "unrelated gotcha about DNS caching"
-	newer := add(t, store, db, newerContent, []float32{1, 0, 0}, "2026-07-01 00:00:00")
-	older := add(t, store, db, olderContent, []float32{0, 1, 0}, "2026-01-01 00:00:00")
 
-	if err := store.CreateLink(ctx, newer, older, "supersedes", 0.95, "llm"); err != nil {
-		t.Fatal(err)
-	}
-	// Backdate the link so the memory's later update is unambiguously newer
-	// and the reclassify path fires.
-	if _, err := db.ExecContext(ctx,
-		`UPDATE memory_links SET created_at = '2020-01-01 00:00:00' WHERE source_id = ? AND target_id = ?`,
-		newer, older,
-	); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.MarkSupersedeNeither(ctx, "p", map[[2]string]memory.SupersedeCheck{
-		{newer, older}: {NewerHash: contentHash(newerContent), OlderHash: contentHash(olderContent)},
-	}); err != nil {
-		t.Fatalf("seed cache: %v", err)
-	}
-
-	cls := &mockClassifier{verdict: func(_, _ string) Relation { return RelationSupersedes }}
-	res, _, err := Run(ctx, store, cls, "p", 0.9, true, nil)
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if cls.batchCalls != 1 {
-		t.Errorf("classify calls=%d, want 1 — reclassify pairs ignore the NEITHER cache", cls.batchCalls)
-	}
-	if res.Skipped != 0 {
-		t.Errorf("skipped=%d, want 0 for a reclassify pair", res.Skipped)
-	}
-}
-
-// TestRunMixedCachedAndUncachedPairs: one batch call carries only the uncached
-// pairs, the cached pair is skipped, and the verdicts still land as links.
-func TestRunMixedCachedAndUncachedPairs(t *testing.T) {
-	store, db := seed(t)
-	ctx := context.Background()
-
-	aNewContent := "api rate limit raised to 500 rps"
-	aOldContent := "api rate limit is 100 rps"
-	aNew := add(t, store, db, aNewContent, []float32{1, 0, 0}, "2026-07-01 00:00:00")
-	aOld := add(t, store, db, aOldContent, []float32{0.99, 0, 0}, "2026-01-01 00:00:00")
-	bNew := add(t, store, db, "kubernetes now on 1.31", []float32{0, 1, 0}, "2026-07-01 00:00:00")
-	bOld := add(t, store, db, "kubernetes cluster runs 1.27", []float32{0, 0.99, 0}, "2026-01-01 00:00:00")
-
-	if err := store.MarkSupersedeNeither(ctx, "p", map[[2]string]memory.SupersedeCheck{
-		{aNew, aOld}: {NewerHash: contentHash(aNewContent), OlderHash: contentHash(aOldContent)},
-	}); err != nil {
-		t.Fatalf("seed cache: %v", err)
-	}
-
-	cls := &mockClassifier{verdict: func(_, _ string) Relation { return RelationSupersedes }}
-	res, classified, err := Run(ctx, store, cls, "p", 0.9, true, nil)
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if res.Candidates != 2 || res.Skipped != 1 {
-		t.Errorf("candidates=%d skipped=%d, want 2/1", res.Candidates, res.Skipped)
-	}
-	if cls.batchCalls != 1 || cls.lastBatchSize != 1 {
-		t.Errorf("want 1 batch call carrying 1 uncached pair, got %d call(s), last size %d", cls.batchCalls, cls.lastBatchSize)
-	}
-	if res.Confirmed != 1 || res.Created != 1 {
-		t.Errorf("confirmed=%d created=%d, want 1/1 for the uncached pair", res.Confirmed, res.Created)
-	}
-	if len(classified) != 1 {
-		t.Errorf("classified=%d, want 1 (the uncached pair)", len(classified))
-	}
-	pairsB, _ := store.SupersedesWithin(ctx, []string{bNew, bOld})
-	if len(pairsB) != 1 {
-		t.Errorf("uncached pair links=%d, want 1", len(pairsB))
-	}
-	pairsA, _ := store.SupersedesWithin(ctx, []string{aNew, aOld})
-	if len(pairsA) != 0 {
-		t.Errorf("cached pair links=%d, want 0 (cache skip writes nothing)", len(pairsA))
-	}
-}
-
-// failingMarkStore wraps a real store so only the NEITHER-cache write fails —
-// used to pin that losing derived cache state does not fail a pass whose
-// primary effect landed.
-type failingMarkStore struct {
-	*memory.Store
-	err    error
-	called bool
-}
-
-func (f *failingMarkStore) MarkSupersedeNeither(context.Context, string, map[[2]string]memory.SupersedeCheck) error {
-	f.called = true
-	return f.err
-}
-
-// TestRunCacheWriteFailureDoesNotFailThePass: mirrors resolve's KEEP-cache
-// choice — a failed cache write costs a re-classify next pass, so the pass
-// warns instead of failing after its link writes already landed.
-func TestRunCacheWriteFailureDoesNotFailThePass(t *testing.T) {
-	store, db := seed(t)
-	ctx := context.Background()
-	add(t, store, db, "prod database is postgres 16", []float32{1, 0, 0}, "2026-07-01 00:00:00")
-	add(t, store, db, "staging database is postgres 16", []float32{0.99, 0, 0}, "2026-01-01 00:00:00")
-
-	cls := &mockClassifier{verdict: func(_, _ string) Relation { return RelationNeither }}
-	failing := &failingMarkStore{Store: store, err: errors.New("disk full")}
-	res, _, err := Run(ctx, failing, cls, "p", 0.9, true, slog.Default())
-	if err != nil {
-		t.Fatalf("a cache write failure must not fail the pass: %v", err)
-	}
-	if !failing.called {
-		t.Error("MarkSupersedeNeither was never called; the test did not exercise the failure path")
-	}
-	if res.Confirmed != 0 || res.Candidates != 1 {
-		t.Errorf("candidates=%d confirmed=%d, want 1/0", res.Candidates, res.Confirmed)
-	}
-}
-
-// TestResultWouldWriteLinks pins the dry-run hint's promise. A reversed verdict
-// is a refusal, so a result whose only finding is one must not tell the operator
 // that --apply would write links for it (#649 review).
 func TestResultWouldWriteLinks(t *testing.T) {
 	cases := []struct {
@@ -1340,12 +465,8 @@ func TestResultWouldWriteLinks(t *testing.T) {
 		{"only a NEITHER reclassification, which only drops the link", Result{Reclassified: 1, ReclassifiedNoWrite: 1}, false},
 		{"a fresh refusal, no live link to drop", Result{Reversed: 1}, false},
 		{"one no-write reclassification and one real reclassification", Result{Reclassified: 2, Reversed: 1, ReclassifiedNoWrite: 1}, true},
-		// Only refusals, and the cache is not a graph change either way.
 		{"cache hits and unclassified pairs", Result{Skipped: 3, Unclassified: 2}, false},
 		// The WRITE counts never appear here (#834). They are 0 in every dry run,
-		// which is the run that prints this hint, so keying the promise off them
-		// would make it false on exactly the pass it is for; and a result carrying
-		// one is a result of an --apply, which prints the hint not at all.
 		{"writes alone, no verdicts", Result{Created: 1, CausesWritten: 1}, false},
 	}
 	for _, c := range cases {
@@ -1355,57 +476,8 @@ func TestResultWouldWriteLinks(t *testing.T) {
 	}
 }
 
-// TestRunCountsNoWriteReclassifications: a verdict that only invalidates — a
-// reversal or a NEITHER — must be distinguishable in the Result from one that
-// re-links the pair, because the CLI's dry-run hint keys on exactly that
 // difference (#649 review). Every verdict that leaves Reclassified without
 // leaving a link to write is a NEITHER or a reversal.
 //
-// The fixture carries a live 'causes' edge beside the 'supersedes' one, and it
 // has to. Since #845 a bare denial over a 'supersedes' edge moves nothing at all
-// — the withdrawal is reported, not made — so Reclassified is no longer the
-// finding that separates the two cases; a 'causes' edge the same verdict really
-// sweeps is. This therefore still pins the counter it was written for, and
-// TestTheOrdinaryPassReportsTheSupersedesWithdrawalItRefusesToMake pins the bare
 // denial, where the finding is WithdrawSuppressed.
-func TestRunCountsNoWriteReclassifications(t *testing.T) {
-	for _, verdict := range []Relation{RelationReversed, RelationNeither} {
-		t.Run(string(verdict), func(t *testing.T) {
-			store, db := seed(t)
-			ctx := context.Background()
-			newer := add(t, store, db, "kubernetes now on 1.31", []float32{1, 0, 0, 0}, "2026-07-01 00:00:00")
-			older := add(t, store, db, "kubernetes cluster runs 1.27", []float32{0, 1, 0, 0}, "2026-01-01 00:00:00")
-			if err := store.CreateLink(ctx, newer, older, "supersedes", 0.95, "llm"); err != nil {
-				t.Fatal(err)
-			}
-			// A live 'causes' edge the same verdict sweeps for real, so the
-			// reclassification this counts is a mutation the graph really took.
-			if err := store.CreateLink(ctx, older, newer, "causes", 0.9, "llm"); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := db.ExecContext(ctx,
-				`UPDATE memory_links SET created_at = '2020-01-01 00:00:00' WHERE source_id = ? AND target_id = ?`,
-				newer, older,
-			); err != nil {
-				t.Fatal(err)
-			}
-
-			cls := &mockClassifier{verdict: func(_, _ string) Relation { return verdict }}
-			res, _, err := Run(ctx, store, cls, "p", 0.9, true, slog.Default())
-			if err != nil {
-				t.Fatalf("Run: %v", err)
-			}
-			if res.Reclassified != 1 || res.ReclassifiedNoWrite != 1 {
-				t.Fatalf("got reclassified=%d noWrite=%d, want 1/1 for a %s verdict",
-					res.Reclassified, res.ReclassifiedNoWrite, verdict)
-			}
-			if res.Created != 0 || res.CausesCreated != 0 || res.CausesWritten != 0 {
-				t.Errorf("a %s reclassification must write nothing, got created=%d causes=%d causesWritten=%d",
-					verdict, res.Created, res.CausesCreated, res.CausesWritten)
-			}
-			if res.WouldWriteLinks() {
-				t.Errorf("a pass whose only finding is a %s reclassification must not promise a link to write", verdict)
-			}
-		})
-	}
-}

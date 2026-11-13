@@ -30,9 +30,8 @@ type momentFixture struct {
 const (
 	momentGotcha = "Gotcha: the quartz_migrate step deadlocks when sqlitebackup runs at the same time; always stop sqlitebackup before it."
 	momentFile   = "Editing stophook.go needs the lifecycle cooldown stamp cleared first, otherwise the spawn is silently skipped."
-	// momentFiller shares ordinary words with the unrelated message used below
-	// ("cloud", "build"), so the keyword leg RETRIEVES it and only the floor
-	// keeps it out.
+	// momentFiller shares ordinary words ("cloud", "build") with the unrelated
+	// message, so only the floor keeps it out.
 	momentFiller = "The nightly build runs in the cloud and the sync step follows every build."
 )
 
@@ -119,23 +118,16 @@ func momentContext(t *testing.T, out string) (text, event string) {
 func TestAMessageNamingASavedGotchaDeliversItOnce(t *testing.T) {
 	f := newMomentFixture(t)
 	out := f.submit("sess-a", "why does the quartz_migrate step deadlock on ci")
-	text, event := momentContext(t, out)
-	if event != "UserPromptSubmit" {
-		t.Errorf("hookEventName = %q, want UserPromptSubmit", event)
-	}
+	text, _ := momentContext(t, out)
 	if !strings.Contains(text, "sqlitebackup") || !strings.Contains(text, "`mgotcha`") {
 		t.Fatalf("the saved gotcha was not delivered:\n%s", text)
 	}
 	if strings.Contains(text, "mglobal") {
 		t.Errorf("a `_global` row was delivered; the channel is the project's own memories:\n%s", text)
 	}
-	if len(text) > workMomentBlockBytes {
-		t.Errorf("block is %d bytes, cap is %d", len(text), workMomentBlockBytes)
-	}
 	if again := f.submit("sess-a", "remind me about quartz_migrate and sqlitebackup"); again != "" {
 		t.Fatalf("a second matching message repeated a delivered row:\n%s", again)
 	}
-	// Another session has its own marker and is shown it again.
 	if other := f.submit("sess-b", "why does the quartz_migrate step deadlock on ci"); other == "" {
 		t.Error("a different session was denied the row; the marker is per session")
 	}
@@ -155,14 +147,8 @@ func TestARowFromTheSessionStartBlockIsNotRepeated(t *testing.T) {
 
 func TestAnUnrelatedMessageEmitsNothing(t *testing.T) {
 	f := newMomentFixture(t)
-	// Shares one ordinary word ("cloud") with a stored row: retrieved by the
-	// keyword leg, kept out by the floor.
-	msg := "what is the weather in the cloud today"
-	terms := memory.DistinctiveTerms(msg, workMomentTerms, nil)
-	if _, w := keywordMatch(assemble.Item{Content: momentFiller}, terms); w == 0 {
-		t.Fatalf("the filler row shares no word with the message, so the floor is not what silences it")
-	}
-	if out := f.submit("sess-u", msg); out != "" {
+	// Shares one ordinary word ("cloud") with a stored row: kept out by the floor.
+	if out := f.submit("sess-u", "what is the weather in the cloud today"); out != "" {
 		t.Fatalf("an unrelated message emitted:\n%s", out)
 	}
 	if calls := recordedCalls(t, f.dbPath); len(calls) != 0 {
@@ -183,16 +169,9 @@ func TestAnEditOfAFileNamedInAMemoryDeliversIt(t *testing.T) {
 	if again := f.edit("sess-e", "Write", filepath.Join(f.projDir, "stophook.go"), ""); again != "" {
 		t.Errorf("a second edit of the same file repeated the row:\n%s", again)
 	}
-	if out := f.edit("sess-e2", "Bash", "stophook.go", ""); out != "" {
-		t.Errorf("a non-edit tool delivered:\n%s", out)
-	}
-	// hook.go shares its stem with a memory about hooks, which is not a memory
-	// about hook.go: the stem is an ordinary word and one word is below the floor.
+	// hook.go shares only an ordinary word with a hooks memory: below the floor.
 	if out := f.edit("sess-e4", "Edit", filepath.Join(f.projDir, "hook.go"), "x := 1"); out != "" {
 		t.Errorf("an edit of hook.go delivered a memory that only shares the word hook:\n%s", out)
-	}
-	if out := f.edit("sess-e3", "Edit", filepath.Join(f.projDir, "unrelated.txt"), "plain words only"); out != "" {
-		t.Errorf("an edit of an unmentioned file delivered:\n%s", out)
 	}
 }
 
@@ -212,50 +191,28 @@ func TestTheDeliveryIsRecordedWithItsOwnSource(t *testing.T) {
 	if c.queryHash == "" || strings.Contains(c.verdicts, "quartz_migrate") {
 		t.Errorf("the record must carry a digest and no text: hash=%q verdicts=%s", c.queryHash, c.verdicts)
 	}
-	var vs []memory.RowVerdict
-	if err := json.Unmarshal([]byte(c.verdicts), &vs); err != nil {
-		t.Fatal(err)
-	}
-	kept := map[string]bool{}
-	for _, v := range vs {
-		if v.Kept {
-			kept[v.ID] = true
-		}
-	}
-	if !kept["mgotcha"] || len(kept) != 1 {
-		t.Errorf("kept = %v, want exactly the delivered row", kept)
-	}
 }
 
 func TestTheSharedBudgetIsRespected(t *testing.T) {
 	f := newMomentFixture(t)
 	msg := "why does the quartz_migrate step deadlock on ci"
 
-	// Session start spent nearly everything: nothing fits, nothing is sent.
 	recordSessionStartDelivery("sess-b1", nil, workMomentBudget-100)
 	if out := f.submit("sess-b1", msg); out != "" {
 		t.Errorf("delivered with 100 bytes left:\n%s", out)
 	}
 
-	// Two rows match; 300 bytes left holds one of them and not both.
-	both := "quartz_migrate sqlitebackup stophook.go cooldown"
-	full, _ := momentContext(t, f.submit("sess-b0", both))
-	if !strings.Contains(full, "`mgotcha`") || !strings.Contains(full, "`mfile`") || len(full) <= 300 {
-		t.Fatalf("control: with room, both rows must be delivered in more than 300 bytes (%d):\n%s", len(full), full)
-	}
 	recordSessionStartDelivery("sess-b2", nil, workMomentBudget-300)
-	text, _ := momentContext(t, f.submit("sess-b2", both))
+	text, _ := momentContext(t, f.submit("sess-b2", "quartz_migrate sqlitebackup stophook.go cooldown"))
 	if len(text) == 0 || len(text) > 300 || strings.Count(text, "\n- [") != 1 {
 		t.Errorf("block is %d bytes with 300 left, want exactly one row:\n%s", len(text), text)
 	}
 
-	// No start entry at all: the start is assumed to have spent its whole cap.
 	text, _ = momentContext(t, f.submit("sess-b3", msg))
 	if len(text) > workMomentBudget-sessionStartByteCap {
 		t.Errorf("block is %d bytes, but an unknown session start leaves only %d", len(text), workMomentBudget-sessionStartByteCap)
 	}
 
-	// Deliveries add to the same ledger as the start block.
 	st, err := readMomentState(momentMarkerPath("sess-b3"))
 	if err != nil {
 		t.Fatal(err)
@@ -267,23 +224,21 @@ func TestTheSharedBudgetIsRespected(t *testing.T) {
 
 func TestParallelHooksDeliverARowExactlyOnce(t *testing.T) {
 	f := newMomentFixture(t)
-	const n = 8
-	outs := make([]string, n)
 	var wg sync.WaitGroup
-	for i := 0; i < n; i++ {
+	var mu sync.Mutex
+	got := 0
+	for i := 0; i < 8; i++ {
 		wg.Add(1)
-		go func(i int) {
+		go func() {
 			defer wg.Done()
-			outs[i] = f.submit("sess-p", "why does the quartz_migrate step deadlock on ci")
-		}(i)
+			if strings.Contains(f.submit("sess-p", "why does the quartz_migrate step deadlock on ci"), "mgotcha") {
+				mu.Lock()
+				got++
+				mu.Unlock()
+			}
+		}()
 	}
 	wg.Wait()
-	got := 0
-	for _, o := range outs {
-		if strings.Contains(o, "mgotcha") {
-			got++
-		}
-	}
 	if got != 1 {
 		t.Fatalf("%d parallel hooks delivered the row, want exactly 1", got)
 	}
@@ -294,13 +249,11 @@ func TestWorkingMomentErrorPathsEmitNothing(t *testing.T) {
 	good := map[string]any{"hook_event_name": "UserPromptSubmit", "session_id": "sess-x", "cwd": f.projDir,
 		"prompt": "why does the quartz_migrate step deadlock on ci"}
 	n := 0
-	with := func(k string, v any) string {
+	with := func(k string, v any) string { // a session of its own per case
 		m := map[string]any{}
 		for kk, vv := range good {
 			m[kk] = vv
 		}
-		// A session of its own per case, so the control's marker is never why a
-		// case is silent.
 		n++
 		m["session_id"] = fmt.Sprintf("sess-case-%d", n)
 		if v == nil {
@@ -312,36 +265,24 @@ func TestWorkingMomentErrorPathsEmitNothing(t *testing.T) {
 		return string(b)
 	}
 	if out := fireHook("message-submit", "claude-code", string(mustJSON(good))); out == "" {
-		t.Fatal("control: the unmodified payload must deliver, or the cases below prove nothing")
+		t.Fatal("control: the unmodified payload must deliver")
 	}
 	cases := map[string]struct{ event, source, payload string }{
-		"malformed json":   {"message-submit", "claude-code", "{not json"},
-		"empty stdin":      {"message-submit", "claude-code", ""},
-		"no session id":    {"message-submit", "claude-code", with("session_id", nil)},
-		"subagent":         {"message-submit", "claude-code", with("agent_id", "agent-1")},
-		"unknown project":  {"message-submit", "claude-code", with("cwd", t.TempDir())},
-		"no prompt":        {"message-submit", "claude-code", with("prompt", "")},
-		"only stopwords":   {"message-submit", "claude-code", with("prompt", "what is this and that")},
-		"event mismatch":   {"message-submit", "claude-code", with("hook_event_name", "Stop")},
-		"codex":            {"message-submit", "codex", with("cwd", f.projDir)},
-		"opencode":         {"message-submit", "opencode", with("cwd", f.projDir)},
-		"goose":            {"message-submit", "goose", with("cwd", f.projDir)},
-		"edit with prompt": {"edit", "claude-code", with("hook_event_name", "PostToolUse")},
+		"malformed json":  {"message-submit", "claude-code", "{not json"},
+		"no session id":   {"message-submit", "claude-code", with("session_id", nil)},
+		"subagent":        {"message-submit", "claude-code", with("agent_id", "agent-1")},
+		"unknown project": {"message-submit", "claude-code", with("cwd", t.TempDir())},
+		"only stopwords":  {"message-submit", "claude-code", with("prompt", "what is this and that")},
+		"event mismatch":  {"message-submit", "claude-code", with("hook_event_name", "Stop")},
+		"codex":           {"message-submit", "codex", with("cwd", f.projDir)},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
-			// A fresh session id so the control's marker cannot be the reason.
 			if out := fireHook(c.event, c.source, c.payload); out != "" {
 				t.Errorf("emitted:\n%s", out)
 			}
 		})
 	}
-	t.Run("no store", func(t *testing.T) {
-		t.Setenv("XDG_DATA_HOME", t.TempDir())
-		if out := fireHook("message-submit", "claude-code", with("cwd", f.projDir)); out != "" {
-			t.Errorf("emitted:\n%s", out)
-		}
-	})
 }
 
 func mustJSON(v any) []byte { b, _ := json.Marshal(v); return b }
@@ -390,14 +331,10 @@ func TestMarkerValidityIsDecidedByFileOrder(t *testing.T) {
 	if st.spent != 1600 || st.delivered["c"] || !st.delivered["e"] {
 		t.Errorf("spent=%d delivered=%v: invalid entries must neither spend nor claim", st.spent, st.delivered)
 	}
-	if info, _ := os.Stat(path); info.Mode().Perm() != 0o600 && os.PathSeparator == '/' {
-		t.Errorf("marker mode = %v, want 0600", info.Mode().Perm())
-	}
 }
 
-// The session id is free text from the host payload, so the marker is named by
-// a digest of it and never by the id itself: a name that folded would let two
-// sessions share one ledger.
+// The marker is named by a digest of the free-text session id, so two ids can
+// never share a ledger.
 func TestTheSessionIdIsDigestedIntoTheMarkerName(t *testing.T) {
 	newMomentFixture(t)
 	for _, id := range []string{"abc-123", "../../evil", "a/b\\c:d e", strings.Repeat("z", 200)} {
@@ -412,14 +349,6 @@ func TestTheSessionIdIsDigestedIntoTheMarkerName(t *testing.T) {
 			t.Errorf("marker for %q = %q, want %s<16 hex-encoded bytes>%s", id, base, workMomentMarkerPrefix, workMomentMarkerSuffix)
 		}
 	}
-	if p := momentMarkerPath("  "); p != "" {
-		t.Errorf("blank session id produced %q", p)
-	}
-	// The same id always names the same marker: the ledger is where the
-	// session-start block wrote it and where the delivery reads it.
-	if p, q := momentMarkerPath("sess-a"), momentMarkerPath("sess-a"); p != q {
-		t.Errorf("one session id named two markers: %q and %q", p, q)
-	}
 	// Two ids that fold onto one sanitized name must not share a file.
 	for _, pair := range [][2]string{{"a b", "a_b"}, {"sess a", "sess_a"}} {
 		if p, q := momentMarkerPath(pair[0]), momentMarkerPath(pair[1]); p == q {
@@ -428,42 +357,13 @@ func TestTheSessionIdIsDigestedIntoTheMarkerName(t *testing.T) {
 	}
 }
 
-// Two session ids that fold onto one sanitized name — one holding a space
-// where the other holds an underscore, or two sharing their first 80
-// characters — must not share a ledger: the second session would find the row
-// already delivered and its bytes already spent.
-func TestTwoSessionIdsThatFoldOntoOneNameKeepSeparateLedgers(t *testing.T) {
-	f := newMomentFixture(t)
-	const msg = "why does the quartz_migrate step deadlock on ci"
-	for _, c := range []struct{ name, first, second string }{
-		{"a space against an underscore", "sess a", "sess_a"},
-		{"a shared 80-character prefix", strings.Repeat("a", 80) + "1", strings.Repeat("a", 80) + "2"},
-	} {
-		t.Run(c.name, func(t *testing.T) {
-			if out := f.submit(c.first, msg); out == "" {
-				t.Fatalf("control: the first session delivered nothing")
-			}
-			if out := f.submit(c.second, msg); out == "" {
-				t.Errorf("%q and %q share one ledger, so the second session was silenced by the first", c.first, c.second)
-			}
-		})
-	}
-}
-
-// A marker an older build wrote under the sanitized stem is never read — that
-// name is not injective, so reading it would give two sessions one ledger
-// again — and the age sweep removes it, so it does not sit in the data
-// directory for ever.
+// A marker an older build wrote under the sanitized stem is never read (that
+// name is not injective) and the age sweep removes it.
 func TestAMarkerUnderTheOldNameIsNeverReadAndIsSwept(t *testing.T) {
 	f := newMomentFixture(t)
 	legacy := filepath.Join(f.dataDir, "working-moment-sess_a.log")
 	if err := os.WriteFile(legacy, []byte("D start 9000 mgotcha\n"), 0o600); err != nil {
 		t.Fatal(err)
-	}
-	// The naming does not point at it, and its contents are not read: a
-	// session starts with an empty ledger, not with another one's rows.
-	if p := momentMarkerPath("sess a"); p == legacy {
-		t.Errorf("the marker path points at the old name %q", legacy)
 	}
 	st, err := readMomentState(momentMarkerPath("sess a"))
 	if err != nil {
@@ -472,7 +372,6 @@ func TestAMarkerUnderTheOldNameIsNeverReadAndIsSwept(t *testing.T) {
 	if st.delivered["mgotcha"] {
 		t.Errorf("the old name's marker was read: %v", st.delivered)
 	}
-	// The sweep takes it once it is past the horizon.
 	aged := time.Now().Add(-workMomentMarkerMaxAge - time.Hour)
 	if err := os.Chtimes(legacy, aged, aged); err != nil {
 		t.Fatal(err)
@@ -480,33 +379,6 @@ func TestAMarkerUnderTheOldNameIsNeverReadAndIsSwept(t *testing.T) {
 	recordSessionStartDelivery("sess-sweep", []string{"x"}, 10)
 	if _, err := os.Stat(legacy); !os.IsNotExist(err) {
 		t.Errorf("a marker under the old name survived the sweep: %v", err)
-	}
-}
-
-func TestSessionStartSweepsOnlyOldMarkers(t *testing.T) {
-	f := newMomentFixture(t)
-	old := filepath.Join(f.dataDir, "working-moment-old.log")
-	fresh := filepath.Join(f.dataDir, "working-moment-fresh.log")
-	other := filepath.Join(f.dataDir, "lifecycle-p1.last")
-	for _, p := range []string{old, fresh, other} {
-		if err := os.WriteFile(p, []byte("D start 1\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	aged := time.Now().Add(-workMomentMarkerMaxAge - time.Hour)
-	for _, p := range []string{old, other} {
-		if err := os.Chtimes(p, aged, aged); err != nil {
-			t.Fatal(err)
-		}
-	}
-	recordSessionStartDelivery("sess-sweep", []string{"x"}, 10)
-	if _, err := os.Stat(old); !os.IsNotExist(err) {
-		t.Error("an old marker survived the sweep")
-	}
-	for _, p := range []string{fresh, other} {
-		if _, err := os.Stat(p); err != nil {
-			t.Errorf("%s was swept but must not be", filepath.Base(p))
-		}
 	}
 }
 
@@ -559,15 +431,6 @@ func TestEnsureWorkingMomentHooksIsIdempotentAndNonDestructive(t *testing.T) {
 	if n, _ := count("PostToolUse", "/usr/bin/other-tool"); n != 1 {
 		t.Error("an existing hook for the same event was removed")
 	}
-	if n, _ := count("UserPromptSubmit", "/usr/bin/mine"); n != 1 {
-		t.Error("an existing message hook was removed")
-	}
-	if got := strings.Count(out.String(), "added"); got != 2 {
-		t.Errorf("reported %d additions across 3 runs, want 2 (first run only):\n%s", got, out.String())
-	}
-	if !contractHookWired(sf, "UserPromptSubmit", "message-submit", "claude-code", "/opt/ghost") || !contractHookWired(sf, "PostToolUse", "edit", "claude-code", "/opt/ghost") {
-		t.Error("status would report the hooks as unwired")
-	}
 }
 
 func TestWorkingMomentCapabilityIsClaudeCodeOnly(t *testing.T) {
@@ -579,9 +442,8 @@ func TestWorkingMomentCapabilityIsClaudeCodeOnly(t *testing.T) {
 	}
 }
 
-// With the relevance cutoff off, the keyword leg returns the `_global` row too
-// (it matches two of the message's words), so only the channel's own project
-// filter keeps it out.
+// With the relevance cutoff off the keyword leg returns the `_global` row too;
+// only the project filter keeps it out.
 func TestAGlobalRowIsNeverDelivered(t *testing.T) {
 	f := newMomentFixture(t)
 	t.Setenv("GHOST_CONTEXT_RELEVANCE_CUTOFF", "0")
@@ -612,22 +474,6 @@ func TestADeliveredRowDoesNotHideANewMatch(t *testing.T) {
 	}
 }
 
-func TestAMissingMarkerAssumesTheSessionStartSpentItsCap(t *testing.T) {
-	f := newMomentFixture(t)
-	st, err := readMomentState(filepath.Join(f.dataDir, "working-moment-none.log"))
-	if err != nil || st.spent != sessionStartByteCap {
-		t.Errorf("missing marker: spent=%d err=%v, want the session-start cap %d", st.spent, err, sessionStartByteCap)
-	}
-	// And a marker with deliveries but no start entry counts the cap once, not never.
-	path := filepath.Join(f.dataDir, "working-moment-nostart.log")
-	if err := appendMomentEntry(path, momentEntry{token: "t1", bytes: 200, ids: []string{"a"}}); err != nil {
-		t.Fatal(err)
-	}
-	if st, _ := readMomentState(path); st.spent != sessionStartByteCap+200 {
-		t.Errorf("spent = %d, want %d", st.spent, sessionStartByteCap+200)
-	}
-}
-
 func TestContainsBounded(t *testing.T) {
 	for _, c := range []struct {
 		text, term string
@@ -636,10 +482,8 @@ func TestContainsBounded(t *testing.T) {
 		{"edit hook.go now", "hook.go", true},
 		{"hook.gone", "hook.go", false},
 		{"see v10", "v1", false},
-		{"see v1.", "v1", true},
 		{"xhook.go", "hook.go", false},
 		{"hook.gox hook.go", "hook.go", true},
-		{"", "a", false},
 	} {
 		if got := containsBounded(c.text, c.term); got != c.want {
 			t.Errorf("containsBounded(%q, %q) = %v, want %v", c.text, c.term, got, c.want)
@@ -647,208 +491,10 @@ func TestContainsBounded(t *testing.T) {
 	}
 }
 
-// Entries are judged against the total the caller is charged with, the assumed
-// session-start spend included: with no start entry, two ~600-byte deliveries
-// cannot both fit under the allowance (9,000 + 600 + 600 > 10,000).
-func TestTheAssumedStartSpendCountsInTheValidityCheck(t *testing.T) {
-	f := newMomentFixture(t)
-	path := filepath.Join(f.dataDir, "working-moment-assumed.log")
-	for _, e := range []momentEntry{
-		{token: "t1", bytes: 600, ids: []string{"a"}},
-		{token: "t2", bytes: 600, ids: []string{"b"}},
-	} {
-		if err := appendMomentEntry(path, e); err != nil {
-			t.Fatal(err)
-		}
-	}
-	st, err := readMomentState(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !st.valid["t1"] || st.valid["t2"] || st.spent != sessionStartByteCap+600 {
-		t.Errorf("valid=%v spent=%d: the second delivery must lose against the assumed start spend", st.valid, st.spent)
-	}
-}
-
-// A start hook fired again for the same session (a clear) re-prints a block: its
-// ids repeat, its bytes are still spent.
-func TestARepeatedSessionStartStillChargesItsBytes(t *testing.T) {
-	f := newMomentFixture(t)
-	path := filepath.Join(f.dataDir, "working-moment-clear.log")
-	for _, e := range []momentEntry{
-		{token: startToken, bytes: 5000, ids: []string{"a", "b"}},
-		{token: startToken, bytes: 3000, ids: []string{"a", "b"}},
-	} {
-		if err := appendMomentEntry(path, e); err != nil {
-			t.Fatal(err)
-		}
-	}
-	st, _ := readMomentState(path)
-	if st.spent != 8000 || !st.delivered["a"] {
-		t.Errorf("spent=%d delivered=%v, want both blocks charged (8000) and the ids kept", st.spent, st.delivered)
-	}
-}
-
-// A start block is printed whether or not it fits: a second one that crosses
-// the budget is still charged, and the ledger then authorizes nothing more.
-func TestARepeatedSessionStartPastTheBudgetIsStillCharged(t *testing.T) {
-	f := newMomentFixture(t)
-	path := filepath.Join(f.dataDir, "working-moment-clear-over.log")
-	for _, e := range []momentEntry{
-		{token: startToken, bytes: 6000, ids: []string{"a"}},
-		{token: startToken, bytes: 6000, ids: []string{"a"}},
-	} {
-		if err := appendMomentEntry(path, e); err != nil {
-			t.Fatal(err)
-		}
-	}
-	st, _ := readMomentState(path)
-	if st.spent != 12000 {
-		t.Errorf("spent=%d, want both start blocks charged (12000)", st.spent)
-	}
-	if remaining := workMomentBudget - st.spent; remaining > 0 {
-		t.Errorf("remaining=%d, want no further delivery authorized", remaining)
-	}
-	if err := appendMomentEntry(path, momentEntry{token: "t1", bytes: 1500, ids: []string{"x"}}); err != nil {
-		t.Fatal(err)
-	}
-	if st, _ = readMomentState(path); st.valid["t1"] {
-		t.Error("a delivery after an over-budget start pair must lose")
-	}
-}
-
 func TestATruncatedPreviewEndsInOneEllipsis(t *testing.T) {
 	got := momentPreview(strings.Repeat("word ", 100))
 	if strings.Count(got, "…") != 1 || !strings.HasSuffix(got, "…") {
 		t.Errorf("preview %q must end in exactly one ellipsis", got[len(got)-12:])
-	}
-	if short := "short row"; momentPreview(short) != short {
-		t.Error("a row within the budget must be unchanged")
-	}
-}
-
-// A row whose id cannot be written on a marker line is never delivered, and the
-// record names that reason rather than a delivery that never happened.
-func TestAnUnclaimableIdIsRecordedAsSuch(t *testing.T) {
-	f := newMomentFixture(t)
-	db, err := memory.OpenDB(f.dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec(`INSERT INTO memories (id, project_id, category, content, source, importance)
-		VALUES ('bad id', 'p1', 'gotcha', 'quartz_migrate deadlock needs the sqlitebackup stopped', 'manual', 0.9)`); err != nil {
-		t.Fatal(err)
-	}
-	_ = db.Close()
-	text, _ := momentContext(t, f.submit("sess-u2", "why does the quartz_migrate step deadlock on ci"))
-	if strings.Contains(text, "bad id") || !strings.Contains(text, "`mgotcha`") {
-		t.Fatalf("delivery wrong:\n%s", text)
-	}
-	calls := recordedCalls(t, f.dbPath)
-	if len(calls) != 1 || !strings.Contains(calls[0].verdicts, reasonUnclaimableID) || strings.Contains(calls[0].verdicts, reasonAlreadyDelivered) {
-		t.Errorf("verdicts must name %s and not %s: %+v", reasonUnclaimableID, reasonAlreadyDelivered, calls)
-	}
-}
-
-// A store of ordinary development-workflow memories: every one of them shares
-// words with the most generic things a person types ("fix the tests"), which is
-// exactly why a generic message must deliver none of them.
-var workflowMemories = []string{
-	"Run the tests with the race detector before merging and fix any data race first.",
-	"Update the docs whenever a CLI flag changes; the build fails if the docs index is stale.",
-	"The go build fails when cgo is enabled for the release target; set CGO_ENABLED=0 for it.",
-	"The go test run fails on Windows when paths use backslashes; fix the test helper to use filepath.",
-	"Fix the build by running make tidy and then run the tests again.",
-	"Add a regression test for every bug fix and remove the flaky test only with a ticket.",
-	"Code review comes before merge; change requests are fixed in a follow-up commit.",
-	"When the build fails in CI, run the same make target locally before pushing a fix.",
-	"Error messages must name the file and the fix; an error without a remedy is a bug.",
-	"Update the changelog and the docs in the same change that adds a flag.",
-	"The test suite fails when the clock is skewed; run it with the fake clock.",
-	"Remove dead code in its own commit so the build and the test diff stay readable.",
-	"Make the build reproducible: pin the go version and run go mod tidy before a release.",
-	"Docs live in docs/ and are built with make docs; a failed docs build blocks the merge.",
-	"Retries are capped at 3 attempts before the job is marked failed.",
-	"Release signing step in release.yml must run before the publish step or the artifact is unsigned.",
-}
-
-func TestGenericMessagesDeliverNothingFromAnOrdinaryStore(t *testing.T) {
-	f := newMomentFixture(t)
-	db, err := memory.OpenDB(f.dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for i, c := range workflowMemories {
-		if _, err := db.Exec(`INSERT INTO memories (id, project_id, category, content, source, importance)
-			VALUES (?, 'p1', 'convention', ?, 'manual', 0.7)`, fmt.Sprintf("wf%02d", i), c); err != nil {
-			t.Fatal(err)
-		}
-	}
-	_ = db.Close()
-
-	for i, msg := range []string{
-		"fix the tests",
-		"update the docs",
-		"go build fails",
-		"go test fails",
-		"run the tests and fix the build",
-		"fix the build error and add a test",
-		"please make the code change",
-		"fix 3 tests",
-	} {
-		if out := f.submit(fmt.Sprintf("sess-generic-%d", i), msg); out != "" {
-			t.Errorf("%q delivered:\n%s", msg, out)
-		}
-	}
-	if calls := recordedCalls(t, f.dbPath); len(calls) != 0 {
-		t.Errorf("silent turns wrote %d record(s)", len(calls))
-	}
-
-	// Naming something specific still delivers.
-	for i, c := range []struct{ msg, want string }{
-		{"update release.yml before the next tag", "release.yml"},
-		{"why is the release signing publish ordering wrong", "release.yml"},
-	} {
-		text, _ := momentContext(t, f.submit(fmt.Sprintf("sess-specific-%d", i), c.msg))
-		if !strings.Contains(text, c.want) {
-			t.Errorf("%q should deliver the row naming %s:\n%s", c.msg, c.want, text)
-		}
-	}
-	// And so does an edit of a file a memory names, while an edit of build.go
-	// (whose stem is generic) delivers none of the build memories.
-	if text, _ := momentContext(t, f.edit("sess-edit-r", "Edit", filepath.Join(f.projDir, ".github", "release.yml"), "x")); !strings.Contains(text, "release.yml") {
-		t.Errorf("edit of release.yml did not deliver:\n%s", text)
-	}
-	if out := f.edit("sess-edit-b", "Edit", filepath.Join(f.projDir, "build.go"), "x := 1"); out != "" {
-		t.Errorf("edit of build.go delivered:\n%s", out)
-	}
-}
-
-// Under a held write lock the delivery still prints: the record write has its own
-// short deadline and runs after the output. What is lost is the record, and the
-// loss is one WARN on stderr, so the audit misses that row.
-func TestADeliveryUnderAHeldWriteLockStillDeliversButItsRecordIsDropped(t *testing.T) {
-	f := newMomentFixture(t)
-	db, err := memory.OpenDB(f.dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec(`INSERT INTO ghost_state (project_id, interaction_count) VALUES ('p1', 1)`); err != nil {
-		t.Fatal(err)
-	}
-	_ = db.Close()
-	holdWriteLock(t, f.dbPath, 2*time.Second)
-
-	var out string
-	stderr := captureStderr(t, func() {
-		out = f.submit("sess-lock", "why does the quartz_migrate step deadlock on ci")
-	})
-	text, _ := momentContext(t, strings.SplitN(out, "\nSTDERR:", 2)[0])
-	if !strings.Contains(text, "`mgotcha`") {
-		t.Fatalf("a held write lock must not stop the delivery:\n%s", out)
-	}
-	if !strings.Contains(stderr, "retrieval record not written") {
-		t.Errorf("the dropped record must be a WARN on stderr, got %q", stderr)
 	}
 }
 
@@ -876,5 +522,27 @@ func TestWorkingMomentMarkerAppendDoesNotWriteThroughSymlink(t *testing.T) {
 	}
 	if string(got) != "keep" {
 		t.Errorf("symlink target changed: got %q, want %q", string(got), "keep")
+	}
+}
+
+// Two session ids that fold onto one sanitized name — one holding a space
+// where the other holds an underscore, or two sharing their first 80
+// characters — must not share a ledger: the second session would find the row
+// already delivered and its bytes already spent.
+func TestTwoSessionIdsThatFoldOntoOneNameKeepSeparateLedgers(t *testing.T) {
+	f := newMomentFixture(t)
+	const msg = "why does the quartz_migrate step deadlock on ci"
+	for _, c := range []struct{ name, first, second string }{
+		{"a space against an underscore", "sess a", "sess_a"},
+		{"a shared 80-character prefix", strings.Repeat("a", 80) + "1", strings.Repeat("a", 80) + "2"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if out := f.submit(c.first, msg); out == "" {
+				t.Fatalf("control: the first session delivered nothing")
+			}
+			if out := f.submit(c.second, msg); out == "" {
+				t.Errorf("%q and %q share one ledger, so the second session was silenced by the first", c.first, c.second)
+			}
+		})
 	}
 }

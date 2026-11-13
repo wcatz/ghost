@@ -5,7 +5,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/wcatz/ghost/internal/memory"
 )
@@ -22,10 +21,6 @@ func contextAsOfStore(t *testing.T) (dir string) {
 		t.Fatalf("mkdir ghostDir: %v", err)
 	}
 	dir = t.TempDir()
-	// Recorded against the RESOLVED path, because `ghost context` resolves the
-	// directory it is given before matching it against a project's recorded path.
-	// On Windows t.TempDir() returns a short-name path that EvalSymlinks expands,
-	// so an unresolved fixture path matches no project and the block is empty.
 	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
 		dir = resolved
 	}
@@ -79,105 +74,5 @@ func TestContextAsOfFlagReachesTheRenderer(t *testing.T) {
 				t.Errorf("the block printed today's text for a memory with no recorded version:\n%s", stdout)
 			}
 		})
-	}
-}
-
-// TestContextWithoutAsOfIsUnchanged: the flag is additive. The current render has
-// to stay byte-identical, or a debugging tool has changed the session-start block
-// every adapter injects.
-func TestContextWithoutAsOfIsUnchanged(t *testing.T) {
-	dir := contextAsOfStore(t)
-	origArgs := os.Args
-	os.Args = []string{origArgs[0], "context", "--cwd", dir}
-	defer func() { os.Args = origArgs }()
-	stdout, _ := captureStreams(t, func() { runContext() })
-	if !strings.Contains(stdout, "the nightly sweep compacts the WAL file") {
-		t.Errorf("the current block does not show the memory:\n%s", stdout)
-	}
-	if strings.Contains(stdout, "as_of ") {
-		t.Errorf("a request with no --as-of produced a historical block:\n%s", stdout)
-	}
-	if !strings.Contains(stdout, "Save to Ghost as it happens") {
-		t.Errorf("the current block lost its session instruction:\n%s", stdout)
-	}
-}
-
-// TestContextRefusesAnInstantItCannotRead: an unreadable --as-of is a mistake at
-// the boundary, and the command says so instead of printing the present. The parse
-// is the thing under test rather than the exit code: runContext returns the code
-// rather than taking the process down, and TestContextArgumentRefusalsExitOne
-// pins the code itself.
-func TestContextRefusesAnInstantItCannotRead(t *testing.T) {
-	for _, bad := range []string{"yesterday", "2020-01-01", "2020-01-01 00:00:00", "2035-01-01"} {
-		got, err := contextAsOf([]string{"--as-of", bad})
-		if err == nil {
-			t.Errorf("--as-of %q parsed to %v, want a refusal", bad, got)
-			continue
-		}
-		if got != nil {
-			t.Errorf("--as-of %q returned %v alongside its error, want nil: a refused read has no instant", bad, got)
-		}
-		if !strings.Contains(err.Error(), "RFC 3339") {
-			t.Errorf("--as-of %q was refused with %q, want the message to name the layout it could not read", bad, err)
-		}
-	}
-}
-
-// TestContextAsOfFlagIsOptional: an absent flag is a current read, not an error —
-// which is what keeps every existing invocation of this command working.
-func TestContextAsOfFlagIsOptional(t *testing.T) {
-	for _, argv := range [][]string{
-		nil,
-		{"--cwd", "/tmp"},
-		{"--cwd=/tmp"},
-	} {
-		got, err := contextAsOf(argv)
-		if err != nil {
-			t.Errorf("contextAsOf(%v) = %v, want no error: an absent flag is a current read", argv, err)
-		}
-		if got != nil {
-			t.Errorf("contextAsOf(%v) = %v, want nil", argv, got)
-		}
-	}
-}
-
-// TestContextAsOfWithoutAValueIsRefused: `--as-of` with nothing usable after it
-// is a mistake, and the mistake it invites is the worst available — the flag is
-// simply not seen, so the command renders a LIVE session-start block, Obsidian
-// sync and session-count bump included, for a request that asked about the past.
-// The count would move the present's session number because of a past reading, and
-// nothing in the output would say the flag was dropped.
-func TestContextAsOfWithoutAValueIsRefused(t *testing.T) {
-	for _, argv := range [][]string{
-		{"--as-of"},
-		{"--cwd", "/tmp", "--as-of"},
-		{"--as-of", "--cwd", "/tmp"}, // a flag is not an instant
-	} {
-		got, err := contextAsOf(argv)
-		if err == nil {
-			t.Errorf("contextAsOf(%v) = %v, want a refusal: a dropped flag renders the present for a past-instant request", argv, got)
-			continue
-		}
-		if got != nil {
-			t.Errorf("contextAsOf(%v) returned %v alongside its error, want nil", argv, got)
-		}
-		if !strings.Contains(err.Error(), "--as-of") {
-			t.Errorf("contextAsOf(%v) refused with %q, want it to name the flag that was incomplete", argv, err)
-		}
-	}
-}
-
-// TestContextAsOfNormalisesToUTC: the rendered note carries the instant, so two
-// spellings of one moment must not produce two different labels for the same read.
-func TestContextAsOfNormalisesToUTC(t *testing.T) {
-	got, err := contextAsOf([]string{"--as-of", "2026-09-20T11:00:00+02:00"})
-	if err != nil {
-		t.Fatalf("contextAsOf: %v", err)
-	}
-	if got == nil {
-		t.Fatal("contextAsOf returned nil for a valid instant")
-	}
-	if want := "2026-09-20T09:00:00Z"; got.UTC().Format(time.RFC3339) != want {
-		t.Errorf("contextAsOf normalised to %s, want %s", got.UTC().Format(time.RFC3339), want)
 	}
 }

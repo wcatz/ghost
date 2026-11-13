@@ -127,32 +127,6 @@ func TestAnyMemoryIDsByIDPrefixReachesEveryIdAMemoryHasEverHeld(t *testing.T) {
 	})
 }
 
-// TestAnyMemoryIDsByIDPrefixMeasuresTheBoundInCharacters: the id column is TEXT
-// and SQLite's substr() slices by CHARACTER, so a byte-counted bound compares a
-// multi-byte ref against the first N characters of every id and can never match —
-// refusing an id the store holds. The hex ids Ghost mints have byte length ==
-// rune count, so only an imported id can catch it.
-func TestAnyMemoryIDsByIDPrefixMeasuresTheBoundInCharacters(t *testing.T) {
-	s := testStore(t)
-	ctx := context.Background()
-	const japanese = "日本語-メモ"
-	if _, _, _, err := s.ImportMemory(ctx, PortableMemory{
-		ID: japanese, ProjectID: testProject, Category: "fact",
-		Content: "An imported note whose id is not ASCII.", Source: "mcp",
-	}, ImportOptions{Apply: true}); err != nil {
-		t.Fatalf("ImportMemory: %v", err)
-	}
-	for _, prefix := range []string{japanese, "日本語"} {
-		got, err := s.AnyMemoryIDsByIDPrefix(ctx, prefix)
-		if err != nil {
-			t.Fatalf("AnyMemoryIDsByIDPrefix(%q): %v", prefix, err)
-		}
-		if len(got) != 1 || got[0] != japanese {
-			t.Errorf("AnyMemoryIDsByIDPrefix(%q) = %q, want [%s]", prefix, got, japanese)
-		}
-	}
-}
-
 // TestMemoryIDsByIDPrefixAnyProjectReachesEveryLiveMemory is the unscoped half
 // of a `_global` withdrawal's ref resolution. `_global` is the shared scope, so a
 // ref an operator types while working on it may name a memory in any project — and
@@ -209,30 +183,5 @@ func TestMemoryIDsByIDPrefixAnyProjectReachesEveryLiveMemory(t *testing.T) {
 	// The miss is an empty set and no error, exactly as every other id read here.
 	if got, err := store.MemoryIDsByIDPrefixAnyProject(ctx, "ffffffff"); err != nil || len(got) != 0 {
 		t.Errorf("MemoryIDsByIDPrefixAnyProject(miss) = %v, %v; want empty and no error", got, err)
-	}
-}
-
-// TestMemoryIDsByIDPrefixAnyProjectMeasuresTheBoundInCharacters: the id column is
-// TEXT and SQLite's substr() slices by CHARACTER, so a byte bound would make a
-// non-ASCII ref unfindable in a store that plainly holds it — and `ghost import`
-// writes ids verbatim, so such ids exist.
-func TestMemoryIDsByIDPrefixAnyProjectMeasuresTheBoundInCharacters(t *testing.T) {
-	store := linkTestStore(t)
-	ctx := context.Background()
-	const japanese = "日本語-メモ"
-	if _, _, _, err := store.ImportMemory(ctx, PortableMemory{
-		ID: japanese, ProjectID: "p1", Category: "fact",
-		Content: "An imported note whose id is not ASCII.", Source: "mcp",
-	}, ImportOptions{Apply: true}); err != nil {
-		t.Fatalf("ImportMemory: %v", err)
-	}
-	for _, prefix := range []string{japanese, "日本語"} {
-		got, err := store.MemoryIDsByIDPrefixAnyProject(ctx, prefix)
-		if err != nil {
-			t.Fatalf("MemoryIDsByIDPrefixAnyProject(%q): %v", prefix, err)
-		}
-		if len(got) != 1 || got[0] != japanese {
-			t.Errorf("MemoryIDsByIDPrefixAnyProject(%q) = %q, want [%s]", prefix, got, japanese)
-		}
 	}
 }

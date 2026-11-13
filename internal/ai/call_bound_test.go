@@ -11,26 +11,10 @@ import (
 	"time"
 )
 
-// A caller that removes the bound on purpose (reflection's
-// consolidation_timeout_minutes: 0) hands the client a context with no
-// deadline, and so does a caller that never set one. The clients used to treat
-// both the same way and cut the call at defaultTimeout, so "no bound" was a
-// five-minute bound. These tests pin the three cases apart, for every client:
-// an unmarked context with no deadline still gets the default (and the error
-// says so), a context marked WithoutDefaultBound runs as long as the harness
-// takes, and a caller's own deadline wins either way.
-
-// slowHarnessSleep is how long the fake harness takes to answer. It is well
-// past the injected default below, so a call cut at the default fails long
-// before the answer arrives.
 const slowHarnessSleep = 2 * time.Second
 
-// injectedDefault stands in for the five-minute production default, so a cut
-// at the default is observable without waiting five minutes.
 const injectedDefault = 400 * time.Millisecond
 
-// withDefaultTimeout swaps the package default for the test and restores it.
-// Tests that use it must not run in parallel: the default is package state.
 func withDefaultTimeout(t *testing.T, d time.Duration) {
 	t.Helper()
 	prev := defaultTimeout
@@ -38,13 +22,10 @@ func withDefaultTimeout(t *testing.T, d time.Duration) {
 	t.Cleanup(func() { defaultTimeout = prev })
 }
 
-// slowHarness is one client under test: its fake binary answers the client's
-// own capability or version check at once, then takes slowHarnessSleep to
-// answer the real call.
 type slowHarness struct {
 	name   string
-	answer string // the line the fake prints for the real call
-	want   string // what the client returns for that line
+	answer string
+	want   string
 	call   func(bin string, ctx context.Context) (string, error)
 }
 
@@ -81,9 +62,6 @@ func slowHarnesses() []slowHarness {
 	}
 }
 
-// writeSlowHarness writes the fake binary for h. The capability and version
-// checks (`--help` for claude, `--version` for opencode, `features list` for
-// codex) answer immediately, so only the real call is slow.
 func writeSlowHarness(t *testing.T, h slowHarness) string {
 	t.Helper()
 	if runtime.GOOS == "windows" {
@@ -111,11 +89,6 @@ func writeSlowHarness(t *testing.T, h slowHarness) string {
 	return path
 }
 
-// TestHarnessCallWithoutDeadlineKeepsTheDefault is every caller that is not
-// the consolidation path: resolve, supersede, the ghost_resolve tool, the
-// bench classifier and the storyline eval pass a context with no deadline and
-// no marker, and they keep the per-call default. The error names that default,
-// because the harness's own output (an empty tail after a SIGTERM) does not.
 func TestHarnessCallWithoutDeadlineKeepsTheDefault(t *testing.T) {
 	withDefaultTimeout(t, injectedDefault)
 	for _, h := range slowHarnesses() {
@@ -137,9 +110,6 @@ func TestHarnessCallWithoutDeadlineKeepsTheDefault(t *testing.T) {
 	}
 }
 
-// TestHarnessCallWithoutDefaultBoundIsNotCut is the explicit 0: a context
-// marked WithoutDefaultBound and carrying no deadline runs until the harness
-// answers, however far past the default that is.
 func TestHarnessCallWithoutDefaultBoundIsNotCut(t *testing.T) {
 	withDefaultTimeout(t, injectedDefault)
 	for _, h := range slowHarnesses() {
@@ -159,16 +129,13 @@ func TestHarnessCallWithoutDefaultBoundIsNotCut(t *testing.T) {
 	}
 }
 
-// TestHarnessCallKeepsTheCallersDeadline is a configured timeout: the caller's
-// deadline wins over the default in both directions, and over the marker. A
-// cut at the caller's own deadline is not blamed on the client default.
 func TestHarnessCallKeepsTheCallersDeadline(t *testing.T) {
 	t.Run("short deadline cuts, and is not called the default", func(t *testing.T) {
 		withDefaultTimeout(t, time.Minute)
 		for _, h := range slowHarnesses() {
 			t.Run(h.name, func(t *testing.T) {
 				bin := writeSlowHarness(t, h)
-				// The marker must not lift a deadline the caller did set.
+
 				ctx, cancel := context.WithTimeout(WithoutDefaultBound(context.Background()), injectedDefault)
 				defer cancel()
 				start := time.Now()
@@ -205,16 +172,12 @@ func TestHarnessCallKeepsTheCallersDeadline(t *testing.T) {
 	})
 }
 
-// TestDefaultTimeoutIsFiveMinutes keeps the injection above honest: the
-// production default every unmarked caller gets is still five minutes.
 func TestDefaultTimeoutIsFiveMinutes(t *testing.T) {
 	if defaultTimeout != 5*time.Minute {
 		t.Errorf("defaultTimeout = %v, want 5m0s", defaultTimeout)
 	}
 }
 
-// TestDefaultBoundMarker pins the marker's reach: it is set only by
-// WithoutDefaultBound, and survives the derived contexts a caller builds on it.
 func TestDefaultBoundMarker(t *testing.T) {
 	if DefaultBoundRemoved(context.Background()) {
 		t.Error("a plain context must keep the default bound")

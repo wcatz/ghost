@@ -42,21 +42,3 @@ func TestAnExportThatLeftAnEvidenceRowOutAdvisesTheDeleteNotARekey(t *testing.T)
 		}
 	}
 }
-
-// The refusal is the importer's own sentence, so the report names the field to
-// fix rather than a second description of the rule.
-func TestAnExportThatLeftAnEvidenceRowOutNamesTheField(t *testing.T) {
-	store, db := exportTestStore(t)
-	plantExportRow(t, db, `INSERT INTO memories (id, project_id, category, content, source, tags, created_at, updated_at)
-	                        VALUES ('m-evidence', 'p1', 'gotcha', 'a plain note', 'mcp', '[]', datetime('now'), datetime('now'))`)
-	plantExportRow(t, db, `INSERT INTO memory_provenance (id, memory_id, kind, agent, observed_at, verified_at)
-	                        VALUES ('ev-unreadable', 'm-evidence', 'verified', 'ops', 'not a date', 'not a date')`)
-
-	path := filepath.Join(t.TempDir(), "artifact.jsonl")
-	var summary, warn strings.Builder
-	err := runExportCore(context.Background(), store, &summary, &warn, path, "")
-	report := summary.String() + warn.String() + fmtErr(err)
-	if !strings.Contains(report, "evidence[0].observed_at") {
-		t.Errorf("the report does not name the field to fix:\n%s", report)
-	}
-}

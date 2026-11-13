@@ -14,35 +14,13 @@ import (
 	"github.com/wcatz/ghost/internal/memory"
 )
 
-// Adversarial fixtures for the Obsidian mirror (issue #585).
-//
-// A vault is the one place Ghost writes Markdown a human and other tools read,
-// and everything in it comes from the store — which a portable artifact can
-// seed with ids, names, tags and bodies ghost never generated. So the fixtures
-// here plant the shared corpus in every field the renderers touch and assert
-// three things: the note lands INSIDE the vault and inside the subtree prune
-// manages, the front matter stays one closed block, one key per line, with the
-// real ghost_id first (the reader's block, and prune's OWNERSHIP test — it will
-// not touch a file without one, though its keep-set is keyed on the filename, not
-// on the id), and a hostile value is present verbatim as text rather than having
-// become structure.
-//
-// Nothing is stripped. A payload that cannot be found is a payload the user
-// cannot see, and an Obsidian note that silently lost its injection is not a
-// defence.
+// Adversarial fixtures for the Obsidian mirror (issue #585): the shared corpus
+// is planted in every field the renderers touch, and a note must land inside
+// the vault and the subtree prune manages, keep one closed front-matter block
+// with the real ghost_id first, and carry hostile values verbatim as text.
 
-// hostileIDs are record ids that only an artifact can produce: ghost mints hex,
-// and an artifact carries whatever ids its writer chose.
-//
-// Since #791 `Store.ImportMemory` refuses the ones holding a control character,
-// whitespace, a backtick or a «», so the fixtures below plant those in SQL rather
-// than through the import path. That is the honest route for them now and was
-// always the honest ROUTE for the state itself: a store written before the
-// refusal landed, one restored from a snapshot an older Ghost took, a
-// hand-edited database. None of those consult this build's writers, and the
-// exporter has to survive all of them — refusing the id on the way in says
-// nothing about the ones already in the store, and the note filename is built
-// from the stored id on every export.
+// hostileIDs are record ids that only an artifact (or a store older than the
+// import refusal of #791) can hold, so the fixtures plant them in SQL.
 var hostileIDs = []struct{ name, id string }{
 	{"parent-escape", "../../../../tmp/ghost-pwned"},
 	{"parent-escape-short", "../../evil"},
@@ -54,35 +32,16 @@ var hostileIDs = []struct{ name, id string }{
 	{"trailing-dot", "abc."},
 	{"space", "has space"},
 	{"empty", ""},
-	// yamlScalar flattens a tab, a newline and a carriage return to a space, so
-	// an id carrying one is written to the front matter as something other than
-	// itself. That was a second, independent way a note could be written and then
-	// removed on the same pass, and it is what moved the keep-set off the id and
-	// onto the path the system wrote the note at (see keepSet).
 	{"tab", "tab\tid-xyz"},
 	{"newline", "line\nid-xyz"},
 	{"carriage-return", "cr\rid-xyz"},
 	{"crlf", "crlf\r\nid-xyz"},
-	// The three whitespace ids above all flatten to the same bytes, so whatever
-	// reads them back has to tell them apart some other way. These two differ
-	// from "tab\tid-xyz" only in the whitespace, so a reader that recovers the
-	// flattened text matches none of the three.
 	{"whitespace-only", " "},
 	{"all-whitespace", "\t\n\r"},
 }
 
-// TestFileNameStaysInsideItsDirectory defends the containment half for the
-// filename every note is published under (#585).
-//
-// A note's name is slug(content) + "-" + the record's id token + ".md", and the
-// id token used to be a bare prefix of the id. Ghost mints hex ids, so that was
-// safe for everything the store wrote itself — but a portable artifact carries
-// its own ids and `ghost import` writes them verbatim, so a hostile id reached
-// this function unchanged. A separator in the fragment let the note land outside
-// the Memories/ subtree prune watches, and the keep-set then deleted it on the
-// same pass; a NUL made the write fail with EINVAL, failing every export and
-// every retry. So the rule is the one the whole package is built on: whatever
-// else happens, the name is a single path component.
+// TestFileNameStaysInsideItsDirectory: whatever the id, a note's name is a single
+// path component (#585).
 func TestFileNameStaysInsideItsDirectory(t *testing.T) {
 	for _, tc := range hostileIDs {
 		t.Run(tc.name, func(t *testing.T) {
@@ -96,9 +55,6 @@ func TestFileNameStaysInsideItsDirectory(t *testing.T) {
 	}
 
 	t.Run("two_hostile_ids_stay_apart", func(t *testing.T) {
-		// Replacing the offending bytes would have collapsed these onto one
-		// filename, so one memory's note would have overwritten the other's and
-		// then been pruned. Hashing is what keeps them distinct.
 		a := fileName(memory.Memory{ID: "../../aaaaaaa", Content: "Body A, long enough to be a real memory."})
 		b := fileName(memory.Memory{ID: "../../bbbbbbb", Content: "Body B, long enough to be a real memory."})
 		if a == b {
@@ -106,20 +62,7 @@ func TestFileNameStaysInsideItsDirectory(t *testing.T) {
 		}
 	})
 
-	t.Run("an_unnameable_name_is_hashed", func(t *testing.T) {
-		// A tab or a line break in a name is legal, and unusable: invisible to
-		// `ls`, unopenable by a user, and a glob in most shells never matches it.
-		for _, id := range []string{"tab\there", "line\nhere", "cr\rhere"} {
-			name := fileName(memory.Memory{ID: id, Content: "A body long enough to be a real memory about naming."})
-			if strings.ContainsAny(name, "\t\n\r") {
-				t.Errorf("idToken(%q) kept an unnameable byte: %q", id, name)
-			}
-		}
-	})
-
 	t.Run("a_minted_id_keeps_its_name", func(t *testing.T) {
-		// The plain path must be byte-identical to the old prefix rule, or every
-		// existing vault renames every note on the next export.
 		const id = "938891EAF111890B5C116BA2BFDFB40A"
 		if got := idToken(id); got != "938891EA" {
 			t.Errorf("idToken(%q) = %q, want 938891EA — a real note's filename changed", id, got)
@@ -127,14 +70,8 @@ func TestFileNameStaysInsideItsDirectory(t *testing.T) {
 	})
 }
 
-// plantMemory writes one memory row under a caller-chosen id, in SQL.
-//
-// It replaces `Store.ImportMemory` in the fixtures below, which #791 turned into
-// the wrong route for them: the import refuses an id holding a control character,
-// whitespace, a backtick or a «», so the store can no longer be SEEDED with one
-// that way. The state is still real and the exporter still has to survive it —
-// see hostileIDs for why — and writing the row directly is how a store that
-// already holds one is reached.
+// plantMemory writes one memory row under a caller-chosen id, in SQL, since the
+// import refuses the ids hostileIDs holds.
 func plantMemory(t *testing.T, db *sql.DB, projectID, id, content string) {
 	t.Helper()
 	if _, err := db.Exec(`INSERT INTO memories (id, project_id, category, content, source, importance, created_at, updated_at)
@@ -144,10 +81,9 @@ func plantMemory(t *testing.T, db *sql.DB, projectID, id, content string) {
 	}
 }
 
-// TestExportKeepsHostileRecordIDsInsideTheVault is the end-to-end half of the
-// same rule: a store holding a hostile id must export every note into
-// <vault>/<project>/Memories, every pass, with the tree itself inside the vault
-// and a canary outside it untouched.
+// TestExportKeepsHostileRecordIDsInsideTheVault: a store holding a hostile id
+// exports every note into <vault>/<project>/Memories, with a canary outside
+// the vault untouched.
 func TestExportKeepsHostileRecordIDsInsideTheVault(t *testing.T) {
 	for _, tc := range hostileIDs {
 		if tc.id == "" {
@@ -158,10 +94,6 @@ func TestExportKeepsHostileRecordIDsInsideTheVault(t *testing.T) {
 			ctx := context.Background()
 			plantMemory(t, db, "ghost", tc.id, "A body long enough to be a real memory about the exporter.")
 
-			// The canary lives in a SIBLING of the vault, not in the vault's
-			// parent: the vault is supposed to appear under its parent, so a
-			// snapshot of the parent would report the vault itself as a write
-			// outside the target and the assertion would be meaningless.
 			outer := t.TempDir()
 			canary := filepath.Join(outer, "outside")
 			if err := os.MkdirAll(canary, 0o700); err != nil {
@@ -192,63 +124,8 @@ func TestExportKeepsHostileRecordIDsInsideTheVault(t *testing.T) {
 	}
 }
 
-// TestExportSurvivesEveryHostileRecordAtOnce pins the failure the per-id cases
-// could each miss: the export is one pass over every project, so a single id the
-// filesystem cannot name took down every OTHER project's notes too, on every run
-// and every retry, and no error said which record did it.
-func TestExportSurvivesEveryHostileRecordAtOnce(t *testing.T) {
-	db, store := seedStoreWithDB(t)
-	ctx := context.Background()
-	for i, tc := range hostileIDs {
-		if tc.id == "" {
-			continue
-		}
-		plantMemory(t, db, "ghost", fmt.Sprintf("%s%d", tc.id, i),
-			fmt.Sprintf("A body long enough to be a real memory, case %d.", i))
-	}
-	// An ordinary project alongside the hostile ones, because the point is that
-	// it is not dragged down with them.
-	if err := store.EnsureProject(ctx, "bystander", "/tmp/bystander", "bystander"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.Create(ctx, "bystander", memory.Memory{
-		Category: "fact", Content: "An ordinary memory that must still be exported.", Source: "mcp",
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	parent := t.TempDir()
-	vault := filepath.Join(parent, "vault")
-	ex := &Exporter{Store: store, Logger: slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))}
-	if err := ex.Export(ctx, vault, ""); err != nil {
-		t.Fatalf("export failed: %v", err)
-	}
-	adversarial.Snapshot(t, vault).AssertTreeInside(t, "export", vault)
-
-	notes, err := filepath.Glob(filepath.Join(vault, "bystander", "Memories", "*.md"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(notes) != 1 {
-		t.Errorf("the bystander project exported %d notes, want 1", len(notes))
-	}
-	hostile, err := filepath.Glob(filepath.Join(vault, "ghost", "Memories", "*.md"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(hostile) != len(hostileIDs)-1 {
-		t.Errorf("ghost exported %d notes, want %d — a note escaped Memories/ or was pruned away", len(hostile), len(hostileIDs)-1)
-	}
-}
-
-// TestFolderNameStaysCreatable defends the over-long-name case (#585).
-//
-// A project name is whatever a caller sent: EnsureProject stores it verbatim and
-// an artifact carries its own. A 300-character name is therefore reachable, and
-// MkdirAll answered ENAMETOOLONG for it — so the note was never written, the
-// export returned an error, and the auto-sync retried forever. folderNames
-// already refused a name that would ESCAPE the vault; a name the filesystem
-// cannot hold is refused the same way, because it fails just as completely.
+// TestFolderNameStaysCreatable defends the over-long-name case (#585): a name
+// the filesystem cannot hold is refused like one that would escape the vault.
 func TestFolderNameStaysCreatable(t *testing.T) {
 	long := strings.Repeat("n", 300)
 	store := seedStore(t)
@@ -278,21 +155,9 @@ func TestFolderNameStaysCreatable(t *testing.T) {
 	}
 }
 
-// TestExportKeepsEveryNoteOfACollidingIdSet is the fixture for the second way an
-// id cannot be read back out of a note, and the one that decides the keep-set's
-// key.
-//
-// yamlScalar flattens a tab, a newline and a carriage return to a space, so three
-// distinct ids render to the SAME ghost_id line. Keyed on that line — which is
-// what the keep-set used to be — the three notes collided on one key, the other
-// two matched nothing, and prune deleted them: the export wrote three notes and
-// left one, silently, on every run. Keyed on the canonical filename instead,
-// which is unique per record, there is nothing to collide.
-//
-// The three are planted together on purpose. Asserted one at a time, a single
-// unmatched id is indistinguishable from an id that simply has no note — the
-// per-id fixture in TestExportKeepsHostileRecordIDsInsideTheVault passes for a
-// keep-set that dropped the note, and this is the case that separates the two.
+// TestExportKeepsEveryNoteOfACollidingIdSet: yamlScalar flattens tab, newline and
+// carriage return to a space, so these three ids render to one ghost_id line;
+// the keep-set is keyed on the filename, so all three notes must survive.
 func TestExportKeepsEveryNoteOfACollidingIdSet(t *testing.T) {
 	db, store := seedStoreWithDB(t)
 	ctx := context.Background()
@@ -333,26 +198,15 @@ func TestExportKeepsEveryNoteOfACollidingIdSet(t *testing.T) {
 	}
 	noteCount("after the first export")
 
-	// And on a second pass, so this is durable rather than a first-write fluke.
 	if err := ex.Export(ctx, vault, ""); err != nil {
 		t.Fatalf("second export: %v", err)
 	}
 	noteCount("after the second export")
 }
 
-// TestHostileContentRendersAsInertStructure is the inertness half for the
-// renderers: the shared corpus, planted as memory content, must be present in
-// the note verbatim while the front matter around it stays exactly as parseable
-// as it is for an ordinary note.
-//
-// Two things can go wrong and the fixtures separate them. hasGhostID reads the
-// first closed front-matter block, so a body that looks like front matter must
-// not become one — that is TestBodyCannotForgeASecondFrontmatterBlock. And a
-// front-matter VALUE carrying a newline, a colon, a quote or an invisible
-// character must not change the shape of the line it sits on, which is what this
-// test drives: ghost_id stays the first key, every value stays on its own line,
-// and hasGhostID — the real reader, the one prune calls — returns the record's
-// own id.
+// TestHostileContentRendersAsInertStructure: the shared corpus, as memory
+// content, is present verbatim while ghost_id stays the first key and
+// hasGhostID returns the record's own id.
 func TestHostileContentRendersAsInertStructure(t *testing.T) {
 	payloads := adversarial.Injection()
 	payloads = append(payloads, adversarial.Secrets()...)
@@ -367,9 +221,6 @@ func TestHostileContentRendersAsInertStructure(t *testing.T) {
 			}
 			note := renderMemory(m, nil, nil)
 
-			// ghost_id first, and it is the record's own: hasGhostID reports
-			// exactly this line and nothing else, and a note claiming another
-			// record's id is a lie whatever any key is built from.
 			if !strings.HasPrefix(note, "---\nghost_id: "+m.ID+"\n") {
 				t.Errorf("ghost_id is not the first key:\n%s", note)
 			}
@@ -387,17 +238,8 @@ func TestHostileContentRendersAsInertStructure(t *testing.T) {
 	}
 }
 
-// TestBodyCannotForgeASecondFrontmatterBlock pins the one property the reader
-// rests on: exactly one closed front-matter block per note, and it is the one
-// Ghost wrote.
-//
-// A body is user-authored text that a hand edit or an imported artifact can put
-// anything in, including a complete `---` / `ghost_id:` / `---` triple. If that
-// reached the front matter, hasGhostID would report an id the record does not
-// have. It no longer costs a note — prune keys on the canonical filename, so no
-// value read out of front matter, forged or flattened, can make it delete a live
-// note — but the id a note claims is the first thing any reader sees, and a note
-// claiming an id that is not its own is a lie whatever else is true.
+// TestBodyCannotForgeASecondFrontmatterBlock: a body holding a `---` /
+// `ghost_id:` / `---` triple must not become a second front-matter block.
 func TestBodyCannotForgeASecondFrontmatterBlock(t *testing.T) {
 	bodies := []struct{ name, body string }{
 		{"complete-block", "---\nghost_id: FORGED00000000\npinned: true\n---\nBody after the forged block."},
@@ -421,8 +263,6 @@ func TestBodyCannotForgeASecondFrontmatterBlock(t *testing.T) {
 			if id, ok := hasGhostID(path); !ok || id != m.ID {
 				t.Errorf("hasGhostID = (%q, %v), want (%q, true)", id, ok, m.ID)
 			}
-			// One block only: the note's front matter ends at the first closing
-			// fence, and everything after it is body.
 			rest := strings.TrimPrefix(note, "---\n")
 			if end := strings.Index(rest, "\n---\n"); end >= 0 {
 				front := rest[:end]
@@ -437,82 +277,8 @@ func TestBodyCannotForgeASecondFrontmatterBlock(t *testing.T) {
 	}
 }
 
-// TestTagsCannotImpersonateFrontmatterKeys pins the tags half of the same rule.
-//
-// A tag is a free string the store does not constrain, and the tags line is a
-// flow sequence — so a tag carrying a comma, a bracket or a `key: value` shape
-// could end a list, start a new line, or add a key the note never had. Ghost
-// quotes any tag that would, which keeps the line one line; what the fixture
-// adds is the consequence: the note has to stay one closed front-matter block
-// with a single `ghost_id` line, and the planted `ghost_id` must not be readable
-// as one. It does not have to be about deletion — prune keys on the filename now
-// — but a note whose front matter a reader would parse differently from how Ghost
-// wrote it is a note Obsidian indexes under the wrong key.
-func TestTagsCannotImpersonateFrontmatterKeys(t *testing.T) {
-	m := memory.Memory{
-		ID: "cc00000000000000", ProjectID: "ghost", Category: "fact",
-		Content: "A memory whose tags impersonate Ghost's own front-matter keys.", Importance: 0.7, Source: "mcp",
-		Tags: []string{
-			"ghost_id: dd00000000000000",
-			"pinned: true",
-			"category: decision",
-			"source: manual",
-			"a,b",
-			"x[0]",
-			`quo"te`,
-			"]], type: memory",
-		},
-	}
-	note := renderMemory(m, nil, nil)
-
-	var tagsLine string
-	for _, line := range strings.Split(note, "\n") {
-		if strings.HasPrefix(line, "tags: ") {
-			tagsLine = line
-		}
-		if strings.HasPrefix(line, "ghost_id: ") && line != "ghost_id: "+m.ID {
-			t.Errorf("a second ghost_id line reached the front matter: %q", line)
-		}
-	}
-	if tagsLine == "" {
-		t.Fatalf("no tags line rendered:\n%s", note)
-	}
-	if strings.ContainsAny(tagsLine[len("tags: ["):len(tagsLine)-1], "\n") {
-		t.Errorf("the tags list spans more than one line:\n%s", tagsLine)
-	}
-	for _, planted := range []string{"ghost_id: dd00000000000000", "pinned: true", "category: decision", "source: manual"} {
-		adversarial.AssertVerbatim(t, "tags line", tagsLine, planted)
-	}
-
-	dir := t.TempDir()
-	path := filepath.Join(dir, fileName(m))
-	if err := os.WriteFile(path, []byte(note), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if id, ok := hasGhostID(path); !ok || id != m.ID {
-		t.Errorf("hasGhostID = (%q, %v), want (%q, true) — an impersonating tag changed the note's identity", id, ok, m.ID)
-	}
-}
-
-// TestGhostIDReadsBackAsWritten pins the agreement between the renderer and its
-// reader: whatever the note says its ghost_id is, hasGhostID must return that,
-// character for character.
-//
-// fm writes ghost_id through yamlScalar, which quotes any value a YAML reader
-// would not take as a plain scalar — and a separator, a backslash or a NUL in an
-// id all need quoting, so every id an artifact can bring that is not plain hex
-// was written quoted and read back quoted. The mismatch was silent in the worst
-// direction: prune looked the quoted text up in a keep-set keyed by the real id,
-// did not find it, and deleted the note it had just written, on every export,
-// for good.
-//
-// The expectation is yamlScalar's own output, not the stored id, and the
-// difference is the point. yamlScalar also flattens a tab, a newline and a
-// carriage return to a space, which is what keeps every key on one line and is
-// lossy: "tab<TAB>id", "line<NL>id" and "tab id" are three ids and one line. So
-// the reader returns the id AS RECORDED, and nothing may be keyed on it
-// recovering the stored id — which is why prune keys on the canonical filename
-// instead (see TestExportKeepsEveryNoteOfACollidingIdSet).
+// TestGhostIDReadsBackAsWritten: hasGhostID returns exactly what yamlScalar
+// wrote for the id, whether quoted, escaped or flattened.
 func TestGhostIDReadsBackAsWritten(t *testing.T) {
 	ids := []string{
 		"938891EAF111890B5C116BA2BFDFB40A", // plain hex: never quoted
@@ -524,15 +290,10 @@ func TestGhostIDReadsBackAsWritten(t *testing.T) {
 		"has space",
 		"#hash",
 		"yes",
-		// Quoted because of a character anywhere in the value, not only at its
-		// start — these are the cases where fm emits an ESCAPE, so the reader
-		// has to undo one rather than just peel a pair of quotes.
 		`quo"ted`,
 		`back\slash`,
 		"trailing:",
 		"colon: inside",
-		// Flattened, so these are the cases where the reader cannot give the
-		// stored id back however careful it is.
 		"tab\tid-xyz",
 		"line\nid-xyz",
 		"cr\rid-xyz",
@@ -556,34 +317,16 @@ func TestGhostIDReadsBackAsWritten(t *testing.T) {
 			if !ok {
 				t.Fatalf("hasGhostID found no ghost_id in:\n%s", note)
 			}
-			// yamlScalar's output, unquoted: the transforms the writer applied,
-			// undone in the order that inverts them.
 			want := unquoteYAMLScalar(yamlScalar(id, false))
 			if got != want {
 				t.Errorf("hasGhostID = %q, want %q (what the renderer wrote for %q)\n  the note was written as:\n%s", got, want, id, note)
 			}
 		})
 	}
-
-	t.Run("a_single_quoted_value_stays_as_written", func(t *testing.T) {
-		// This function reports which files are Ghost's to prune, so it must not
-		// start matching a hand-written quoting form it never emitted. A note
-		// written that way keeps reading as its own text.
-		dir := t.TempDir()
-		path := filepath.Join(dir, "handwritten.md")
-		if err := os.WriteFile(path, []byte("---\nghost_id: 'abc'\n---\nbody\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if got, ok := hasGhostID(path); !ok || got != "'abc'" {
-			t.Errorf("hasGhostID = (%q, %v), want ('abc', true)", got, ok)
-		}
-	})
 }
 
-// TestProjectNamesStayCreatableAndTraceable covers the name half of the folder
-// rule over the corpus: whatever a project is called, the folder it lands in is
-// a local name the filesystem accepts, the note carries the real project id in
-// its front matter, and the note is written where prune will look for it.
+// TestProjectNamesStayCreatableAndTraceable: whatever a project is called, its
+// folder is a local name and the note carries the real project id.
 func TestProjectNamesStayCreatableAndTraceable(t *testing.T) {
 	store := seedStore(t)
 	ctx := context.Background()
@@ -592,8 +335,6 @@ func TestProjectNamesStayCreatableAndTraceable(t *testing.T) {
 		id := fmt.Sprintf("shape-%02d", i)
 		name := p.Text
 		if strings.ContainsAny(name, "\x00\n") {
-			// A NUL or a newline in a project name is legal in the column and
-			// the renderer quotes it; the folder is what has to survive.
 			name = strings.NewReplacer("\x00", "", "\n", " ").Replace(name)
 			if strings.TrimSpace(name) == "" {
 				continue

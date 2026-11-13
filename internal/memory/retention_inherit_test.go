@@ -6,27 +6,12 @@ import (
 	"time"
 )
 
-// ageSessionRow puts a session row into the shape both issues reproduce: a save
-// old enough that the expiry the save derived is already in the past, with the
-// row's last write of the same vintage.
-//
-// last_accessed is left NULL, which is what a real store holds: nothing in
-// production writes it (Store.Touch has no caller), and prune's activity term
-// PREFERS it when it is there. A fixture that filled it in would measure the
-// column the term reaches past rather than the one it reaches for.
 func ageSessionRow(t *testing.T, s *Store, id string, ago time.Duration) {
 	t.Helper()
 	ageSessionRowAt(t, s, id, time.Now().UTC(), ago)
 }
-
-// ageSessionRowAt is ageSessionRow at a base the caller chose. A fixture that
-// ages more than one row, or ages a row and then records a read on it, has to
-// reach for this: the rows are meant to be the same age, and separate clock
-// reads leave them a second apart without any of them being wrong (#800).
 func ageSessionRowAt(t *testing.T, s *Store, id string, now time.Time, ago time.Duration) {
 	t.Helper()
-	// One instant for the three columns, which are one row's history: read apart
-	// they leave the write an hour from the expiry by a second as well.
 	at, expires := stampAt(now, -ago), stampAt(now, -ago+time.Hour)
 	if _, err := s.db.ExecContext(context.Background(), `
 		UPDATE memories
@@ -35,10 +20,6 @@ func ageSessionRowAt(t *testing.T, s *Store, id string, now time.Time, ago time.
 		t.Fatalf("age %s by %s: %v", id, ago, err)
 	}
 }
-
-// recordRead is the one stamp production never writes, stated so that a test can
-// prove a fold leaves it alone: a NULL there cannot tell a fold that moved it
-// from one that never did.
 func recordRead(t *testing.T, s *Store, id, when string) {
 	t.Helper()
 	if _, err := s.db.ExecContext(context.Background(),
@@ -46,9 +27,6 @@ func recordRead(t *testing.T, s *Store, id, when string) {
 		t.Fatalf("record a read on %s at %s: %v", id, when, err)
 	}
 }
-
-// wantFreshSessionExpiry asserts the row holds a session expiry derived from
-// about now, which is the whole of what "this write extended its life" means.
 func wantFreshSessionExpiry(t *testing.T, id string, got *string, from, to time.Time) {
 	t.Helper()
 	if got == nil {
@@ -62,17 +40,12 @@ func wantFreshSessionExpiry(t *testing.T, id string, got *string, from, to time.
 		t.Errorf("%s expires_at = %v, want about %v after the write", id, exp, SessionTTL)
 	}
 }
-
-// expiryText renders a nullable stamp for a failure message. %v on a *string
-// prints an address, so a comparison that went wrong would report where two
-// strings live rather than what they say.
 func expiryText(v *string) string {
 	if v == nil {
 		return "NULL"
 	}
 	return *v
 }
-
 func sameStrPtr(a, b *string) bool {
 	switch {
 	case a == nil && b == nil:
@@ -83,10 +56,6 @@ func sameStrPtr(a, b *string) bool {
 		return *a == *b
 	}
 }
-
-// rowExists is GetByIDs answered as a question. GetByIDs returns an empty slice
-// and no error for an id the store does not hold, so "no error" is not "still
-// there" and a test that reads it that way asserts nothing.
 func rowExists(t *testing.T, s *Store, id string) bool {
 	t.Helper()
 	var n int
@@ -96,19 +65,6 @@ func rowExists(t *testing.T, s *Store, id string) bool {
 	}
 	return n == 1
 }
-
-// TestAFoldRefreshesASessionRowsExpiry is issue #772. The strengthen UPDATE
-// writes importance and the validity and provenance fields and nothing else, and
-// raiseRetentionTx returns early whenever the fold's tier is not a change — so a
-// session→session fold, which is what "the same fact restated" looks like, left
-// the expiry its own original save derived. A row that was about to expire
-// therefore kept an expiry already in the past, and `ghost prune --apply`
-// removed a memory that had been reinforced seconds earlier.
-//
-// Both fold paths are covered because they are two statements in two places and
-// either one alone leaves the defect half-fixed. Neither may move updated_at or
-// last_accessed: those carry the decay recency and the --skip-unchanged
-// fingerprint, and the tier's life is not what they measure.
 func TestAFoldRefreshesASessionRowsExpiry(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -123,8 +79,6 @@ func TestAFoldRefreshesASessionRowsExpiry(t *testing.T) {
 			opts:     UpsertOptions{Retention: RetentionSession},
 		},
 		{
-			// FoldOnly collapses only what is equal after normalization, so its
-			// restatement differs in case and spacing rather than in wording.
 			name:     "fold-only fold",
 			saved:    "a session fact _global already knows",
 			restated: "A  Session Fact _Global Already Knows ",
@@ -141,9 +95,6 @@ func TestAFoldRefreshesASessionRowsExpiry(t *testing.T) {
 			if err != nil {
 				t.Fatalf("save the session fact: %v", err)
 			}
-			// One instant for the ageing and the read below: the read is recorded at
-			// the moment the row was last written, and a second between the two
-			// would make a row its own age (#800).
 			now := time.Now().UTC()
 			ageSessionRowAt(t, s, id, now, 8*24*time.Hour)
 			recordRead(t, s, id, stampAt(now, -8*24*time.Hour))
@@ -177,8 +128,6 @@ func TestAFoldRefreshesASessionRowsExpiry(t *testing.T) {
 					got.AccessCount, was.AccessCount)
 			}
 
-			// The outcome the refresh exists for: the row is still there after the
-			// prune that would otherwise have taken it.
 			report, err := s.PruneSessionMemories(ctx, PruneOptions{Apply: true})
 			if err != nil {
 				t.Fatalf("PruneSessionMemories: %v", err)
@@ -191,13 +140,6 @@ func TestAFoldRefreshesASessionRowsExpiry(t *testing.T) {
 		})
 	}
 }
-
-// TestAFoldTouchesTheExpiryOnlyWhileTheRowIsStillSession pins the CONDITION
-// rather than the refresh. The expiry belongs to the tier, so it is refreshed
-// only while the row's RESULTING tier is session — and a durable row is never
-// handed one, in either direction. Each case gets its own store: a third
-// near-identical row in the corpus is a row the dedup probe might choose instead
-// of the one under test, which is a different writer from the one here.
 func TestAFoldTouchesTheExpiryOnlyWhileTheRowIsStillSession(t *testing.T) {
 	t.Run("a fold that leaves the session tier drops the expiry", func(t *testing.T) {
 		s := testStore(t)
@@ -229,9 +171,6 @@ func TestAFoldTouchesTheExpiryOnlyWhileTheRowIsStillSession(t *testing.T) {
 		}
 	})
 
-	// The direction a "refresh on every fold" implementation gets wrong in the
-	// damaging direction: a session save folded into a durable row must not put
-	// an expiry on it, because prune would one day act on that claim.
 	t.Run("a session fold into a durable row does not put an expiry on it", func(t *testing.T) {
 		s := testStore(t)
 		ctx := context.Background()
@@ -259,13 +198,6 @@ func TestAFoldTouchesTheExpiryOnlyWhileTheRowIsStillSession(t *testing.T) {
 		}
 	})
 }
-
-// TestAPinnedSessionRowIsRefreshedAndStillSpared is the pinned row, and its two
-// halves are different facts. The refresh is not gated on the pin — the tier's
-// life is a property of the tier, and a pin says "do not consolidate this" rather
-// than "this is old" — and the prune is what honours the pin. The unpinned control
-// is otherwise identical and IS removed, at the same instant, so a predicate that
-// spared everything would not pass here.
 func TestAPinnedSessionRowIsRefreshedAndStillSpared(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -303,13 +235,9 @@ func TestAPinnedSessionRowIsRefreshedAndStillSpared(t *testing.T) {
 		if got.Retention != RetentionSession {
 			t.Fatalf("%s retention = %q, want %q", r.id, got.Retention, RetentionSession)
 		}
-		// The pin is not a reason to stop refreshing: the two rows are the same
-		// tier and the same age, and a fold extends the life of both.
 		wantFreshSessionExpiry(t, r.id, got.ExpiresAt, from, time.Now().UTC())
 	}
 
-	// An hour past the refreshed expiry, so the tier's own gate no longer spares
-	// either row and the pin is the only thing left that can.
 	now := time.Now().UTC().Add(SessionTTL + time.Hour)
 	report, err := s.PruneSessionMemories(ctx, PruneOptions{Apply: true, Grace: time.Minute, Now: now})
 	if err != nil {
@@ -329,20 +257,6 @@ func TestAPinnedSessionRowIsRefreshedAndStillSpared(t *testing.T) {
 		t.Errorf("the pinned row is not in the store after the prune")
 	}
 }
-
-// TestPruneMeasuresTheGraceFromAnExpiryAFoldRefreshed is the second half of
-// #772, and it is a separate change from the refresh. The refresh moves a column;
-// the grace is measured from the row's newest stamp among the ones a write moves,
-// and a fold moved none of them until now — so prune.go's own claim that the term
-// is "the row's last WRITE" was false for the one write that extends a session
-// row's life, and a folded row became prunable the instant its fresh expiry
-// arrived, however recently it had been reinforced.
-//
-// Both rows carry no recorded read, because that is the shape a real store has
-// and the shape the term reaches for. The control is a row of the identical aged
-// shape that was NOT folded: it is removed at the same instant, so what spares
-// the folded one is the grace measured from the write that refreshed its expiry,
-// not a prune that found nothing.
 func TestPruneMeasuresTheGraceFromAnExpiryAFoldRefreshed(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -353,10 +267,6 @@ func TestPruneMeasuresTheGraceFromAnExpiryAFoldRefreshed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("save the session fact: %v", err)
 	}
-	// One instant for both rows. The argument below is that the activity term is
-	// the only thing that can spare the folded row, which the control's own
-	// thirty-day age also does not (#800). Not named `now`: the prune below runs
-	// at an instant of its own, an hour past the refreshed expiry.
 	ageBase := time.Now().UTC()
 	ageSessionRowAt(t, s, folded, ageBase, 30*24*time.Hour)
 
@@ -376,9 +286,6 @@ func TestPruneMeasuresTheGraceFromAnExpiryAFoldRefreshed(t *testing.T) {
 		t.Fatalf("the restatement folded into %q, want %q", dup, folded)
 	}
 
-	// An hour past the refreshed expiry: the row IS expired, so the activity term
-	// is the only thing that can spare it, and the control's expiry was thirty
-	// days past before the run started.
 	now := time.Now().UTC().Add(SessionTTL + time.Hour)
 	report, err := s.PruneSessionMemories(ctx, PruneOptions{Apply: true, Now: now})
 	if err != nil {
@@ -398,22 +305,6 @@ func TestPruneMeasuresTheGraceFromAnExpiryAFoldRefreshed(t *testing.T) {
 		t.Errorf("the folded row is gone from the store")
 	}
 }
-
-// TestAConsolidationSuccessorInheritsTheLongestTierOfItsSources is issue #773.
-// ReplaceNonManual's reuse branches update a row in place, so they keep the tier
-// the row has; the FRESH INSERT — taken for a real merge or a rewrite — named
-// neither retention nor expires_at, so the successor took the column default.
-// Reflection never states a tier on an emission, so a merge of two session
-// memories came out project with no expiry: a fact the user scoped to one
-// conversation was silently promoted to the corpus and could never be pruned.
-//
-// The rule is raiseRetentionTx's, over the sources rather than over a fold's two
-// tiers: the longest life any source names wins, and the emission's own silence
-// is never folded in as a raise to the default — that is the session+session case
-// below, and it is the case the whole issue is about. The last two are the
-// persistent-adjacent ones: a keep-forever source is not a consolidation input
-// (retentionExemptSQL excludes it from every set this function builds) but it CAN
-// be named in ReplacesIDs, and the successor must not come out shorter-lived.
 func TestAConsolidationSuccessorInheritsTheLongestTierOfItsSources(t *testing.T) {
 	from := time.Now().UTC()
 	for _, tc := range []struct {
@@ -431,8 +322,6 @@ func TestAConsolidationSuccessorInheritsTheLongestTierOfItsSources(t *testing.T)
 			s := testStore(t)
 			ctx := context.Background()
 
-			// Unrelated sentences, deliberately: a near-duplicate would FOLD into
-			// the first, and a fold's tier is a different writer from this one.
 			bodies := [2]string{
 				"the staging cluster answers on port 8443",
 				"deploys go out through the bastion tunnel on port 2222",
@@ -468,20 +357,12 @@ func TestAConsolidationSuccessorInheritsTheLongestTierOfItsSources(t *testing.T)
 			if rowExists(t, s, sources[0]) {
 				t.Errorf("source %s survived a merge that named it", sources[0])
 			}
-			// A keep-forever source is in no replaceable set, so inheriting its tier
-			// must not have taken the source with it.
 			if tc.tiers[1] == RetentionPersistent && !rowExists(t, s, sources[1]) {
 				t.Errorf("the keep-forever source %s was deleted: it is exempt from every set this function builds", sources[1])
 			}
 		})
 	}
 }
-
-// TestAConsolidationEmissionWithNoSourcesArrivesAsTheTierItStated pins the
-// fallback, so the inheritance above cannot quietly become "an emission with no
-// sources is a session row": there is nothing to inherit from, and the emission's
-// own value — or the default, which is what reflection always sends — is what the
-// row gets.
 func TestAConsolidationEmissionWithNoSourcesArrivesAsTheTierItStated(t *testing.T) {
 	from := time.Now().UTC()
 	for _, tc := range []struct {
@@ -517,11 +398,6 @@ func TestAConsolidationEmissionWithNoSourcesArrivesAsTheTierItStated(t *testing.
 		})
 	}
 }
-
-// TestAReflectionMergeLeavesItsSessionSuccessorPrunable is the two issues meeting.
-// A merge of two session rows now arrives as a session row with a derived expiry,
-// so the tier the user asked for still has a way to take it back; without it the
-// promotion #773 fixes would have been permanent, which is the whole cost of it.
 func TestAReflectionMergeLeavesItsSessionSuccessorPrunable(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -551,9 +427,6 @@ func TestAReflectionMergeLeavesItsSessionSuccessorPrunable(t *testing.T) {
 		t.Fatalf("the merged successor is %s; this test is about the prunable one", got.Retention)
 	}
 
-	// Aged the way a conversation that has moved on ages, and then pruned. A
-	// project-tier successor takes neither branch, which is the whole of what the
-	// merge used to do to it.
 	aged := stamp(-30 * 24 * time.Hour)
 	if _, err := s.db.ExecContext(ctx,
 		`UPDATE memories SET created_at = ?, updated_at = ?, expires_at = ? WHERE id = ?`,
@@ -570,27 +443,6 @@ func TestAReflectionMergeLeavesItsSessionSuccessorPrunable(t *testing.T) {
 			report.RemovedIDs, successor)
 	}
 }
-
-// TestAReusedRowInheritsTheLongestTierOfItsOtherSources is #773 through the REUSE
-// path, and it is the same defect the fresh-INSERT fix removed arriving by the
-// other door. The reuse branches update a row in place, so the reused row keeps
-// its own tier — correct when it is the row the consolidator re-emitted and
-// nothing else. It is not correct when the emission's ReplacesIDs names OTHER
-// sources beside it: those rows are deleted into this one, and their tier is the
-// life the merged knowledge then has.
-//
-// The repro: A saved as session, B saved as project, and one emission whose
-// content byte-matches A with ReplacesIDs [A, B]. A is reused and stays session
-// with a live expiry, B is deleted, and a `ghost prune` run a month later takes
-// the project's knowledge with it. The successor must be the LONGEST life any
-// source named, exactly as the fresh insert's is.
-//
-// The two cases that must NOT move are here too, because the fix is a raise and
-// both are ways to write too much. A verbatim re-emission — reuseChangesNothing,
-// the branch that writes nothing at all — is not a new assertion of the fact, so
-// it must not extend a session row's life on every applied reflect; and a reuse
-// that names no other source is the row restating itself, which is the case
-// keeping the tier was always right for.
 func TestAReusedRowInheritsTheLongestTierOfItsOtherSources(t *testing.T) {
 	from := time.Now().UTC()
 	for _, tc := range []struct {
@@ -608,9 +460,6 @@ func TestAReusedRowInheritsTheLongestTierOfItsOtherSources(t *testing.T) {
 			s := testStore(t)
 			ctx := context.Background()
 
-			// Byte-identical content for the reused row, because reuse is matched on
-			// content alone; unrelated text for the other source, so the emission
-			// cannot reuse it instead.
 			const reused = "the staging cluster answers on port 8443"
 			const other = "deploys go out through the bastion tunnel on port 2222"
 			a, _, _, err := s.UpsertWithOptions(ctx, testProject, "fact", reused, "mcp", 0.5, nil,
@@ -623,15 +472,9 @@ func TestAReusedRowInheritsTheLongestTierOfItsOtherSources(t *testing.T) {
 			if err != nil {
 				t.Fatalf("save the other source as %s: %v", tc.tiers[1], err)
 			}
-			// Backdate the reused row's stamp so a provenance write is observable:
-			// the save and the replace otherwise run in the same clock second, and
-			// a stamp written to `datetime('now')` would read as unmoved.
 			setUpdatedAt(t, s, a, "2020-01-01 00:00:00")
 			before := getOne(t, s, a)
 
-			// Importance 0.5 with no tags and no scope, so the emission also matches
-			// reuseChangesNothing — the branch that writes nothing. The tier raise is
-			// not optional there, so the test runs against the strictest branch.
 			if _, _, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
 				Category: "fact", Content: reused, Importance: 0.5,
 				ReplacesIDs: []string{a, b},
@@ -642,11 +485,6 @@ func TestAReusedRowInheritsTheLongestTierOfItsOtherSources(t *testing.T) {
 			if !rowExists(t, s, a) {
 				t.Fatalf("the reused row %s is gone; the fixture did not exercise a reuse", a)
 			}
-			// A keep-forever source is exempt from every set this replace builds, so
-			// it is never deleted and the reused row does not absorb it. The raise
-			// still applies — ReplacesIDs naming a row is the emission asserting it
-			// stands for that row, and the rule does not consult the delete set —
-			// which is asserted above and is why this case is here.
 			if tc.tiers[1] == RetentionPersistent {
 				if !rowExists(t, s, b) {
 					t.Errorf("the keep-forever source %s was deleted: it is exempt from every set this replace builds", b)
@@ -664,14 +502,6 @@ func TestAReusedRowInheritsTheLongestTierOfItsOtherSources(t *testing.T) {
 			} else if got.ExpiresAt != nil {
 				t.Errorf("reused row %s expires_at = %q on a %s row: only a session row is scheduled for expiry", a, *got.ExpiresAt, got.Retention)
 			}
-			// A verbatim re-emission that restates the row ALONE is not a write, so
-			// the raise leaves the stamp it never owned alone (#727). But the
-			// provenance stamp a consuming merge applies IS a write, and it moves
-			// updated_at in the same statement that files its version, because every
-			// writer of the reflect phase must move the column (stampMovingPhases in
-			// history_compact.go). The keep-forever case is the one that consumes
-			// nothing: b is exempt from every set this replace builds, so nothing
-			// wrote to a and its old stamp stands.
 			if tc.tiers[1] == RetentionPersistent {
 				if got.UpdatedAt != before.UpdatedAt {
 					t.Errorf("updated_at moved from %q to %q: the keep-forever source is not consumed, so nothing wrote to the reused row",
@@ -684,43 +514,22 @@ func TestAReusedRowInheritsTheLongestTierOfItsOtherSources(t *testing.T) {
 		})
 	}
 }
-
-// TestAReusedSessionRowIsNotRefreshedByAVerbatimReEmission is the other half of
-// the raise, and the reason it is a separate test: a session row that a reflect
-// run re-emits byte-for-byte has not been re-asserted by anybody. Refreshing its
-// expiry on every applied reflect would give a conversation-scoped memory an
-// unbounded life, which is the opposite of what the tier is for — the fix raises
-// a tier when the SOURCES demand one and never invents an extension. A FOLD is the
-// contrast and already has its own test: a fold is a new assertion of the fact and
-// does refresh (#772), so the two behaviours are deliberately different and this
-// is the half that would otherwise go unstated.
 func TestAReusedSessionRowIsNotRefreshedByAVerbatimReEmission(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
 
 	reEmitted := pruneRow(t, s, testProject, "a session fact a reflect run re-emits every pass", RetentionSession)
-	// One instant for both rows below: the comment on the control says both are
-	// expired, aged and past the grace, and separate clock reads leave the pair
-	// a second apart without any of them being wrong (#800).
 	now := time.Now().UTC()
 	aged, newer := stampAt(now, -30*24*time.Hour), stampAt(now, -29*24*time.Hour)
 	agePruneRow(t, s, reEmitted, aged, newer)
 	wasReEmitted := getOne(t, s, reEmitted)
 
-	// The control, and it is a `manual` source for a reason the fixture needs
-	// rather than for realism: consolidation DELETES every replaceable row the
-	// emission does not account for, so a peer session row written here would be
-	// gone before the prune ever saw it. `manual` is in the exclusion list, so this
-	// row survives the replace and is a candidate on its own terms — an aged,
-	// expired session row the prune must reach, which is what makes the row above
-	// removed because of ITS expiry and nothing else.
 	control := pruneRow(t, s, testProject, "a session fact the user wrote by hand", RetentionSession)
 	if _, err := s.db.ExecContext(ctx, `UPDATE memories SET source = 'manual' WHERE id = ?`, control); err != nil {
 		t.Fatalf("mark the control manual: %v", err)
 	}
 	agePruneRow(t, s, control, aged, newer)
 
-	// The reflect run: re-emit the row byte-for-byte, naming only itself.
 	if _, _, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
 		Category: "fact", Content: "a session fact a reflect run re-emits every pass", Importance: 0.6,
 		ReplacesIDs: []string{reEmitted},
@@ -734,18 +543,11 @@ func TestAReusedSessionRowIsNotRefreshedByAVerbatimReEmission(t *testing.T) {
 	if !rowExists(t, s, control) {
 		t.Fatalf("the control %s was deleted by the replace; a `manual` row is exempt from it", control)
 	}
-	// Compared through the sameStrPtr helper, so a mutation that DROPS the expiry
-	// reports as a finding rather than as a nil dereference: "no expiry" and "a
-	// different expiry" are both the defect, and a test that panics on one of them
-	// does not say which.
 	if got := getOne(t, s, reEmitted); !sameStrPtr(got.ExpiresAt, wasReEmitted.ExpiresAt) {
 		t.Errorf("the re-emitted row's expiry moved from %s to %s: a reflect run that re-states a row is not a new assertion of the fact, and refreshing it here would give a session memory an unbounded life",
 			expiryText(wasReEmitted.ExpiresAt), expiryText(got.ExpiresAt))
 	}
 
-	// The outcome, which is the tier's own. Both rows are expired, aged and past
-	// the grace, and both are removed: the re-emitted one is not spared, because a
-	// reflect run is not something anybody re-asserted.
 	report, err := s.PruneSessionMemories(ctx, PruneOptions{Apply: true})
 	if err != nil {
 		t.Fatalf("PruneSessionMemories: %v", err)
@@ -761,14 +563,6 @@ func TestAReusedSessionRowIsNotRefreshedByAVerbatimReEmission(t *testing.T) {
 		t.Errorf("prune spared %s: its expiry was refreshed by a re-emission, so a reflect run has become a way to keep a session memory forever", reEmitted)
 	}
 }
-
-// TestAnEmissionWithNoOtherSourcesLeavesTheReusedRowAlone is the boundary the
-// raise must not cross: a reuse that names nothing but the reused row is that row
-// restating itself, and it has no claim on a longer life. This is the case the
-// reuse path was always right about, and it is what a raise written as "fold the
-// ReplacesIDs together" would break — with no other source there is nothing to
-// fold, and a rule that fell back to the emission's silence would read that
-// silence as the project default and quietly make every session memory durable.
 func TestAnEmissionWithNoOtherSourcesLeavesTheReusedRowAlone(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
@@ -780,8 +574,6 @@ func TestAnEmissionWithNoOtherSourcesLeavesTheReusedRowAlone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("save the session row: %v", err)
 	}
-	// A second session row the emission does NOT account for, so the replace has a
-	// real delete to perform and is not a no-op.
 	dropped, _, _, err := s.UpsertWithOptions(ctx, testProject, "fact",
 		"a session fact the consolidator decided was stale", "mcp", 0.5, nil,
 		UpsertOptions{Retention: RetentionSession})
@@ -790,7 +582,6 @@ func TestAnEmissionWithNoOtherSourcesLeavesTheReusedRowAlone(t *testing.T) {
 	}
 	was := getOne(t, s, reused)
 
-	// ReplacesIDs names only the reused row. Reflection does this on every `keep`.
 	if _, _, _, _, err := s.ReplaceNonManual(ctx, testProject, []Memory{{
 		Category: "fact", Content: "a session fact reflection keeps, without naming anything else", Importance: 0.5,
 		ReplacesIDs: []string{reused},
@@ -809,140 +600,5 @@ func TestAnEmissionWithNoOtherSourcesLeavesTheReusedRowAlone(t *testing.T) {
 	wantFreshSessionExpiry(t, reused, got.ExpiresAt, from, time.Now().UTC())
 	if got.ExpiresAt != nil && *got.ExpiresAt != *was.ExpiresAt {
 		t.Errorf("expires_at moved from %q to %q: nothing re-asserted this row", *was.ExpiresAt, *got.ExpiresAt)
-	}
-}
-
-// TestPruneReportsTheGraceBasisSeparatelyFromActivity is the store half of the
-// renderer fix, and it exists because the two columns are projected by one
-// statement and a renderer cannot tell a projection that was never made from one
-// it chose to ignore.
-//
-// The shape it pins: a session row saved and never written to since. Its expiry
-// is the save's own value derived forward, so it is the NEWEST of the three
-// stamps the grace can be measured from — which means the two fields are equal
-// here, and a report that printed the grace basis under the name "last touched"
-// would be naming an event at an instant nothing happened. A row edited after its
-// save is the other direction: the write is later than the expiry, so the basis
-// and the activity are again the same value but neither is the expiry, which is
-// the case where printing only one of the two hides why the row is eligible now.
-//
-// The control is a project row, which is never a candidate at all: if it reached
-// the list, the projection rather than this test's arithmetic would be wrong.
-func TestPruneReportsTheGraceBasisSeparatelyFromActivity(t *testing.T) {
-	s := testStore(t)
-	ctx := context.Background()
-	// One instant for every stamp below, written and expected (#800). This test
-	// compares a row's column against the value it was given, so a second
-	// boundary between the two calls would report a production defect that is not
-	// one.
-	now := time.Now().UTC()
-	backdated := stampAt(now, -30*24*time.Hour)
-	expiry := stampAt(now, -30*24*time.Hour+SessionTTL)
-
-	untouched := pruneRow(t, s, testProject, "a session note nobody has written to since its save", RetentionSession)
-	edited := pruneRow(t, s, testProject, "a session note edited after the expiry its save derived", RetentionSession)
-	pruneFixture(t, s, "a durable note that is just as old", RetentionProject,
-		stampAt(now, -30*24*time.Hour), stampAt(now, -29*24*time.Hour))
-	// Thirty days ago with no recorded read, which is the shape a real store
-	// holds and the shape the fallback is for: last_accessed stays NULL, the
-	// write stamps go back to the save, and the expiry is that save's own
-	// SessionTTL — a month past the write, not on it.
-	for _, id := range []string{untouched, edited} {
-		backdateWrite(t, s, id, backdated)
-		agePruneRow(t, s, id, expiry, "")
-	}
-	// The edit: later than the expiry, so the grace has to run from it.
-	if _, err := s.db.ExecContext(ctx, `UPDATE memories SET updated_at = ? WHERE id = ?`,
-		stampAt(now, -20*24*time.Hour), edited); err != nil {
-		t.Fatalf("edit %s: %v", edited, err)
-	}
-
-	report, err := s.PruneSessionMemories(ctx, PruneOptions{})
-	if err != nil {
-		t.Fatalf("PruneSessionMemories: %v", err)
-	}
-	got := map[string]PruneCandidate{}
-	for _, c := range report.Candidates {
-		got[c.ID] = c
-		if c.Retention != RetentionSession {
-			t.Errorf("a %s row is a prune candidate: %s", c.Retention, c.ID)
-		}
-	}
-	if len(got) != 2 {
-		t.Fatalf("the preview selected %d row(s), want the 2 session rows: %+v", len(got), report.Candidates)
-	}
-
-	// Untouched: the expiry is the save's own forward-derived value and is the
-	// newest stamp, so the basis IS the expiry while the activity is the save.
-	// Equality here is the fact the renderer has to be able to see.
-	u := got[untouched]
-	if u.GraceFrom != u.ExpiresAt {
-		t.Errorf("%s: GraceFrom = %q, want the expiry %q — nothing has written to this row since its save, so the expiry is the newest stamp the grace can be measured from",
-			untouched, u.GraceFrom, u.ExpiresAt)
-	}
-	if u.ActivityAt == u.ExpiresAt {
-		t.Errorf("%s: ActivityAt = %q, which is the expiry: nothing touched this row at the instant it stopped being wanted, and a report saying so is claiming an event",
-			untouched, u.ActivityAt)
-	}
-	if u.ActivityAt == "" || u.GraceFrom == "" {
-		t.Errorf("%s: both readings must be populated: %+v", untouched, u)
-	}
-
-	// Edited: the write is later than the expiry, so the basis follows the write
-	// and the two readings agree on something that HAPPENED.
-	e := got[edited]
-	if e.GraceFrom != e.ActivityAt {
-		t.Errorf("%s: GraceFrom = %q and ActivityAt = %q, want the same — the row's last write is the newest stamp, so the grace ran from the event",
-			edited, e.GraceFrom, e.ActivityAt)
-	}
-	if e.GraceFrom == e.ExpiresAt {
-		t.Errorf("%s: GraceFrom = %q is the expiry, but this row was edited after it: the basis is the write",
-			edited, e.GraceFrom)
-	}
-
-	// And the case the two comments disagreed about, pinned rather than argued: a
-	// FOLD is a write, and #772 made it the write that most refreshes a session
-	// row — but raiseRetentionTx sets expires_at and deliberately leaves
-	// updated_at alone, so on a row with no recorded read the expiry is STILL the
-	// newest stamp. The basis therefore equals the expiry here and the renderer
-	// omits the label, even though something did write to the row. The rule is not
-	// "nothing has been written to the row"; it is "no stamp on the row is newer
-	// than the expiry".
-	// The fold happens BEFORE the ageing, which is the order the case needs: the
-	// fold refreshes the expiry to now+SessionTTL, so a row aged first and folded
-	// second is not a candidate at all — which is #772 working, and would make this
-	// the re-emission test's subject rather than this one's.
-	folded := pruneRow(t, s, testProject, "a session note a later save folds into", RetentionSession)
-	backdateWrite(t, s, folded, backdated)
-	if _, dup, _, err := s.UpsertWithOptions(ctx, testProject, "fact",
-		"a session note a later save folds into, at some length", "mcp", 0.6, nil,
-		UpsertOptions{Retention: RetentionSession}); err != nil {
-		t.Fatalf("fold into %s: %v", folded, err)
-	} else if dup != folded {
-		t.Fatalf("the restatement folded into %q, want %q", dup, folded)
-	}
-	agePruneRow(t, s, folded, expiry, "")
-	// The fold must leave updated_at alone, or this row is not the case the test
-	// claims to be. Asserted rather than assumed, because the whole point of the
-	// case is that the fold's write lands on a DIFFERENT column than an edit's.
-	if got := getOne(t, s, folded); got.UpdatedAt != backdated {
-		t.Errorf("updated_at = %q after the fold, want the backdated %q: #772 refreshes expires_at and must not move this",
-			got.UpdatedAt, backdated)
-	}
-	report, err = s.PruneSessionMemories(ctx, PruneOptions{})
-	if err != nil {
-		t.Fatalf("PruneSessionMemories: %v", err)
-	}
-	got = map[string]PruneCandidate{}
-	for _, c := range report.Candidates {
-		got[c.ID] = c
-	}
-	fc, ok := got[folded]
-	if !ok {
-		t.Fatalf("the folded row %s is not a candidate; the fixture did not age a prunable row", folded)
-	}
-	if fc.GraceFrom != fc.ExpiresAt {
-		t.Errorf("%s: GraceFrom = %q, want the expiry %q — a fold refreshes expires_at and leaves updated_at alone, so the expiry is still the newest stamp and the basis is not a separate event",
-			folded, fc.GraceFrom, fc.ExpiresAt)
 	}
 }

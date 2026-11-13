@@ -18,18 +18,6 @@ import (
 )
 
 // capturedLog is a slog.Handler that keeps every record a pass emits, so a
-// test can read the KEYS a line carries rather than re-deriving them from the
-// call site.
-//
-// It exists because a slog level call takes alternating key/value arguments
-// and the pairing happens inside slog, from the ARGUMENT LIST: a call that
-// writes `"link", a, b, "scan", c, d` compiles, vets, and runs, and slog pairs
-// it as link=a, b=scan, c=d — so `b` is read as a key while the author read it
-// as a value. Nothing downstream of the handler can tell, because by then the
-// record is well-formed.
-//
-// The one thing a handler CAN see is the pairing itself, which is why the
-// assertions below are on keys.
 type capturedLog struct {
 	mu      sync.Mutex
 	records []capturedRecord
@@ -61,10 +49,6 @@ func (c *capturedLog) WithGroup(_ string) slog.Handler      { return c }
 func (c *capturedLog) logger() *slog.Logger { return slog.New(c) }
 
 // onlyRecordFor returns the single record whose message contains substr and whose
-// attr key carries the given value, failing if there is none. "The record that
-// names this pair" is the identity of the thing under test; a count of one is
-// not, because a line that starts firing twice (a fixture change, a pass run
-// twice) would then quietly stop being checked.
 func (c *capturedLog) onlyRecordFor(t *testing.T, substr, key, value string) capturedRecord {
 	t.Helper()
 	var matches []capturedRecord
@@ -94,18 +78,6 @@ func (c *capturedLog) find(substr string) []capturedRecord {
 }
 
 // Every key the pass logs is a lowercase label — "newer", "older", "reason",
-// "error" — and that is the whole rule assertLogKeysAreLabels enforces. It is
-// one rule because it covers both ways a key/value list can fail to line up:
-//
-//   - A memory id in the KEY slot is a value that landed there, which is what
-//     #804 was: slog paired `"link", a, b, "scan", c, d` as link=a, b=scan, c=d.
-//     go vet's slog check cannot see that, because the argument count is even
-//     and every argument is a string — the pairing the author meant is not
-//     recoverable from the types.
-//   - slog's own !BADKEY marker is an argument list that does not pair at all —
-//     an odd number of trailing args. vet does reject that one ("missing a final
-//     value"), so a handler never sees it in this tree; the rule covers it so
-//     the assertion does not depend on that staying true.
 func assertLogKeysAreLabels(t *testing.T, log *capturedLog) {
 	t.Helper()
 	for _, r := range log.records {
@@ -143,33 +115,8 @@ func isLogKeyLabel(s string) bool {
 }
 
 // TestRunNamesTheKeyOfEveryValueItLogs is #804.
-//
-// The line it pins is the one that reports a scan proposing the REVERSE of a
-// live link: the only log line in the package whose subject is two
-// disagreeing orientations of one pair, so the only one where naming the source
-// of each id is the whole point. It passed `"link", l.SourceID, l.TargetID,
-// "scan", cand.NewerID, cand.OlderID` — six values, four of them with a name and
-// two without, and slog paired l.TargetID as a KEY, so a dry run printed
-//
-//	link=02EA044F… 3092A7BE…=scan 3092A7BE…=74CE9D10…
-//
-// which reads as three unrelated facts and names neither endpoint.
-//
-// It names the relation as well as the endpoints because a reader given
-// `link_source`/`link_target` and nothing else cannot tell which end of the pair
-// those two ids are: the two relations are written in OPPOSITE directions, so for
-// a 'causes' edge the source is the note a supersedes edge would call the older.
-// The relation is a value like every other one, so it gets a key too — and it is
-// a key rather than part of the message precisely because the line is structured
-// for grep and a bare value would not be findable.
 func TestRunNamesTheKeyOfEveryValueItLogs(t *testing.T) {
 	// ONE case, and the fixture is the only shape in which the line is reachable
-	// at all: a live 'supersedes' edge pointing at the OLDER note. A 'causes'
-	// edge cannot produce it, because a causes edge's direction does not decide
-	// the question the pair is asked in (see pairVerdict), so there is never a
-	// proposal to oppose one — which is why the line's relation key is always
-	// 'supersedes' and is nonetheless carried explicitly rather than asserted by
-	// the caller.
 	for _, tc := range []struct {
 		name       string
 		relation   Relation
@@ -193,10 +140,6 @@ func TestRunNamesTheKeyOfEveryValueItLogs(t *testing.T) {
 			ctx := context.Background()
 
 			// One note a month old and one a month new, so the timestamps have a
-			// chronology, and the edge running old→recent against it: the
-			// supersedes edge names the OLDER note as the one that supersedes,
-			// which is exactly the backwards edge #641 is about and the one shape
-			// the scan's proposal has to be measured against.
 			old := add(t, store, db, tc.sourceText, []float32{1, 0, 0}, "2026-01-01 00:00:00")
 			recent := add(t, store, db, tc.targetText, []float32{0.98, 0.02, 0}, "2026-09-01 00:00:00")
 			linkSource, linkTarget := old, recent
@@ -219,10 +162,6 @@ func TestRunNamesTheKeyOfEveryValueItLogs(t *testing.T) {
 			}
 			attrs := records[0].attrs
 			// Each id under the key that says WHICH source asserted it, plus the
-			// relation that says which end of the pair the link's own two ids
-			// are. The link's direction and the scan's proposal disagree, so
-			// "newer"/"older" alone would leave a reader unable to tell which id
-			// came from where.
 			want := map[string]string{
 				"link_relation": string(tc.relation),
 				"link_source":   memory.RefusalArg("memory_id", linkSource),
@@ -249,27 +188,6 @@ func TestRunNamesTheKeyOfEveryValueItLogs(t *testing.T) {
 }
 
 // assertDrivenLoggers requires every function in this package that actually
-// LOGS to be covered by one of the cases, so the guard's scope cannot quietly
-// outgrow the code it guards.
-//
-// It walks the package with go/parser rather than transcribing the list, which is
-// the same technique TestEveryHarnessCommandCallSiteChecksItsError uses in
-// internal/ai and TestEveryVerifiedAtMentionIsClassified uses in
-// internal/memory: the point of a guard like this is that it fails when the code
-// moves, and a transcribed list only fails when someone remembers to edit it —
-// which is the discipline the guard exists to remove.
-//
-// The set is the functions that make a slog LEVEL CALL, not the functions that
-// merely take a *slog.Logger, and the receiver is resolved to a logger the file
-// actually declares. Both halves of that were wrong in the first version, in the
-// direction that looks like a pass: scanning declarations reports
-// RelationClassifier.SetLogger, a setter that logs nothing, and matching the
-// selector name alone counts `err.Error()` as a log call, which credits the
-// Withdraw case with a line it never reaches. A guard that over-counts is worse
-// than none, because it reports coverage it does not have.
-//
-// Finding ZERO logging functions is itself a failure: a scan that recognised
-// nothing is indistinguishable from a package that is clean.
 func assertDrivenLoggers(t *testing.T, cases []struct {
 	name   string
 	covers []string
@@ -300,9 +218,6 @@ func assertDrivenLoggers(t *testing.T, cases []struct {
 			t.Fatalf("parse %s: %v", name, err)
 		}
 		// The enclosing FuncDecl of every level call. A method or closure that
-		// logs is attributed to the function whose name a caller already knows,
-		// so the table is keyed on entry points rather than on every small
-		// function that happens to emit a line.
 		loggers := declaredLoggers(file)
 		seenInFile := 0
 		var stack []*ast.FuncDecl
@@ -325,10 +240,6 @@ func assertDrivenLoggers(t *testing.T, cases []struct {
 			return true
 		})
 		// Per FILE, not just per package: a file that declares a logger and is
-		// then seen making no level call is a gap in the scan, not a file that
-		// happens not to log. With only a package-wide count, that loss is
-		// silent — the other files keep `found` above zero, the file's cases stop
-		// being load-bearing, and deleting them from the table would still pass.
 		if len(loggers) > 0 && seenInFile == 0 {
 			t.Errorf("%s declares a *slog.Logger (%v) but the scan found no level call in it: the scan is not reading this file's logging, so its case covers nothing",
 				name, sortedKeys(loggers))
@@ -357,14 +268,6 @@ var slogLevelNames = map[string]bool{
 }
 
 // isSlogLevelCall reports whether call is a level call on this package's logger,
-// or on the slog package itself.
-//
-// The receiver is checked against the set of names the FILE declares a
-// *slog.Logger under, because "the selector's name is a level method" is not
-// enough on its own: `err.Error()` satisfies it, `slog` shares its level names
-// with error and with a dozen other types, and a false positive here credits a
-// case with covering a function that logs nothing — which is the exact failure
-// the scan exists to prevent, in the direction that looks like a pass.
 func isSlogLevelCall(call *ast.CallExpr, loggers map[string]bool) bool {
 	switch fun := ast.Unparen(call.Fun).(type) {
 	case *ast.SelectorExpr:
@@ -375,9 +278,6 @@ func isSlogLevelCall(call *ast.CallExpr, loggers map[string]bool) bool {
 			return true
 		}
 		// A method on a logger the file declares: a parameter, a struct field
-		// (`h.logger`), or a local. The receiver's name is resolved against a
-		// declaration in the same file, so `err.Error()` cannot pass, and a
-		// logger reached through a field or a local can.
 		return loggers[baseIdentName(fun.X)]
 	case *ast.Ident:
 		return slogLevelNames[fun.Name] // slog.Info(...) at package level
@@ -386,18 +286,6 @@ func isSlogLevelCall(call *ast.CallExpr, loggers map[string]bool) bool {
 }
 
 // declaredLoggers returns the names a file binds a *slog.Logger to: parameters,
-// results, struct fields, var declarations and locals. A name bound to a logger
-// ANYWHERE in the file counts.
-//
-// The struct-field arm is load-bearing, not decoration. `RelationClassifier`
-// holds its logger in a field, so without that arm declaredLoggers(relation.go)
-// sees only SetLogger's parameter — named `l` — while every one of that file's
-// five log calls is `h.logger.Warn(...)`, whose receiver name is `logger`. The
-// scan then reports no logging function in the file at all, which is a silent
-// loss rather than a visible one, so the per-file check in assertDrivenLoggers
-// is the second half of the same fix: a file that declares a logger and is seen
-// making no level call is reported, and a scan that recognises nothing in a file
-// it has a logger in cannot hide behind the files that work.
 func declaredLoggers(file *ast.File) map[string]bool {
 	names := map[string]bool{}
 	bind := func(expr ast.Expr, ident *ast.Ident) {
@@ -497,32 +385,6 @@ func baseIdentName(expr ast.Expr) string {
 }
 
 // TestPackagePassesLogOnlyLabelKeys is the package-wide half of #804: the same
-// shape assertion, driven through every entry point in this package that logs —
-// the creation pass, the repair pass, the operator's named withdrawal, and the
-// harness classifier's own diagnostics — so a future mispaired call on any of
-// them fails here rather than in a log file nobody reads.
-//
-// Its fixtures are built to hit lines with DIFFERENT key vocabularies on
-// purpose: a refusal naming a link's direction, a second refusal, a veto, an
-// unclassifiable verdict, a cyclic pair ("a"/"b", not "newer"/"older"), a
-// withdrawal ("source"/"target"), and a retry ("unjudged"/"settled"). One line's
-// keys being right says nothing about the next one's, which is the whole reason
-// #804 survived in a tree where every other line was fine.
-//
-// WHAT IT DOES AND DOES NOT CATCH, since the boundary is the useful part: a
-// mispairing is caught when the value that lands in the KEY slot is a memory id,
-// which is every value in the lines above except the classifier's own (a retry
-// delay, a message, an error). A mispairing among plain words is NOT caught —
-// `"pair", "delay", "why", "the call failed"` is all labels and all keys, and
-// nothing in a Record distinguishes it from what was meant. That is why the
-// per-line key/value assertions live in the tests beside each pass's own
-// behaviour, and why the audit this test came from was a type-checked read of
-// every call rather than a runtime signal.
-//
-// The table is the coverage claim made checkable: a function in this package
-// that logs, and no case covers it, is named by the check below. That set is
-// read out of the package's own source, so it grows when a fifth logging entry
-// point is added rather than when someone remembers this file.
 func TestPackagePassesLogOnlyLabelKeys(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -531,9 +393,6 @@ func TestPackagePassesLogOnlyLabelKeys(t *testing.T) {
 		wants  []string
 	}{
 		// `Run` is a one-line wrapper since #799 moved the pass into RunWith
-		// (the per-call decisions became an Options value), so the function that
-		// logs is RunWith and that is the name the scan reports. The fixture
-		// still calls Run, because Run is the entry point a caller reads.
 		{name: "Run", covers: []string{"RunWith"}, run: runPassesLogKeys, wants: []string{
 			"reverse of a live link", // the #804 line
 			"refusing a pair the graph claims in both directions",
@@ -554,9 +413,6 @@ func TestPackagePassesLogOnlyLabelKeys(t *testing.T) {
 			"supersede withdrew a named edge",
 		}},
 		// The classifier's lines live in its retry wrapper and its per-chunk
-		// helper, not in the public Classify/ClassifyBatch a caller names — the
-		// scan reads that off the source, which is why these two are spelled the
-		// way they are rather than the way the case is named.
 		{name: "RelationClassifier", covers: []string{"ClassifyBatch", "call", "classifyChunk"}, run: classifierPassesLogKeys, wants: []string{
 			"classify call failed; retrying once",
 			"batch reply unparseable",
@@ -564,11 +420,6 @@ func TestPackagePassesLogOnlyLabelKeys(t *testing.T) {
 	}
 
 	// Every pass in the package that logs must have a case, or this test is
-	// quietly narrower than it says. The list is DERIVED from the package's own
-	// source rather than transcribed, so a fifth logging entry point added later
-	// fails here instead of logging into an unguarded void. (The first version of
-	// this check transcribed the four names and a reviewer was right that it
-	// could only ever catch a case being removed, not a logger being added.)
 	assertDrivenLoggers(t, cases)
 
 	for _, tc := range cases {
@@ -639,18 +490,6 @@ func runPassesLogKeys(t *testing.T, log *capturedLog) {
 	}
 
 	// A line that names a pair is only useful if it names the RIGHT pair, and
-	// the shape assertion cannot tell a correctly-keyed id from a swapped one.
-	// The unclassifiable pair and the vetoed pair are the two whose ids the
-	// fixture knows, so read both back.
-	//
-	// The record is found by ITS OWN IDS, not by there being exactly one: this
-	// fixture emits several veto lines, because the friday-train note is the
-	// older endpoint of every candidate that clears the threshold and the veto
-	// fires on it each time. Guarding the assertion on a count of one therefore
-	// made it dead code that only a reviewer could see — a count of zero is
-	// caught by the case's coverage floor, and a count above one silently
-	// disables the check, which is the failure this whole guard exists to
-	// remove. Selecting by identity runs whatever the count is.
 	unclassified := log.onlyRecordFor(t, "skipping pair with an unclassifiable verdict", "newer", memory.RefusalArg("memory_id", blankNewer))
 	if unclassified.attrs["older"] != memory.RefusalArg("memory_id", blankOlder) {
 		t.Errorf("the unclassifiable line names older=%s, want %s: the fixture exists so the line's keys carry the pair that produced them",
@@ -675,9 +514,6 @@ func reassessPassesLogKeys(t *testing.T, log *capturedLog) {
 	ctx := context.Background()
 
 	// A cycle whose two rows share both timestamps, so the repair pass reports
-	// it as unframeable rather than asking about it. This is the only line in
-	// Reassess whose keys are "a"/"b" rather than "newer"/"older", which is
-	// exactly the kind of local vocabulary a shared guard has to survive.
 	const bulkStamp = "2026-09-20 09:26:05"
 	cycA := add(t, store, db, "prod db timeout is 30s", []float32{1, 0, 0}, bulkStamp)
 	cycB := add(t, store, db, "prod db timeout is 5s", []float32{0.99, 0.01, 0}, bulkStamp)
@@ -703,10 +539,6 @@ func reassessPassesLogKeys(t *testing.T, log *capturedLog) {
 	}
 
 	// A third edge, and the gated run that reaches #862's split line: two passes
-	// say NEITHER and one says SUPERSEDES, so nothing is withdrawn and the
-	// disagreement is logged with the tally. The ungated run above cannot reach
-	// that line at all — with one pass there is nothing to disagree with — so
-	// without this the guard's coverage claim for it would be aspirational.
 	splitNewer := add(t, store, db, "the nightly export job writes to the vault bucket", []float32{0, 0, 1}, "2026-09-02 09:00:00")
 	splitOlder := add(t, store, db, "the nightly export job writes to the shared volume", []float32{0, 0, 0.99}, "2026-02-02 09:00:00")
 	if err := store.CreateLink(ctx, splitNewer, splitOlder, "supersedes", 0.95, "llm"); err != nil {
@@ -721,9 +553,6 @@ func reassessPassesLogKeys(t *testing.T, log *capturedLog) {
 }
 
 // withdrawPassesLogKeys drives the named withdrawal
-// (`ghost_link_withdraw` / `ghost resolve --withdraw`). Its line carries three
-// ids and a running count, and its keys are "source"/"target" — a fourth
-// vocabulary in a package that already had three.
 func withdrawPassesLogKeys(t *testing.T, log *capturedLog) {
 	t.Helper()
 	store, db := seed(t)
@@ -740,11 +569,6 @@ func withdrawPassesLogKeys(t *testing.T, log *capturedLog) {
 }
 
 // classifierPassesLogKeys drives the harness classifier's own lines, the ones in
-// the package made by a type that is not one of the three passes
-// (relation.go's RelationClassifier, which owns its logger because an
-// unparseable reply and a failed call are its own business). Its keys are a
-// fifth vocabulary — "unjudged", "settled", "batch", "reply" — so it is the one
-// entry that would have gone uncovered had the table stopped at the passes.
 func classifierPassesLogKeys(t *testing.T, log *capturedLog) {
 	t.Helper()
 	ctx := context.Background()

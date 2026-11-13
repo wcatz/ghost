@@ -219,10 +219,6 @@ func (s *Store) passiveBucket(ctx context.Context, req CandidateRequest, pol Sli
 // should have to carry a counter it does not read.
 var passiveKeyScanVisited atomic.Int64
 
-func resetPassiveKeyScan() { passiveKeyScanVisited.Store(0) }
-
-func passiveKeyScanReads() int64 { return passiveKeyScanVisited.Load() }
-
 // passiveWindow is a policy's window: the top OverFetch rows under the policy's
 // own order, kept by a THRESHOLD SCAN rather than by sorting the bucket.
 func (s *Store) passiveWindow(ctx context.Context, req CandidateRequest, pol SlicePolicy, cols passiveColumns) ([]Memory, error) {

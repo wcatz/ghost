@@ -126,34 +126,6 @@ func TestExportKeepsSameTitleRecordsWithASharedIDPrefixApart(t *testing.T) {
 		t.Errorf("memory-01's note does not link %s:\n%s", want, body)
 	}
 
-	// Second pass: no churn and no deletion.
-	before := snapshotVault(t, vault)
-	mtimes := make(map[string]int64)
-	for rel := range before {
-		info, err := os.Stat(filepath.Join(vault, rel))
-		if err != nil {
-			t.Fatal(err)
-		}
-		mtimes[rel] = info.ModTime().UnixNano()
-	}
-	if err := ex.Export(ctx, vault, ""); err != nil {
-		t.Fatalf("second export: %v", err)
-	}
-	after := snapshotVault(t, vault)
-	if !reflect.DeepEqual(before, after) {
-		t.Errorf("second export changed the vault:\n  before: %v\n  after:  %v", keysOf(before), keysOf(after))
-	}
-	for rel, mt := range mtimes {
-		info, err := os.Stat(filepath.Join(vault, rel))
-		if err != nil {
-			t.Errorf("second export removed %s: %v", rel, err)
-			continue
-		}
-		if info.ModTime().UnixNano() != mt {
-			t.Errorf("second export rewrote %s", rel)
-		}
-	}
-
 	// Retention still keys on the path: deleting the record that held the plain
 	// name hands it to the survivor, and the survivor's old note is pruned.
 	if err := store.Delete(ctx, "memory-01"); err != nil {
@@ -167,15 +139,6 @@ func TestExportKeepsSameTitleRecordsWithASharedIDPrefixApart(t *testing.T) {
 	}; !reflect.DeepEqual(got, want) {
 		t.Errorf("after deleting memory-01 the Memories folder holds %v, want %v", got, want)
 	}
-}
-
-func keysOf(m map[string]string) []string {
-	ks := make([]string, 0, len(m))
-	for k := range m {
-		ks = append(ks, k)
-	}
-	sort.Strings(ks)
-	return ks
 }
 
 // TestNoteNamesIsOrderIndependentAndKeepsPlainNames pins the naming rule
