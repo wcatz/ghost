@@ -1,6 +1,9 @@
 package secret
 
-import "testing"
+import (
+	"slices"
+	"testing"
+)
 
 // The fixtures below are the CBOR tags the Cardano rules discriminate on, as
 // byte-string header + body, so a test reads as a format rather than as a hex
@@ -40,102 +43,39 @@ var (
 )
 
 // TestCardanoCBORTagsAreDiscriminatedOnShape is the Cardano half of the
-// precision contract, and every row is a case where two DIFFERENT values share a
-// field name and a length prefix.
-//
-// The negative corpus for this rule is not prose. It is the Cardano key file
-// formats themselves, and they collide by construction: a signing key and a
-// verification key are the same 32 bytes, an extended signing key and an
-// extended verification key are the same 64 bytes, and the KES signing key
-// carries the two-byte-length tag that a Plutus script also carries. The only
-// things that tell them apart are the CBOR length byte and the `"type"`
-// envelope, so those are what the rule reads.
-//
-// The rows that accept are the ones a block producer or a wallet operator must
-// be able to record. A memory that cannot hold a published verification key
-// cannot be a memory about a Cardano node.
+// precision contract: the Cardano key file formats collide by construction (a
+// signing key and a verification key are the same 32 bytes, an extended pair the
+// same 64, the KES key carries the tag a Plutus script also carries), so the
+// CBOR length byte and the "type" envelope are what the rule reads. A memory
+// that cannot hold a published verification key cannot be about a Cardano node.
+// Which rule reports a refused key is an implementation detail; what must hold
+// is that it is refused.
 func TestCardanoCBORTagsAreDiscriminatedOnShape(t *testing.T) {
-	accepted := []struct {
-		name string
-		text string
-		why  string
-	}{
-		{
-			name: "extended verification key, shelley",
-			text: `{"type":"StakeExtendedVerificationKeyShelley_ed25519_bip32","cborHex":"` + cardano64 + `"}`,
-			why:  "a 32-byte key plus a 32-byte chain code, published by design",
-		},
-		{
-			name: "extended verification key, cc-hot",
-			text: `{"type":"cc-hot-StakeExtendedVerificationKey","cborHex":"` + cardano64 + `"}`,
-			why:  "the same shape under a naming convention, still public",
-		},
-		{
-			name: "kes verification key",
-			text: `{"type":"KESVerificationKey","v":1,"cborHex":"` + cardano32 + `"}`,
-			why:  "what cardano-node writes for a block production key",
-		},
-		{
-			name: "payment verification key",
-			text: `{"type":"PaymentVerificationKey","cborHex":"` + cardano32 + `"}`,
-			why:  "published; refusing it would refuse a wallet memory",
-		},
-		{
-			name: "a bare 32-byte cborHex with no envelope",
-			text: "the cold key cborHex " + cardano32,
-			why: "a 32-byte value is ambiguous with a verification key, so a bare one " +
-				"is only refused when the line also names a signing key",
-		},
-		{
-			name: "a public plutus script",
-			text: `{"type":"PlutusScriptV1","cborHex":"` + plutusScript + `"}`,
-			why:  "two-byte length, and not the KES one",
-		},
+	accepted := map[string]string{
+		"extended verification key, shelley": `{"type":"StakeExtendedVerificationKeyShelley_ed25519_bip32","cborHex":"` + cardano64 + `"}`,
+		"extended verification key, cc-hot":  `{"type":"cc-hot-StakeExtendedVerificationKey","cborHex":"` + cardano64 + `"}`,
+		"kes verification key":               `{"type":"KESVerificationKey","v":1,"cborHex":"` + cardano32 + `"}`,
+		"payment verification key":           `{"type":"PaymentVerificationKey","cborHex":"` + cardano32 + `"}`,
+		"a bare 32-byte cborHex":             "the cold key cborHex " + cardano32,
+		"a public plutus script":             `{"type":"PlutusScriptV1","cborHex":"` + plutusScript + `"}`,
 	}
-	for _, tc := range accepted {
-		t.Run("accept/"+tc.name, func(t *testing.T) {
-			if f, ok := Detect(tc.text); ok {
-				t.Errorf("Detect flagged rule %q on a value that must be storable — %s",
-					f.Rule, tc.why)
+	for name, text := range accepted {
+		t.Run("accept/"+name, func(t *testing.T) {
+			if f, ok := Detect(text); ok {
+				t.Errorf("Detect flagged rule %q on a value that must be storable", f.Rule)
 			}
 		})
 	}
 
-	// Which rule reports a given key is an implementation detail — an
-	// unlabelled run over the long-hex floor is caught by long-hex, and an
-	// envelope carrying both a type and a value is caught by the type rule
-	// first. What has to hold is that each of these is REFUSED, and that the
-	// reason names a Cardano shape rather than a generic blob.
 	refused := []struct {
-		name  string
-		text  string
-		rules []string
+		name, text string
+		rules      []string
 	}{
-		{
-			name:  "kes signing key in a bare cborHex",
-			text:  `{"cborHex":"` + kesKey + `"}`,
-			rules: []string{"cardano-cbor-hex"},
-		},
-		{
-			name:  "128-byte key in a bare cborHex",
-			text:  `{"cborHex":"` + cardano128 + `"}`,
-			rules: []string{"cardano-cbor-hex"},
-		},
-		{
-			name:  "32-byte signing key named by its file",
-			text:  "the cold key is in cold.skey, cborHex " + cardano32,
-			rules: []string{"cardano-cbor-hex"},
-		},
-		{
-			name:  "64-byte signing key under a signing type",
-			text:  `{"type":"StakePoolSigningKey_ed25519","cborHex":"` + cardano64 + `"}`,
-			rules: []string{"cardano-key-file", "cardano-cbor-hex"},
-		},
-		{
-			name:  "64-byte key named in prose as a signing key",
-			text:  "the pool signing key cborHex is " + cardano64,
-			rules: []string{"long-hex", "cardano-cbor-hex"},
-		},
+		{"kes signing key in a bare cborHex", `{"cborHex":"` + kesKey + `"}`, []string{"cardano-cbor-hex"}},
+		{"128-byte key in a bare cborHex", `{"cborHex":"` + cardano128 + `"}`, []string{"cardano-cbor-hex"}},
+		{"32-byte signing key named by its file", "the cold key is in cold.skey, cborHex " + cardano32, []string{"cardano-cbor-hex"}},
+		{"64-byte signing key under a signing type", `{"type":"StakePoolSigningKey_ed25519","cborHex":"` + cardano64 + `"}`, []string{"cardano-key-file", "cardano-cbor-hex"}},
+		{"64-byte key named in prose as a signing key", "the pool signing key cborHex is " + cardano64, []string{"long-hex", "cardano-cbor-hex"}},
 	}
 	for _, tc := range refused {
 		t.Run("refuse/"+tc.name, func(t *testing.T) {
@@ -143,45 +83,31 @@ func TestCardanoCBORTagsAreDiscriminatedOnShape(t *testing.T) {
 			if !ok {
 				t.Fatalf("Detect accepted a key: %q", tc.text)
 			}
-			hit := false
-			for _, want := range tc.rules {
-				if f.Rule == want {
-					hit = true
-				}
-			}
-			if !hit {
+			if !slices.Contains(tc.rules, f.Rule) {
 				t.Errorf("Detect = rule %q (%s), want one of %v", f.Rule, f.Label, tc.rules)
 			}
 		})
 	}
 }
 
-// TestCardanoKeyFileTypeNeedsMaterial is the other half of the same envelope: a
-// `"type"` field NAMES a key, and a sentence about rotating one is a sentence
-// about a key. Only a value next to the name is a key.
-//
-// This was the second false positive the same review batch found, and it is the
-// same error as the Heli=`secretName` cases in the other table: the identifier
-// is not the thing. `"type": "StakePoolSigningKey_ed25519"` in a runbook is
-// documentation, and a block producer writes that documentation constantly.
+// TestCardanoKeyFileTypeNeedsMaterial: a "type" field NAMES a key, and a
+// sentence about rotating one is a sentence about a key. Only a value next to
+// the name is a key.
 func TestCardanoKeyFileTypeNeedsMaterial(t *testing.T) {
-	accepted := []string{
+	for _, text := range []string{
 		`we rotate the "type": "StakePoolSigningKey_ed25519" on the pool host`,
 		`the KES key lives at "type": "KESKey" in the node config`,
 		`"type":"EvolVerificationKey" is what the genesis file carries`,
-	}
-	for _, text := range accepted {
+	} {
 		if f, ok := Detect(text); ok {
 			t.Errorf("Detect flagged rule %q on a type name with no key material: %q", f.Rule, text)
 		}
 	}
-
-	refused := []string{
+	for _, text := range []string{
 		`{"type":"PaymentSigningKeyShelley_ed25519","cborHex":"` + cardano32 + `"}`,
 		`{"type":"KESKey","cborHex":"` + kesKey + `"}`,
 		`{"type":"EvolKey","cborHex":"` + cardano32 + `"}`,
-	}
-	for _, text := range refused {
+	} {
 		if _, ok := Detect(text); !ok {
 			t.Errorf("Detect accepted a key beside its type name: %q", text)
 		}

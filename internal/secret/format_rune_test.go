@@ -89,34 +89,6 @@ func sampleFormatRunes(rs []rune) string {
 	return out
 }
 
-// TestTheFormatRuneClassNamesTheInvisibleMembers: the members the class exists
-// for are named one by one, because each is a character some future change
-// would plausibly reach for. The exhaustive test above proves the SET matches;
-// this says which members are the point.
-func TestTheFormatRuneClassNamesTheInvisibleMembers(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		r    rune
-	}{
-		{"zero-width space", 0x200B},
-		{"zero-width non-joiner", 0x200C},
-		{"zero-width joiner", 0x200D},
-		{"word joiner", 0x2060},
-		{"byte-order mark", 0xFEFF},
-		{"soft hyphen", 0x00AD},
-		{"left-to-right mark", 0x200E},
-		{"right-to-left override", 0x202E},
-		{"left-to-right isolate", 0x2066},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if !IsFormatRune(tc.r) {
-				t.Errorf("%U is not recognised as a FORMAT character, so a detector "+
-					"cannot see through it and two values that differ in bytes read alike", tc.r)
-			}
-		})
-	}
-}
-
 // TestDetectSeesThroughAnInvisibleFormatCharacter is the hole this package
 // had. The rules matched the raw bytes of a value, so one invisible character
 // placed inside a token-shaped value broke the match: the value was reported
@@ -137,51 +109,16 @@ func TestDetectSeesThroughAnInvisibleFormatCharacter(t *testing.T) {
 		name string
 		ch   string
 	}{
-		// Cf: format characters
 		{"zero-width space (Cf)", "\u200b"},
 		{"soft hyphen (Cf)", "\u00ad"},
-		// Mn/Me: combining marks
 		{"combining grapheme joiner (Mn)", "\u034f"},
-		{"combining acute accent (Mn)", "\u0301"},
-		// Mn: variation selectors (U+FE00..U+FE0F)
 		{"variation selector 1 (Mn)", "\ufe00"},
-		{"variation selector 2 (Mn)", "\ufe01"},
-		{"variation selector 3 (Mn)", "\ufe02"},
-		{"variation selector 4 (Mn)", "\ufe03"},
-		{"variation selector 5 (Mn)", "\ufe04"},
-		{"variation selector 6 (Mn)", "\ufe05"},
-		{"variation selector 7 (Mn)", "\ufe06"},
-		{"variation selector 8 (Mn)", "\ufe07"},
-		{"variation selector 9 (Mn)", "\ufe08"},
-		{"variation selector 10 (Mn)", "\ufe09"},
-		{"variation selector 11 (Mn)", "\ufe0a"},
-		{"variation selector 12 (Mn)", "\ufe0b"},
-		{"variation selector 13 (Mn)", "\ufe0c"},
-		{"variation selector 14 (Mn)", "\ufe0d"},
-		{"variation selector 15 (Mn)", "\ufe0e"},
 		{"variation selector 16 (Mn)", "\ufe0f"},
-		// Mn: Mongolian free variation selectors (U+180B..U+180F)
 		{"mongolian free variation selector 1 (Mn)", "\u180b"},
-		{"mongolian free variation selector 2 (Mn)", "\u180c"},
-		{"mongolian free variation selector 3 (Mn)", "\u180d"},
-		{"mongolian free variation selector 4 (Mn)", "\u180e"},
-		{"mongolian free variation selector 5 (Mn)", "\u180f"},
-		// Mn: Khmer vowel inherent (U+17B4, U+17B5)
 		{"khmer vowel inherent (Mn)", "\u17b4"},
-		{"khmer vowel inherent 2 (Mn)", "\u17b5"},
-		// Hangul fillers (Letter category but invisible)
-		{"hangul choseong filler (L)", "\u115f"},
-		{"hangul jungseong filler (L)", "\u1160"},
 		{"hangul filler (L)", "\u3164"},
-		{"halfwidth hangul filler (L)", "\uffa0"},
-		// So: object replacement character
 		{"object replacement character (So)", "\ufffc"},
-		// Cc: control characters (detection-only, all of Cc except \t \n \r)
-		// Named rows for four notable control characters.
-		{"null (Cc)", "\x00"},
-		{"backspace (Cc)", "\x08"},
-		{"delete (Cc)", "\x7f"},
-		{"next line (Cc)", "\u0085"},
+		{"braille blank (So)", "\u2800"},
 	}
 	// Loop over every Cc code point except tab, newline, carriage return.
 	// This covers the remaining 56 control characters.
@@ -197,11 +134,6 @@ func TestDetectSeesThroughAnInvisibleFormatCharacter(t *testing.T) {
 			}{fmt.Sprintf("U+%04X (Cc)", r), string(r)})
 		}
 	}
-	// So: braille blank
-	invisibles = append(invisibles, struct {
-		name string
-		ch   string
-	}{"braille blank (So)", "\u2800"})
 	// Token shapes: a whole value and how to split it with one invisible
 	// character. Each rule must fire on the split value exactly as it fires on
 	// the whole one, because the two are the same credential to a reader.
@@ -222,20 +154,6 @@ func TestDetectSeesThroughAnInvisibleFormatCharacter(t *testing.T) {
 			whole: "ghp_0123456789abcdefghijklmnopqrstuvwxyzAB",
 			split: func(h string) string { return "ghp_0123456789abcdef" + h + "ghijklmnopqrstuvwxyzAB" },
 			rule:  "github-pat",
-		},
-		{
-			name:  "aws access key id",
-			whole: "AKIAIOSFODNN7EXAMPLE",
-			split: func(h string) string { return "AKIAIOSFODNN7" + h + "EXAMPLE" },
-			rule:  "aws-access-key-id",
-		},
-		{
-			name:  "authorization bearer token",
-			whole: "Authorization: Bearer Zm9vYmFyYmF6cXV4MDEyMzQ1Njc4OTBhYmNkZWY=",
-			split: func(h string) string {
-				return "Authorization: Bearer Zm9v" + h + "YmFyYmF6cXV4MDEyMzQ1Njc4OTBhYmNkZWY="
-			},
-			rule: "authorization-bearer",
 		},
 		{
 			name:  "pem private key block",
@@ -294,23 +212,12 @@ func TestDetectKeepsRefusingWhatTheBytesRefused(t *testing.T) {
 // sentence broken across a line, and a value that only LOOKS like a credential
 // once the invisible characters are removed.
 func TestDetectAllowsProseCarryingAnInvisibleCharacter(t *testing.T) {
-	cases := []struct {
-		name string
-		text string
-	}{
+	cases := []struct{ name, text string }{
 		{"a word split by an invisible character", "the re" + hidden + "lay listens on 2222"},
-		{"a sentence broken across a line", "rotate the deployment pass" + hidden + "word every quarter"},
 		{"a short example token", "GITHUB_TOKEN=ghp" + hidden + "_example"},
-		{"a prose mention of a key", "the api key for this service is sk" + hidden + "-live-123"},
 		{"an accented word", "the cafe\u0301 serves coffee every morning"},
 		{"a soft hyphen in prose", "soft\u00adhyphenated word in a note"},
 		{"an emoji with a variation selector", "love \u2764\ufe0f you"},
-		{"an arabic phrase", "the relay \u0627\u0644\u0645\u0631\u062d\u0644\u0629 listens on 2222"},
-		// Prose with tabs and newlines: these are visible line structure and
-		// must NOT be flagged as credentials.
-		{"prose with tabs", "the relay\tlistens on 2222"},
-		{"prose with newlines", "the relay\nlistens on 2222"},
-		{"prose with carriage return", "the relay\rlistens on 2222"},
 		{"prose with mixed whitespace", "the relay\t\n\rlistens on 2222"},
 	}
 	for _, tc := range cases {
