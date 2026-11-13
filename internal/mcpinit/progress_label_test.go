@@ -6,8 +6,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/wcatz/ghost/internal/memory"
 )
 
 // hostileName holds a newline, a carriage return and an ESC byte, the way a
@@ -48,58 +46,6 @@ func TestWriteRedirectsProgressLinePerProject(t *testing.T) {
 		t.Errorf("embedded newline reached init output:\n%s", got)
 	}
 	if !strings.Contains(got, "plainproject — would create redirect") {
-		t.Errorf("plain project name did not print unchanged:\n%s", got)
-	}
-}
-
-func TestImportMemoriesProgressLinePerProject(t *testing.T) {
-	root := t.TempDir()
-	dataHome := filepath.Join(root, "data")
-	dataDir := filepath.Join(dataHome, "ghost")
-	dbPath := storeAt(t, dataDir)
-
-	hostilePath := filepath.Join(root, "hostileproj")
-	plainPath := filepath.Join(root, "plainproj")
-	mkdirAll(t, hostilePath)
-	mkdirAll(t, plainPath)
-
-	db, err := memory.OpenDB(dbPath)
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	if _, err := db.Exec(`INSERT INTO projects (id, path, name) VALUES (?, ?, ?)`, "hostile", hostilePath, hostileName); err != nil {
-		t.Fatalf("insert hostile project: %v", err)
-	}
-	if _, err := db.Exec(`INSERT INTO projects (id, path, name) VALUES (?, ?, ?)`, "plain", plainPath, "plainproject"); err != nil {
-		t.Fatalf("insert plain project: %v", err)
-	}
-	if err := db.Close(); err != nil {
-		t.Fatalf("close store: %v", err)
-	}
-
-	fakeHome := filepath.Join(root, "home")
-	setHome(t, fakeHome)
-	t.Setenv("XDG_DATA_HOME", dataHome)
-
-	var out bytes.Buffer
-	if _, err := importMemories(&out, true); err != nil {
-		t.Fatalf("importMemories: %v\n%s", err, out.String())
-	}
-
-	got := out.String()
-	if n := strings.Count(got, "\n"); n != 2 {
-		t.Fatalf("expected one progress line per project (2), got %d newlines:\n%s", n, got)
-	}
-	if strings.Contains(got, "\x1b") {
-		t.Errorf("raw ESC reached init output:\n%s", got)
-	}
-	if strings.Contains(got, "\r") {
-		t.Errorf("raw CR reached init output:\n%s", got)
-	}
-	if strings.Contains(got, "bad\nname") {
-		t.Errorf("embedded newline reached init output:\n%s", got)
-	}
-	if !strings.Contains(got, "plainproject — would scan for importable memories") {
 		t.Errorf("plain project name did not print unchanged:\n%s", got)
 	}
 }

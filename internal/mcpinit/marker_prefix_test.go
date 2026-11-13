@@ -13,10 +13,7 @@ import (
 // label the value renders to, which is the length the alert's budget spends.
 func labelLength(s string) int { return len(assemble.Label(s)) }
 
-// longestFittingPrefix is the answer markerPrefixWithin is expected to give:
-// the longest prefix that ends on a rune boundary and measures at most room.
-// It is written the slow way — every boundary, one at a time — because it is
-// the brute force the fast search is measured against.
+// longestFittingPrefix is the answer markerPrefixWithin is expected to give.
 func longestFittingPrefix(s string, measure func(string) int, room int) int {
 	best := 0
 	for l := 0; l <= len(s); l++ {
@@ -35,13 +32,6 @@ func longestFittingPrefix(s string, measure func(string) int, room int) int {
 // TestMarkerPrefixWithinFindsTheLongestFit pins the search the alert's three
 // cuts share: it must return the LONGEST prefix that ends on a rune boundary
 // and measures at most the room.
-//
-// The search walks bytes, so a candidate in the middle of a multi-byte
-// character has to be moved to a boundary. Moving it down can land at or
-// below the lower bound, and stopping there loses the whole rest of the
-// value: an emoji at the front puts every byte after it out of reach, so an
-// error led by one dropped to an empty field, and a project led by one was
-// rendered as an ellipsis although several bytes of it fitted.
 func TestMarkerPrefixWithinFindsTheLongestFit(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -73,12 +63,6 @@ func TestMarkerPrefixWithinFindsTheLongestFit(t *testing.T) {
 // renderers treat differently: ASCII, accented letters, CJK, an emoji, a
 // control rune, a backtick, a quote, a bidirectional control and an invalid
 // byte. The seed is fixed, so the sweep is the same every run.
-//
-// The property under test is that the search never returns MORE than the
-// room allows and never returns LESS than the longest fit — the first would
-// put an over-long value on the line, the second would drop value the
-// budget had room for. It runs against all three measures the alert's cuts
-// use, because each of them escapes differently.
 func TestMarkerPrefixWithinMatchesTheLongestFitOverRandomValues(t *testing.T) {
 	pieces := []string{
 		"a", "Z", "9", "-", "_", ".", "/",

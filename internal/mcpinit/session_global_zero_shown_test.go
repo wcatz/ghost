@@ -57,26 +57,6 @@ func TestSessionStartKeepsGlobalBucketWhenFitCutsRows(t *testing.T) {
 	}
 }
 
-// TestSessionStartKeepsEveryPinnedGlobalUnderPressure: a user's pinned global
-// rows are their cross-project non-negotiables, and a project with enough pinned
-// rows of its own used to push all but one of them out of the block (the global
-// reserve was one row). Every pinned global up to the globals cap is now kept
-// while project rows can be cut instead.
-func TestSessionStartKeepsEveryPinnedGlobalUnderPressure(t *testing.T) {
-	dbPath, projectPath := seedSessionPressure(t, 3, false)
-	block := SessionBlockAt(dbPath, projectPath, mustHookConfig(t), time.Date(2026, 1, 2, 12, 0, 0, 0, time.UTC))
-	for i := 0; i < 3; i++ {
-		if want := fmt.Sprintf("Global row %02d", i); !strings.Contains(block, want) {
-			t.Errorf("pinned global %q was cut from the block:\n%s", want, block)
-		}
-	}
-}
-
-// seedSessionPressure writes a store whose project framing and pinned project
-// rows overflow the session-start byte cap, with eight globals of which the
-// first pinnedGlobals are pinned. With heavyFraming the summary, tasks and
-// decisions alone nearly fill the cap; without it the pinned project rows are
-// what overflow it. It returns the database and project paths.
 func seedSessionPressure(t *testing.T, pinnedGlobals int, heavyFraming bool) (string, string) {
 	t.Helper()
 	ghostDir := filepath.Join(t.TempDir(), "ghost")

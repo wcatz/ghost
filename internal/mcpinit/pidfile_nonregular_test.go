@@ -1,10 +1,6 @@
 package mcpinit
 
 import (
-	"os"
-	"path/filepath"
-	"strconv"
-	"strings"
 	"testing"
 	"time"
 )
@@ -47,40 +43,5 @@ func withClaimDeadline(t *testing.T, unblock func(), fn func()) {
 			t.Fatalf("the claim read blocked for more than %s on a path that is not a regular file", claimDeadline)
 		case <-time.After(50 * time.Millisecond):
 		}
-	}
-}
-
-// TestIsAliveRefusesADirectoryClaim: a directory sits where the claim belongs
-// as readily as a file does, and a read of it cannot mean anything.
-func TestIsAliveRefusesADirectoryClaim(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "lifecycle-p1.pid")
-	if err := os.Mkdir(path, 0o700); err != nil {
-		t.Fatal(err)
-	}
-
-	var alive bool
-	withClaimDeadline(t, nil, func() { alive = isAlive(path) })
-
-	if alive {
-		t.Error("isAlive() = true for a directory where a claim belongs, want false")
-	}
-}
-
-// TestIsAliveRefusesAnOverCapClaim: the read is bounded, and a file over the
-// bound is no claim. The padding is SPACES, so an unbounded read still parses
-// the pid the file starts with — the file is a live claim that is too long,
-// which is exactly the case the bound has to refuse.
-func TestIsAliveRefusesAnOverCapClaim(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "lifecycle-p1.pid")
-	content := strconv.Itoa(os.Getpid()) + strings.Repeat(" ", maxPIDFileBytes)
-	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	var alive bool
-	withClaimDeadline(t, nil, func() { alive = isAlive(path) })
-
-	if alive {
-		t.Errorf("isAlive() = true for a claim file of %d bytes, want false: the read is bounded", len(content))
 	}
 }

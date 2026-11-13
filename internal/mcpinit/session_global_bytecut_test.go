@@ -8,10 +8,6 @@ import (
 )
 
 // TestGlobalHeadingKeptWhenEveryGlobalRowIsByteCut is the regression for #1837.
-// When the response-fit pass cuts every global row for size, the global section
-// used to disappear with nothing saying it was cut. The project half keeps its
-// heading when tally.project.ByteCut > 0 even with zero rows shown; the global
-// half must do the same, measured with the same Measure the fit pass uses.
 func TestGlobalHeadingKeptWhenEveryGlobalRowIsByteCut(t *testing.T) {
 	project := "ghost"
 	learned := "A short summary."

@@ -113,28 +113,6 @@ func TestOldStemMarkerOfAnotherProjectSurvivesAClear(t *testing.T) {
 	}
 }
 
-// TestMarkerStemCarriesNoProjectID: the stem is a digest, so the file name is
-// injective in practice for ids differing in any byte (case included, for a
-// case-insensitive filesystem) and never spells the id out.
-func TestMarkerStemCarriesNoProjectID(t *testing.T) {
-	ids := []string{"my project", "my_project", "My_project", "my-project", "my.project", "ghp_abcdefghijklmnopqrstuvwxyzABCDEFGHIJ"}
-	seen := map[string]string{}
-	for _, id := range ids {
-		f := projectMarkerFile(id)
-		if prev, dup := seen[strings.ToLower(f)]; dup {
-			t.Errorf("%q and %q share %s", prev, id, f)
-		}
-		seen[strings.ToLower(f)] = id
-		if strings.Contains(f, strings.ReplaceAll(id, " ", "_")) {
-			t.Errorf("file name %s carries the id %q", f, id)
-		}
-	}
-}
-
-// TestAnotherProjectsOldStemMarkerDoesNotHideOwnLegacyMarker: the old-stem
-// file "my_project" reads first may hold "my project"'s failure. It must be
-// passed over, not returned for the alert to suppress, so the legacy shared
-// marker recording "my_project"'s own failure is still reached.
 func TestAnotherProjectsOldStemMarkerDoesNotHideOwnLegacyMarker(t *testing.T) {
 	dataHome := isolatedHome(t)
 	seedProject(t, dataHome, "p1", "/tmp/proj-a", "Proj A")

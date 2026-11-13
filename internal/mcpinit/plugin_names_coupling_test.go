@@ -88,9 +88,6 @@ func manifestName(t *testing.T, tree string) string {
 }
 
 // assertSameNames fails when the two name sets differ in either direction.
-// Set equality (not subset): a marketplace entry the allow-list misses means
-// `ghost mcp init` double-wires instead of deferring; an allow-list name no
-// entry produces is dead deferral.
 func assertSameNames(t *testing.T, aName string, a map[string]bool, bName string, b map[string]bool) {
 	t.Helper()
 	for n := range a {

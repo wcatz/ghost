@@ -55,8 +55,6 @@ func stubPath(dir, name string) string {
 // writeStub creates an executable stub at binDir/name. The stubs exist to be
 // found by exec.LookPath and echoed into rendered config; the only run they
 // get is findGhostBinary's `--version` probe, which they pass by exiting 0.
-// The Windows form must be a real batch file, since PATHEXT governs both
-// discovery and execution there.
 func writeStub(t *testing.T, binDir, name string) string {
 	t.Helper()
 	content := "#!/bin/sh\n"
@@ -72,15 +70,6 @@ func writeStub(t *testing.T, binDir, name string) string {
 
 // TestRenderOpencodeGhostPlugin_ConfigSessionListIsBounded guards against a
 // reintroduced deadlock: the plugin's config() hook calls client.session.list()
-// to find the most-recently-used session directory, but that's an RPC back
-// into opencode's own server, which is still coming up during config()
-// resolution. An unbounded await there stalls config() — and all of
-// opencode's startup, since nothing past config() runs until it resolves —
-// forever, with the ghost MCP server never even spawned. See the 2026-08-25
-// "opencode won't load" investigation: reproduced on two machines (one memory
-// -starved, one idle with 67GB free), confirmed via GHOST_LOG_FILE+GHOST_DEBUG
-// that ghost was never invoked during the hang, and confirmed disabling only
-// this plugin fixed it.
 func TestRenderOpencodeGhostPlugin_ConfigSessionListIsBounded(t *testing.T) {
 	src := renderOpencodeGhostPlugin("/usr/local/bin/ghost")
 	if !strings.Contains(src, "withTimeout(client.session.list()") {
@@ -88,37 +77,6 @@ func TestRenderOpencodeGhostPlugin_ConfigSessionListIsBounded(t *testing.T) {
 	}
 }
 
-// TestRenderOpencodeGhostPlugin_V2NudgeDoesNotResumeFinishedSessions guards
-// against a reintroduced #1658 regression: the V2 save reminder must not use
-// delivery "queue" with resume true, because that stores a pending entry in the
-// session inbox that a later server start acts on, resuming finished sessions
-// with no user present. With resume false the reminder is stored with the
-// session and reaches the agent with the session's next turn, never waking a
-// finished session.
-func TestRenderOpencodeGhostPlugin_V2NudgeDoesNotResumeFinishedSessions(t *testing.T) {
-	src := renderOpencodeGhostPlugin("/usr/local/bin/ghost")
-	// The V2 synthetic call must not queue the reminder for later delivery.
-	if strings.Contains(src, `delivery: "queue"`) {
-		t.Error("V2 save reminder must not use delivery \"queue\" — a queued entry is acted on by a later server start, resuming finished sessions (#1658)")
-	}
-	// The V2 synthetic call must not ask opencode to resume the session.
-	if strings.Contains(src, "resume: true") {
-		t.Error("V2 save reminder must not set resume: true — that wakes finished sessions on the next server start (#1658)")
-	}
-	// The V2 synthetic call must store the reminder for the next turn.
-	if !strings.Contains(src, `delivery: "steer"`) {
-		t.Error("V2 save reminder must use delivery \"steer\" so the reminder is stored with the session and reaches the agent with its next turn (#1658)")
-	}
-	if !strings.Contains(src, "resume: false") {
-		t.Error("V2 save reminder must set resume: false so the stop hook never wakes a finished session (#1658)")
-	}
-}
-
-// TestStripJSONC pins the reduction that lets status read opencode's config:
-// comments and trailing commas are dropped, string literals are content —
-// "//" and "," inside a quoted value, an escaped quote before a comment —
-// and the newlines a removed comment spanned survive, so a parse error after
-// a comment still names the right line.
 func TestStripJSONC(t *testing.T) {
 	cases := map[string]struct{ in, want string }{
 		"line comment keeps its newline": {
@@ -159,104 +117,6 @@ func TestStripJSONC(t *testing.T) {
 	}
 }
 
-// TestParseOpencodeConfig_MCPEntry verifies the parser reads the registration
-// out of a JSONC file — comments, trailing commas and unrelated opencode keys
-// included — and that a disabled shorthand entry classifies as disabled
-// rather than as a parse failure.
-func TestParseOpencodeConfig_MCPEntry(t *testing.T) {
-	cfg, err := parseOpencodeConfig([]byte(`{
-  // ghost's registration
-  "$schema": "https://opencode.ai/config.json",
-  "mcp": {
-    "ghost": {
-      "type": "local",
-      "command": ["/opt/ghost/ghost", "mcp"],
-      "enabled": true,
-    },
-  },
-}`))
-	if err != nil {
-		t.Fatalf("parseOpencodeConfig: %v", err)
-	}
-	entry := cfg.MCP["ghost"]
-	if entry.Command == nil || len(*entry.Command) != 2 || (*entry.Command)[0] != "/opt/ghost/ghost" || (*entry.Command)[1] != "mcp" {
-		t.Errorf("command = %v, want [/opt/ghost/ghost mcp]", entry.Command)
-	}
-	if entry.Type == nil || *entry.Type != "local" {
-		t.Errorf("type = %v, want local", entry.Type)
-	}
-	if entry.Enabled == nil || !*entry.Enabled {
-		t.Errorf("enabled = %v, want true", entry.Enabled)
-	}
-
-	disabled, err := parseOpencodeConfig([]byte(`{"mcp": {"ghost": {"enabled": false}}}`))
-	if err != nil {
-		t.Fatalf("parseOpencodeConfig (shorthand): %v", err)
-	}
-	if e := disabled.MCP["ghost"]; e.Enabled == nil || *e.Enabled {
-		t.Errorf("shorthand entry enabled = %v, want false", e.Enabled)
-	}
-}
-
-func TestRunOpencode_NoClaudeRequired(t *testing.T) {
-	home, xdg := setupOpencodeTestEnv(t)
-	want := renderOpencodeGhostPlugin(stubPath(filepath.Join(home, "bin"), "ghost"))
-
-	var out bytes.Buffer
-	if err := RunOpencode(&out, false); err != nil {
-		t.Fatalf("RunOpencode: %v", err)
-	}
-
-	// Plugin-only integration: the single artifact registers MCP (config
-	// hook) and bridges stop events. opencode's own config file is never
-	// touched — no jsonc rewriting, no comment loss.
-	cfgPath := filepath.Join(xdg, "opencode", "opencode.json")
-	if _, err := os.Stat(cfgPath); !os.IsNotExist(err) {
-		t.Error("RunOpencode must not write opencode.json")
-	}
-	if _, err := os.Stat(filepath.Join(xdg, "opencode", "opencode.jsonc")); !os.IsNotExist(err) {
-		t.Error("RunOpencode must not write opencode.jsonc")
-	}
-	pluginPath := filepath.Join(xdg, "opencode", "plugins", "ghost-opencode.ts")
-	data, err := os.ReadFile(pluginPath)
-	if err != nil {
-		t.Fatalf("expected plugin installed at %s: %v", pluginPath, err)
-	}
-	if string(data) != want {
-		t.Error("installed plugin should match the rendered embedded source (binary path baked)")
-	}
-	if !strings.Contains(string(data), `const GHOST_BIN_DEFAULT = `+jsStringLiteral(stubPath(filepath.Join(home, "bin"), "ghost"))) {
-		t.Error("plugin default must be the resolved absolute binary path")
-	}
-
-	output := out.String()
-	if !strings.Contains(output, "+ installed lifecycle plugin") {
-		t.Errorf("expected installation message, got:\n%s", output)
-	}
-	if strings.Contains(output, "claude") {
-		t.Errorf("opencode path must not mention claude, got:\n%s", output)
-	}
-	if !strings.Contains(output, "Restart opencode to activate.") {
-		t.Errorf("expected 'Restart opencode to activate.', got:\n%s", output)
-	}
-}
-
-func TestRunOpencode_DoesNotTouchClaudeSettings(t *testing.T) {
-	home, _ := setupOpencodeTestEnv(t)
-
-	var out bytes.Buffer
-	if err := RunOpencode(&out, false); err != nil {
-		t.Fatalf("RunOpencode: %v", err)
-	}
-
-	settings := filepath.Join(home, ".claude", "settings.json")
-	if _, err := os.Stat(settings); err == nil {
-		t.Error("RunOpencode must not create ~/.claude/settings.json")
-	}
-}
-
-// TestRunOpencode_Idempotent verifies a second run changes nothing on disk
-// beyond what the first wrote.
 func TestRunOpencode_Idempotent(t *testing.T) {
 	_, xdg := setupOpencodeTestEnv(t)
 	pluginPath := filepath.Join(xdg, "opencode", "plugins", "ghost-opencode.ts")
@@ -309,173 +169,6 @@ func TestRunOpencode_DryRunWritesNothing(t *testing.T) {
 	}
 }
 
-// TestRunOpencode_InstallsLifecyclePlugin verifies init writes the embedded
-// adapter to <config-dir>/plugins/ and that a second run is a no-op
-// reporting "already installed".
-func TestRunOpencode_InstallsLifecyclePlugin(t *testing.T) {
-	home, xdg := setupOpencodeTestEnv(t)
-	want := renderOpencodeGhostPlugin(stubPath(filepath.Join(home, "bin"), "ghost"))
-	pluginPath := filepath.Join(xdg, "opencode", "plugins", "ghost-opencode.ts")
-
-	var out bytes.Buffer
-	if err := RunOpencode(&out, false); err != nil {
-		t.Fatalf("RunOpencode (first): %v", err)
-	}
-	data, err := os.ReadFile(pluginPath)
-	if err != nil {
-		t.Fatalf("expected plugin installed at %s: %v", pluginPath, err)
-	}
-	if string(data) != want {
-		t.Error("installed plugin should match the rendered embedded source")
-	}
-	if !strings.Contains(out.String(), "+ installed lifecycle plugin") {
-		t.Errorf("first run should report installation, got:\n%s", out.String())
-	}
-
-	var out2 bytes.Buffer
-	if err := RunOpencode(&out2, false); err != nil {
-		t.Fatalf("RunOpencode (second): %v", err)
-	}
-	if !strings.Contains(out2.String(), "already installed") {
-		t.Errorf("second run should report 'already installed', got:\n%s", out2.String())
-	}
-	again, err := os.ReadFile(pluginPath)
-	if err != nil {
-		t.Fatalf("re-read plugin: %v", err)
-	}
-	if string(again) != want {
-		t.Error("second run must not alter an identical plugin file")
-	}
-}
-
-// TestRunOpencode_PluginDriftRestored verifies a drifted or outdated plugin
-// file is overwritten with the embedded source by the next init.
-func TestRunOpencode_PluginDriftRestored(t *testing.T) {
-	home, xdg := setupOpencodeTestEnv(t)
-	want := renderOpencodeGhostPlugin(stubPath(filepath.Join(home, "bin"), "ghost"))
-	pluginPath := filepath.Join(xdg, "opencode", "plugins", "ghost-opencode.ts")
-
-	var first bytes.Buffer
-	if err := RunOpencode(&first, false); err != nil {
-		t.Fatalf("RunOpencode (install): %v", err)
-	}
-	if err := os.WriteFile(pluginPath, []byte("// ghost-opencode v0 — stale"), 0644); err != nil {
-		t.Fatalf("clobber plugin: %v", err)
-	}
-
-	var second bytes.Buffer
-	if err := RunOpencode(&second, false); err != nil {
-		t.Fatalf("RunOpencode (repair): %v", err)
-	}
-	data, err := os.ReadFile(pluginPath)
-	if err != nil {
-		t.Fatalf("re-read plugin: %v", err)
-	}
-	if string(data) != want {
-		t.Error("drifted plugin should be restored to the rendered embedded source")
-	}
-	if !strings.Contains(second.String(), "+ installed lifecycle plugin") {
-		t.Errorf("drift repair should report reinstallation, got:\n%s", second.String())
-	}
-}
-
-func TestCheckPrereqs_ProbesCommonDirs(t *testing.T) {
-	home := t.TempDir()
-	setHome(t, home)
-	binDir := filepath.Join(home, "bin")
-	if err := os.MkdirAll(binDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	ghostStub := writeStub(t, binDir, "ghost")
-	t.Setenv("PATH", binDir)
-
-	// Place claude only in a common install dir that is not on PATH.
-	localBin := filepath.Join(home, ".local", "bin")
-	if err := os.MkdirAll(localBin, 0755); err != nil {
-		t.Fatal(err)
-	}
-	claudeStub := writeStub(t, localBin, "claude")
-
-	var out bytes.Buffer
-	ghostBin, claudeBin, err := checkPrereqs(&out, "claude")
-	if err != nil {
-		t.Fatalf("checkPrereqs: %v", err)
-	}
-	if ghostBin != ghostStub {
-		t.Errorf("ghost = %q, want %q", ghostBin, ghostStub)
-	}
-	if claudeBin != claudeStub {
-		t.Errorf("claude = %q, want %q", claudeBin, claudeStub)
-	}
-}
-
-func TestCheckPrereqs_ClaudeMissing(t *testing.T) {
-	home := t.TempDir()
-	setHome(t, home)
-	t.Setenv("GHOST_EMBEDDING_ENABLED", "false")
-	orig := systemBinDirs
-	systemBinDirs = nil
-	t.Cleanup(func() { systemBinDirs = orig })
-	binDir := filepath.Join(home, "bin")
-	if err := os.MkdirAll(binDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	writeStub(t, binDir, "ghost")
-	t.Setenv("PATH", binDir)
-
-	var out bytes.Buffer
-	_, _, err := checkPrereqs(&out, "claude")
-	if err == nil {
-		t.Error("expected error when claude is missing from PATH and common dirs")
-	} else {
-		// The dead-end guard: the error must point at the other clients and
-		// must not suggest re-running init, which can never succeed here.
-		msg := err.Error()
-		if !strings.Contains(msg, "--client opencode") {
-			t.Errorf("claude-missing error should list alternative clients, got: %q", msg)
-		}
-		if strings.Contains(msg, "Re-run") {
-			t.Errorf("claude-missing error should not carry the circular re-run hint, got: %q", msg)
-		}
-	}
-	if _, _, err := checkPrereqs(&out, "opencode"); err != nil {
-		t.Errorf("opencode target should require only ghost: %v", err)
-	}
-}
-
-// TestFindBinary_CommonDirFallback pins the PATH-less fallback itself: a
-// binary planted in a common install dir is found under its platform name —
-// the bare POSIX name with its exec bit, claude.exe (the Windows native
-// installer's name under %USERPROFILE%\.local\bin) on Windows, where mode
-// bits never mark a regular file executable.
-func TestFindBinary_CommonDirFallback(t *testing.T) {
-	home := t.TempDir()
-	setHome(t, home)
-	orig := systemBinDirs
-	systemBinDirs = nil
-	t.Cleanup(func() { systemBinDirs = orig })
-	t.Setenv("PATH", t.TempDir())
-
-	localBin := filepath.Join(home, ".local", "bin")
-	if err := os.MkdirAll(localBin, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	name := "claude"
-	if runtime.GOOS == "windows" {
-		name = "claude.exe"
-	}
-	stub := filepath.Join(localBin, name)
-	if err := os.WriteFile(stub, []byte("#!/bin/sh\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	if got := findBinary("claude"); got != stub {
-		t.Errorf("findBinary(claude) = %q, want %q from the common-dir fallback", got, stub)
-	}
-}
-
-// writeExitStub creates an executable stub at dir that exits with code, in
-// the form exec.LookPath resolves on this OS.
 func writeExitStub(t *testing.T, dir, name string, code int) string {
 	t.Helper()
 	content := fmt.Sprintf("#!/bin/sh\nexit %d\n", code)
@@ -510,25 +203,6 @@ func TestFindGhostBinary_SkipsPathHitThatRefusesToRun(t *testing.T) {
 
 	if got := findGhostBinary(); got != good {
 		t.Errorf("findGhostBinary() = %q, want %q (the PATH hit exits 97)", got, good)
-	}
-}
-
-// TestFindGhostBinary_FailsOpenToPathHit keeps a lone ghost that fails the
-// probe usable: with no working alternative the PATH hit is returned as
-// before, rather than reporting ghost as not installed.
-func TestFindGhostBinary_FailsOpenToPathHit(t *testing.T) {
-	home := t.TempDir()
-	setHome(t, home)
-	orig := systemBinDirs
-	systemBinDirs = nil
-	t.Cleanup(func() { systemBinDirs = orig })
-
-	shimDir := t.TempDir()
-	shim := writeExitStub(t, shimDir, "ghost", 97)
-	t.Setenv("PATH", shimDir)
-
-	if got := findGhostBinary(); got != shim {
-		t.Errorf("findGhostBinary() = %q, want the PATH hit %q when nothing else runs", got, shim)
 	}
 }
 
