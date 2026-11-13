@@ -12,13 +12,6 @@ import (
 	"github.com/wcatz/ghost/internal/memory"
 )
 
-// The project segment of ghost://project/{project_id}/... is ONE RFC 6570
-// simple-string value: percent-encoded by the client, decoded exactly once by
-// the server. These tests pin that the segment is split out of the escaped
-// path (so an encoded '/' stays inside the id), that it is not decoded a
-// second time, and that the URI a write notifies is the same encoded form a
-// client reads and subscribes to.
-
 func TestParseProjectIDFromURI_DecodesSegmentOnce(t *testing.T) {
 	tests := []struct {
 		name string
@@ -32,7 +25,6 @@ func TestParseProjectIDFromURI_DecodesSegmentOnce(t *testing.T) {
 		{"double-encoded slash decodes once", "ghost://project/team%252Fapi/context", "team%2Fapi"},
 		{"encoded slash beside a sub-delim", "ghost://project/a%2Fb%3Ac%40d/context", "a/b:c@d"},
 		{"utf-8 id", "ghost://project/caf%C3%A9/context", "café"},
-		// Controls: an id that needs no encoding reads exactly as before.
 		{"plain name", "ghost://project/ghost/context", "ghost"},
 		{"hash id", "ghost://project/6bdc098af7f5/tasks", "6bdc098af7f5"},
 		{"global bucket", "ghost://project/_global/context", "_global"},
@@ -73,8 +65,6 @@ func TestProjectResourceURI_RoundTrips(t *testing.T) {
 
 func TestProjectResourceURI_EncodesLikeTheTemplate(t *testing.T) {
 	tests := []struct{ id, want string }{
-		// Controls: an unreserved-only id is its own encoding, so the URIs
-		// clients already use for names and hash ids do not move.
 		{"myproj", "ghost://project/myproj/context"},
 		{"6bdc098af7f5", "ghost://project/6bdc098af7f5/context"},
 		{"_global", "ghost://project/_global/context"},
@@ -93,9 +83,6 @@ func TestProjectResourceURI_EncodesLikeTheTemplate(t *testing.T) {
 	}
 }
 
-// encodedURIFixture registers projects whose ids need encoding, beside a
-// project ("team") whose id is the prefix of one of them, and connects a
-// real client so reads go through the SDK's template matching.
 type encodedURIFixture struct {
 	srv     *Server
 	session *mcp.ClientSession
@@ -114,10 +101,7 @@ func newEncodedURIFixture(t *testing.T) *encodedURIFixture {
 		{"team/api", "/srv/team/api", "team-api"},
 		{"/srv/u/repo", "/srv/u/repo", "repo"},
 		{"my proj", "/srv/my proj", "my proj"},
-		// Sub-delims the template rejects raw, which url.PathEscape would
-		// leave unencoded.
 		{"a:b@c+d", "/srv/a:b@c+d", "subdelims"},
-		// An id and a name that BOTH need encoding, for the two-alias rule.
 		{"/srv/u/my repo", "/srv/u/my repo", "my repo"},
 	} {
 		if err := store.EnsureProject(ctx, p.id, p.path, p.name); err != nil {
@@ -175,9 +159,6 @@ func TestProjectResources_EncodedIDReadsTheNamedProject(t *testing.T) {
 		})
 	}
 
-	// The literal URIs from the report, spelled out rather than built, so the
-	// read is tied to what a template-expanding client sends. They run first
-	// so the leak, not an earlier failure, is what a regression reports.
 	if text := f.read(t, "ghost://project/team%2Fapi/context"); strings.Contains(text, marker["team"]) || !strings.Contains(text, marker["team/api"]) {
 		t.Errorf("team%%2Fapi/context did not read team/api alone:\n%s", text)
 	}
@@ -201,8 +182,6 @@ func TestProjectResources_EncodedIDReadsTheNamedProject(t *testing.T) {
 	}
 }
 
-// awaitOnly asserts want arrives and that nothing else does within the quiet
-// window after it, so a notification for the prefix project would fail.
 func awaitOnly(t *testing.T, updated <-chan string, want string) {
 	t.Helper()
 	awaitNotification(t, updated, want)
@@ -226,8 +205,6 @@ func TestResourceSubscription_EncodedIDNotifiesAReadableURI(t *testing.T) {
 		{"/srv/u/repo", "ghost://project/%2Fsrv%2Fu%2Frepo/context", "notifyrepomarker"},
 		{"my proj", "ghost://project/my%20proj/context", "notifyspacemarker"},
 	}
-	// The prefix project's subscription is the negative control: a write to
-	// team/api must never be reported as a change to team.
 	const prefixURI = "ghost://project/team/context"
 	subs := []string{prefixURI}
 	for _, c := range cases {
@@ -245,16 +222,12 @@ func TestResourceSubscription_EncodedIDNotifiesAReadableURI(t *testing.T) {
 			"project_id": c.id, "content": "memory " + c.marker, "category": "fact",
 		})
 		awaitOnly(t, f.updated, c.encoded)
-		// The delivered string is what a client re-reads on update, so it
-		// must name the project that was written.
 		if text := f.read(t, c.encoded); !strings.Contains(text, c.marker) {
 			t.Errorf("re-read of notified %q does not show the write:\n%s", c.encoded, text)
 		}
 	}
 }
 
-// A write notifies under both aliases, and each alias is encoded on its own:
-// the id and the name here both carry characters the template rejects raw.
 func TestResourceSubscription_EncodedNameAndIDBothNotified(t *testing.T) {
 	f := newEncodedURIFixture(t)
 	ctx := context.Background()
@@ -284,7 +257,6 @@ func TestResourceSubscription_ProjectDeleteNotifiesEncodedURI(t *testing.T) {
 	f := newEncodedURIFixture(t)
 	ctx := context.Background()
 
-	// The delete notifies under both aliases: the encoded id and the name.
 	const idURI = "ghost://project/%2Fsrv%2Fu%2Frepo/context"
 	const nameURI = "ghost://project/repo/context"
 	for _, uri := range []string{idURI, nameURI} {
@@ -317,8 +289,6 @@ func TestResourceSubscription_ProjectDeleteNotifiesEncodedURI(t *testing.T) {
 	}
 }
 
-// The global bucket keeps its literal URI: encoding must not move the one
-// project every session reads.
 func TestProjectResourceURI_GlobalIsUnchanged(t *testing.T) {
 	if got := projectResourceURI(memory.GlobalProjectID, "context"); got != "ghost://project/_global/context" {
 		t.Errorf("global context URI = %q", got)

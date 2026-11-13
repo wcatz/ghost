@@ -12,21 +12,12 @@ import (
 )
 
 // TestMemorySaveReportsRefusedNameBinding is the product half of #613: the save
-// still succeeds — refusing to route it into a project the evidence does not
-// support is right, and losing the memory is not better — but the result says
-// which project kept the name and where the memory went, because "opened a new
-// project" and "lost the context of the project you just saved into" are
-// otherwise the same sentence to the agent reading it.
 func TestMemorySaveReportsRefusedNameBinding(t *testing.T) {
-	// main() wires this for the real binary; tests build stores directly.
 	memory.SetDetectRemote(repo.DetectRemote)
 	t.Cleanup(func() { memory.SetDetectRemote(nil) })
 
 	const origin = "https://github.com/wcatz/infra.git"
 	checkout := repoDir(t, "infra", origin)
-	// A project of the same name, at a checkout of its own, claiming no
-	// remote: the state every project upgraded from a v9 database is in, and
-	// the one an unrelated clone named after it used to take over.
 	recorded := filepath.Join(t.TempDir(), "git", "infra")
 	if err := os.MkdirAll(recorded, 0o755); err != nil {
 		t.Fatalf("create %s: %v", recorded, err)
@@ -52,9 +43,6 @@ func TestMemorySaveReportsRefusedNameBinding(t *testing.T) {
 		}
 	}
 
-	// The save is in the project it was routed to, and not in the one it could
-	// not claim: a notice that also moved the memory would trade a visible
-	// refusal for a silent misroute.
 	for _, projectID := range []string{recorded, "real-infra"} {
 		if count, err := srv.store.CountMemories(ctx, projectID); err != nil {
 			t.Fatalf("CountMemories(%q): %v", projectID, err)
@@ -71,20 +59,6 @@ func TestMemorySaveReportsRefusedNameBinding(t *testing.T) {
 
 // TestDecisionRecordReportsRefusedNameBinding is the product half of #613 on the
 // decision path, and it is the test #956 turned around.
-//
-// It used to assert the opposite: the tool refused a project_id it could not
-// resolve, so the id it handed on was always one `ResolveProject` had answered
-// with, and `ensureProjectFor` returned that on the exact-id lookup before it
-// could derive a repository — no refusal was reachable. Routing the decision
-// through `ensureProjectFor` makes the repository route reachable, so a decision
-// recorded from an unrelated clone of a same-named repository is now written to a
-// project of its own while `real-infra` keeps the name.
-//
-// So the contract is the save's: the decision is still recorded — refusing to
-// route it would lose the decision to protect an address — and the result names
-// what kept the name and where the decision went, because "Decision recorded" and
-// "you just stopped seeing the context of the project you named" are otherwise
-// the same sentence to the agent reading it.
 func TestDecisionRecordReportsRefusedNameBinding(t *testing.T) {
 	memory.SetDetectRemote(repo.DetectRemote)
 	t.Cleanup(func() { memory.SetDetectRemote(nil) })
@@ -117,9 +91,6 @@ func TestDecisionRecordReportsRefusedNameBinding(t *testing.T) {
 		}
 	}
 
-	// The decision and its companion memory are in the project it was routed to,
-	// and not in the one that could not claim it: a notice that also moved the
-	// rows would trade a visible refusal for a silent misroute.
 	for _, projectID := range []string{recorded, "real-infra"} {
 		if count, err := srv.store.CountMemories(ctx, projectID); err != nil {
 			t.Fatalf("CountMemories(%q): %v", projectID, err)
@@ -140,8 +111,6 @@ func TestDecisionRecordReportsRefusedNameBinding(t *testing.T) {
 		t.Errorf("the routed project holds %d decision(s), want the one just recorded", len(decisions))
 	}
 
-	// A decision under the project that does resolve still works, and says
-	// nothing about a refusal that did not happen.
 	res = callTool(t, session, "ghost_decision_record", map[string]any{
 		"project_id": "real-infra",
 		"title":      "Keep the vendored clone out",
@@ -156,12 +125,7 @@ func TestDecisionRecordReportsRefusedNameBinding(t *testing.T) {
 	}
 }
 
-// TestMemorySaveWithoutRefusalReportsNothing pins the quiet side of the same
-// contract: an ordinary save under a name, and an ordinary second save that
-// repository identity joins to the project it already had, must read exactly
-// as they did before. A notice on every result is a notice nobody reads.
 func TestMemorySaveWithoutRefusalReportsNothing(t *testing.T) {
-	// main() wires this for the real binary; tests build stores directly.
 	memory.SetDetectRemote(repo.DetectRemote)
 	t.Cleanup(func() { memory.SetDetectRemote(nil) })
 
@@ -169,8 +133,6 @@ func TestMemorySaveWithoutRefusalReportsNothing(t *testing.T) {
 	first := repoDir(t, "infra", origin)
 	second := repoDir(t, "infra-elsewhere", origin)
 	srv, session := newCapSession(t)
-	// The server's own directory is the test binary's, a real checkout of another
-	// repository; this test is about an unbound server, so it has none.
 	srv.workingDir = ""
 
 	for i, projectID := range []string{"infra", first, second} {

@@ -16,7 +16,6 @@ import (
 func seedPinned(t *testing.T, s *memory.Store, project string, n int, contentLen int, importance float32) []string {
 	t.Helper()
 	ctx := context.Background()
-	// Ensure project exists for _global tests (testStore only creates abc123)
 	_ = s.EnsureProject(ctx, project, "/tmp/"+project, project)
 	ids := make([]string, 0, n)
 	for i := 0; i < n; i++ {
@@ -42,7 +41,6 @@ func TestPinOverflowAtCapReportsNone(t *testing.T) {
 	session := connectedClient(t, srv)
 	ctx := context.Background()
 
-	// Fill to cap-1, then pin via tool to reach exactly cap -> should report none
 	for i := 0; i < memory.PinnedProjectCap-1; i++ {
 		id, _ := store.Create(ctx, "abc123", memory.Memory{Category: "fact", Content: fmt.Sprintf("pin %03d", i), Source: "manual", Importance: 0.7})
 		_ = store.TogglePinInProject(ctx, "abc123", id, true)
@@ -64,12 +62,10 @@ func TestPinOverflowCapPlusOneReportsOverflow(t *testing.T) {
 	srv := New(store, slog.New(slog.NewTextHandler(io.Discard, nil)), "test")
 	session := connectedClient(t, srv)
 	ctx := context.Background()
-	// Create cap pinned
 	for i := 0; i < memory.PinnedProjectCap; i++ {
 		id, _ := store.Create(ctx, "abc123", memory.Memory{Category: "fact", Content: fmt.Sprintf("c %03d", i), Source: "manual", Importance: 0.7})
 		_ = store.TogglePinInProject(ctx, "abc123", id, true)
 	}
-	// Create one more and pin via tool
 	id, _ := store.Create(ctx, "abc123", memory.Memory{Category: "fact", Content: "overflow", Source: "manual", Importance: 0.1})
 	res := callTool(t, session, "ghost_memory_pin", map[string]any{"project_id": "test-project", "memory_id": id, "pinned": true})
 	txt := pinnedToolText(t, res)
@@ -85,11 +81,9 @@ func TestPinOverflowCapPlusOneReportsOverflow(t *testing.T) {
 	if !strings.Contains(txt, fmt.Sprintf("cap %d", memory.PinnedProjectCap)) {
 		t.Fatalf("pin overflow should name cap %d, got %q", memory.PinnedProjectCap, txt)
 	}
-	// The notice must name exactly one id after the risk phrase
 	if !strings.Contains(txt, "most at risk of being cut") {
 		t.Fatalf("pin overflow should name risk phrase, got %q", txt)
 	}
-	// Find a quoted 32-hex id
 	re := regexp.MustCompile(`"([0-9a-fA-F]{32})"`)
 	matches := re.FindAllStringSubmatch(txt, -1)
 	if len(matches) != 1 {
@@ -101,7 +95,6 @@ func TestPinOverflowCapPlusOneReportsOverflow(t *testing.T) {
 	if strings.Contains(txt, "bytes vs") {
 		t.Fatalf("pin overflow should not name bytes vs share, got %q", txt)
 	}
-	// Also test save with pin=true
 	store2 := testStore(t)
 	srv2 := New(store2, slog.New(slog.NewTextHandler(io.Discard, nil)), "test")
 	session2 := connectedClient(t, srv2)
@@ -116,7 +109,6 @@ func TestPinOverflowCapPlusOneReportsOverflow(t *testing.T) {
 	if !strings.Contains(txt2, "lowest-ranked by importance") || !strings.Contains(txt2, "most at risk of being cut") {
 		t.Fatalf("save pin overflow should report risk with new wording, got %q", txt2)
 	}
-	// Health lists the same project
 	report := pinnedHealthText(t, srv)
 	if !strings.Contains(report, "exceed the session-start bucket") {
 		t.Fatalf("health should list overflow, got:\n%s", report)
@@ -124,7 +116,6 @@ func TestPinOverflowCapPlusOneReportsOverflow(t *testing.T) {
 	if !strings.Contains(report, fmt.Sprintf("cap %d", memory.PinnedProjectCap)) {
 		t.Fatalf("health should name cap, got:\n%s", report)
 	}
-	// Check exact cap reports none for health
 	store3 := testStore(t)
 	srv3 := New(store3, slog.New(slog.NewTextHandler(io.Discard, nil)), "test")
 	for i := 0; i < memory.PinnedProjectCap; i++ {
@@ -134,7 +125,6 @@ func TestPinOverflowCapPlusOneReportsOverflow(t *testing.T) {
 	if strings.Contains(report3, "exceed the session-start bucket") {
 		t.Fatalf("health at exact cap should report none, got:\n%s", report3)
 	}
-	// _global at cap
 	store4 := testStore(t)
 	srv4 := New(store4, slog.New(slog.NewTextHandler(io.Discard, nil)), "test")
 	for i := 0; i < memory.PinnedGlobalCap; i++ {
@@ -160,13 +150,11 @@ func TestPinByteOverflowWithFewLongPins(t *testing.T) {
 	srv := New(store, slog.New(slog.NewTextHandler(io.Discard, nil)), "test")
 	session := connectedClient(t, srv)
 	ctx := context.Background()
-	// 3 long pins each 1500 bytes under cap; byte-only overflow not reported
 	ids := seedPinned(t, store, "abc123", 3, 1500, 0.7)
 	report := pinnedHealthText(t, srv)
 	if strings.Contains(report, "exceed the session-start bucket") {
 		t.Fatalf("byte-only overflow should not report, got:\n%s", report)
 	}
-	// Pin result for a new long pin under cap
 	id, _ := store.Create(ctx, "abc123", memory.Memory{Category: "fact", Content: strings.Repeat("y", 1500), Source: "manual", Importance: 0.1})
 	res := callTool(t, session, "ghost_memory_pin", map[string]any{"project_id": "test-project", "memory_id": id, "pinned": true})
 	txt := pinnedToolText(t, res)

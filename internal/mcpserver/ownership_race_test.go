@@ -14,11 +14,6 @@ import (
 	"github.com/wcatz/ghost/internal/provider"
 )
 
-// promoteAfterReadStore stands in for a second session that promotes a memory
-// to _global in the gap between a handler's ownership read and its write. It
-// embeds *memory.Store rather than provider.MemoryStore so the history methods
-// the delete handler asserts for are still present: the purge branch under test
-// is the one a real store takes.
 type promoteAfterReadStore struct {
 	*memory.Store
 	armed  atomic.Bool
@@ -35,8 +30,6 @@ func (s *promoteAfterReadStore) GetByIDs(ctx context.Context, ids []string) ([]m
 	return mems, err
 }
 
-// notHistoryCapableRace is the same interleave against a store without the
-// history methods, so the handler takes the DeleteWithOptions fallback.
 type notHistoryCapableRace struct {
 	provider.MemoryStore
 	inner *promoteAfterReadStore
@@ -84,11 +77,6 @@ func rowOf(t *testing.T, store *memory.Store, id string) (memory.Memory, bool) {
 	return mems[0], true
 }
 
-// TestMemoryDeleteRefusesARowPromotedAfterTheOwnershipRead: the delete's
-// ownership decision belongs inside the delete's transaction. A memory another
-// session promoted to _global between the handler's read and the write is no
-// longer the project's to delete — or to purge — and the call says so and
-// writes nothing: the row stays, global, and its history is untouched.
 func TestMemoryDeleteRefusesARowPromotedAfterTheOwnershipRead(t *testing.T) {
 	cases := []struct {
 		name           string
@@ -130,8 +118,6 @@ func TestMemoryDeleteRefusesARowPromotedAfterTheOwnershipRead(t *testing.T) {
 	}
 }
 
-// TestMemoryPinRefusesARowPromotedAfterTheOwnershipRead is the pin half of the
-// same interleave: the row stays global and unpinned.
 func TestMemoryPinRefusesARowPromotedAfterTheOwnershipRead(t *testing.T) {
 	store, wrapped, session, id := newOwnershipRaceSession(t, true)
 	wrapped.armed.Store(true)
@@ -156,8 +142,6 @@ func TestMemoryPinRefusesARowPromotedAfterTheOwnershipRead(t *testing.T) {
 	}
 }
 
-// TestMemoryDeleteAndPinStillWorkInTheirOwnProject: the scoped writes refuse a
-// row that moved, and only that — the ordinary same-project call succeeds.
 func TestMemoryDeleteAndPinStillWorkInTheirOwnProject(t *testing.T) {
 	t.Run("pin and unpin", func(t *testing.T) {
 		store, _, session, id := newOwnershipRaceSession(t, true)
