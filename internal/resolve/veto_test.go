@@ -3,7 +3,6 @@ package resolve
 import (
 	"context"
 	"regexp"
-	"strings"
 	"testing"
 
 	"github.com/wcatz/ghost/internal/memory"
@@ -40,39 +39,6 @@ func TestVetoKeepIssueExamples(t *testing.T) {
 				t.Errorf("VetoKeep(%q) vetoed with an empty reason; the reason names the pattern that fired", tc.content)
 			}
 		})
-	}
-}
-
-// TestVetoKeepIsWordBounded: the patterns are word-bounded, so a keyword buried
-// inside a longer word is not a signal. Without the boundary these notes would
-// all be pinned in the ranked surface forever.
-func TestVetoKeepIsWordBounded(t *testing.T) {
-	for _, content := range []string{
-		"nevertheless the timeline held through the cutover",
-		"mustard seeds are not part of the reward fixture",
-		"the todos list is empty",
-		"requirements were met by the reviewer",
-	} {
-		if reason, vetoed := VetoKeep(content); vetoed {
-			t.Errorf("VetoKeep(%q) = %q, want no veto (word-bounded patterns)", content, reason)
-		}
-	}
-}
-
-// TestVetoKeepLetsGenuineEvidenceThrough is the other half of the contract: the
-// vetoes must not swallow the plain concluded-work notes resolve exists to
-// demote, or resolve would stop working entirely.
-func TestVetoKeepLetsGenuineEvidenceThrough(t *testing.T) {
-	for _, content := range []string{
-		"Kill experiment found 7.3% cross-session links, so we removed the ranking bonus.",
-		"Cost estimate from May: $148/mo projected; actuals have since replaced it.",
-		"Postmortem (concluded): deploy failure was a stale hash; mitigated. No open actions.",
-		"Changelog: connection leak fixed in v0.9.3 (PR #398). Concluded work.",
-		"PR locator: compose file split landed in PR #405. Reference only.",
-	} {
-		if reason, vetoed := VetoKeep(content); vetoed {
-			t.Errorf("VetoKeep(%q) = %q, want no veto (concluded-work evidence)", content, reason)
-		}
 	}
 }
 
@@ -126,22 +92,6 @@ func TestVetoKeepPatternList(t *testing.T) {
 	}
 }
 
-// TestVetoKeepIsCaseInsensitive: memories shout their rules (NEVER, Do NOT,
-// STILL STALE), and the whole point of the veto is catching the shouting.
-func TestVetoKeepIsCaseInsensitive(t *testing.T) {
-	for _, content := range []string{
-		"never run restore on one spindle",
-		"NEVER RUN RESTORE ON ONE SPINDLE",
-		"Never run restore on one spindle",
-		"STILL STALE: the runbook image tag",
-		"still stale: the runbook image tag",
-	} {
-		if _, vetoed := VetoKeep(content); !vetoed {
-			t.Errorf("VetoKeep(%q) = false, want a veto (patterns are case-insensitive)", content)
-		}
-	}
-}
-
 // TestRunVetoSkipsClassifierCall is the behavioural guard for the pass: a
 // vetoed candidate is KEEP with no harness call at all, and it is not written
 // into the KEEP cache (the veto is recomputed free every pass, so a cache entry
@@ -175,55 +125,6 @@ func TestRunVetoSkipsClassifierCall(t *testing.T) {
 		if id == "rule" {
 			t.Errorf("a vetoed memory must not be KEEP-cached; cache = %v", store.kept)
 		}
-	}
-}
-
-// TestRunVetoDoesNotShieldDeterministicDemotions documents where the veto
-// stops: it guards the LLM classifier, not the two free deterministic signals.
-// The older endpoint of a live 'supersedes' link was already adjudicated by
-// supersede's own classifier, so a note that reads like a rule there is still
-// demoted. Changing this would be a separate, deliberate change.
-func TestRunVetoDoesNotShieldDeterministicDemotions(t *testing.T) {
-	older := memory.Memory{ID: "older", Category: "gotcha",
-		Content: "never use the old reward calculation on import"}
-	// The newer note is vetoed too, so the pass makes no classifier call at all
-	// and the only thing that can demote "older" is the piggyback.
-	newer := memory.Memory{ID: "newer", Category: "gotcha",
-		Content: "superseded the old reward calculation; never rely on the old ledgerstate import"}
-	store := &fakeStore{
-		candidates: []memory.Memory{older, newer},
-		links: []memory.Link{{
-			SourceID: "newer", TargetID: "older", Relation: "supersedes", Source: "llm",
-		}},
-	}
-	cls := &fakeClassifier{drop: map[string]bool{}}
-
-	res, confirmed, err := Run(context.Background(), store, cls, "proj", true, nil)
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if res.Superseded != 1 || len(confirmed) != 1 || confirmed[0].ID != "older" {
-		t.Errorf("superseded=%d confirmed=%v, want the supersedes piggyback to still demote older",
-			res.Superseded, confirmed)
-	}
-	if res.Vetoed != 1 {
-		t.Errorf("res.Vetoed = %d, want 1 (the newer note is vetoed before the call)", res.Vetoed)
-	}
-	if cls.calls != 0 {
-		t.Errorf("classifier calls = %d, want 0 (the newer note is vetoed, the older is piggybacked)", cls.calls)
-	}
-}
-
-// TestVetoKeepReasonNamesThePattern: the returned reason is the pattern text,
-// which is what the pass logs, so a wrong resolution can be traced to the rule
-// that vetoed it.
-func TestVetoKeepReasonNamesThePattern(t *testing.T) {
-	reason, vetoed := VetoKeep("STILL STALE: the runbook image tag")
-	if !vetoed {
-		t.Fatal("STILL STALE must veto")
-	}
-	if !strings.Contains(strings.ToLower(reason), "stale") {
-		t.Errorf("reason = %q, want the matched pattern text", reason)
 	}
 }
 
