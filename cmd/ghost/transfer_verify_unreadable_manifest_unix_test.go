@@ -16,7 +16,7 @@ import (
 // the manifest's place is refused unopened, so the run reaches the checks that
 // need no manifest instead of blocking until a writer appears.
 func TestRunBackupVerifyCoreReportsTheManifestFreeChecksForAFIFOManifest(t *testing.T) {
-	dest := backedUpSnapshot(t)
+	dest := snapshotForVerify(t)
 	path := memory.ManifestPath(dest)
 	if err := os.Remove(path); err != nil {
 		t.Fatalf("remove the manifest: %v", err)
