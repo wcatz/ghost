@@ -413,13 +413,17 @@ class TestTheClassifyStep(unittest.TestCase):
         output, _log = self._run(free_status="success")
         self.assertEqual(self._classification(output), "success")
 
-    def test_a_model_that_acted_is_a_failure(self):
+    def test_a_model_that_acted_and_never_answered_is_left_pending(self):
+        # No document reached validation, so there is no verdict: the
+        # gate is left pending for the bounded retry, under the fixed
+        # acted label rather than the provider's outage label.
         output, _log = self._run(
             free_failures="opencode/big-pickle: %s\n" % DROPPED_SOCKET,
             paid_reason="the paid model did not answer",
             marker=marker_for(events=TEXT_EVENT))
-        self.assertEqual(self._classification(output), "failure")
-        self.assertIn("acted", self._cause(output))
+        self.assertEqual(self._classification(output), "unavailable")
+        self.assertEqual(self._cause(output),
+                         review_outcome.CAUSE_MODEL_ACTED)
 
     def test_a_rule_that_could_not_be_consulted_is_not_an_outage(self):
         # The rule that says whether the model acted is read from the
@@ -497,17 +501,19 @@ class TestACallSite(unittest.TestCase):
             self.assertEqual(classification_of(output), "failure")
             self.assertNotEqual(classification_of(output), "unavailable")
 
-    def test_a_refused_tool_attempt_on_stderr_alone_is_a_failure(self):
+    def test_a_refused_tool_attempt_on_stderr_alone_is_marked_acted(self):
         # No events at all: the model's refusal is on the stderr, and it
-        # is the refusal that makes the run a verdict rather than an
-        # outage.
+        # is the refusal that marks the run acted. With no document it is
+        # left pending under the acted label, never the outage label the
+        # stderr's provider words would pick.
         with tempfile.TemporaryDirectory() as folder:
             runner, _result = run_selection_step(
                 folder, helper=True, stderr=REFUSAL_AND_OUTAGE)
             marker = _read(os.path.join(runner, "model-acted.txt"))
             self.assertEqual(marker.strip(), "acted")
             output, _log = run_classify(folder, runner=runner)
-            self.assertEqual(classification_of(output), "failure")
+            self.assertEqual(classification_of(output), "unavailable")
+            self.assertIn(review_outcome.CAUSE_MODEL_ACTED, output)
 
     def test_the_same_run_without_the_refusal_is_an_outage(self):
         # The contrast: the same provider failure reads as an outage

@@ -13,8 +13,9 @@ This module is the ONE place that decides which of three outcomes a run
 had:
 
   success     - a result was produced, on either path
-  unavailable - no result, because the models were unavailable: an
-                outage, not a verdict
+  unavailable - no result, because the models were unavailable (an
+                outage, not a verdict) or a model made tool calls and
+                never answered
   failure     - everything else, exactly as it behaved before
 
 The input is what the two paths reported: the free path's status and its
@@ -57,7 +58,7 @@ CAUSE_PAID_USAGE_LIMIT = "paid fallback usage limit"
 CAUSE_FREE_UNREACHABLE = "free models unreachable"
 CAUSE_TIMEOUT = "the review models timed out"
 CAUSE_MODEL_ANSWERED = "a model answered with a document nobody can use"
-CAUSE_MODEL_ACTED = "the model acted on the pull request"
+CAUSE_MODEL_ACTED = "the model made tool calls but gave no answer"
 CAUSE_AGENT_MISSING = "the reviewer agent did not register"
 CAUSE_FREE_STEP_FATAL = "the free review step could not run"
 CAUSE_NO_RESULT = "no valid free or paid review result was produced"
@@ -229,14 +230,8 @@ def decide(free_status, free_failures, paid_status, paid_reason,
     if paid_status == "success":
         return Decision(OUTCOME_SUCCESS, CAUSE_PAID_RESULT)
 
-    # The model ACTED, or ANSWERED: it produced something, so the run
-    # has a verdict to judge rather than an outage to wait for. This is
-    # asked first, on both paths, because a model can write anything,
-    # including the provider's own words - and because the process's
-    # stderr carries a rejected tool call, whose command is the model's
-    # own text.
-    if model_acted:
-        return Decision(OUTCOME_FAILURE, CAUSE_MODEL_ACTED)
+    # The model ANSWERED: it produced a document, so the run has a
+    # verdict to judge rather than an outage to wait for.
     if free_validation.strip() or paid_validation.strip():
         # Any validation text at all means the model produced a document
         # the gate cannot use, whatever the text says.
@@ -250,6 +245,22 @@ def decide(free_status, free_failures, paid_status, paid_reason,
 
     if select_agent_fatal or free_agent_fatal or paid_agent_fatal:
         return Decision(OUTCOME_FAILURE, CAUSE_AGENT_MISSING)
+
+    # The model ACTED but never answered: it read files or called a tool
+    # the read-only agent auto-rejects, and every path ended without a
+    # document. That is a model that strayed, not a verdict, and the next
+    # attempt usually answers, so the gate is left PENDING for the
+    # scheduled retry (bounded per head) rather than published red. A
+    # pending gate never passes, so a pull request that steers every
+    # model into a refused tool call is still blocked. This is asked
+    # BEFORE the provider reasons below, because the process's stderr
+    # carries a rejected tool call whose command is the model's own text:
+    # the cause is this fixed label, never a phrase a reason supplied.
+    # A free step that could not run is still the pipeline's failure.
+    if model_acted:
+        if free_status == "fatal":
+            return Decision(OUTCOME_FAILURE, CAUSE_FREE_STEP_FATAL)
+        return Decision(OUTCOME_UNAVAILABLE, CAUSE_MODEL_ACTED)
 
     # The paid fallback's usage window is spent. That is an outage
     # whatever the free path did.
