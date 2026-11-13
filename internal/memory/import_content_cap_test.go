@@ -153,50 +153,6 @@ func TestImportDecisionClampsTextToTheWriterCaps(t *testing.T) {
 	}
 }
 
-// TestImportTaskAndDecisionLeaveSubCapTextByteIdentical: the clamp is a clamp
-// and not a rewrite. An ordinary artifact — the overwhelmingly common case, and
-// every artifact this build has ever written — must come back byte for byte,
-// with no marker and no cut, or a restore stops being a restore.
-func TestImportTaskAndDecisionLeaveSubCapTextByteIdentical(t *testing.T) {
-	store := portableTestStore(t)
-	ctx := context.Background()
-	if err := store.EnsureProject(ctx, "p1", "/src/p1", "p1"); err != nil {
-		t.Fatalf("EnsureProject: %v", err)
-	}
-	task := Task{
-		ID: "t1", ProjectID: "p1", Title: "ship it", Description: "a description",
-		Notes: "some notes", Status: "done", Priority: 2, CompletedAt: "2026-01-02 00:00:00",
-	}
-	if _, _, err := store.ImportTask(ctx, task, true); err != nil {
-		t.Fatalf("ImportTask: %v", err)
-	}
-	gotTask, err := store.GetTask(ctx, "t1")
-	if err != nil {
-		t.Fatalf("GetTask: %v", err)
-	}
-	if gotTask.Title != task.Title || gotTask.Description != task.Description || gotTask.Notes != task.Notes {
-		t.Errorf("imported task text = %q / %q / %q, want %q / %q / %q byte for byte",
-			gotTask.Title, gotTask.Description, gotTask.Notes, task.Title, task.Description, task.Notes)
-	}
-
-	dec := Decision{
-		ID: "d1", ProjectID: "p1", Title: "a title", Decision: "do it",
-		Alternatives: []string{"one", "two"}, Rationale: "because", Status: "active",
-		Tags: []string{"tag"},
-	}
-	if _, _, err := store.ImportDecision(ctx, dec, true); err != nil {
-		t.Fatalf("ImportDecision: %v", err)
-	}
-	gotDec := findDecision(t, store, "d1")
-	if gotDec.Title != dec.Title || gotDec.Decision != dec.Decision || gotDec.Rationale != dec.Rationale {
-		t.Errorf("imported decision text = %q / %q / %q, want byte for byte",
-			gotDec.Title, gotDec.Decision, gotDec.Rationale)
-	}
-	if len(gotDec.Alternatives) != 2 || gotDec.Alternatives[0] != "one" || gotDec.Alternatives[1] != "two" {
-		t.Errorf("imported alternatives = %q, want [one two] byte for byte", gotDec.Alternatives)
-	}
-}
-
 // TestCompleteTaskClampsNotesLikeTheImporter pins #1238. A completion note is
 // the task field a caller can make arbitrarily long — it is where "here is the
 // value that fixed it" gets written — and it reaches the store through

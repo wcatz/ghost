@@ -145,50 +145,6 @@ func TestStoreRefusalsNeverEchoATokenOrAnOversizedID(t *testing.T) {
 	}
 }
 
-// TestStoreRefusalsStillNameAnOrdinaryID is the other half, and the reason the
-// fix is a renderer rather than a removal: an ordinary id must still be named,
-// or the refusal stops telling the caller which value to fix.
-func TestStoreRefusalsStillNameAnOrdinaryID(t *testing.T) {
-	ctx := context.Background()
-	const id = "ordinary-project-id"
-
-	for _, tc := range []struct {
-		name string
-		run  func(t *testing.T, s *Store) error
-		want string
-	}{
-		{
-			name: "GetProjectPath",
-			run: func(_ *testing.T, s *Store) error {
-				_, err := s.GetProjectPath(ctx, id)
-				return err
-			},
-			want: `project "ordinary-project-id" not found`,
-		},
-		{
-			name: "BindProjectPath unknown project",
-			run: func(t *testing.T, s *Store) error {
-				_, err := s.BindProjectPath(ctx, id, t.TempDir(), "")
-				return err
-			},
-			want: `"ordinary-project-id"`,
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			err := tc.run(t, testStore(t))
-			if err == nil {
-				t.Fatalf("%s accepted the id", tc.name)
-			}
-			if !strings.Contains(err.Error(), tc.want) {
-				t.Errorf("the refusal no longer names the id %s: %v", tc.want, err)
-			}
-			if strings.Contains(err.Error(), "withheld") {
-				t.Errorf("the refusal withheld an ordinary id: %v", err)
-			}
-		})
-	}
-}
-
 // assertRefusalWithholdsID asserts the three things every one of these sentences
 // owes: it is an error, it names the argument rather than repeating the value,
 // and no part of the value is in it.

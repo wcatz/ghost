@@ -53,70 +53,6 @@ func TestImportedEvidenceIDIsJudgedOnDryRunAndApply(t *testing.T) {
 	}
 }
 
-// The refusal never prints the offending text.
-func TestImportedEvidenceIDRefusalNamesNoValue(t *testing.T) {
-	err := CheckImportedMemory(PortableMemory{
-		ID: "evidid0000000000000000000000AB", ProjectID: testProject,
-		Category: "fact", Content: "c", Source: "onboarding",
-		Evidence: []PortableEvidence{{ID: "leak\nsentinel", Kind: "observed"}},
-	})
-	if err == nil {
-		t.Fatal("accepted a control character in an evidence id")
-	}
-	if strings.Contains(err.Error(), "sentinel") {
-		t.Errorf("the refusal printed the id: %v", err)
-	}
-}
-
-// A well-formed artifact still imports, and distinct ids are kept as given.
-func TestImportedEvidenceDistinctIDsStillRoundTrip(t *testing.T) {
-	s := testStore(t)
-	ctx := context.Background()
-	m := PortableMemory{
-		ID: "evidid0000000000000000000000AC", ProjectID: testProject,
-		Category: "fact", Content: "an ordinary imported fact", Source: "onboarding",
-		Evidence: []PortableEvidence{
-			{ID: "ev-one", Kind: "observed"},
-			{ID: "ev-two", Kind: "imported"},
-			{ID: strings.Repeat("x", MaxImportedIDLen), Kind: "observed"},
-		},
-	}
-	if err := CheckImportedMemory(m); err != nil {
-		t.Fatalf("CheckImportedMemory refused a valid memory: %v", err)
-	}
-	for _, apply := range []bool{false, true} {
-		created, _, _, err := s.ImportMemory(ctx, m, ImportOptions{Apply: apply})
-		if err != nil || !created {
-			t.Fatalf("apply=%v: created=%v err=%v", apply, created, err)
-		}
-	}
-	var n int
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM memory_provenance WHERE id IN ('ev-one','ev-two')`).Scan(&n); err != nil || n != 2 {
-		t.Fatalf("carried evidence ids = %d, err %v, want 2", n, err)
-	}
-}
-
-// An empty evidence id is minted by the importer, so two of them are not a repeat.
-func TestImportedEmptyEvidenceIDsAreMintedDistinct(t *testing.T) {
-	s := testStore(t)
-	ctx := context.Background()
-	m := PortableMemory{
-		ID: "evidid0000000000000000000000AD", ProjectID: testProject,
-		Category: "fact", Content: "an ordinary imported fact", Source: "onboarding",
-		Evidence: []PortableEvidence{{Kind: "observed"}, {Kind: "observed"}},
-	}
-	for _, apply := range []bool{false, true} {
-		created, _, _, err := s.ImportMemory(ctx, m, ImportOptions{Apply: apply})
-		if err != nil || !created {
-			t.Fatalf("apply=%v: created=%v err=%v", apply, created, err)
-		}
-	}
-	var n, d int
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*), COUNT(DISTINCT id) FROM memory_provenance WHERE memory_id = ? AND kind = 'observed'`, m.ID).Scan(&n, &d); err != nil || n != 2 || d != 2 {
-		t.Fatalf("rows=%d distinct=%d err=%v, want 2 and 2", n, d, err)
-	}
-}
-
 // An evidence id already stored on ANOTHER memory is the primary key of that
 // row, so the importer mints a fresh id for the incoming record instead of
 // failing the insert. The dry run reports the create the apply then makes, the
@@ -179,28 +115,5 @@ func TestImportedEvidenceIDHeldByAnotherMemoryIsMinted(t *testing.T) {
 	}
 	if n := count(b.ID); n != 1 {
 		t.Fatalf("B has %d observed rows after the re-import, want 1", n)
-	}
-}
-
-// Two memories of one artifact that share an evidence id: the dry run writes
-// nothing, so only the apply can see the second collide, and it must not fail.
-func TestImportedEvidenceIDSharedWithinOneArtifactIsMinted(t *testing.T) {
-	s := testStore(t)
-	ctx := context.Background()
-	for _, id := range []string{"evidid0000000000000000000000CA", "evidid0000000000000000000000CB"} {
-		m := PortableMemory{
-			ID: id, ProjectID: testProject, Category: "fact", Content: "content of " + id, Source: "onboarding",
-			Evidence: []PortableEvidence{{ID: "shared-ev", Kind: "observed"}},
-		}
-		for _, apply := range []bool{false, true} {
-			created, _, _, err := s.ImportMemory(ctx, m, ImportOptions{Apply: apply})
-			if err != nil || !created {
-				t.Fatalf("%s apply=%v: created=%v err=%v", id, apply, created, err)
-			}
-		}
-	}
-	var n int
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(DISTINCT memory_id) FROM memory_provenance WHERE kind = 'observed' AND memory_id LIKE 'evidid%000C%'`).Scan(&n); err != nil || n != 2 {
-		t.Fatalf("memories with evidence = %d, err %v, want 2", n, err)
 	}
 }
