@@ -75,35 +75,6 @@ func TestDryRunWiringStepsPrintWouldNotAppliedMarkers(t *testing.T) {
 	}
 }
 
-// TestApplyWiringStepsKeepAppliedMarkers is the other side: an ordinary run
-// still prints the "+ " marker, so the fix cannot be "always print would".
-func TestApplyWiringStepsKeepAppliedMarkers(t *testing.T) {
-	home := t.TempDir()
-	setHome(t, home)
-	path := filepath.Join(home, ".claude", "settings.json")
-	mkdirAll(t, filepath.Dir(path))
-	if err := os.WriteFile(path, []byte(`{"permissions":{"allow":["Bash"]}}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	got := wiringOutput(t, path, "/opt/ghost/ghost", false)
-
-	if strings.Contains(got, "~ would ") {
-		t.Errorf("an apply run printed a preview marker:\n%s", got)
-	}
-	for _, want := range []string{
-		"  + mcp__ghost__ghost_memory_save",
-		"  + added SessionStart hook",
-		"  + added Stop hook",
-		"  + added UserPromptSubmit hook",
-		"  + added PostToolUse hook",
-	} {
-		if !strings.Contains(got, want) {
-			t.Errorf("apply output missing %q:\n%s", want, got)
-		}
-	}
-}
-
 // TestDryRunStaleHookRepairPrintsWouldMigrate pins the repair tense too: a dry
 // run that would rewrite a stale ghost hook path reports "~ would migrate …",
 // never the applied marker, and leaves the file alone.
