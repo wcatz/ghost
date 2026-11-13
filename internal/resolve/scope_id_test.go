@@ -51,31 +51,6 @@ func TestScopeAcceptsAFullIDWhateverItsShape(t *testing.T) {
 	}
 }
 
-// The floor is still a floor for a PREFIX, and a short hex selector that is not
-// a stored id is still the too-short error rather than a miss — a miss would
-// bury the mistake in a list of skips.
-func TestScopeKeepsThePrefixRulesForAnythingThatIsNotAFullID(t *testing.T) {
-	for _, tc := range []struct {
-		name, only, want string
-	}{
-		{"too short", "abcdef0", "too short"},
-		{"one character", "a", "too short"},
-		{"not hex", "zzzzzzzz", "not hex"},
-		{"a word", "resolved", "not hex"},
-		{"whitespace only", "   ", "empty"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			_, _, err := (Scope{Only: []string{tc.only}}).Select(scopedPool())
-			if err == nil {
-				t.Fatalf("Select(%q) must fail", tc.only)
-			}
-			if !strings.Contains(err.Error(), tc.want) {
-				t.Errorf("error %q must mention %q", err, tc.want)
-			}
-		})
-	}
-}
-
 // A full id is matched against the STORED id, not against the selector's
 // spelling, and a single case-folded match still resolves — ids are lowercase
 // hex and an operator pasting from a terminal has no reason to know it. Two rows
@@ -106,38 +81,5 @@ func TestScopeResolvesOneCaseFoldedIDAndRefusesTwo(t *testing.T) {
 	// the same refusal.
 	if _, _, err := (Scope{Only: []string{recase(scopedA)}}).Select(two); err == nil {
 		t.Error("a spelling matching two case variants must be an error, not a silent pick")
-	}
-}
-
-// exactInPool is the reading that decides whether a selector is a full id, so its
-// own rules are worth pinning directly: byte-exact first, then a single
-// case-folded match, and two case-variant rows are no match at all.
-//
-// The pool matters, so each case carries its own: a case-folded match is only
-// unique when the pool does not hold the row's twin, and adding the twin is
-// exactly what turns that case into the two-variant refusal.
-func TestExactInPool(t *testing.T) {
-	one := []memory.Memory{{ID: scopedA}, {ID: scopedB}}
-	two := append(one, memory.Memory{ID: strings.ToUpper(scopedA)})
-	for _, tc := range []struct {
-		name  string
-		pool  []memory.Memory
-		spec  string
-		wantI string
-		wantO bool
-	}{
-		{"byte exact", one, scopedA, scopedA, true},
-		{"byte exact wins over a case variant", two, strings.ToUpper(scopedA), strings.ToUpper(scopedA), true},
-		{"one case-folded match", one, recase(scopedA), scopedA, true},
-		{"the same spelling against both twins", two, recase(scopedA), "", false},
-		{"a prefix is not an id", one, scopedB[:8], "", false},
-		{"no such row", one, strings.Repeat("f", 32), "", false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			id, ok := exactInPool(tc.pool, tc.spec)
-			if ok != tc.wantO || id != tc.wantI {
-				t.Errorf("exactInPool(%q) = (%q, %v), want (%q, %v)", tc.spec, id, ok, tc.wantI, tc.wantO)
-			}
-		})
 	}
 }

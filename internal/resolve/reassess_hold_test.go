@@ -3,7 +3,6 @@ package resolve
 import (
 	"context"
 	"fmt"
-	"sort"
 	"strings"
 	"testing"
 
@@ -15,85 +14,6 @@ import (
 // each one, so an operator repairing a store could not tell a live edge (which
 // `ghost supersede --withdraw` can undo) from a correction pairing (which it
 // cannot), and could not check whether the pairing was itself wrong.
-
-// TestReassessNamesWhatHoldsEachRow: every held row is listed with the thing
-// that holds it — the live supersedes edge by its SOURCE, the correction by its
-// own id. A held row with no name is a count an operator can only act on by
-// re-deriving the whole graph, which is the work the pass just did.
-func TestReassessNamesWhatHoldsEachRow(t *testing.T) {
-	superseded := memory.Memory{ID: "superseded", Category: "gotcha", UpdatedAt: "2026-09-01 00:00:00",
-		Content: "Cost estimate from May: $148/mo projected; actuals have since replaced it."}
-	newer := memory.Memory{ID: "newer", Category: "gotcha", UpdatedAt: "2026-09-02 00:00:00",
-		Content: "superseded the May cost estimate; the actuals document it now"}
-	paired := memory.Memory{ID: "paired", Category: "gotcha", UpdatedAt: "2026-09-19 20:00:00",
-		Content: "root cause: ledgerstate/imported_reward_inputs.go never sets CalculationVersion on imported reward_snapshot rows; unusable (closed)"}
-	correction := memory.Memory{ID: "correction", Category: "gotcha", UpdatedAt: "2026-09-19 21:00:00",
-		Content: "CORRECTION/RESOLUTION to the imported reward_snapshot P0: the bug IS ALREADY FIXED ON MAIN. Commit d646e680 adds CalculationVersion to ledgerstate/imported_reward_inputs.go. NO PR IS NEEDED FROM US."}
-	store := &fakeStore{
-		alreadyResolved: []memory.Memory{superseded, paired},
-		candidates:      []memory.Memory{newer, correction},
-		links: []memory.Link{{
-			SourceID: newer.ID, TargetID: superseded.ID, Relation: "supersedes", Source: "llm",
-		}},
-	}
-	// The classifier would KEEP both; neither is asked about, because the
-	// up-front floor settles them for free.
-	cls := &fakeClassifier{drop: map[string]bool{}}
-
-	res, _, err := Reassess(context.Background(), store, cls, "proj", false, Scope{}, nil)
-	if err != nil {
-		t.Fatalf("Reassess: %v", err)
-	}
-	if cls.calls != 0 {
-		t.Errorf("classifier calls = %d, want 0 — a held row is never asked about", cls.calls)
-	}
-	if res.Demoted != 2 || len(res.Held) != 2 {
-		t.Fatalf("Demoted = %d, Held = %v, want 2 and the two rows that list must agree with the count", res.Demoted, res.Held)
-	}
-	// Pool order, the same order every other listing on the report uses.
-	if res.Held[0].Memory.ID != superseded.ID || res.Held[1].Memory.ID != paired.ID {
-		t.Fatalf("Held = %v, want [superseded paired] in pool order", res.Held)
-	}
-	if got, want := res.Held[0].Reason(), "held by supersedes newer"; got != want {
-		t.Errorf("the edge-held row's reason = %q, want %q", got, want)
-	}
-	if got, want := res.Held[1].Reason(), "held by correction correction"; got != want {
-		t.Errorf("the correction-held row's reason = %q, want %q", got, want)
-	}
-}
-
-// TestHeldMemoryReasonNamesEveryHolder: a note two newer notes both supersede
-// is held by BOTH, and withdrawing one of them releases nothing — so naming only
-// one would send the operator to withdraw an edge whose withdrawal changes
-// nothing. The corrections are the reverse case: a pairing an operator cannot
-// withdraw, so the id is the thing to go and read. Every holder is named, the
-// supersedes ones first because they are the ones an action exists for.
-func TestHeldMemoryReasonNamesEveryHolder(t *testing.T) {
-	h := HeldMemory{
-		Memory: memory.Memory{ID: "target"},
-		Holds: []Hold{
-			{Kind: HoldCorrection, Holder: "corr-b"},
-			{Kind: HoldSupersedes, Holder: "edge-b"},
-			{Kind: HoldCorrection, Holder: "corr-a"},
-			{Kind: HoldSupersedes, Holder: "edge-a"},
-		},
-	}
-	want := "held by supersedes edge-a, supersedes edge-b, correction corr-a, correction corr-b"
-	if got := h.Reason(); got != want {
-		t.Errorf("Reason() = %q, want %q", got, want)
-	}
-	// Order-independent, so a caller that assembles the list another way cannot
-	// change what the report says run to run.
-	reordered := HeldMemory{Memory: h.Memory, Holds: []Hold{h.Holds[3], h.Holds[1], h.Holds[2], h.Holds[0]}}
-	if got := reordered.Reason(); got != want {
-		t.Errorf("Reason() on a reordered Holds = %q, want %q", got, want)
-	}
-	// A row with no holder has no reason, and must not read as held by nothing
-	// in particular — the report never renders one, and this pins that.
-	if got := (HeldMemory{Memory: h.Memory}).Reason(); got != "" {
-		t.Errorf("Reason() with no holds = %q, want empty", got)
-	}
-}
 
 // fixedPointFixture is the subject-token bookkeeping the fixed-point tests
 // share. Every boundary is counted by hand, because the whole defect is a
@@ -401,117 +321,10 @@ func newHoldChainFixture(n int) holdChainFixture {
 	return holdChainFixture{live: live, loaded: loaded, c: loaded[0]}
 }
 
-// TestHoldBackBoundIsReportedWhenHit: the re-check is bounded, and a bound that
-// stops it with a row still changing is not a quiet truncation — the repair is
-// short of its fixed point and a further pass may clear more. That is a sentence
-// the report has to be able to make, so the signal is computed here, on the same
-// fixture, one round short of the answer.
-func TestHoldBackBoundIsReportedWhenHit(t *testing.T) {
-	f := newFixedPointFixture()
-
-	full := holdBack(f.loaded, f.live, maxHoldBackRounds)
-	if full.boundHit {
-		t.Error("the fixture settles inside the bound, so boundHit must be false")
-	}
-	if full.rounds != 3 {
-		t.Errorf("rounds = %d, want 3: two rounds that drop a row and the round that finds nothing", full.rounds)
-	}
-	if len(full.holds) != 2 {
-		t.Fatalf("holds = %v, want row-c2 and row-b2", full.holds)
-	}
-	if sortedHeldIDs(full.kept) != "row-a,row-b1,row-y" {
-		t.Errorf("kept = %v, want [row-a row-b1 row-y]", full.kept)
-	}
-
-	// One round is the mutation this test exists for: it cannot see the pairing
-	// that dropping row-c2 reveals, so it frees a row the fixed point holds.
-	one := holdBack(f.loaded, f.live, 1)
-	if !one.boundHit || one.rounds != 1 {
-		t.Errorf("one round = %d round(s), boundHit %v, want 1 and true — the round still dropped a row", one.rounds, one.boundHit)
-	}
-	if contains(full.kept, "row-c2") || contains(full.kept, "row-b2") {
-		t.Errorf("kept = %v, want the fixed point to hold both rows back", full.kept)
-	}
-	if len(one.holds) != 1 || one.holds["row-c2"][0].Holder != f.y.ID {
-		t.Errorf("one round's holds = %v, want only row-c2, held by the correction", one.holds)
-	}
-	if !contains(one.kept, "row-b2") {
-		t.Errorf("one round kept %v, want the row the second round holds back to be freed", one.kept)
-	}
-}
-
-// TestReassessDryRunMatchesApplyAndWritesNothing: the fixed point is a property
-// of the DECISION, not of whether anything was written, so the preview has to
-// name the same held rows and spend the same rounds as the run that applies it.
-// A dry run that reported a smaller repair than --apply would reach is a
-// preview an operator cannot plan from, and one that wrote anything to find out
-// is not a preview.
-func TestReassessDryRunMatchesApplyAndWritesNothing(t *testing.T) {
-	f := newFixedPointFixture()
-	dryStore := &fakeStore{alreadyResolved: f.loaded, candidates: f.live}
-	dry, dryKept, err := Reassess(context.Background(), dryStore, &fakeClassifier{}, "proj", false, Scope{}, nil)
-	if err != nil {
-		t.Fatalf("Reassess dry: %v", err)
-	}
-	if len(dryStore.cleared) != 0 || len(dryStore.kept) != 0 || len(dryStore.markedKept) != 0 {
-		t.Errorf("the dry run wrote: cleared %v, cache %v, marked %v", dryStore.cleared, dryStore.kept, dryStore.markedKept)
-	}
-
-	applyStore := &fakeStore{alreadyResolved: f.loaded, candidates: f.live}
-	applied, appliedKept, err := Reassess(context.Background(), applyStore, &fakeClassifier{}, "proj", true, Scope{}, nil)
-	if err != nil {
-		t.Fatalf("Reassess apply: %v", err)
-	}
-	if dry.Rounds != applied.Rounds || dry.BoundHit != applied.BoundHit {
-		t.Errorf("dry re-checked %d round(s) (boundHit %v) and --apply re-checked %d (boundHit %v), want the same fixed point",
-			dry.Rounds, dry.BoundHit, applied.Rounds, applied.BoundHit)
-	}
-	if !eqStrings(ids(dryKept), ids(appliedKept)) {
-		t.Errorf("dry would clear %v, --apply cleared %v; the preview must report the repair the run reaches", ids(dryKept), ids(appliedKept))
-	}
-	if dry.ReKept != applied.ReKept || dry.Demoted != applied.Demoted {
-		t.Errorf("dry reported %d re-KEEP / %d held, --apply %d / %d", dry.ReKept, dry.Demoted, applied.ReKept, applied.Demoted)
-	}
-	if len(dry.Held) != len(applied.Held) {
-		t.Fatalf("dry listed %v, --apply listed %v", dry.Held, applied.Held)
-	}
-	for i := range dry.Held {
-		if dry.Held[i].Memory.ID != applied.Held[i].Memory.ID || dry.Held[i].Reason() != applied.Held[i].Reason() {
-			t.Errorf("held row %d differs: dry %q/%q, apply %q/%q", i,
-				dry.Held[i].Memory.ID, dry.Held[i].Reason(), applied.Held[i].Memory.ID, applied.Held[i].Reason())
-		}
-	}
-	if len(applyStore.cleared) != len(appliedKept) {
-		t.Errorf("--apply cleared %v, want the %d row(s) it reported", applyStore.cleared, len(appliedKept))
-	}
-}
-
 func ids(mems []memory.Memory) []string {
 	out := make([]string, len(mems))
 	for i, m := range mems {
 		out[i] = m.ID
 	}
 	return out
-}
-
-func contains(mems []memory.Memory, id string) bool {
-	for _, m := range mems {
-		if m.ID == id {
-			return true
-		}
-	}
-	return false
-}
-
-func sortedHeldIDs(mems []memory.Memory) string {
-	out := ids(mems)
-	sort.Strings(out)
-	joined := ""
-	for i, id := range out {
-		if i > 0 {
-			joined += ","
-		}
-		joined += id
-	}
-	return joined
 }

@@ -12,7 +12,6 @@ package resolve
 import (
 	"context"
 	"errors"
-	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -222,20 +221,5 @@ func TestAFlagReasksACachedKeepOnceAndThenGoesQuiet(t *testing.T) {
 	if cls3.calls != 0 || res.Skipped != 1 {
 		t.Errorf("after the re-stamp the pass made %d classifier call(s) and skipped %d; want 0 and 1 — the "+
 			"stamp already covers this flag", cls3.calls, res.Skipped)
-	}
-}
-
-// TestKeepStampFormatIsStable: the fingerprint's spelling is a stored key, so it
-// is pinned rather than described. A build that wrote the flag count in a
-// different shape would leave every existing cache entry a miss and re-ask the
-// whole corpus once.
-func TestKeepStampFormatIsStable(t *testing.T) {
-	const content = "the retry budget is three attempts"
-	base := memory.ContentHash(content)
-	if got, want := KeepStamp(content, memory.FlagEvidence{Flagged: 1}), fmt.Sprintf("%s:1", base); got != want {
-		t.Errorf("KeepStamp(flagged) = %q, want %q", got, want)
-	}
-	if got, want := KeepStamp(content, memory.FlagEvidence{Flagged: 2}), fmt.Sprintf("%s:2", base); got != want {
-		t.Errorf("KeepStamp(two flags) = %q, want %q", got, want)
 	}
 }

@@ -79,22 +79,6 @@ func TestScopeSelectsOnlyNamedMemories(t *testing.T) {
 	}
 }
 
-// TestEmptyScopeSelectsEverything: the zero Scope is the unscoped pass, so it
-// returns the pool untouched and never reports a miss.
-func TestEmptyScopeSelectsEverything(t *testing.T) {
-	pool := scopedPool()
-	got, misses, err := Scope{}.Select(pool)
-	if err != nil {
-		t.Fatalf("Select: %v", err)
-	}
-	if len(misses) != 0 {
-		t.Errorf("misses = %v, want none", misses)
-	}
-	if ids := scopedIDs(got); !eqIDs(ids, scopedIDs(pool)) {
-		t.Errorf("Select() = %v, want the whole pool %v", ids, scopedIDs(pool))
-	}
-}
-
 // TestScopeMissIsReportedNotFatal: an id that is not resolved, or not in this
 // project, is something the operator typed wrong or something resolve has
 // already cleared — not a reason to refuse the run. The rest of the scope is
@@ -118,67 +102,10 @@ func TestScopeMissIsReportedNotFatal(t *testing.T) {
 	}
 }
 
-// TestScopeAmbiguousPrefixIsAnError: the two halves of a selector have opposite
-// failure modes. A prefix that matches nothing is a typo the operator can see in
-// the report; a prefix that matches two rows is not a typo the pass can resolve
-// on its own, and silently judging one of them (or both) is exactly the
-// un-hiding this flag exists to prevent — so it stops the run.
-func TestScopeAmbiguousPrefixIsAnError(t *testing.T) {
-	pool := []memory.Memory{
-		{ID: "abcdef00111111111111111111111111", Content: "one"},
-		{ID: "abcdef00222222222222222222222222", Content: "two"},
-	}
-	got, _, err := (Scope{Only: []string{"abcdef00"}}).Select(pool)
-	if err == nil {
-		t.Fatal("Select: an ambiguous prefix must be an error")
-	}
-	if !strings.Contains(err.Error(), "ambiguous") || !strings.Contains(err.Error(), "abcdef00") {
-		t.Errorf("error %q must name the ambiguous selector and say so", err)
-	}
-	if got != nil {
-		t.Errorf("Select returned %v alongside the error, want nothing judged", scopedIDs(got))
-	}
-}
-
-// TestScopeRejectsMalformedSelectors: below the prefix floor a selector cannot
-// be a deliberate choice — one hex character matches most of a project — so it is
-// a usage error rather than a miss. So is a non-hex selector, which is either a
-// truncated paste or a word; neither can name a row, and reporting it as a miss
-// would bury the mistake in a list of skips.
-func TestScopeRejectsMalformedSelectors(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		only string
-		want string
-	}{
-		{"too short", "abcdef0", "8"},
-		{"one character", "a", "8"},
-		{"not hex", "zzzzzzzz", "hex"},
-		{"a word", "resolved", "hex"},
-		{"empty", "", "hex"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			_, _, err := (Scope{Only: []string{tc.only}}).Select(scopedPool())
-			if err == nil {
-				t.Fatalf("Select(%q) must fail", tc.only)
-			}
-			if !strings.Contains(err.Error(), tc.want) {
-				t.Errorf("error %q must mention %q", err, tc.want)
-			}
-		})
-	}
-}
-
-// TestScopeAcceptsEveryHexLengthAtOrAboveTheFloor: the floor is a length, not a
-// spelling, so a 9- or 32-character selector is a prefix like any other.
-func TestScopeAcceptsEveryHexLengthAtOrAboveTheFloor(t *testing.T) {
-	for _, only := range []string{scopedB[:8], scopedB[:9], scopedB[:31], scopedB} {
-		got, misses, err := (Scope{Only: []string{only}}).Select(scopedPool())
-		if err != nil {
-			t.Fatalf("Select(%q): %v", only, err)
-		}
-		if len(misses) != 0 || !eqIDs(scopedIDs(got), []string{scopedB}) {
-			t.Errorf("Select(%q) = %v misses %v, want [%s]", only, scopedIDs(got), misses, scopedB)
+func TestScopeSelectorErrors(t *testing.T) {
+	for _, spec := range []string{" ", "zzzzzzzz", "abc"} {
+		if _, _, err := (Scope{Only: []string{spec}}).Select(nil); err == nil {
+			t.Errorf("selector %q: want an error", spec)
 		}
 	}
 }

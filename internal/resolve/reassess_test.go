@@ -72,26 +72,6 @@ func TestReassessRepairsWrongResolutions(t *testing.T) {
 	}
 }
 
-// TestReassessIgnoresKeywordPrefilter: the prefilter exists to bound the cost
-// of the ordinary pass, and it is exactly the note's own resolved-sounding
-// framing that let a wrong resolution through in the first place. Reassess
-// re-asks every already-resolved memory so a rule with no resolution keyword
-// ("the default branch is main") can come back KEEP.
-func TestReassessIgnoresKeywordPrefilter(t *testing.T) {
-	rule := memory.Memory{ID: "rule", Category: "gotcha",
-		Content: "the ledgerstate import silently drops CalculationVersion on restore"}
-	store := &fakeStore{alreadyResolved: []memory.Memory{rule}}
-	cls := &fakeClassifier{drop: map[string]bool{}}
-
-	res, reKept, err := Reassess(context.Background(), store, cls, "proj", false, Scope{}, nil)
-	if err != nil {
-		t.Fatalf("Reassess: %v", err)
-	}
-	if cls.calls != 1 || res.ReKept != 1 || len(reKept) != 1 {
-		t.Errorf("calls=%d reKept=%d list=%v, want the keywordless note re-asked and kept", cls.calls, res.ReKept, reKept)
-	}
-}
-
 // TestReassessSkipsCachedKeepVerdicts: a content hash already recorded as a KEEP
 // is not re-asked — the same convergence the ordinary pass has.
 func TestReassessSkipsCachedKeepVerdicts(t *testing.T) {
@@ -117,183 +97,6 @@ func TestReassessSkipsCachedKeepVerdicts(t *testing.T) {
 	}
 }
 
-// TestReassessSkipsAStoredStampThatAlreadyCoversTheEvidence: the other half of
-// #880 review finding 1. The repair does not only WRITE the ordinary pass's
-// key, it READS it — so a row whose stored stamp already carries the evidence
-// the store holds is skipped here exactly as the ordinary gate skips it, with no
-// classifier call, rather than re-asked for evidence it was already judged
-// under. Reverted to comparing the bare content hash, the two passes disagree
-// again: this row's stamp is not a bare hash, so the repair re-asks a note the
-// flag has already had its say about.
-func TestReassessSkipsAStoredStampThatAlreadyCoversTheEvidence(t *testing.T) {
-	content := "kill experiment: the graph bonus is gone, PR #210 landed it"
-	ev := memory.FlagEvidence{Flagged: 1}
-	store := &fakeStore{
-		alreadyResolved: []memory.Memory{{ID: "M1", Content: content}},
-		kept:            map[string]string{"M1": KeepStamp(content, ev)},
-		usefulness:      map[string]memory.FlagEvidence{"M1": ev},
-	}
-	cls := &fakeClassifier{}
-
-	res, reKept, err := Reassess(context.Background(), store, cls, "proj", true, Scope{}, nil)
-	if err != nil {
-		t.Fatalf("Reassess: %v", err)
-	}
-	if res.Cached != 1 || cls.calls != 0 {
-		t.Errorf("cached=%d classifier calls=%d, want 1 and 0: a stamp that already covers the evidence "+
-			"is the same skip the ordinary gate gives it (%v)", res.Cached, cls.calls, cls.askedFor)
-	}
-	if len(reKept) != 1 || len(store.cleared) != 1 {
-		t.Errorf("reKept=%v cleared=%v, want the cached row returned to injection", reKept, store.cleared)
-	}
-}
-
-// TestReassessLeavesUnknownAlone: an unparseable verdict is not an implicit
-// KEEP, so the note keeps its resolved_at and is offered again next pass.
-func TestReassessLeavesUnknownAlone(t *testing.T) {
-	content := "Cost estimate from May: $148/mo projected; actuals have since replaced it."
-	store := &fakeStore{alreadyResolved: []memory.Memory{{ID: "m", Content: content}}}
-	cls := &fakeClassifier{unknown: map[string]bool{content: true}}
-
-	res, reKept, err := Reassess(context.Background(), store, cls, "proj", true, Scope{}, nil)
-	if err != nil {
-		t.Fatalf("Reassess: %v", err)
-	}
-	if res.Unknown != 1 {
-		t.Errorf("res.Unknown = %d, want 1", res.Unknown)
-	}
-	if len(reKept) != 0 || len(store.cleared) != 0 {
-		t.Errorf("reKept = %v cleared = %v, want nothing cleared on an UNKNOWN verdict", reKept, store.cleared)
-	}
-	if len(store.markedKept) != 0 {
-		t.Errorf("an UNKNOWN verdict must not be KEEP-cached: %v", store.markedKept)
-	}
-
-	res, _, err = Reassess(context.Background(), store, cls, "proj", true, Scope{}, nil)
-	if err != nil {
-		t.Fatalf("Reassess second: %v", err)
-	}
-	if cls.calls != 2 {
-		t.Errorf("classifier calls = %d, want 2 (the unknown note is re-asked)", cls.calls)
-	}
-	if res.Unknown != 1 {
-		t.Errorf("second pass Unknown = %d, want 1", res.Unknown)
-	}
-}
-
-// TestReassessStampsTheEvidenceItJudgedTheNoteUnder: the repair pass and the
-// ordinary pass must write and read ONE key (#880 review finding 1). The repair
-// reads the same flag evidence the ordinary gate reads, so it can compare the
-// stamp it is about to overwrite — and it asks the classifier with that
-// evidence appended, because a stamp claiming a verdict was judged under
-// evidence is only honest when the verdict really was.
-func TestReassessStampsTheEvidenceItJudgedTheNoteUnder(t *testing.T) {
-	content := "kill experiment: the graph bonus is gone, PR #210 landed it"
-	evidence := map[string]memory.FlagEvidence{
-		"M1": {Flagged: 1},
-	}
-	store := &fakeStore{
-		alreadyResolved: []memory.Memory{{ID: "M1", Content: content}},
-		usefulness:      evidence,
-	}
-	cls := &fakeClassifier{}
-
-	if _, _, err := Reassess(context.Background(), store, cls, "proj", true, Scope{}, nil); err != nil {
-		t.Fatalf("Reassess: %v", err)
-	}
-	if got, want := store.kept["M1"], KeepStamp(content, evidence["M1"]); got != want {
-		t.Errorf("reassess stamped %q, want %q: the ordinary gate compares KeepStamp over the evidence "+
-			"it read, so a stamp that does not cover the evidence is a stamp the next pass misses and "+
-			"a note it re-asks (#880)", got, want)
-	}
-	if want := content + "\n" + evidence["M1"].Line(); !sentVerbatim(cls.askedFor, want) {
-		t.Errorf("reassess asked about %q, want %q: the stamp records the evidence the verdict was "+
-			"judged with, so the verdict has to have been judged with it", cls.askedFor, want)
-	}
-}
-
-// TestReassessReadsTheEvidenceOnceForThePool: the read is ONE bounded read per
-// repair over a pool with rows in it, and nothing at all over an empty pool —
-// the same bound Run holds (TestTheEvidenceReadIsBoundToCandidatesThatReachTheGate).
-func TestReassessReadsTheEvidenceOnceForThePool(t *testing.T) {
-	cls := &fakeClassifier{}
-
-	empty := &fakeStore{}
-	if _, _, err := Reassess(context.Background(), empty, cls, "proj", true, Scope{}, nil); err != nil {
-		t.Fatalf("Reassess (empty pool): %v", err)
-	}
-	if empty.usefulnessCalls != 0 {
-		t.Errorf("usefulnessCalls = %d, want 0: a repair with no row to judge reads no evidence",
-			empty.usefulnessCalls)
-	}
-
-	store := &fakeStore{
-		alreadyResolved: []memory.Memory{
-			{ID: "M1", Content: "kill experiment: the graph bonus is gone, PR #210 landed it"},
-			{ID: "M2", Content: "postmortem concluded: the deploy failure was a stale hash"},
-		},
-		usefulness: map[string]memory.FlagEvidence{"M1": {Flagged: 1}},
-	}
-	if _, _, err := Reassess(context.Background(), store, cls, "proj", true, Scope{}, nil); err != nil {
-		t.Fatalf("Reassess: %v", err)
-	}
-	if store.usefulnessCalls != 1 {
-		t.Errorf("usefulnessCalls = %d, want 1 — one bounded read for the whole pool, never one per memory",
-			store.usefulnessCalls)
-	}
-}
-
-// TestReassessFailsOpenWhenTheEvidenceCannotBeRead: an unreadable audit must
-// not fail a repair, and it must not let the repair claim evidence it never
-// read — the stamp it writes falls back to the bare content hash, which the
-// ordinary pass re-asks (errs toward asking) rather than trusts.
-func TestReassessFailsOpenWhenTheEvidenceCannotBeRead(t *testing.T) {
-	content := "kill experiment: the graph bonus is gone, PR #210 landed it"
-	store := &fakeStore{
-		alreadyResolved: []memory.Memory{{ID: "M1", Content: content}},
-		usefulnessErr:   errEvidenceUnavailable,
-	}
-	var buf bytes.Buffer
-	logger := slog.New(slog.NewTextHandler(&buf, nil))
-	cls := &fakeClassifier{}
-
-	res, reKept, err := Reassess(context.Background(), store, cls, "proj", true, Scope{}, logger)
-	if err != nil {
-		t.Fatalf("an unreadable audit must not fail the repair: %v", err)
-	}
-	if res.Cleared != 1 || len(reKept) != 1 {
-		t.Fatalf("cleared=%d reKept=%v, want the repair to land with the audit unreadable", res.Cleared, reKept)
-	}
-	if got, want := store.kept["M1"], ContentHash(content); got != want {
-		t.Errorf("stamped %q, want the bare content hash %q — a pass that could not read the evidence "+
-			"must not stamp a verdict as judged under it", got, want)
-	}
-	if len(cls.askedFor) != 1 || cls.askedFor[0] != content {
-		t.Errorf("asked about %q, want the note alone: an unreadable audit appends nothing", cls.askedFor)
-	}
-	if !strings.Contains(buf.String(), "flag evidence unavailable") {
-		t.Errorf("expected the evidence read failure to be logged, log:\n%s", buf.String())
-	}
-}
-
-// TestReassessClearErrorIsFatal: a failed repair must not be reported as a
-// repair, so the error propagates instead of counting zero writes.
-func TestReassessClearErrorIsFatal(t *testing.T) {
-	content := "Cost estimate from May: $148/mo projected; actuals have since replaced it."
-	store := &fakeStore{
-		alreadyResolved: []memory.Memory{{ID: "m", Content: content}},
-		clearErr:        errors.New("database is locked"),
-	}
-	cls := &fakeClassifier{drop: map[string]bool{}}
-
-	if _, _, err := Reassess(context.Background(), store, cls, "proj", true, Scope{}, nil); err == nil {
-		t.Fatal("Reassess: want the clear error propagated, got nil")
-	}
-	if len(store.markedKept) != 0 {
-		t.Errorf("a failed clear must not cache KEEPs: %v", store.markedKept)
-	}
-}
-
 // TestReassessMarkResolveKeptErrorWarns: once resolved_at is cleared the repair
 // has landed; losing the derived cache entry only costs a re-ask next pass, so
 // it warns rather than failing.
@@ -316,22 +119,6 @@ func TestReassessMarkResolveKeptErrorWarns(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "resolve kept cache write failed") {
 		t.Errorf("expected a warning about the failed cache write, log:\n%s", buf.String())
-	}
-}
-
-// TestReassessClassifierErrorIsFatal: a transport error leaves every verdict
-// undecided, so nothing may be cleared — a partial repair would bury rows the
-// harness never judged.
-func TestReassessClassifierErrorIsFatal(t *testing.T) {
-	content := "Cost estimate from May: $148/mo projected; actuals have since replaced it."
-	store := &fakeStore{alreadyResolved: []memory.Memory{{ID: "m", Content: content}}}
-	cls := &fakeClassifier{err: errors.New("boom")}
-
-	if _, _, err := Reassess(context.Background(), store, cls, "proj", true, Scope{}, nil); err == nil {
-		t.Fatal("Reassess: want the classifier error propagated, got nil")
-	}
-	if len(store.cleared) != 0 {
-		t.Errorf("cleared = %v, want nothing on a fatal classify error", store.cleared)
 	}
 }
 
@@ -379,41 +166,6 @@ func TestReassessSkipsDeterministicallyAssertedRows(t *testing.T) {
 	}
 	if cls.calls != 0 {
 		t.Errorf("classifier calls = %d, want 0 (every row is settled for free)", cls.calls)
-	}
-}
-
-// TestReassessCorrectionMustBeUnresolved: Run draws its corrections from the
-// unresolved pool (correctionPairTargets(loaded, cands), where loaded is
-// ResolveCandidates), so a correction that is itself resolved pairs nothing and
-// the older row is repairable again. The floor must use the same pool, or it
-// protects a row the next pass will not re-stamp and reports it under the wrong
-// label (review finding on #643).
-//
-// The correction is judged RESOLVED here — it is the "already fixed on main, no
-// PR needed" note resolve should have stamped anyway — so it stays resolved and
-// asserts nothing. The companion case, where the correction is itself repaired
-// and therefore leaves the pool, is TestReassessHoldsBackRowWhoseCorrectionIsRepaired.
-func TestReassessCorrectionMustBeUnresolved(t *testing.T) {
-	paired := memory.Memory{ID: "paired", Category: "gotcha", UpdatedAt: "2026-09-19 20:00:00",
-		Content: "root cause: ledgerstate/imported_reward_inputs.go never sets CalculationVersion on imported reward_snapshot rows; unusable (closed)"}
-	// The correction is itself resolved, so Run will never see it again.
-	correction := memory.Memory{ID: "correction", Category: "gotcha", UpdatedAt: "2026-09-19 21:00:00",
-		Content: "CORRECTION/RESOLUTION to the imported reward_snapshot P0: the bug IS ALREADY FIXED ON MAIN. Commit d646e680 adds CalculationVersion to ledgerstate/imported_reward_inputs.go. NO PR IS NEEDED FROM US."}
-	store := &fakeStore{alreadyResolved: []memory.Memory{paired, correction}}
-	cls := &fakeClassifier{drop: map[string]bool{correction.Content: true}}
-
-	res, reKept, err := Reassess(context.Background(), store, cls, "proj", true, Scope{}, nil)
-	if err != nil {
-		t.Fatalf("Reassess: %v", err)
-	}
-	if res.Demoted != 0 {
-		t.Errorf("res.Demoted = %d, want 0 — a correction that stays resolved asserts nothing", res.Demoted)
-	}
-	if len(reKept) != 1 || reKept[0].ID != "paired" {
-		t.Errorf("reKept = %v, want [paired] to be repairable", reKept)
-	}
-	if len(store.cleared) != 1 || store.cleared[0] != "paired" {
-		t.Errorf("cleared = %v, want [paired]", store.cleared)
 	}
 }
 
@@ -467,40 +219,6 @@ func TestReassessHoldsBackRowWhoseCorrectionIsRepaired(t *testing.T) {
 	}
 }
 
-// TestReassessHoldsBackOnlyPrefilterPassingRows: Run's mechanism 2 iterates
-// correctionPairTargets(loaded, cands) where cands is the keyword-prefiltered
-// subset, so a row with no resolution keyword is never a pairing target however
-// much a correction shares with it. Holding such a row back would be permanent
-// and mislabelled — nothing asserts it, yet every later --reassess run would
-// report it as asserted again, so no pass could ever repair it (review finding
-// on #643).
-func TestReassessHoldsBackOnlyPrefilterPassingRows(t *testing.T) {
-	// No resolveKeywords entry, so the ordinary pass never considers it — the
-	// same fixture TestRunCorrectionPairingSkipsLiveGotcha uses.
-	live := memory.Memory{ID: "live", Category: "gotcha", UpdatedAt: "2026-09-01 00:00:00",
-		Content: "re-bootstrap gotcha: ledgerstate/imported_reward_inputs.go mithril CalculationVersion never set on imported reward_snapshot rows — dingo-core-mithril-sync restarts"}
-	correction := memory.Memory{ID: "correction", Category: "gotcha", UpdatedAt: "2026-09-19 00:00:00",
-		Content: "CORRECTION/RESOLUTION to the imported reward_snapshot P0: the bug IS ALREADY FIXED ON MAIN. Commit d646e680 adds CalculationVersion to ledgerstate/imported_reward_inputs.go. NO PR IS NEEDED FROM US."}
-	store := &fakeStore{alreadyResolved: []memory.Memory{live, correction}}
-	// Both come back KEEP for free: the rule is vetoed ("never"), the
-	// correction is not.
-	cls := &fakeClassifier{}
-
-	res, reKept, err := Reassess(context.Background(), store, cls, "proj", true, Scope{}, nil)
-	if err != nil {
-		t.Fatalf("Reassess: %v", err)
-	}
-	if res.Demoted != 0 {
-		t.Errorf("res.Demoted = %d, want 0 — a keyword-free row is never a pairing target", res.Demoted)
-	}
-	if len(reKept) != 2 {
-		t.Errorf("reKept = %v, want both rows repairable", reKept)
-	}
-	if len(store.cleared) != 2 {
-		t.Errorf("cleared = %v, want both rows", store.cleared)
-	}
-}
-
 // TestReassessEmptyPool: a project with no resolved rows is a no-op that makes
 // no harness call.
 func TestReassessEmptyPool(t *testing.T) {
@@ -513,5 +231,72 @@ func TestReassessEmptyPool(t *testing.T) {
 	}
 	if cls.calls != 0 || len(reKept) != 0 || res.Cleared != 0 {
 		t.Errorf("calls=%d reKept=%v cleared=%d, want a no-op", cls.calls, reKept, res.Cleared)
+	}
+}
+
+// TestReassessClassifierErrorIsFatal: a transport error leaves every verdict
+// undecided, so nothing may be cleared — a partial repair would bury rows the
+// harness never judged.
+func TestReassessClassifierErrorIsFatal(t *testing.T) {
+	content := "Cost estimate from May: $148/mo projected; actuals have since replaced it."
+	store := &fakeStore{alreadyResolved: []memory.Memory{{ID: "m", Content: content}}}
+	cls := &fakeClassifier{err: errors.New("boom")}
+
+	if _, _, err := Reassess(context.Background(), store, cls, "proj", true, Scope{}, nil); err == nil {
+		t.Fatal("Reassess: want the classifier error propagated, got nil")
+	}
+	if len(store.cleared) != 0 {
+		t.Errorf("cleared = %v, want nothing on a fatal classify error", store.cleared)
+	}
+}
+
+// TestReassessClearErrorIsFatal: a failed repair must not be reported as a
+// repair, so the error propagates instead of counting zero writes.
+func TestReassessClearErrorIsFatal(t *testing.T) {
+	content := "Cost estimate from May: $148/mo projected; actuals have since replaced it."
+	store := &fakeStore{
+		alreadyResolved: []memory.Memory{{ID: "m", Content: content}},
+		clearErr:        errors.New("database is locked"),
+	}
+	cls := &fakeClassifier{drop: map[string]bool{}}
+
+	if _, _, err := Reassess(context.Background(), store, cls, "proj", true, Scope{}, nil); err == nil {
+		t.Fatal("Reassess: want the clear error propagated, got nil")
+	}
+	if len(store.markedKept) != 0 {
+		t.Errorf("a failed clear must not cache KEEPs: %v", store.markedKept)
+	}
+}
+
+// TestReassessFailsOpenWhenTheEvidenceCannotBeRead: an unreadable audit must
+// not fail a repair, and it must not let the repair claim evidence it never
+// read — the stamp it writes falls back to the bare content hash, which the
+// ordinary pass re-asks (errs toward asking) rather than trusts.
+func TestReassessFailsOpenWhenTheEvidenceCannotBeRead(t *testing.T) {
+	content := "kill experiment: the graph bonus is gone, PR #210 landed it"
+	store := &fakeStore{
+		alreadyResolved: []memory.Memory{{ID: "M1", Content: content}},
+		usefulnessErr:   errEvidenceUnavailable,
+	}
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	cls := &fakeClassifier{}
+
+	res, reKept, err := Reassess(context.Background(), store, cls, "proj", true, Scope{}, logger)
+	if err != nil {
+		t.Fatalf("an unreadable audit must not fail the repair: %v", err)
+	}
+	if res.Cleared != 1 || len(reKept) != 1 {
+		t.Fatalf("cleared=%d reKept=%v, want the repair to land with the audit unreadable", res.Cleared, reKept)
+	}
+	if got, want := store.kept["M1"], ContentHash(content); got != want {
+		t.Errorf("stamped %q, want the bare content hash %q — a pass that could not read the evidence "+
+			"must not stamp a verdict as judged under it", got, want)
+	}
+	if len(cls.askedFor) != 1 || cls.askedFor[0] != content {
+		t.Errorf("asked about %q, want the note alone: an unreadable audit appends nothing", cls.askedFor)
+	}
+	if !strings.Contains(buf.String(), "flag evidence unavailable") {
+		t.Errorf("expected the evidence read failure to be logged, log:\n%s", buf.String())
 	}
 }

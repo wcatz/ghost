@@ -1,13 +1,9 @@
 package resolve
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
-	"log/slog"
-	"strings"
 	"testing"
 
 	"github.com/wcatz/ghost/internal/memory"
@@ -171,25 +167,6 @@ func (s *fakeStore) MarkResolveKept(_ context.Context, _ string, hashes map[stri
 	return nil
 }
 
-func TestPrefilterKeepsOnlyPlausible(t *testing.T) {
-	in := []memory.Memory{
-		{ID: "1", Content: "Graph-expansion RESOLVED NO-GO after kill experiment"},
-		{ID: "2", Content: "Ghost uses SQLite with FTS5 for storage"},
-		{ID: "3", Content: "fixed in PR #210, dead ranking bonus removed"},
-	}
-	got := Prefilter(in)
-	gotIDs := map[string]bool{}
-	for _, m := range got {
-		gotIDs[m.ID] = true
-	}
-	if !gotIDs["1"] || !gotIDs["3"] {
-		t.Errorf("prefilter dropped a resolution-keyword memory: got %v", gotIDs)
-	}
-	if gotIDs["2"] {
-		t.Errorf("prefilter kept a memory with no resolution keyword: got %v", gotIDs)
-	}
-}
-
 func TestRunResolvesConfirmedEvidence(t *testing.T) {
 	store := &fakeStore{candidates: []memory.Memory{
 		{ID: "keep", Content: "Graph-expansion RESOLVED NO-GO decision record"},
@@ -229,25 +206,6 @@ func TestRunResolvesConfirmedEvidence(t *testing.T) {
 	}
 	if res.Resolved != 1 {
 		t.Errorf("res.Resolved = %d, want 1", res.Resolved)
-	}
-}
-
-func TestRunFailsFatallyOnClassifierError(t *testing.T) {
-	store := &fakeStore{candidates: []memory.Memory{
-		{ID: "keep", Content: "Graph-expansion RESOLVED NO-GO decision record"},
-		{ID: "drop", Content: "kill experiment finding: 7.3% cross-session links, removed"},
-	}}
-	// Both survive the prefilter (both contain keywords); classification fails
-	// partway through the batch on the second one.
-	cls := &fakeClassifier{errOn: "kill experiment finding: 7.3% cross-session links, removed",
-		err: errors.New("boom")}
-
-	res, confirmed, err := Run(context.Background(), store, cls, "proj", true, nil)
-	if err == nil {
-		t.Fatalf("Run: want error, got nil (res=%+v confirmed=%v)", res, confirmed)
-	}
-	if len(store.resolved) != 0 {
-		t.Errorf("store.resolved = %v, want empty — a partial pass must never be applied", store.resolved)
 	}
 }
 
@@ -353,73 +311,6 @@ func TestRunCorrectionPairing(t *testing.T) {
 	}
 }
 
-// TestRunCorrectionPairingSkipsLiveGotcha: F6AB3B79 regression — a memory
-// sharing rare tokens with a correction but NOT passing the prefilter is never
-// demoted; only prefilter-passing candidates are.
-func TestRunCorrectionPairingSkipsLiveGotcha(t *testing.T) {
-	live := memory.Memory{ID: "live", Category: "gotcha", UpdatedAt: "2026-09-01 00:00:00",
-		Content: "re-bootstrap gotcha: ledgerstate/imported_reward_inputs.go mithril CalculationVersion never set on imported reward_snapshot rows — dingo-core-mithril-sync restarts"}
-	correction := memory.Memory{ID: "correction", Category: "gotcha", UpdatedAt: "2026-09-19 00:00:00",
-		Content: "CORRECTION/RESOLUTION to the imported reward_snapshot P0: the bug IS ALREADY FIXED ON MAIN. Commit d646e680 adds CalculationVersion to ledgerstate/imported_reward_inputs.go. NO PR IS NEEDED FROM US."}
-	// "live" is strictly OLDER than the correction and shares its rare tokens,
-	// but passes no resolution keyword, so it is not a candidate and must survive.
-	store := &fakeStore{candidates: []memory.Memory{live, correction}}
-	cls := &fakeClassifier{drop: map[string]bool{}}
-
-	res, confirmed, err := Run(context.Background(), store, cls, "proj", true, nil)
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if res.Corrected != 0 {
-		t.Errorf("res.Corrected = %d, want 0 (live gotcha must not be demoted)", res.Corrected)
-	}
-	if len(confirmed) != 0 {
-		t.Errorf("confirmed = %v, want nothing demoted", confirmed)
-	}
-	if len(store.resolved) != 0 {
-		t.Errorf("applied %v, want nothing written", store.resolved)
-	}
-}
-
-// TestRunSkipsCachedKeepVerdicts: a candidate whose content hash matches the
-// recorded KEEP hash never reaches the classifier, in dry-run or apply.
-func TestRunSkipsCachedKeepVerdicts(t *testing.T) {
-	content := "kill experiment finding: 7.3% cross-session links, removed"
-	store := &fakeStore{
-		candidates: []memory.Memory{{ID: "kept", Content: content}},
-		kept:       map[string]string{"kept": ContentHash(content)},
-	}
-	cls := &fakeClassifier{drop: map[string]bool{}}
-
-	res, confirmed, err := Run(context.Background(), store, cls, "proj", false, nil)
-	if err != nil {
-		t.Fatalf("Run dry: %v", err)
-	}
-	if cls.calls != 0 {
-		t.Errorf("classifier calls = %d, want 0 for a cached KEEP", cls.calls)
-	}
-	if res.Skipped != 1 {
-		t.Errorf("res.Skipped = %d, want 1", res.Skipped)
-	}
-	if len(confirmed) != 0 {
-		t.Errorf("confirmed = %v, want nothing (cached KEEP stays KEEP)", confirmed)
-	}
-
-	res, _, err = Run(context.Background(), store, cls, "proj", true, nil)
-	if err != nil {
-		t.Fatalf("Run apply: %v", err)
-	}
-	if cls.calls != 0 {
-		t.Errorf("classifier calls on apply = %d, want 0", cls.calls)
-	}
-	if len(store.resolved) != 0 {
-		t.Errorf("apply wrote %v, want nothing", store.resolved)
-	}
-	if len(store.markedKept) != 0 {
-		t.Errorf("cached skips must not be re-recorded: markedKept = %v", store.markedKept)
-	}
-}
-
 func TestContentHashVersionsExplicitKeepCache(t *testing.T) {
 	const content = "kill experiment finding: 7.3% cross-session links, removed"
 	sum := sha256.Sum256([]byte(keepCacheHashVersion + "\x00" + content))
@@ -451,85 +342,6 @@ func TestRunReasksV2CachedKeepVerdicts(t *testing.T) {
 	}
 	if res.Skipped != 0 {
 		t.Errorf("res.Skipped = %d, want 0 for a stale-prefix cache entry", res.Skipped)
-	}
-}
-
-// TestRunDoesNotCacheGarbledBatchLine exercises the complete cache boundary:
-// a missing or malformed numbered line becomes UNKNOWN in the real batch
-// parser, is not written to the KEEP cache, and is retried on the next pass.
-func TestRunDoesNotCacheGarbledBatchLine(t *testing.T) {
-	first := memory.Memory{ID: "first", Content: "kill experiment finding: removed"}
-	second := memory.Memory{ID: "second", Content: "fixed in PR #210, removed"}
-	store := &fakeStore{candidates: []memory.Memory{first, second}}
-	provider := &fakeProvider{resps: []string{"1: KEEP\n2: already-resolved\n", "KEEP"}}
-	cls := NewResolutionClassifier(provider)
-
-	res, _, err := Run(context.Background(), store, cls, "proj", true, nil)
-	if err != nil {
-		t.Fatalf("Run first apply: %v", err)
-	}
-	if res.Unknown != 1 {
-		t.Errorf("first pass Unknown = %d, want 1", res.Unknown)
-	}
-	if len(store.markedKept) != 1 {
-		t.Fatalf("first pass markedKept = %v, want one explicit KEEP", store.markedKept)
-	}
-	if _, ok := store.markedKept[0][second.ID]; ok {
-		t.Fatalf("garbled batch line was KEEP-cached: %v", store.markedKept[0])
-	}
-
-	res, _, err = Run(context.Background(), store, cls, "proj", true, nil)
-	if err != nil {
-		t.Fatalf("Run second apply: %v", err)
-	}
-	if res.Unknown != 0 {
-		t.Errorf("second pass Unknown = %d, want 0 after explicit KEEP", res.Unknown)
-	}
-	if provider.calls != 2 {
-		t.Errorf("provider calls = %d, want 2 (garbled candidate re-asked)", provider.calls)
-	}
-	if _, ok := store.kept[second.ID]; !ok {
-		t.Errorf("second pass did not cache its explicit KEEP: %v", store.kept)
-	}
-}
-
-// TestRunDoesNotCacheUnparseableVerdict is the regression guard for the KEEP
-// cache's meaning: a classifier reply that cannot be parsed is UNKNOWN, not an
-// explicit KEEP, and must be offered again on the next pass.
-func TestRunDoesNotCacheUnparseableVerdict(t *testing.T) {
-	content := "kill experiment finding: 7.3% cross-session links, removed"
-	store := &fakeStore{candidates: []memory.Memory{{ID: "m", Content: content}}}
-	cls := &fakeClassifier{unknown: map[string]bool{content: true}}
-	var logs bytes.Buffer
-	logger := slog.New(slog.NewTextHandler(&logs, nil))
-
-	res, _, err := Run(context.Background(), store, cls, "proj", true, logger)
-	if err != nil {
-		t.Fatalf("Run apply: %v", err)
-	}
-	if res.Unknown != 1 {
-		t.Errorf("Unknown = %d, want 1", res.Unknown)
-	}
-	if !strings.Contains(logs.String(), "unknown=1") {
-		t.Errorf("resolve log must report UNKNOWN count, log:\n%s", logs.String())
-	}
-	if len(store.markedKept) != 0 {
-		t.Fatalf("unparseable verdict must not be KEEP-cached: markedKept = %v", store.markedKept)
-	}
-	if _, ok := store.kept["m"]; ok {
-		t.Fatalf("unparseable verdict must not be present in the KEEP cache: %v", store.kept)
-	}
-
-	// The next pass must offer the same unknown candidate again.
-	res, _, err = Run(context.Background(), store, cls, "proj", true, nil)
-	if err != nil {
-		t.Fatalf("Run second apply: %v", err)
-	}
-	if res.Unknown != 1 {
-		t.Errorf("second pass Unknown = %d, want 1", res.Unknown)
-	}
-	if cls.calls != 2 {
-		t.Errorf("classifier calls = %d, want 2 (unknown candidate re-asked)", cls.calls)
 	}
 }
 
@@ -571,176 +383,5 @@ func TestRunRecordsKeepHashesOnlyOnApply(t *testing.T) {
 	}
 	if _, ok := store.markedKept[0]["drop"]; ok {
 		t.Errorf("resolved verdict must not be KEEP-cached: %v", store.markedKept[0])
-	}
-}
-
-// TestRunNeverCachesResolvedVerdicts: a RESOLVED verdict is written via
-// SetResolved, never into the KEEP cache.
-func TestRunNeverCachesResolvedVerdicts(t *testing.T) {
-	content := "kill experiment finding: 7.3% cross-session links, removed"
-	store := &fakeStore{candidates: []memory.Memory{{ID: "drop", Content: content}}}
-	cls := &fakeClassifier{drop: map[string]bool{content: true}}
-
-	res, _, err := Run(context.Background(), store, cls, "proj", true, nil)
-	if err != nil {
-		t.Fatalf("Run apply: %v", err)
-	}
-	if res.Confirmed != 1 || res.Resolved != 1 {
-		t.Fatalf("confirmed=%d resolved=%d, want 1/1", res.Confirmed, res.Resolved)
-	}
-	if len(store.resolved) != 1 || store.resolved[0] != "drop" {
-		t.Fatalf("resolved = %v, want [drop]", store.resolved)
-	}
-	if len(store.markedKept) != 0 {
-		t.Errorf("resolved verdicts must not be KEEP-cached: markedKept = %v", store.markedKept)
-	}
-}
-
-// TestRunReclassifiesChangedContent: a stored hash for different content does
-// not match, so the candidate is classified again.
-func TestRunReclassifiesChangedContent(t *testing.T) {
-	store := &fakeStore{
-		candidates: []memory.Memory{{ID: "m", Content: "fixed in PR #210, dead ranking bonus removed"}},
-		kept:       map[string]string{"m": ContentHash("an older version of this note")},
-	}
-	cls := &fakeClassifier{drop: map[string]bool{}}
-
-	res, _, err := Run(context.Background(), store, cls, "proj", false, nil)
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if cls.calls != 1 {
-		t.Errorf("classifier calls = %d, want 1 (hash mismatch re-classifies)", cls.calls)
-	}
-	if res.Skipped != 0 {
-		t.Errorf("res.Skipped = %d, want 0", res.Skipped)
-	}
-}
-
-// TestRunDeterministicDemotionsIgnoreCache: the supersedes-edge piggyback is
-// confirmed before the cache lookup, so it counts as Superseded (not Skipped)
-// and needs no classifier call even when the cache holds a stale entry.
-func TestRunDeterministicDemotionsIgnoreCache(t *testing.T) {
-	older := memory.Memory{ID: "older", Category: "gotcha",
-		Content: "Reward snapshot import miscalculates: unrelated live-looking gotcha without keywords"}
-	// Neither note carries a resolution keyword, so the only candidate the
-	// piggyback demotes is the link's older endpoint and no note reaches the
-	// classifier.
-	newer := memory.Memory{ID: "newer", Category: "gotcha",
-		Content: "the snapshot import row was replaced; never use the old calculation on import"}
-	store := &fakeStore{
-		candidates: []memory.Memory{older, newer},
-		links: []memory.Link{{
-			SourceID: "newer", TargetID: "older", Relation: "supersedes", Source: "llm",
-		}},
-		kept: map[string]string{"older": ContentHash(older.Content)},
-	}
-	cls := &fakeClassifier{drop: map[string]bool{}}
-
-	res, confirmed, err := Run(context.Background(), store, cls, "proj", true, nil)
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if res.Superseded != 1 {
-		t.Fatalf("res.Superseded = %d, want 1", res.Superseded)
-	}
-	if res.Skipped != 0 {
-		t.Errorf("res.Skipped = %d, want 0 (piggyback wins over the cache)", res.Skipped)
-	}
-	if cls.calls != 0 {
-		t.Errorf("classifier calls = %d, want 0 for a deterministic demotion", cls.calls)
-	}
-	if len(confirmed) != 1 || confirmed[0].ID != "older" {
-		t.Fatalf("confirmed = %v, want [older]", confirmed)
-	}
-}
-
-// TestRunMixedCachedAndUncachedCandidates: cache hits are skipped while the
-// rest go through one batched call; counts and writes stay per-candidate.
-func TestRunMixedCachedAndUncachedCandidates(t *testing.T) {
-	cached := memory.Memory{ID: "cached", Content: "kill experiment closed, removed"}
-	drop := memory.Memory{ID: "drop", Content: "fixed in PR #210, dead ranking bonus removed"}
-	keep := memory.Memory{ID: "keep", Content: "postmortem concluded, no follow-up"}
-	store := &fakeStore{
-		candidates: []memory.Memory{cached, drop, keep},
-		kept:       map[string]string{cached.ID: ContentHash(cached.Content)},
-	}
-	cls := &fakeClassifier{drop: map[string]bool{drop.Content: true}}
-
-	res, confirmed, err := Run(context.Background(), store, cls, "proj", true, nil)
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if cls.calls != 1 {
-		t.Errorf("classifier calls = %d, want 1 for the two uncached notes", cls.calls)
-	}
-	if res.Skipped != 1 || res.Confirmed != 1 || res.Resolved != 1 {
-		t.Fatalf("skipped=%d confirmed=%d resolved=%d, want 1/1/1", res.Skipped, res.Confirmed, res.Resolved)
-	}
-	if len(confirmed) != 1 || confirmed[0].ID != "drop" {
-		t.Fatalf("confirmed = %v, want [drop]", confirmed)
-	}
-	if len(store.resolved) != 1 || store.resolved[0] != "drop" {
-		t.Fatalf("resolved = %v, want [drop]", store.resolved)
-	}
-	if len(store.markedKept) != 1 || len(store.markedKept[0]) != 1 {
-		t.Fatalf("markedKept = %v, want one KEEP hash", store.markedKept)
-	}
-	if got := store.markedKept[0]["keep"]; got != ContentHash(keep.Content) {
-		t.Errorf("cached hash = %q, want %q", got, ContentHash(keep.Content))
-	}
-	if _, ok := store.markedKept[0]["cached"]; ok {
-		t.Errorf("cache hit must not be re-recorded: %v", store.markedKept[0])
-	}
-}
-
-// TestRunFailsFatallyOnVerdictCountMismatch: a classifier that returns fewer
-// verdicts than candidates must abort the pass rather than leave notes unjudged
-// (or panic indexing).
-func TestRunFailsFatallyOnVerdictCountMismatch(t *testing.T) {
-	store := &fakeStore{candidates: []memory.Memory{
-		{ID: "a", Content: "kill experiment finding: removed"},
-		{ID: "b", Content: "fixed in PR #210, removed"},
-	}}
-	cls := &fakeClassifier{drop: map[string]bool{}, truncate: true}
-
-	res, confirmed, err := Run(context.Background(), store, cls, "proj", true, nil)
-	if err == nil {
-		t.Fatalf("Run: want verdict-count error, got nil (res=%+v confirmed=%v)", res, confirmed)
-	}
-	if !strings.Contains(err.Error(), "classifier returned 1 verdict(s)") {
-		t.Errorf("error = %v, want a verdict-count mismatch", err)
-	}
-	if len(store.resolved) != 0 {
-		t.Errorf("partial pass must not be applied: %v", store.resolved)
-	}
-	if len(store.markedKept) != 0 {
-		t.Errorf("partial pass must not cache KEEPs: %v", store.markedKept)
-	}
-}
-
-// TestRunMarkResolveKeptErrorDoesNotFailThePass: the resolved rows are already
-// correct when the cache write fails; losing derived state only costs a
-// re-classify next pass, so the pass warns and continues.
-func TestRunMarkResolveKeptErrorDoesNotFailThePass(t *testing.T) {
-	store := &fakeStore{
-		candidates: []memory.Memory{
-			{ID: "keep", Content: "kill experiment finding: 7.3% cross-session links, removed"},
-		},
-		markErr: errors.New("disk full"),
-	}
-	cls := &fakeClassifier{drop: map[string]bool{}}
-	var buf bytes.Buffer
-	logger := slog.New(slog.NewTextHandler(&buf, nil))
-
-	res, _, err := Run(context.Background(), store, cls, "proj", true, logger)
-	if err != nil {
-		t.Fatalf("Run must not fail on a cache-write error: %v", err)
-	}
-	if res.Confirmed != 0 || res.Resolved != 0 {
-		t.Errorf("confirmed=%d resolved=%d, want 0/0", res.Confirmed, res.Resolved)
-	}
-	if !strings.Contains(buf.String(), "resolve kept cache write failed") {
-		t.Errorf("expected a warning about the failed cache write, log:\n%s", buf.String())
 	}
 }

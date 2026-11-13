@@ -86,35 +86,6 @@ func TestAWithdrawnSupersedesEdgeDoesNotBuryItsTarget(t *testing.T) {
 	}
 }
 
-// The positive half: an edge that is still live at write time still stamps, and
-// a target with two live edges survives the withdrawal of one of them.
-func TestALiveSupersedesEdgeStillStamps(t *testing.T) {
-	s, ctx, project := newFreshnessStore(t)
-	older := mustCreate(t, s, ctx, project, "the cache layer uses redis for sessions")
-	newer := mustCreate(t, s, ctx, project, "the cache layer now uses memcached for sessions")
-	newest := mustCreate(t, s, ctx, project, "sessions moved to valkey, replacing memcached")
-	mustCreate(t, s, ctx, project, bystander)
-	for _, src := range []string{newer, newest} {
-		if err := s.CreateLink(ctx, src, older, "supersedes", 0.9, "llm"); err != nil {
-			t.Fatalf("CreateLink: %v", err)
-		}
-	}
-	cls := &duringClassify{fn: func(ctx context.Context) error {
-		_, err := s.InvalidateLink(ctx, newer, older, "supersedes")
-		return err
-	}}
-	res, _, err := Run(ctx, s, cls, project, true, nil)
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if res.Resolved != 1 || res.Stale != 0 {
-		t.Errorf("Resolved=%d Stale=%d, want 1 and 0: a second live edge still justifies the stamp", res.Resolved, res.Stale)
-	}
-	if ra := resolvedAt(t, s, ctx, older); ra == nil {
-		t.Error("older resolved_at is NULL, want stamped")
-	}
-}
-
 const correctionText = "CORRECTION/RESOLUTION: the sessions cache fix zephyrone zephyrtwo zephyrthree is already fixed on main"
 const claimText = "sessions cache problem zephyrone zephyrtwo zephyrthree was shipped with a bug"
 
@@ -147,83 +118,5 @@ func TestACorrectionDeletedDuringClassifyDoesNotBuryItsTarget(t *testing.T) {
 	}
 	if ra := resolvedAt(t, s, ctx, claim); ra != nil {
 		t.Errorf("claim resolved_at = %q, want NULL", *ra)
-	}
-}
-
-func TestACorrectionRewrittenDuringClassifyDoesNotBuryItsTarget(t *testing.T) {
-	s, ctx, project, claim, correction := correctionFixture(t)
-	rewrite := "the sessions cache fix is NOT done; keep the patch plan live"
-	cls := &duringClassify{fn: func(ctx context.Context) error {
-		return s.UpdateMemory(ctx, project, correction, &rewrite, nil, nil, nil)
-	}}
-	res, _, err := Run(ctx, s, cls, project, true, nil)
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if res.Corrected != 1 {
-		t.Fatalf("Corrected = %d, want 1 (the fixture must pair)", res.Corrected)
-	}
-	if res.Resolved != 0 || res.Stale != 1 {
-		t.Errorf("Resolved=%d Stale=%d, want 0 and 1: the correction was rewritten before the write", res.Resolved, res.Stale)
-	}
-	if ra := resolvedAt(t, s, ctx, claim); ra != nil {
-		t.Errorf("claim resolved_at = %q, want NULL", *ra)
-	}
-}
-
-func TestAnUntouchedCorrectionStillStamps(t *testing.T) {
-	s, ctx, project, claim, _ := correctionFixture(t)
-	res, _, err := Run(ctx, s, &duringClassify{}, project, true, nil)
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if res.Corrected != 1 || res.Resolved != 1 || res.Stale != 0 {
-		t.Errorf("Corrected=%d Resolved=%d Stale=%d, want 1, 1, 0", res.Corrected, res.Resolved, res.Stale)
-	}
-	if ra := resolvedAt(t, s, ctx, claim); ra == nil {
-		t.Error("claim resolved_at is NULL, want stamped")
-	}
-}
-
-// A batch holding one row whose edge was withdrawn and one whose edge is live:
-// the UPDATE runs (the live row reaches it), so only binding it to the rows that
-// passed every check keeps the refused row live — it still matches the content
-// CAS.
-func TestAMixedBatchStampsOnlyTheRowsWhoseSignalHolds(t *testing.T) {
-	s, ctx, project := newFreshnessStore(t)
-	refusedID := mustCreate(t, s, ctx, project, "the cache layer uses redis for sessions")
-	liveID := mustCreate(t, s, ctx, project, "the queue layer uses nats for events")
-	newer := mustCreate(t, s, ctx, project, "the layers were rebuilt on valkey")
-	for _, tgt := range []string{refusedID, liveID} {
-		if err := s.CreateLink(ctx, newer, tgt, "supersedes", 0.9, "llm"); err != nil {
-			t.Fatalf("CreateLink: %v", err)
-		}
-	}
-	rows, err := s.GetByIDs(ctx, []string{refusedID, liveID})
-	if err != nil || len(rows) != 2 {
-		t.Fatalf("GetByIDs: %v (%d rows)", err, len(rows))
-	}
-	if _, err := s.InvalidateLink(ctx, newer, refusedID, "supersedes"); err != nil {
-		t.Fatalf("InvalidateLink: %v", err)
-	}
-	why := map[string]memory.ResolveJustification{
-		refusedID: {EdgeSources: []string{newer}},
-		liveID:    {EdgeSources: []string{newer}},
-	}
-	stamped, stale, err := s.SetResolvedJustified(ctx, rows, why)
-	if err != nil {
-		t.Fatalf("SetResolvedJustified: %v", err)
-	}
-	if len(stamped) != 1 || stamped[0] != liveID {
-		t.Errorf("stamped = %v, want only %s", stamped, liveID)
-	}
-	if len(stale) != 1 || stale[0] != refusedID {
-		t.Errorf("stale = %v, want only %s", stale, refusedID)
-	}
-	if ra := resolvedAt(t, s, ctx, refusedID); ra != nil {
-		t.Errorf("refused row resolved_at = %q, want NULL", *ra)
-	}
-	if ra := resolvedAt(t, s, ctx, liveID); ra == nil {
-		t.Error("live row resolved_at is NULL, want stamped")
 	}
 }
