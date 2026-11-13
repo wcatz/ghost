@@ -12,15 +12,10 @@ import (
 	"time"
 )
 
-// The three cases the first round of this file did not cover, and the two of them
-// that changed a verdict rather than added a message: a copy that is not the file
-// its manifest describes, in the shape where the hash still had to run; and a copy
-// from an OLDER Ghost, which is restorable and therefore not a failure.
-
 // bumpUserVersion writes a schema version onto a snapshot. A snapshot is opened
 // writeable here even though the product never does that: OpenDB would migrate
-// the version back, and the point of these cases is a file that is at a version
-// this build does not expect.
+// the version back, and these cases need a file at a version this build does
+// not expect.
 func bumpUserVersion(t *testing.T, dest string, version int) {
 	t.Helper()
 	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(dest))
@@ -35,15 +30,9 @@ func bumpUserVersion(t *testing.T, dest string, version int) {
 	}
 }
 
-// TestVerifyReportsAHashMismatchOnATruncatedCopy: a copy cut short is the case
-// the hash exists for, and the one where running the database checks FIRST would
-// have said nothing useful — a truncated file has no schema to read, so the count
-// and version checks cannot run, and the single most informative fact (the
-// manifest says 245760 bytes, the file is 4096) would never have been reported.
-//
-// The run also ends in a hard error, because SQLite cannot read a schema out of
-// half a file. That is the point: the report still has to carry the diagnosis, so
-// the assertions here are on the report and the error is only required.
+// TestVerifyReportsAHashMismatchOnATruncatedCopy: the hash check runs FIRST so a
+// truncated copy (which has no schema to read, and ends in a hard error) still
+// reports the size on both sides, and claims no row counts it never read.
 func TestVerifyReportsAHashMismatchOnATruncatedCopy(t *testing.T) {
 	dest := backedUpFixture(t)
 	full := fileSize(t, dest)
@@ -51,7 +40,6 @@ func TestVerifyReportsAHashMismatchOnATruncatedCopy(t *testing.T) {
 	if err := os.Truncate(dest, left); err != nil {
 		t.Fatalf("truncate %s to %d: %v", dest, left, err)
 	}
-
 	rep, _ := VerifyBackup(context.Background(), dest)
 	if len(rep.Problems) == 0 {
 		t.Fatalf("verify accepted a truncated copy: %+v", rep)
@@ -60,60 +48,22 @@ func TestVerifyReportsAHashMismatchOnATruncatedCopy(t *testing.T) {
 	if hash.State != VerifyFailed {
 		t.Fatalf("sha256 check = %q (%s), want failed", hash.State, hash.Detail)
 	}
-	// The size, in bytes on both sides, because a digest a reader has to compare
-	// by hand is a worse answer to "is this the whole file" than two numbers.
 	for _, want := range []string{strconv.FormatInt(full, 10), strconv.Itoa(left)} {
 		if !strings.Contains(hash.Detail, want) {
 			t.Errorf("detail = %q, want it to name %s", hash.Detail, want)
 		}
 	}
-	// The hash check is reported FIRST, ahead of everything that needs the
-	// database, so a reader meets the diagnosis before the checks that could not
-	// run.
 	if rep.Checks[0].Name != "sha256" {
-		t.Errorf("the first check reported is %q, want sha256: it is the only one that can answer for a file that is not a database", rep.Checks[0].Name)
+		t.Errorf("the first check reported is %q, want sha256", rep.Checks[0].Name)
 	}
-	// And nothing is claimed about rows nobody counted.
-	if rep.CountsRead {
-		t.Error("CountsRead is true for a truncated copy, so the report would print a row count it never read")
-	}
-	if rep.Counts != (BackupCounts{}) {
-		t.Errorf("Counts = %+v, want the zero value: nothing was read", rep.Counts)
+	if rep.CountsRead || rep.Counts != (BackupCounts{}) {
+		t.Errorf("CountsRead=%v Counts=%+v, want nothing claimed about rows nobody counted", rep.CountsRead, rep.Counts)
 	}
 }
 
-// TestVerifyRefusesANewerSchemaAndSaysToUpgrade: a file from a newer Ghost
-// cannot be opened by this one at all — OpenDB refuses it outright — so that is
-// the one direction of the schema check that is a failure, and the direction whose
-// message has to name UPGRADE. "The file is newer" with the obvious reading
-// ("older stores get migrated") would send a user the wrong way.
-func TestVerifyRefusesANewerSchemaAndSaysToUpgrade(t *testing.T) {
-	dest := backedUpFixture(t)
-	newer := SchemaVersion() + 1
-	bumpUserVersion(t, dest, newer)
-	rewriteManifest(t, dest, func(m *BackupManifest) { m.SchemaVersion = newer })
-
-	rep, err := VerifyBackup(context.Background(), dest)
-	if err != nil {
-		t.Fatalf("VerifyBackup: %v", err)
-	}
-	got := checkNamed(t, rep, "schema version")
-	if got.State != VerifyFailed {
-		t.Fatalf("schema version check = %q (%s), want failed", got.State, got.Detail)
-	}
-	if !strings.Contains(got.Detail, "upgrade") {
-		t.Errorf("detail = %q, want it to say upgrade: a newer file is refused precisely because this build cannot open it", got.Detail)
-	}
-	if strings.Contains(got.Detail, "migrate") {
-		t.Errorf("detail = %q, must not tell a user to migrate a file from a NEWER Ghost", got.Detail)
-	}
-}
-
-// TestVerifyAcceptsAnOlderSchemaBecauseARestoreProducesOne: the documented
-// restore path migrates the restored file on the next open, and every upgrade a
-// user has ever done left a pre-migration copy behind at a LOWER version than the
-// build that wrote it. Refusing that direction would make the command reject the
-// one file it exists to protect.
+// TestVerifyAcceptsAnOlderSchemaBecauseARestoreProducesOne: every upgrade leaves
+// a pre-migration copy at a LOWER version, so that direction is restorable, not
+// a failure, and the detail says the next open migrates it.
 func TestVerifyAcceptsAnOlderSchemaBecauseARestoreProducesOne(t *testing.T) {
 	dest := backedUpFixture(t)
 	older := SchemaVersion() - 1
@@ -125,75 +75,49 @@ func TestVerifyAcceptsAnOlderSchemaBecauseARestoreProducesOne(t *testing.T) {
 		t.Fatalf("VerifyBackup: %v", err)
 	}
 	got := checkNamed(t, rep, "schema version")
-	if got.State != VerifyOK {
-		t.Errorf("schema version check = %q (%s), want ok: an older file is what every restore of a pre-migration copy produces", got.State, got.Detail)
-	}
-	if len(rep.Problems) != 0 {
-		t.Errorf("Problems = %v, want none", rep.Problems)
-	}
-	// Reported as restorable rather than as identical, so a reader knows the
-	// next open will change the file.
-	if !strings.Contains(got.Detail, "migrat") {
-		t.Errorf("detail = %q, want it to say the next open migrates the file", got.Detail)
+	if got.State != VerifyOK || len(rep.Problems) != 0 || !strings.Contains(got.Detail, "migrat") {
+		t.Errorf("schema version check = %q (%s), problems %v, want ok and a note that the next open migrates", got.State, got.Detail, rep.Problems)
 	}
 }
 
 // TestVerifyRefusesAManifestItCannotRead: a sidecar that is present but damaged
-// is not an absent optional file. Treating it as absent would report a snapshot
-// nobody can check as merely unchecked — the exact downgrade that turns a damaged
-// backup into one that still looks fine.
+// (not JSON, or from another format version) is refused, not treated as absent,
+// which would turn a damaged backup into one that merely looks unchecked.
 func TestVerifyRefusesAManifestItCannotRead(t *testing.T) {
-	dest := backedUpFixture(t)
-	manifest := ManifestPath(dest)
-	if err := os.WriteFile(manifest, []byte("{ this is not json"), 0o600); err != nil {
-		t.Fatalf("damage the manifest: %v", err)
-	}
-
-	rep, err := VerifyBackup(context.Background(), dest)
-	if err == nil {
-		t.Fatalf("verify accepted a damaged manifest: %+v", rep)
-	}
-	if !strings.Contains(err.Error(), manifest) {
-		t.Errorf("error = %v, want it to name the unreadable manifest", err)
-	}
-	if rep.HasManifest {
-		t.Error("HasManifest is true for a manifest that could not be read")
-	}
-}
-
-// TestVerifyRefusesAManifestFromAnotherFormatVersion: the manifest's own version
-// is a wire format, and a file this build cannot interpret is refused rather than
-// read on the writer's assumptions.
-func TestVerifyRefusesAManifestFromAnotherFormatVersion(t *testing.T) {
-	dest := backedUpFixture(t)
-	rewriteManifest(t, dest, func(m *BackupManifest) { m.ManifestVersion = ManifestVersion + 1 })
-
-	_, err := VerifyBackup(context.Background(), dest)
-	if err == nil {
-		t.Fatal("verify accepted a manifest from a format version this build does not read")
-	}
-	if !strings.Contains(err.Error(), "format v") {
-		t.Errorf("error = %v, want it to name the format versions", err)
+	for _, tc := range []struct {
+		name   string
+		damage func(t *testing.T, dest string)
+		want   func(dest string) string
+	}{
+		{"not json", func(t *testing.T, dest string) {
+			if err := os.WriteFile(ManifestPath(dest), []byte("{ this is not json"), 0o600); err != nil {
+				t.Fatalf("damage the manifest: %v", err)
+			}
+		}, ManifestPath},
+		{"another format version", func(t *testing.T, dest string) {
+			rewriteManifest(t, dest, func(m *BackupManifest) { m.ManifestVersion = ManifestVersion + 1 })
+		}, func(string) string { return "format v" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dest := backedUpFixture(t)
+			tc.damage(t, dest)
+			rep, err := VerifyBackup(context.Background(), dest)
+			if err == nil || !strings.Contains(err.Error(), tc.want(dest)) {
+				t.Fatalf("VerifyBackup error = %v, want a refusal naming %q (%+v)", err, tc.want(dest), rep)
+			}
+			if rep.HasManifest {
+				t.Error("HasManifest is true for a manifest that could not be read")
+			}
+		})
 	}
 }
 
-// TestCheckIntegrityReportsEveryProblemNotJustTheFirst: a check that judged or
-// reported only the FIRST of SQLite's findings would describe a file with a dozen
-// problems as having one, and a cap applied to rows rather than findings would
-// bound nothing at all — a driver may hand the whole report over in one row.
-//
-// This runs against a plain database built for the purpose. NOT because a Ghost
-// store cannot pass integrity_check — snapshots of one do, and several tests here
-// require exactly that — but because damaging arbitrary pages of a Ghost store
-// lands on the FTS5 shadow tables, and the pragma then aborts with "vtable
-// constructor failed" before it has reported anything. That is a real behaviour
-// worth handling, and checkIntegrity does handle it (the findings delivered
-// before the abort are reported along with the error), but it exercises the abort
-// path and says nothing about how many findings are kept. A plain b-tree gives
-// pages whose scrambling produces findings and nothing else.
-//
-// The cap keeps a catastrophic file from producing an unreadable report, and the
-// count of what was dropped is stated rather than the cap being silent.
+// TestCheckIntegrityReportsEveryProblemNotJustTheFirst: a check that reported
+// only the first of SQLite's findings would describe a damaged file as having
+// one, and a cap applied to rows would bound nothing (a driver may deliver the
+// whole report in one row). It runs on a plain b-tree database because damaging
+// a Ghost store lands on the FTS5 shadow tables and aborts the pragma. The cap
+// states how many findings it dropped.
 func TestCheckIntegrityReportsEveryProblemNotJustTheFirst(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "plain.db")
 	db, err := sql.Open("sqlite", path)
@@ -216,8 +140,6 @@ func TestCheckIntegrityReportsEveryProblemNotJustTheFirst(t *testing.T) {
 		t.Fatalf("close: %v", err)
 	}
 
-	// Scramble the body of every leaf page, which is what makes a page's cells
-	// unreadable rather than merely stale.
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read: %v", err)
@@ -251,24 +173,15 @@ func TestCheckIntegrityReportsEveryProblemNotJustTheFirst(t *testing.T) {
 	if !strings.Contains(got.Detail, "damaged") {
 		t.Errorf("detail = %q, want SQLite's own words carried through", got.Detail)
 	}
-	// More than the FIRST finding, which is the whole point: a driver may hand
-	// the whole report over in one row, and judging or reporting one of them is
-	// what a QueryRow would do.
 	if findings := strings.Count(got.Detail, "Tree "); findings < 2 {
 		t.Errorf("detail names %d findings, want at least 2: %q", findings, got.Detail)
 	}
-	// And — the fixture is deliberately larger than the cap — an explicit count
-	// of what was left out rather than silence.
 	if !strings.Contains(got.Detail, "more)") {
 		t.Errorf("detail = %q, want an explicit count of the findings left out", got.Detail)
 	}
-	// One line, because the report is a table and a newline in a detail shifts
-	// every column under it.
 	if strings.Contains(got.Detail, "\n") {
 		t.Errorf("detail carries a newline, which would break the reportthe report columns: %q", got.Detail)
 	}
-	// And the same function still says "ok" about a sound file, so the failure
-	// above is about this file rather than about the function always failing.
 	sound := filepath.Join(t.TempDir(), "sound.db")
 	soundDB, err := sql.Open("sqlite", sound)
 	if err != nil {
@@ -290,12 +203,9 @@ func TestCheckIntegrityReportsEveryProblemNotJustTheFirst(t *testing.T) {
 	}
 }
 
-// TestManifestReplacedIsNarrowedToTheDatabaseWidth: the manifest is REPLACED
-// rather than refused on (see writeBackupManifest), which means the open mode is
-// the one thing that does not apply — os.OpenFile's mode only sets the width of a
-// file it CREATES. A sidecar left at 0644 by anything else would otherwise be
-// rewritten at 0644, and a full description of the memory database would sit in a
-// directory the user chose to share.
+// TestManifestReplacedIsNarrowedToTheDatabaseWidth: the manifest is REPLACED, and
+// os.OpenFile's mode only applies to a file it creates, so a sidecar left at 0644
+// must come out at 0600 rather than sit wide beside the memory database.
 func TestManifestReplacedIsNarrowedToTheDatabaseWidth(t *testing.T) {
 	store := backupTestStore(t)
 	seedBackupFixture(t, store)
@@ -304,24 +214,9 @@ func TestManifestReplacedIsNarrowedToTheDatabaseWidth(t *testing.T) {
 		t.Fatalf("Backup: %v", err)
 	}
 	manifest := ManifestPath(dest)
-	// Stand in for a manifest something else wrote: wide, and not even JSON.
-	// Chmod rather than a mode argument to the write — os.WriteFile does not
-	// change the width of a file that already exists, so writing at 0644 over
-	// the 0600 one this test just created would leave it at 0600 and assert
-	// nothing at all.
 	if err := os.Chmod(manifest, 0o644); err != nil {
 		t.Fatalf("widen the manifest: %v", err)
 	}
-	if info, err := os.Stat(manifest); err != nil || info.Mode().Perm() != 0o644 {
-		t.Fatalf("the manifest is not wide to begin with (mode %v, err %v): the rest of this test would assert nothing",
-			func() os.FileMode {
-				if info == nil {
-					return 0
-				}
-				return info.Mode().Perm()
-			}(), err)
-	}
-
 	at := time.Date(2026, 9, 26, 15, 32, 7, 0, time.UTC)
 	if _, err := writeBackupManifest(dest, BackupCounts{Memories: 4}, at); err != nil {
 		t.Fatalf("writeBackupManifest over an existing manifest: %v", err)
@@ -331,16 +226,10 @@ func TestManifestReplacedIsNarrowedToTheDatabaseWidth(t *testing.T) {
 		t.Fatalf("stat manifest: %v", err)
 	}
 	if perm := info.Mode().Perm(); perm&0o077 != 0 {
-		t.Errorf("manifest mode = %04o after being replaced, want 0600: an open mode does not apply to a file that already existed", perm)
+		t.Errorf("manifest mode = %04o after being replaced, want 0600", perm)
 	}
 	m, err := ReadBackupManifest(manifest)
-	if err != nil {
-		t.Fatalf("ReadBackupManifest after replacement: %v", err)
-	}
-	if m.Counts.Memories != 4 {
-		t.Errorf("manifest counts = %+v, want the 4 that were written", m.Counts)
-	}
-	if m.CreatedAt != at.Format(time.RFC3339) {
-		t.Errorf("created_at = %q, want the instant the caller passed", m.CreatedAt)
+	if err != nil || m.Counts.Memories != 4 || m.CreatedAt != at.Format(time.RFC3339) {
+		t.Errorf("manifest = %+v, %v, want the counts and instant that were written", m, err)
 	}
 }

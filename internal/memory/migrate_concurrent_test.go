@@ -15,11 +15,9 @@ import (
 )
 
 // laggingStore builds a store one schema step behind this build, holding one
-// project and one memory, and returns its path. The stamp alone is lowered:
-// every migration step is idempotent (each checks for what it adds), so a
-// current store stamped schemaVersion-1 enters migrate() — and therefore takes
-// the pre-migration backup — exactly as the previous release's store does,
-// without this fixture having to know what the newest step adds.
+// project and one memory, and returns its path. Only the stamp is lowered (every
+// step is idempotent), so the store enters migrate() and takes the pre-migration
+// backup exactly as the previous release's store does.
 func laggingStore(t *testing.T) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "ghost.db")
@@ -63,12 +61,9 @@ func preMigrateBackupsOf(t *testing.T, path string) []string {
 	return out
 }
 
-// assertMigratedOnce is the outcome a round of concurrent openers must leave:
-// the store is current, its rows are intact, and exactly ONE pre-migration copy
-// exists. The count is what tells "one opener migrated and the other saw the
-// result" from "both migrated": the steps are idempotent, so a second migration
-// leaves an identical store, and the only trace it leaves is a second backup —
-// or, inside the same wall-clock second, a refused one.
+// assertMigratedOnce is the outcome a round of concurrent openers must leave: the
+// store is current, its rows intact, and exactly ONE pre-migration copy exists
+// (a second migration leaves an identical store and only a second backup).
 func assertMigratedOnce(t *testing.T, round int, path string) {
 	t.Helper()
 	db, err := OpenDB(path)
@@ -92,12 +87,10 @@ func assertMigratedOnce(t *testing.T, round int, path string) {
 	}
 }
 
-// TestConcurrentOpensOfALaggingStoreMigrateOnce opens a store one version back
-// from several goroutines at once. Each OpenDB is its own *sql.DB and so its own
-// SQLite connection and its own lock-file handle, which is how separate
-// processes meet the file. Every opener must succeed, and exactly one of them
-// may back up and migrate: the decision is made under the migration lock, from
-// a user_version read once the lock is held.
+// TestConcurrentOpensOfALaggingStoreMigrateOnce opens a lagging store from several
+// goroutines at once (each OpenDB has its own connection and lock-file handle, as
+// separate processes do). Every opener must succeed and exactly one may back up
+// and migrate, decided under the migration lock.
 func TestConcurrentOpensOfALaggingStoreMigrateOnce(t *testing.T) {
 	const rounds = 10
 	const openers = 3
@@ -129,10 +122,8 @@ func TestConcurrentOpensOfALaggingStoreMigrateOnce(t *testing.T) {
 }
 
 // TestMultiProcessConcurrentOpenOfALaggingStore is the same race between real
-// processes: two editors each spawning `ghost mcp` after an upgrade, or an MCP
-// server and a lifecycle child. Each child is the built multiproc helper's open
-// role (never a self-exec of this test binary); both report ready, the parent
-// releases them together, and each calls memory.OpenDB on the lagging store.
+// processes: each child is the built multiproc helper's open role, reports ready,
+// is released together and calls memory.OpenDB on the lagging store.
 func TestMultiProcessConcurrentOpenOfALaggingStore(t *testing.T) {
 	if testing.Short() {
 		t.Skip("multi-process test: builds and runs a helper program")
@@ -202,10 +193,9 @@ func TestMultiProcessConcurrentOpenOfALaggingStore(t *testing.T) {
 	}
 }
 
-// TestCurrentStoreOpenTakesNoMigrationLock pins the other half of the lock's
-// scope: only a lagging store is serialised. An open of a current store — every
-// open but the first after an upgrade — neither waits on the lock nor leaves its
-// file behind, while the migrating open does leave it (it is never removed).
+// TestCurrentStoreOpenTakesNoMigrationLock: only a lagging store is serialised. An
+// open of a current store neither waits on the lock nor leaves its file behind,
+// while the migrating open does leave it.
 func TestCurrentStoreOpenTakesNoMigrationLock(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "ghost.db")
 	for i := 0; i < 2; i++ {

@@ -97,9 +97,9 @@ func backedUpFixture(t *testing.T) string {
 }
 
 // TestBackupWritesAManifestDescribingTheFileItWrote: the manifest has to
-// describe THIS snapshot. A manifest carrying a schema version, counts and a
-// hash that belong to some other file is worse than no manifest, because
-// `backup verify` would answer "ok" about a copy nobody checked.
+// describe THIS snapshot (schema version, counts, size, hash, file name), or
+// `backup verify` would answer "ok" about a copy nobody checked. It is created
+// without group or world bits.
 func TestBackupWritesAManifestDescribingTheFileItWrote(t *testing.T) {
 	store := backupTestStore(t)
 	seedBackupFixture(t, store)
@@ -112,92 +112,34 @@ func TestBackupWritesAManifestDescribingTheFileItWrote(t *testing.T) {
 	if res.ManifestPath != ManifestPath(dest) {
 		t.Errorf("ManifestPath = %q, want %q", res.ManifestPath, ManifestPath(dest))
 	}
-
 	m := readManifestAt(t, dest)
-	if m.ManifestVersion != ManifestVersion {
-		t.Errorf("manifest_version = %d, want %d", m.ManifestVersion, ManifestVersion)
+	if m.ManifestVersion != ManifestVersion || m.SchemaVersion != SchemaVersion() {
+		t.Errorf("manifest_version/schema_version = %d/%d, want %d/%d", m.ManifestVersion, m.SchemaVersion, ManifestVersion, SchemaVersion())
 	}
-	if m.SchemaVersion != SchemaVersion() {
-		t.Errorf("schema_version = %d, want this build's %d", m.SchemaVersion, SchemaVersion())
+	if m.Counts != res.Counts || m.Counts.Memories != 4 || m.Bytes != res.Bytes {
+		t.Errorf("manifest counts/bytes = %+v/%d, the report's = %+v/%d, want 4 memories", m.Counts, m.Bytes, res.Counts, res.Bytes)
 	}
-	if m.Counts != res.Counts {
-		t.Errorf("manifest counts = %+v, the report's = %+v — the two describe one file", m.Counts, res.Counts)
-	}
-	if m.Counts.Memories != 4 {
-		t.Errorf("manifest memories = %d, want the 4 the fixture wrote", m.Counts.Memories)
-	}
-	if m.Bytes != res.Bytes {
-		t.Errorf("manifest bytes = %d, the report's = %d", m.Bytes, res.Bytes)
-	}
-	sum, err := FileSHA256(dest)
-	if err != nil {
-		t.Fatalf("FileSHA256: %v", err)
-	}
-	if m.SHA256 != sum {
-		t.Errorf("manifest sha256 = %q, the file's = %q", m.SHA256, sum)
+	if sum, err := FileSHA256(dest); err != nil || m.SHA256 != sum {
+		t.Errorf("manifest sha256 = %q, the file's = %q (%v)", m.SHA256, sum, err)
 	}
 	if _, err := time.Parse(time.RFC3339, m.CreatedAt); err != nil {
 		t.Errorf("created_at = %q, want RFC3339: %v", m.CreatedAt, err)
 	}
-	// The manifest names what the user remembers, so it is a document: a
-	// directory of backups is legible without running anything against it.
 	raw, err := os.ReadFile(ManifestPath(dest))
-	if err != nil {
-		t.Fatalf("read manifest: %v", err)
+	if err != nil || !strings.Contains(string(raw), filepath.Base(dest)) {
+		t.Errorf("manifest does not name the file it describes: %s (%v)", raw, err)
 	}
-	if !strings.Contains(string(raw), filepath.Base(dest)) {
-		t.Errorf("manifest does not name the file it describes: %s", raw)
-	}
-	// And it is created at the width the database has, never group- or
-	// world-readable like a plain create would leave it.
-	info, err := os.Stat(ManifestPath(dest))
-	if err != nil {
-		t.Fatalf("stat manifest: %v", err)
-	}
-	if perm := info.Mode().Perm(); perm&0o077 != 0 {
-		t.Errorf("manifest mode = %04o, want no group or world bits", perm)
+	if info, err := os.Stat(ManifestPath(dest)); err != nil || info.Mode().Perm()&0o077 != 0 {
+		t.Errorf("manifest mode = %v (%v), want no group or world bits", info.Mode().Perm(), err)
 	}
 }
 
-// TestVerifyAcceptsTheBackupItJustWrote: the round trip. Every check passes on
-// an untouched copy, which is the only thing that makes a failing check mean
-// anything.
-func TestVerifyAcceptsTheBackupItJustWrote(t *testing.T) {
-	dest := backedUpFixture(t)
-
-	rep, err := VerifyBackup(context.Background(), dest)
-	if err != nil {
-		t.Fatalf("VerifyBackup: %v", err)
-	}
-	if len(rep.Problems) != 0 {
-		t.Errorf("Problems = %v, want none for a fresh backup", rep.Problems)
-	}
-	for _, name := range []string{"sha256", "integrity check", "schema version", "row counts"} {
-		if got := checkNamed(t, rep, name); got.State != VerifyOK {
-			t.Errorf("check %q = %q (%s), want ok", name, got.State, got.Detail)
-		}
-	}
-	if !rep.HasManifest {
-		t.Error("HasManifest = false for a backup `ghost backup` just wrote")
-	}
-	if rep.Counts.Memories != 4 {
-		t.Errorf("report memories = %d, want the 4 in the snapshot", rep.Counts.Memories)
-	}
-}
-
-// fileChangeCounterOffset is byte 24 of a SQLite file: the start of the 4-byte
-// "file change counter" in the 100-byte database header
-// (https://sqlite.org/fileformat.html#the_database_header). It is the field a
-// write interrupted before the header was finalised leaves wrong, and it is the
-// one place a single flipped bit is invisible to everything except a hash —
-// integrity_check does not read it, and neither does a row count. Flipping it
-// here is therefore not a contrivance to dodge the integrity check: it is the
-// cheapest instance of the case the hash exists for, and a test that flipped a
-// byte inside a b-tree page would prove only that SQLite noticed.
+// fileChangeCounterOffset is byte 24 of a SQLite file: the 4-byte "file change
+// counter" in the database header. A flipped bit there is invisible to
+// integrity_check and to a row count, so only the hash can catch it.
 const fileChangeCounterOffset = 24
 
-// flipChangeCounter flips the low bit of the header's file change counter in
-// place, and fails if the file is too short to have a header.
+// flipChangeCounter flips the low bit of the header's file change counter in place.
 func flipChangeCounter(t *testing.T, path string) {
 	t.Helper()
 	raw, err := os.ReadFile(path)
@@ -213,185 +155,93 @@ func flipChangeCounter(t *testing.T, path string) {
 	}
 }
 
-// TestVerifyCatchesAFlippedByte: a backup is trusted on the strength of its
-// hash, and a hash's whole job is the byte that changed for no visible reason.
-// The byte flipped here is in the database header, so the file still opens, still
-// passes SQLite's own integrity_check and still holds every row — which is
-// exactly why a hash is in the manifest: without it a damaged copy reads as
-// sound.
-func TestVerifyCatchesAFlippedByte(t *testing.T) {
-	dest := backedUpFixture(t)
-	flipChangeCounter(t, dest)
-
-	rep, err := VerifyBackup(context.Background(), dest)
-	if err != nil {
-		t.Fatalf("VerifyBackup: %v", err)
-	}
-	if len(rep.Problems) == 0 {
-		t.Fatal("verify accepted a snapshot with a flipped byte")
-	}
-	if got := checkNamed(t, rep, "sha256"); got.State != VerifyFailed {
-		t.Errorf("sha256 check = %q (%s), want failed", got.State, got.Detail)
-	}
-	// The point of the test: the file is structurally fine, so nothing but the
-	// hash could have caught this.
-	if got := checkNamed(t, rep, "integrity check"); got.State != VerifyOK {
-		t.Errorf("integrity check = %q (%s) — this test flips a byte SQLite does not read, so anything but ok means it picked the wrong byte", got.State, got.Detail)
-	}
-	// And so are the counts: a restore of this file would have held every
-	// memory. The only thing wrong with it is that it is not provably the file
-	// the manifest describes.
-	if got := checkNamed(t, rep, "row counts"); got.State != VerifyOK {
-		t.Errorf("row counts check = %q (%s), want ok", got.State, got.Detail)
-	}
-}
-
-// TestVerifyCatchesARowCountMismatch: the manifest's numbers are a claim about
-// the file. A manifest claiming 99 memories over a file holding 4 is a restore
-// that would silently lose rows, and the hash cannot see it — the file is
-// byte-for-byte the one the manifest describes, so only the counts can.
-func TestVerifyCatchesARowCountMismatch(t *testing.T) {
-	dest := backedUpFixture(t)
-	rewriteManifest(t, dest, func(m *BackupManifest) { m.Counts.Memories = 99 })
-
-	rep, err := VerifyBackup(context.Background(), dest)
-	if err != nil {
-		t.Fatalf("VerifyBackup: %v", err)
-	}
-	got := checkNamed(t, rep, "row counts")
-	if got.State != VerifyFailed {
-		t.Fatalf("row counts check = %q (%s), want failed", got.State, got.Detail)
-	}
-	if !strings.Contains(got.Detail, "99") {
-		t.Errorf("detail = %q, want it to name the count the manifest claims", got.Detail)
-	}
-	// The hash still matches: that is what makes this the counts' check and not
-	// the hash's.
-	if sha := checkNamed(t, rep, "sha256"); sha.State != VerifyOK {
-		t.Errorf("sha256 check = %q (%s), want ok — the test left the snapshot untouched", sha.State, sha.Detail)
-	}
-}
-
-// TestVerifyRefusesABackupFromANewerSchema: a copy from a Ghost that migrated
-// past this one. Restoring it would be a downgrade, so verify says so and names
-// both versions rather than reporting a file it cannot vouch for.
-func TestVerifyRefusesABackupFromANewerSchema(t *testing.T) {
-	dest := backedUpFixture(t)
-
-	// The file itself moves past this build, which is what a newer Ghost's
-	// snapshot carries, and the manifest is brought into line so the hash check
-	// still passes and the schema check is the one under test.
+// TestVerifyBackupChecks drives VerifyBackup over a fresh backup and each way a
+// copy can be wrong, asserting the verdict of each named check: an untouched
+// copy passes everything; a flipped header byte is caught by the hash alone; a
+// wrong row count and a schema the file and manifest disagree about are caught
+// with the hash still matching; a newer schema names both versions; a copy with
+// no manifest (what the migration path writes) still gets the structural checks
+// and reports which it skipped.
+func TestVerifyBackupChecks(t *testing.T) {
 	newer := SchemaVersion() + 1
-	bumpUserVersion(t, dest, newer)
-	rewriteManifest(t, dest, func(m *BackupManifest) { m.SchemaVersion = newer })
-
-	rep, err := VerifyBackup(context.Background(), dest)
-	if err != nil {
-		t.Fatalf("VerifyBackup: %v", err)
-	}
-	if len(rep.Problems) == 0 {
-		t.Fatal("verify accepted a backup from a newer schema")
-	}
-	got := checkNamed(t, rep, "schema version")
-	if got.State != VerifyFailed {
-		t.Fatalf("schema version check = %q (%s), want failed", got.State, got.Detail)
-	}
-	// Both versions are named, because "the schema version is wrong" leaves the
-	// reader to work out which side is which.
-	for _, want := range []string{"v" + strconv.Itoa(newer), "v" + strconv.Itoa(SchemaVersion())} {
-		if !strings.Contains(got.Detail, want) {
-			t.Errorf("detail = %q, want it to name %s", got.Detail, want)
-		}
-	}
-}
-
-// TestVerifyRefusesAManifestThatDisagreesWithTheFile: the two places a schema
-// version is recorded have to agree. A manifest that understates its own file's
-// version is a copy whose description cannot be trusted at all, and accepting it
-// would make the schema check decorative.
-func TestVerifyRefusesAManifestThatDisagreesWithTheFile(t *testing.T) {
-	dest := backedUpFixture(t)
-	rewriteManifest(t, dest, func(m *BackupManifest) { m.SchemaVersion = SchemaVersion() - 1 })
-
-	rep, err := VerifyBackup(context.Background(), dest)
-	if err != nil {
-		t.Fatalf("VerifyBackup: %v", err)
-	}
-	got := checkNamed(t, rep, "schema version")
-	if got.State != VerifyFailed {
-		t.Fatalf("schema version check = %q (%s), want failed — the file is at v%d and the manifest claims v%d",
-			got.State, got.Detail, SchemaVersion(), SchemaVersion()-1)
-	}
-	// The file itself is one this build opens happily, so the only problem
-	// reported is the disagreement.
-	if len(rep.Problems) != 1 {
-		t.Errorf("Problems = %v, want just the disagreement", rep.Problems)
-	}
-}
-
-// TestVerifyChecksACopyWithNoManifest: the copy a user actually restores from
-// after a bad upgrade is written by the migration path, which writes no
-// manifest. Refusing it would make the command useless exactly when it is
-// wanted, so the structural checks run and the report says plainly which ones
-// it could not.
-func TestVerifyChecksACopyWithNoManifest(t *testing.T) {
-	dest := backedUpFixture(t)
-	if err := os.Remove(ManifestPath(dest)); err != nil {
-		t.Fatalf("remove manifest: %v", err)
-	}
-
-	rep, err := VerifyBackup(context.Background(), dest)
-	if err != nil {
-		t.Fatalf("VerifyBackup: %v", err)
-	}
-	if rep.HasManifest {
-		t.Error("HasManifest = true after the manifest was removed")
-	}
-	if len(rep.Problems) != 0 {
-		t.Errorf("Problems = %v, want none: a manifest-less copy that is structurally sound is still a restorable backup", rep.Problems)
-	}
-	for _, name := range []string{"sha256", "row counts"} {
-		if got := checkNamed(t, rep, name); got.State != VerifySkipped {
-			t.Errorf("%s check = %q (%s), want skipped — there is no manifest to check against", name, got.State, got.Detail)
-		}
-	}
-	if got := checkNamed(t, rep, "integrity check"); got.State != VerifyOK {
-		t.Errorf("integrity check = %q (%s), want ok", got.State, got.Detail)
-	}
-	// The counts are still reported: they are what a restore would hold, and a
-	// reader deciding whether this is the right copy needs them.
-	if rep.Counts.Memories != 4 {
-		t.Errorf("report memories = %d, want the 4 the snapshot holds", rep.Counts.Memories)
+	for _, tc := range []struct {
+		name       string
+		damage     func(t *testing.T, dest string)
+		want       map[string]VerifyState
+		problems   int // -1: at least one
+		hasMan     bool
+		detailName string // check whose detail must contain every string of detail
+		detail     []string
+	}{
+		{"untouched", func(*testing.T, string) {},
+			map[string]VerifyState{"sha256": VerifyOK, "integrity check": VerifyOK, "schema version": VerifyOK, "row counts": VerifyOK}, 0, true, "", nil},
+		{"flipped byte", func(t *testing.T, d string) { flipChangeCounter(t, d) },
+			map[string]VerifyState{"sha256": VerifyFailed, "integrity check": VerifyOK, "row counts": VerifyOK}, -1, true, "", nil},
+		{"row count mismatch", func(t *testing.T, d string) {
+			rewriteManifest(t, d, func(m *BackupManifest) { m.Counts.Memories = 99 })
+		}, map[string]VerifyState{"row counts": VerifyFailed, "sha256": VerifyOK}, -1, true, "row counts", []string{"99"}},
+		{"newer schema", func(t *testing.T, d string) {
+			bumpUserVersion(t, d, newer)
+			rewriteManifest(t, d, func(m *BackupManifest) { m.SchemaVersion = newer })
+		}, map[string]VerifyState{"schema version": VerifyFailed}, -1, true, "schema version",
+			[]string{"v" + strconv.Itoa(newer), "v" + strconv.Itoa(SchemaVersion())}},
+		{"manifest disagrees with file", func(t *testing.T, d string) {
+			rewriteManifest(t, d, func(m *BackupManifest) { m.SchemaVersion = SchemaVersion() - 1 })
+		}, map[string]VerifyState{"schema version": VerifyFailed}, 1, true, "", nil},
+		{"no manifest", func(t *testing.T, d string) {
+			if err := os.Remove(ManifestPath(d)); err != nil {
+				t.Fatalf("remove manifest: %v", err)
+			}
+		}, map[string]VerifyState{"sha256": VerifySkipped, "row counts": VerifySkipped, "integrity check": VerifyOK}, 0, false, "", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dest := backedUpFixture(t)
+			tc.damage(t, dest)
+			rep, err := VerifyBackup(context.Background(), dest)
+			if err != nil {
+				t.Fatalf("VerifyBackup: %v", err)
+			}
+			if rep.HasManifest != tc.hasMan {
+				t.Errorf("HasManifest = %v, want %v", rep.HasManifest, tc.hasMan)
+			}
+			if tc.problems >= 0 && len(rep.Problems) != tc.problems || tc.problems < 0 && len(rep.Problems) == 0 {
+				t.Errorf("Problems = %v, want %d", rep.Problems, tc.problems)
+			}
+			for name, state := range tc.want {
+				if got := checkNamed(t, rep, name); got.State != state {
+					t.Errorf("check %q = %q (%s), want %q", name, got.State, got.Detail, state)
+				}
+			}
+			for _, w := range tc.detail {
+				if d := checkNamed(t, rep, tc.detailName).Detail; !strings.Contains(d, w) {
+					t.Errorf("%s detail = %q, want it to name %s", tc.detailName, d, w)
+				}
+			}
+			if rep.Counts.Memories != 4 && tc.name != "row count mismatch" {
+				t.Errorf("report memories = %d, want the 4 in the snapshot", rep.Counts.Memories)
+			}
+		})
 	}
 }
 
-// TestVerifyRefusesSomethingThatIsNotADatabase: a mistyped path, or a JSONL
-// artifact passed where a backup was wanted. The message names the file, because
-// "not a database" on its own is a statement about a file the user chose
-// deliberately.
+// TestVerifyRefusesSomethingThatIsNotADatabase: a mistyped path or a JSONL
+// artifact passed where a backup was wanted; the error names the file.
 func TestVerifyRefusesSomethingThatIsNotADatabase(t *testing.T) {
 	dir := t.TempDir()
 	notDB := filepath.Join(dir, "artifact.jsonl")
 	if err := os.WriteFile(notDB, []byte(`{"type":"header","schema_version":2}`+"\n"), 0o600); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	_, err := VerifyBackup(context.Background(), notDB)
-	if err == nil {
-		t.Fatal("verify accepted a file that is not a database")
+	if _, err := VerifyBackup(context.Background(), notDB); err == nil || !strings.Contains(err.Error(), notDB) {
+		t.Fatalf("error = %v, want a refusal naming the file", err)
 	}
-	if !strings.Contains(err.Error(), notDB) {
-		t.Errorf("error = %v, want it to name the file", err)
-	}
-
 	if _, err := VerifyBackup(context.Background(), filepath.Join(dir, "no-such-file.db")); err == nil {
 		t.Error("verify accepted a path that does not exist")
 	}
 }
 
 // TestFileSHA256IsTheHashOfTheBytesOnDisk: the manifest's whole claim rests on
-// this, and a streaming bug that read the file twice, or hashed only the header
-// it had already consumed, would produce a stable wrong answer that no other
-// check contradicts.
+// this, and a streaming bug would produce a stable wrong answer.
 func TestFileSHA256IsTheHashOfTheBytesOnDisk(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "blob")
 	body := []byte(strings.Repeat("ghost", 5000))
@@ -399,12 +249,8 @@ func TestFileSHA256IsTheHashOfTheBytesOnDisk(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 	sum := sha256.Sum256(body)
-	got, err := FileSHA256(path)
-	if err != nil {
-		t.Fatalf("FileSHA256: %v", err)
-	}
-	if want := hex.EncodeToString(sum[:]); got != want {
-		t.Errorf("FileSHA256 = %q, want %q", got, want)
+	if got, err := FileSHA256(path); err != nil || got != hex.EncodeToString(sum[:]) {
+		t.Errorf("FileSHA256 = %q, %v, want %q", got, err, hex.EncodeToString(sum[:]))
 	}
 	if _, err := FileSHA256(filepath.Join(t.TempDir(), "absent")); err == nil {
 		t.Error("FileSHA256 of a missing file returned no error")
@@ -413,7 +259,7 @@ func TestFileSHA256IsTheHashOfTheBytesOnDisk(t *testing.T) {
 
 // TestManifestPathSitsBesideTheSnapshot: the sidecar is found by convention, so
 // its name derives from the snapshot's and is a legal filename on Windows as
-// well as Linux — a backup is taken on one machine and checked on another.
+// well as Linux - a backup is taken on one machine and checked on another.
 func TestManifestPathSitsBesideTheSnapshot(t *testing.T) {
 	if got, want := ManifestPath("/data/ghost.db.backup-20260926T153207Z"), "/data/ghost.db.backup-20260926T153207Z.manifest.json"; got != want {
 		t.Errorf("ManifestPath = %q, want %q", got, want)

@@ -5,21 +5,9 @@ import (
 	"testing"
 )
 
-// The four helpers below plant rows in SQL under ids a caller chose, which is the
-// only way to reach a state this build refuses to create.
-//
-// That state is real, and it is the whole reason the importers have to be careful
-// about what they do with a record they would otherwise refuse: a store written
-// before a guard landed, one restored from a snapshot an older Ghost took, or one
-// a person edited in place. `ghost import` is handed such a store, and re-running
-// an import over it must stay a no-op — the portable format's "never overwrites an
-// id that already exists, so re-running is always safe" is a promise about exactly
-// this case.
-//
-// The importers are the only place these can be written: `ImportMemory` refuses
-// the id at the boundary, `CreateFromCorpus` and `RestoreSnapshot` write
-// byte-exact data by design, and the task/decision/project importers all refuse
-// their id shapes for the same reason the memory one does.
+// The plantRaw helpers write rows in SQL under ids a caller chose, the only way
+// to reach a state this build refuses to create (a store written before a guard
+// landed, restored from an older snapshot, or hand edited).
 
 // plantRawMemory writes one memory under a caller-chosen id.
 func plantRawMemory(t *testing.T, s *Store, id, projectID, content string) {

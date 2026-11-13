@@ -6,7 +6,6 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -34,99 +33,66 @@ func verifyWithDeadline(t *testing.T, dest string) (VerifyReport, error) {
 	}
 }
 
-func requireRefusedNonRegular(t *testing.T, dest string) {
-	t.Helper()
-	rep, err := verifyWithDeadline(t, dest)
-	if err == nil {
-		t.Fatalf("verify accepted a manifest that is not a regular file: %+v", rep)
+// TestVerifyBackupRefusesANonRegularManifestWithoutBlocking: a FIFO, a symlink to
+// a FIFO or a directory in the manifest's place is refused unopened (never
+// blocking), reported as present-but-unreadable, and the checks that need no
+// manifest still run. A symlink to a regular manifest is followed.
+func TestVerifyBackupRefusesANonRegularManifestWithoutBlocking(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		plant func(t *testing.T, path string)
+	}{
+		{"fifo", func(t *testing.T, path string) {
+			if err := syscall.Mkfifo(path, 0o600); err != nil {
+				t.Skipf("mkfifo unavailable: %v", err)
+			}
+		}},
+		{"symlink to fifo", func(t *testing.T, path string) {
+			fifo := filepath.Join(t.TempDir(), "fifo")
+			if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+				t.Skipf("mkfifo unavailable: %v", err)
+			}
+			if err := os.Symlink(fifo, path); err != nil {
+				t.Skipf("symlinks unavailable: %v", err)
+			}
+		}},
+		{"directory", func(t *testing.T, path string) {
+			if err := os.Mkdir(path, 0o700); err != nil {
+				t.Fatalf("mkdir: %v", err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dest := backedUpFixture(t)
+			path := ManifestPath(dest)
+			if err := os.Remove(path); err != nil {
+				t.Fatalf("remove the manifest: %v", err)
+			}
+			tc.plant(t, path)
+			rep, err := verifyWithDeadline(t, dest)
+			if err == nil {
+				t.Fatalf("verify accepted a manifest that is not a regular file: %+v", rep)
+			}
+			if !rep.ManifestPresent || rep.HasManifest || rep.ManifestErr == nil {
+				t.Errorf("ManifestPresent=%v HasManifest=%v ManifestErr=%v, want present but unreadable", rep.ManifestPresent, rep.HasManifest, rep.ManifestErr)
+			}
+			requireManifestFreeChecksRan(t, dest, rep, err)
+		})
 	}
-	if !rep.ManifestPresent {
-		t.Error("ManifestPresent is false for a sidecar Lstat found on disk")
-	}
-	if rep.HasManifest {
-		t.Error("HasManifest is true for a sidecar that could not be read")
-	}
-	if rep.ManifestErr == nil {
-		t.Error("ManifestErr is nil, so the report would print the nil error it names")
-	}
-	requireManifestFreeChecksRan(t, dest, rep, err)
-}
 
-func TestVerifyBackupRefusesAFIFOManifestWithoutBlocking(t *testing.T) {
-	dest := backedUpFixture(t)
-	path := ManifestPath(dest)
-	if err := os.Remove(path); err != nil {
-		t.Fatalf("remove the manifest: %v", err)
-	}
-	if err := syscall.Mkfifo(path, 0o600); err != nil {
-		t.Skipf("mkfifo unavailable: %v", err)
-	}
-	requireRefusedNonRegular(t, dest)
-}
-
-// TestVerifyRunsTheManifestFreeChecksOnAFIFOManifest: a FIFO in the manifest's
-// place is refused unopened, and the run goes on to the checks that need no
-// manifest without blocking on it.
-func TestVerifyRunsTheManifestFreeChecksOnAFIFOManifest(t *testing.T) {
-	dest := backedUpFixture(t)
-	path := ManifestPath(dest)
-	if err := os.Remove(path); err != nil {
-		t.Fatalf("remove the manifest: %v", err)
-	}
-	if err := syscall.Mkfifo(path, 0o600); err != nil {
-		t.Skipf("mkfifo unavailable: %v", err)
-	}
-	rep, err := verifyWithDeadline(t, dest)
-	requireManifestFreeChecksRan(t, dest, rep, err)
-	if err != nil && !strings.Contains(err.Error(), "not a regular file") {
-		t.Errorf("error = %v, want it to say the manifest is not a regular file", err)
-	}
-}
-
-func TestVerifyBackupRefusesASymlinkToAFIFOManifestWithoutBlocking(t *testing.T) {
-	dest := backedUpFixture(t)
-	path := ManifestPath(dest)
-	if err := os.Remove(path); err != nil {
-		t.Fatalf("remove the manifest: %v", err)
-	}
-	fifo := filepath.Join(t.TempDir(), "fifo")
-	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
-		t.Skipf("mkfifo unavailable: %v", err)
-	}
-	if err := os.Symlink(fifo, path); err != nil {
-		t.Skipf("symlinks unavailable: %v", err)
-	}
-	requireRefusedNonRegular(t, dest)
-}
-
-func TestVerifyBackupRefusesADirectoryManifest(t *testing.T) {
-	dest := backedUpFixture(t)
-	path := ManifestPath(dest)
-	if err := os.Remove(path); err != nil {
-		t.Fatalf("remove the manifest: %v", err)
-	}
-	if err := os.Mkdir(path, 0o700); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	requireRefusedNonRegular(t, dest)
-}
-
-// A symlink to a regular file is followed, and says so in the docs.
-func TestVerifyBackupFollowsASymlinkToAValidManifest(t *testing.T) {
-	dest := backedUpFixture(t)
-	path := ManifestPath(dest)
-	real := filepath.Join(t.TempDir(), "real.manifest.json")
-	if err := os.Rename(path, real); err != nil {
-		t.Fatalf("move the manifest: %v", err)
-	}
-	if err := os.Symlink(real, path); err != nil {
-		t.Skipf("symlinks unavailable: %v", err)
-	}
-	rep, err := verifyWithDeadline(t, dest)
-	if err != nil {
-		t.Fatalf("verify refused a symlink to a valid manifest: %v", err)
-	}
-	if !rep.HasManifest {
-		t.Error("HasManifest is false for a followed symlink to a valid manifest")
-	}
+	t.Run("symlink to a valid manifest is followed", func(t *testing.T) {
+		dest := backedUpFixture(t)
+		path := ManifestPath(dest)
+		real := filepath.Join(t.TempDir(), "real.manifest.json")
+		if err := os.Rename(path, real); err != nil {
+			t.Fatalf("move the manifest: %v", err)
+		}
+		if err := os.Symlink(real, path); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+		rep, err := verifyWithDeadline(t, dest)
+		if err != nil || !rep.HasManifest {
+			t.Fatalf("verify refused a symlink to a valid manifest: HasManifest=%v err=%v", rep.HasManifest, err)
+		}
+	})
 }

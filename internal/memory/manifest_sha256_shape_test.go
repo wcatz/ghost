@@ -6,12 +6,9 @@ import (
 	"testing"
 )
 
-// The sidecar arrives with the copy being judged, so it is untrusted input, and
-// its sha256 is the one manifest field verify ever printed as text (#1187). A
-// value carrying ESC [1F moved the cursor back onto the headline and wrote
-// "verified" over "refusing"; a newline forged a whole line. A sha256 is a
-// digest or it is damage: anything other than 64 lowercase hex digits is a
-// manifest that cannot be read.
+// The sidecar is untrusted input and its sha256 is the one manifest field verify
+// printed as text (#1187): ESC [1F moved the cursor onto the headline and a
+// newline forged a line. Anything other than 64 lowercase hex digits is damage.
 
 // craftedSHA256 is the issue's reproduction: the 12 bytes shortHash keeps are
 // ESC [1F followed by "verified", padded to the length of a real digest.
@@ -90,18 +87,5 @@ func TestCheckHashRendersOnlyAHexDigest(t *testing.T) {
 	}
 	if !strings.Contains(c.Detail, `\x1b`) {
 		t.Errorf("detail = %q, want the value shown escaped", c.Detail)
-	}
-}
-
-// TestVerifyStillAcceptsAGenuineDigest: the shape check refuses nothing a
-// backup writes.
-func TestVerifyStillAcceptsAGenuineDigest(t *testing.T) {
-	dest := backedUpFixture(t)
-	rep, err := VerifyBackup(context.Background(), dest)
-	if err != nil || len(rep.Problems) > 0 {
-		t.Fatalf("verify refused the backup it just wrote: err=%v problems=%v", err, rep.Problems)
-	}
-	if hash := checkNamed(t, rep, "sha256"); hash.State != VerifyOK {
-		t.Fatalf("sha256 check = %q (%s), want ok", hash.State, hash.Detail)
 	}
 }

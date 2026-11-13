@@ -68,134 +68,91 @@ func assertGhostState(t *testing.T, got, want ghostStateRow, context string) {
 	}
 }
 
-// TestMergeProjectPreservesLearnedContext reproduces #1045: a merge used to
-// delete the outgoing project's ghost_state without carrying its learned
-// context over, so the survivor's learned context and interaction count were
-// both lost. This is the public wrapper, the free function's path.
-func TestMergeProjectPreservesLearnedContext(t *testing.T) {
-	s := testStore(t)
-	ctx := context.Background()
-
-	if err := s.EnsureProject(ctx, "test", "test", "dup-project"); err != nil {
-		t.Fatalf("EnsureProject dup: %v", err)
-	}
-	// The outgoing project reflects, then is interacted with. UpdateLearnedContext
-	// writes learned_context, reflection_summary and last_reflection_at from one
-	// pass, so the three travel together.
-	if err := s.UpdateLearnedContext(ctx, "test", "LEARNED about old project", "summary of the old project"); err != nil {
-		t.Fatalf("UpdateLearnedContext: %v", err)
-	}
-	for i := 0; i < 5; i++ {
-		if _, err := s.IncrementInteraction(ctx, "test"); err != nil {
-			t.Fatalf("IncrementInteraction: %v", err)
-		}
-	}
-	old := readGhostState(t, s, "test")
-
-	if err := s.MergeProject(ctx, "test", testProject); err != nil {
-		t.Fatalf("MergeProject: %v", err)
-	}
-
-	got := readGhostState(t, s, testProject)
-	assertGhostState(t, got, old, "MergeProject")
-	if got.learnedContext == "" {
-		t.Error("survivor's learned context is empty after the merge: the outgoing project's reflection was discarded")
-	}
-	if got.interactionCount != 5 {
-		t.Errorf("survivor interaction_count = %d, want the outgoing project's 5", got.interactionCount)
+// learnedSeed is a ghost_state row whose every column carries the tag.
+func learnedSeed(tag string, count int) ghostStateRow {
+	return ghostStateRow{
+		interactionCount:  count,
+		learnedContext:    "LEARNED " + tag,
+		lastReflectionAt:  nullStr("2026-06-01 10:00:00"),
+		reflectionSummary: "summary " + tag,
+		reflectInputSig:   "sig " + tag,
 	}
 }
 
-// TestEnsureProjectWithRepoMergePreservesLearnedContext exercises the free
-// mergeProjectTx copy through EnsureProjectWithRepo's auto-merge: a second
-// project for a remote that is already owned is folded into the owner.
-func TestEnsureProjectWithRepoMergePreservesLearnedContext(t *testing.T) {
-	s := testStore(t)
+func projectCount(t *testing.T, s *Store, id string) int {
+	t.Helper()
+	var n int
+	if err := s.db.QueryRow(`SELECT count(*) FROM projects WHERE id = ?`, id).Scan(&n); err != nil {
+		t.Fatalf("count %s: %v", id, err)
+	}
+	return n
+}
+
+// A merge used to delete the outgoing project's ghost_state without carrying its
+// learned context over (#1045). Each of the merge's three entry points - the
+// public MergeProject wrapper, EnsureProjectWithRepo's auto-merge of a remote
+// another project owns, and ResolveOrCreateRepoProject's method copy - must
+// leave the survivor holding the outgoing reflection whole.
+func TestMergePreservesLearnedContext(t *testing.T) {
 	ctx := context.Background()
 	const remote = "git@github.com:wcatz/merge-learned.git"
-
-	if err := s.EnsureProjectWithRepo(ctx, "owner", "/tmp/owner", "owner", remote); err != nil {
-		t.Fatalf("ensure owner: %v", err)
-	}
-	// The outgoing project exists without a remote, reflects, and is then
-	// presented with the remote the owner already claims.
-	if err := s.EnsureProject(ctx, "incoming", "/tmp/incoming", "incoming"); err != nil {
-		t.Fatalf("ensure incoming: %v", err)
-	}
-	seedGhostState(t, s, "incoming", ghostStateRow{
-		interactionCount:  3,
-		learnedContext:    "LEARNED incoming",
-		lastReflectionAt:  nullStr("2026-06-01 10:00:00"),
-		reflectionSummary: "summary incoming",
-		reflectInputSig:   "sig incoming",
+	t.Run("MergeProject", func(t *testing.T) {
+		s := testStore(t)
+		if err := s.EnsureProject(ctx, "test", "test", "dup-project"); err != nil {
+			t.Fatalf("EnsureProject: %v", err)
+		}
+		if err := s.UpdateLearnedContext(ctx, "test", "LEARNED about old project", "summary of the old project"); err != nil {
+			t.Fatalf("UpdateLearnedContext: %v", err)
+		}
+		for i := 0; i < 5; i++ {
+			if _, err := s.IncrementInteraction(ctx, "test"); err != nil {
+				t.Fatalf("IncrementInteraction: %v", err)
+			}
+		}
+		old := readGhostState(t, s, "test")
+		if err := s.MergeProject(ctx, "test", testProject); err != nil {
+			t.Fatalf("MergeProject: %v", err)
+		}
+		got := readGhostState(t, s, testProject)
+		assertGhostState(t, got, old, "MergeProject")
+		if got.learnedContext == "" || got.interactionCount != 5 {
+			t.Errorf("survivor lost the outgoing reflection: %+v", got)
+		}
 	})
-
-	if err := s.EnsureProjectWithRepo(ctx, "incoming", "/tmp/incoming", "incoming", remote); err != nil {
-		t.Fatalf("ensure incoming with owner's remote: %v", err)
-	}
-
-	// The incoming row is gone and the owner holds its reflection whole.
-	var count int
-	if err := s.db.QueryRow(`SELECT count(*) FROM projects WHERE id = 'incoming'`).Scan(&count); err != nil {
-		t.Fatalf("count incoming: %v", err)
-	}
-	if count != 0 {
-		t.Fatalf("incoming project survived the merge: %d row(s)", count)
-	}
-	got := readGhostState(t, s, "owner")
-	assertGhostState(t, got, ghostStateRow{
-		interactionCount:  3,
-		learnedContext:    "LEARNED incoming",
-		lastReflectionAt:  nullStr("2026-06-01 10:00:00"),
-		reflectionSummary: "summary incoming",
-		reflectInputSig:   "sig incoming",
-	}, "EnsureProjectWithRepo merge")
-}
-
-// TestResolveOrCreateRepoProjectMergePreservesLearnedContext exercises the
-// (*Store).mergeProjectTx method copy, which the free function does not reach:
-// its callers are the bind-recovery paths, and ResolveOrCreateRepoProject is
-// the exported entry that reaches one. An explicit, unbound project that is
-// presented with a remote another project already owns is merged into the
-// owner.
-func TestResolveOrCreateRepoProjectMergePreservesLearnedContext(t *testing.T) {
-	s := testStore(t)
-	ctx := context.Background()
-	const remote = "git@github.com:wcatz/method-merge-learned.git"
-
-	if err := s.EnsureProjectWithRepo(ctx, "owner", "/tmp/owner", "owner", remote); err != nil {
-		t.Fatalf("ensure owner: %v", err)
-	}
-	if err := s.EnsureProject(ctx, "outgoing", "/tmp/outgoing", "outgoing"); err != nil {
-		t.Fatalf("ensure outgoing: %v", err)
-	}
-	seedGhostState(t, s, "outgoing", ghostStateRow{
-		interactionCount:  2,
-		learnedContext:    "LEARNED outgoing",
-		lastReflectionAt:  nullStr("2026-06-01 10:00:00"),
-		reflectionSummary: "summary outgoing",
-		reflectInputSig:   "sig outgoing",
+	t.Run("EnsureProjectWithRepo", func(t *testing.T) {
+		s := testStore(t)
+		if err := s.EnsureProjectWithRepo(ctx, "owner", "/tmp/owner", "owner", remote); err != nil {
+			t.Fatalf("ensure owner: %v", err)
+		}
+		if err := s.EnsureProject(ctx, "incoming", "/tmp/incoming", "incoming"); err != nil {
+			t.Fatalf("ensure incoming: %v", err)
+		}
+		seedGhostState(t, s, "incoming", learnedSeed("incoming", 3))
+		if err := s.EnsureProjectWithRepo(ctx, "incoming", "/tmp/incoming", "incoming", remote); err != nil {
+			t.Fatalf("ensure incoming with owner's remote: %v", err)
+		}
+		if n := projectCount(t, s, "incoming"); n != 0 {
+			t.Fatalf("incoming project survived the merge: %d row(s)", n)
+		}
+		assertGhostState(t, readGhostState(t, s, "owner"), learnedSeed("incoming", 3), "EnsureProjectWithRepo merge")
 	})
-
-	if _, _, err := s.ResolveOrCreateRepoProject(ctx, "outgoing", "outgoing", "outgoing", "/tmp/outgoing", "outgoing", remote); err != nil {
-		t.Fatalf("ResolveOrCreateRepoProject: %v", err)
-	}
-
-	var count int
-	if err := s.db.QueryRow(`SELECT count(*) FROM projects WHERE id = 'outgoing'`).Scan(&count); err != nil {
-		t.Fatalf("count outgoing: %v", err)
-	}
-	if count != 0 {
-		t.Fatalf("outgoing project survived the merge: %d row(s)", count)
-	}
-	got := readGhostState(t, s, "owner")
-	assertGhostState(t, got, ghostStateRow{
-		interactionCount:  2,
-		learnedContext:    "LEARNED outgoing",
-		lastReflectionAt:  nullStr("2026-06-01 10:00:00"),
-		reflectionSummary: "summary outgoing",
-		reflectInputSig:   "sig outgoing",
-	}, "ResolveOrCreateRepoProject merge")
+	t.Run("ResolveOrCreateRepoProject", func(t *testing.T) {
+		s := testStore(t)
+		if err := s.EnsureProjectWithRepo(ctx, "owner", "/tmp/owner", "owner", remote); err != nil {
+			t.Fatalf("ensure owner: %v", err)
+		}
+		if err := s.EnsureProject(ctx, "outgoing", "/tmp/outgoing", "outgoing"); err != nil {
+			t.Fatalf("ensure outgoing: %v", err)
+		}
+		seedGhostState(t, s, "outgoing", learnedSeed("outgoing", 2))
+		if _, _, err := s.ResolveOrCreateRepoProject(ctx, "outgoing", "outgoing", "outgoing", "/tmp/outgoing", "outgoing", remote); err != nil {
+			t.Fatalf("ResolveOrCreateRepoProject: %v", err)
+		}
+		if n := projectCount(t, s, "outgoing"); n != 0 {
+			t.Fatalf("outgoing project survived the merge: %d row(s)", n)
+		}
+		assertGhostState(t, readGhostState(t, s, "owner"), learnedSeed("outgoing", 2), "ResolveOrCreateRepoProject merge")
+	})
 }
 
 // TestMigrateV16MergePreservesLearnedContext models
@@ -262,133 +219,29 @@ func TestMigrateV16MergePreservesLearnedContext(t *testing.T) {
 	}
 }
 
-// TestBothMergePathsPreserveLearnedContextIdentically is the guard the review
-// asked for: the free function and the method are two copies of the merge, and
-// they must leave the survivor's ghost_state identical. The method copy is
-// reached through ResolveOrCreateRepoProject, the free one through
-// MergeProject; both are fed the same shape and their results compared.
-func TestBothMergePathsPreserveLearnedContextIdentically(t *testing.T) {
-	const remote = "git@github.com:wcatz/identical-merge.git"
-	seed := ghostStateRow{
-		interactionCount:  7,
-		learnedContext:    "LEARNED shared shape",
-		lastReflectionAt:  nullStr("2026-06-01 10:00:00"),
-		reflectionSummary: "summary shared shape",
-		reflectInputSig:   "sig shared shape",
-	}
-
-	t.Run("free", func(t *testing.T) {
-		s := testStore(t)
-		ctx := context.Background()
-		if err := s.EnsureProject(ctx, "outgoing", "/tmp/outgoing", "outgoing"); err != nil {
-			t.Fatalf("ensure outgoing: %v", err)
-		}
-		seedGhostState(t, s, "outgoing", seed)
-		if err := s.MergeProject(ctx, "outgoing", testProject); err != nil {
-			t.Fatalf("MergeProject: %v", err)
-		}
-		assertGhostState(t, readGhostState(t, s, testProject), seed, "free merge path")
-	})
-
-	t.Run("method", func(t *testing.T) {
-		s := testStore(t)
-		ctx := context.Background()
-		if err := s.EnsureProjectWithRepo(ctx, testProject, "/tmp/test", "test", remote); err != nil {
-			t.Fatalf("bind survivor remote: %v", err)
-		}
-		if err := s.EnsureProject(ctx, "outgoing", "/tmp/outgoing", "outgoing"); err != nil {
-			t.Fatalf("ensure outgoing: %v", err)
-		}
-		seedGhostState(t, s, "outgoing", seed)
-		if _, _, err := s.ResolveOrCreateRepoProject(ctx, "outgoing", "outgoing", "outgoing", "/tmp/outgoing", "outgoing", remote); err != nil {
-			t.Fatalf("ResolveOrCreateRepoProject: %v", err)
-		}
-		assertGhostState(t, readGhostState(t, s, testProject), seed, "method merge path")
-	})
-}
-
-// TestMergeGhostStateRowsUnitRule pins the rule itself, including the edges the
-// review called out: learned_context is never taken from one project while the
-// summary, signature and timestamp come from the other.
+// TestMergeGhostStateRowsUnitRule pins the rule itself: the newer reflection
+// wins whole, learned_context is never taken from one project while the summary,
+// signature and timestamp come from the other, and the interaction count is the
+// larger of the two.
 func TestMergeGhostStateRowsUnitRule(t *testing.T) {
-	surv := ghostStateRow{
-		interactionCount:  1,
-		learnedContext:    "SURV-LC",
-		lastReflectionAt:  nullStr("2026-01-01 00:00:00"),
-		reflectionSummary: "SURV-SUM",
-		reflectInputSig:   "SURV-SIG",
+	unit := func(tag string, count int, at string) ghostStateRow {
+		return ghostStateRow{
+			interactionCount: count, learnedContext: tag + "-LC", lastReflectionAt: nullStr(at),
+			reflectionSummary: tag + "-SUM", reflectInputSig: tag + "-SIG",
+		}
 	}
-	old := ghostStateRow{
-		interactionCount:  9,
-		learnedContext:    "OLD-LC",
-		lastReflectionAt:  nullStr("2026-06-01 00:00:00"),
-		reflectionSummary: "OLD-SUM",
-		reflectInputSig:   "OLD-SIG",
-	}
-
+	surv, old := unit("SURV", 1, "2026-01-01 00:00:00"), unit("OLD", 9, "2026-06-01 00:00:00")
+	survNoStamp, oldNoStamp := unit("SURV", 1, ""), unit("OLD", 9, "")
+	withCount := func(r ghostStateRow, n int) ghostStateRow { r.interactionCount = n; return r }
 	for _, tc := range []struct {
-		name     string
-		survivor ghostStateRow
-		outgoing ghostStateRow
-		want     ghostStateRow
+		name                     string
+		survivor, outgoing, want ghostStateRow
 	}{
-		{
-			name:     "outgoing newer wins whole",
-			survivor: surv,
-			outgoing: old,
-			want: ghostStateRow{
-				interactionCount: 9, learnedContext: "OLD-LC",
-				lastReflectionAt:  nullStr("2026-06-01 00:00:00"),
-				reflectionSummary: "OLD-SUM", reflectInputSig: "OLD-SIG",
-			},
-		},
-		{
-			name:     "survivor newer keeps whole",
-			survivor: old,
-			outgoing: surv,
-			want: ghostStateRow{
-				interactionCount: 9, learnedContext: "OLD-LC",
-				lastReflectionAt:  nullStr("2026-06-01 00:00:00"),
-				reflectionSummary: "OLD-SUM", reflectInputSig: "OLD-SIG",
-			},
-		},
-		{
-			name:     "survivor has no reflection takes outgoing whole",
-			survivor: ghostStateRow{interactionCount: 1},
-			outgoing: old,
-			want: ghostStateRow{
-				interactionCount: 9, learnedContext: "OLD-LC",
-				lastReflectionAt:  nullStr("2026-06-01 00:00:00"),
-				reflectionSummary: "OLD-SUM", reflectInputSig: "OLD-SIG",
-			},
-		},
-		{
-			name: "both untimestamped keep survivor whole",
-			survivor: ghostStateRow{
-				interactionCount: 1, learnedContext: "SURV-LC",
-				reflectionSummary: "SURV-SUM", reflectInputSig: "SURV-SIG",
-			},
-			outgoing: ghostStateRow{
-				interactionCount: 9, learnedContext: "OLD-LC",
-				reflectionSummary: "OLD-SUM", reflectInputSig: "OLD-SIG",
-			},
-			want: ghostStateRow{
-				interactionCount: 9, learnedContext: "SURV-LC",
-				reflectionSummary: "SURV-SUM", reflectInputSig: "SURV-SIG",
-			},
-		},
-		{
-			name: "survivor learned context without timestamp keeps its own unit",
-			survivor: ghostStateRow{
-				interactionCount: 1, learnedContext: "SURV-LC",
-				reflectionSummary: "SURV-SUM", reflectInputSig: "SURV-SIG",
-			},
-			outgoing: old,
-			want: ghostStateRow{
-				interactionCount: 9, learnedContext: "SURV-LC",
-				reflectionSummary: "SURV-SUM", reflectInputSig: "SURV-SIG",
-			},
-		},
+		{"outgoing newer wins whole", surv, old, old},
+		{"survivor newer keeps whole", old, surv, old},
+		{"survivor has no reflection takes outgoing whole", ghostStateRow{interactionCount: 1}, old, old},
+		{"both untimestamped keep survivor whole", survNoStamp, oldNoStamp, withCount(survNoStamp, 9)},
+		{"survivor learned context without timestamp keeps its own unit", survNoStamp, old, withCount(survNoStamp, 9)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			assertGhostState(t, mergeGhostStateRows(tc.survivor, tc.outgoing), tc.want, tc.name)
