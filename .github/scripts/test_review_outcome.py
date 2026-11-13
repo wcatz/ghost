@@ -23,7 +23,9 @@ import tempfile
 import unittest
 
 import review_outcome
-from review_outcome import (CAUSE_FREE_UNREACHABLE, CAUSE_MODEL_ACTED,
+from review_outcome import (CAUSE_AGENT_MISSING, CAUSE_FREE_STEP_FATAL,
+                            CAUSE_FREE_UNREACHABLE, CAUSE_MODEL_ACTED,
+                            CAUSE_MODEL_ANSWERED,
                             CAUSE_PAID_USAGE_LIMIT, CAUSE_TIMEOUT,
                             OUTCOME_FAILURE, OUTCOME_SUCCESS,
                             OUTCOME_UNAVAILABLE, decide, parse_failures)
@@ -83,10 +85,13 @@ class TestThePaidFallback(unittest.TestCase):
         self.assertEqual(decision.outcome, OUTCOME_UNAVAILABLE)
         self.assertEqual(decision.cause, CAUSE_PAID_USAGE_LIMIT)
 
-    def test_a_model_that_acted_and_named_the_funds_phrase_is_a_failure(self):
+    def test_a_model_that_acted_and_named_the_funds_phrase_keeps_its_own_cause(self):
+        # The phrase may be the model's own text echoed by a rejected tool
+        # call, so it never picks the cause: the fixed acted label does.
         decision = decide("failed", [], "failed",
                           "Insufficient account funds", model_acted=True)
-        self.assertEqual(decision.outcome, OUTCOME_FAILURE)
+        self.assertEqual(decision.outcome, OUTCOME_UNAVAILABLE)
+        self.assertEqual(decision.cause, CAUSE_MODEL_ACTED)
 
     def test_only_the_providers_own_phrase_is_the_usage_window(self):
         # "usage limit" on its own is not the window: the provider names
@@ -96,30 +101,59 @@ class TestThePaidFallback(unittest.TestCase):
 
 
 class TestAModelThatActed(unittest.TestCase):
-    # opencode echoes a rejected tool call in its own stderr, and the
-    # command it names is the MODEL's text. So a reason may classify an
-    # outage only when the model produced nothing.
+    # A model that made tool calls and never answered left no verdict:
+    # the gate stays pending for the bounded scheduled retry. opencode
+    # echoes a rejected tool call in its own stderr, and the command it
+    # names is the MODEL's text, so the cause is always the fixed acted
+    # label and never one a reason would pick.
     REJECTED_PAID = ("Permission denied for tool bash: the model tried to run "
                      "Go usage limit exceeded")
     REJECTED_FREE = ("Permission denied for tool bash: the model tried to run "
                      "The socket connection was closed unexpectedly")
 
-    def test_a_rejected_tool_call_naming_the_usage_window_is_a_failure(self):
+    def test_a_rejected_tool_call_naming_the_usage_window_is_not_that_window(self):
         decision = decide("failed", [], "failed", self.REJECTED_PAID,
                           model_acted=True)
-        self.assertEqual(decision.outcome, OUTCOME_FAILURE)
+        self.assertEqual(decision.outcome, OUTCOME_UNAVAILABLE)
+        self.assertEqual(decision.cause, CAUSE_MODEL_ACTED)
 
-    def test_a_rejected_tool_call_naming_a_socket_is_a_failure(self):
+    def test_a_rejected_tool_call_naming_a_socket_is_not_unreachable(self):
         decision = decide("failed",
                           [("opencode/big-pickle", self.REJECTED_FREE)],
                           "failed", "the paid model did not answer",
                           model_acted=True)
-        self.assertEqual(decision.outcome, OUTCOME_FAILURE)
+        self.assertEqual(decision.outcome, OUTCOME_UNAVAILABLE)
+        self.assertEqual(decision.cause, CAUSE_MODEL_ACTED)
 
     def test_a_rejected_tool_call_beats_the_usage_window(self):
         decision = decide("failed", [], "failed", USAGE_LIMIT,
                           model_acted=True)
+        self.assertEqual(decision.outcome, OUTCOME_UNAVAILABLE)
+        self.assertEqual(decision.cause, CAUSE_MODEL_ACTED)
+
+    def test_a_model_that_acted_and_answered_is_a_failure(self):
+        decision = decide("failed", [], "failed", "",
+                          paid_validation="reply validation failed: nope",
+                          model_acted=True)
         self.assertEqual(decision.outcome, OUTCOME_FAILURE)
+        self.assertEqual(decision.cause, CAUSE_MODEL_ANSWERED)
+
+    def test_a_model_that_acted_when_the_agent_was_missing_is_a_failure(self):
+        decision = decide("failed", [], "failed", "", model_acted=True,
+                          paid_agent_fatal=True)
+        self.assertEqual(decision.outcome, OUTCOME_FAILURE)
+        self.assertEqual(decision.cause, CAUSE_AGENT_MISSING)
+
+    def test_a_model_that_acted_when_the_free_step_could_not_run_is_a_failure(self):
+        decision = decide("fatal", [], "failed", "", model_acted=True)
+        self.assertEqual(decision.outcome, OUTCOME_FAILURE)
+        self.assertEqual(decision.cause, CAUSE_FREE_STEP_FATAL)
+
+    def test_the_acted_cause_is_a_fixed_label(self):
+        decision = decide("failed", [], "failed", self.REJECTED_PAID,
+                          model_acted=True)
+        self.assertNotIn("usage limit", decision.cause.lower())
+        self.assertNotIn("bash", decision.cause)
 
     def test_a_genuine_outage_with_no_model_output_is_unavailable(self):
         decision = decide("failed",
@@ -141,8 +175,9 @@ class TestATimedOutRun(unittest.TestCase):
 
     The workflow writes a FIXED reason for a timeout, because the
     shutdown shape opencode leaves behind is not the provider saying the
-    models were unreachable. The reason is the run's own clock, and a
-    model that acted or answered before the timeout is still a failure.
+    models were unreachable. The reason is the run's own clock. A model
+    that answered before the timeout is still a failure, and one that
+    only acted keeps the acted label.
     """
 
     def test_a_timed_out_free_candidate_is_an_outage(self):
@@ -164,7 +199,7 @@ class TestATimedOutRun(unittest.TestCase):
 
     def test_a_timeout_does_not_beat_a_model_that_acted(self):
         decision = decide("failed", [], "failed", TIMEOUT, model_acted=True)
-        self.assertEqual(decision.outcome, OUTCOME_FAILURE)
+        self.assertEqual(decision.outcome, OUTCOME_UNAVAILABLE)
         self.assertEqual(decision.cause, CAUSE_MODEL_ACTED)
 
     def test_the_timeout_reason_is_not_the_cause_label(self):
