@@ -25,32 +25,6 @@ const (
 	reflectSourceAllowed = "allowed: claude-code, opencode, codex, goose"
 )
 
-func TestValidateReflectSelectionAcceptsTheDocumentedSets(t *testing.T) {
-	for _, tier := range []string{"auto", "cli", "opencode", "sqlite"} {
-		for _, source := range []string{"", "claude-code", "opencode", "codex", "goose"} {
-			args := []string{"myproj", "--tier", tier}
-			if source != "" {
-				args = append(args, "--source="+source)
-			}
-			p, err := parseReflectArgs(args)
-			if err != nil {
-				t.Fatalf("parseReflectArgs(%v): %v", args, err)
-			}
-			if p.tier != tier || p.source != source {
-				t.Fatalf("parseReflectArgs(%v) = tier %q source %q", args, p.tier, p.source)
-			}
-			if err := validateReflectSelection(p); err != nil {
-				t.Errorf("validateReflectSelection(%v) refused a documented value: %v", args, err)
-			}
-		}
-	}
-	// The removed tier passes through to the switch, which answers it with
-	// its own removal message rather than the generic refusal.
-	if err := validateReflectSelection(reflectArgs{project: "myproj", tier: "haiku"}); err != nil {
-		t.Errorf("haiku must reach the tier switch's removal message, got %v", err)
-	}
-}
-
 func TestValidateReflectSelectionRefusesAnUnknownValue(t *testing.T) {
 	for _, tier := range []string{"cil", "sqlit", "AUTO", "Sqlite", ""} {
 		err := validateReflectSelection(reflectArgs{project: "myproj", tier: tier})

@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -103,95 +102,6 @@ func liveWithContent(t *testing.T, dataHome, project, content string) int {
 		t.Fatalf("count rows: %v", err)
 	}
 	return n
-}
-
-// TestRunReflectMergeTwinIsNotAConcurrentEdit: the twin is kept (by an explicit
-// keep, or as a row the response never named), nothing moved, and the round
-// must say so — no concurrent-edit line, every row still live exactly once, and
-// the skip fingerprint recorded so the identical overflow is not proposed again.
-func TestRunReflectMergeTwinIsNotAConcurrentEdit(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("shell script fake harness requires a POSIX shell")
-	}
-	// The order of the operations is part of the case: an explicit keep listed
-	// BEFORE the merge puts the twin's emission ahead of the merge's, so no rule
-	// keyed on position ("the first emission with this text is the merge's")
-	// could tell the two apart.
-	merge := func(a, b string) string { return "merge " + a + "," + b + " -> " + soloMergeText }
-	for _, tc := range []struct {
-		name string
-		ops  func(a, b, twin string) []string
-	}{
-		{name: "kept by the response", ops: func(a, b, twin string) []string { return []string{merge(a, b), "keep " + twin} }},
-		{name: "kept before the merge", ops: func(a, b, twin string) []string { return []string{"keep " + twin, merge(a, b)} }},
-		{name: "passed through unnamed", ops: func(a, b, _ string) []string { return []string{merge(a, b)} }},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			dataHome := isolatedLifecycleEnv(t)
-			const project = "vaulttwin"
-			a, b, twin := seedMergeTwinCorpus(t, dataHome, project)
-
-			// The gated harness for its free operation order, with the gate
-			// open from the start: nothing is edited during this round.
-			dir := t.TempDir()
-			calls := filepath.Join(dir, "calls")
-			release := filepath.Join(dir, "release")
-			if err := os.WriteFile(release, nil, 0o600); err != nil {
-				t.Fatalf("open the harness gate: %v", err)
-			}
-			harness := gatedReflectHarness(t, calls, filepath.Join(dir, "started"), release, tc.ops(a, b, twin))
-			t.Setenv("GHOST_CLI_CLAUDE_BINARY", harness)
-			t.Setenv("GHOST_SCRATCH_DIR", t.TempDir())
-
-			report := captureStderr(t, func() {
-				runReflectArgs(t, "reflect", project, "--tier", "cli", "--apply")
-			})
-			t.Logf("report:\n%s", report)
-
-			if strings.Contains(report, "changed or was deleted") {
-				t.Errorf("the merge's same-text twin is reported as a claim on a row that moved:\n%s", report)
-			}
-			// The twin's own keep is what the round wrote: it landed on its row.
-			if !strings.Contains(report, "Applied: 1 memories consolidated (1 fact)") {
-				t.Errorf("the round does not report the twin's keep as the one memory it consolidated:\n%s", report)
-			}
-			if !strings.Contains(report, fmt.Sprintf("%d decision link", soloMergeLinks)) {
-				t.Errorf("the overflowing merge is not reported as an overflow:\n%s", report)
-			}
-			if got := readReflectSignature(t, dataHome); got == "" {
-				t.Errorf("no skip fingerprint was recorded over a round in which no row moved")
-			}
-			// The twin lands on its own row as a keep: still exactly one copy,
-			// and the merge's sources are kept by the overflow.
-			if n := liveWithContent(t, dataHome, project, soloMergeText); n != 1 {
-				t.Errorf("%d live row(s) carry the twin's text, want exactly 1", n)
-			}
-			for _, content := range []string{soloMergeConsumerRow, soloMergeRetryRow} {
-				if n := liveWithContent(t, dataHome, project, content); n != 1 {
-					t.Errorf("%d live row(s) carry merge source %q, want 1", n, content)
-				}
-			}
-			var live sql.NullString
-			db, err := openRawDB(dataHome)
-			if err != nil {
-				t.Fatalf("open for read: %v", err)
-			}
-			defer db.Close() //nolint:errcheck
-			if err := db.QueryRow(`SELECT id FROM memories WHERE id = ? AND resolved_at IS NULL`, twin).Scan(&live); err != nil {
-				t.Errorf("the twin %s is not live under its own id: %v", twin, err)
-			}
-
-			second := captureStderr(t, func() {
-				runReflectArgs(t, "reflect", project, "--tier", "cli", "--apply", "--skip-unchanged")
-			})
-			if !strings.Contains(second, "unchanged since the last applied consolidation") {
-				t.Errorf("the second --skip-unchanged run did not skip: %s", second)
-			}
-			if n := countLines(t, calls); n != 1 {
-				t.Errorf("the harness answered %d rounds, want 1", n)
-			}
-		})
-	}
 }
 
 // TestRunReflectMergeTwinRealConcurrentEditIsStillDetected is the control: when

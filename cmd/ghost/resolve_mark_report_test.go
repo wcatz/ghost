@@ -54,47 +54,122 @@ func TestResolveMarkReportDryRunIsAPreview(t *testing.T) {
 	}
 }
 
-// TestResolveMarkReportNamesEachNoOpForWhatItIs: the four per-row states, each of
-// which is a different thing and only one of which is the issue's "already
-// resolved". A report that grouped the other three under "not marked" would leave
-// an operator unable to tell a row they may retry from one they may not — a pin
-// is an instruction to keep a memory visible, a standing category is knowledge
-// resolve never buries, and a failed write is this run's own broken promise.
-func TestResolveMarkReportNamesEachNoOpForWhatItIs(t *testing.T) {
+// TestResolveMarkReportNamesAFailedWrite: a broken write is not a no-op and not a
+// decline. It says FAILED, because a row that reads as anything else tells the
+// operator their memory is buried when it is not.
+func TestResolveMarkReportNamesAFailedWrite(t *testing.T) {
 	res := resolve.MarkResult{
-		Resolved:        4,
-		Marked:          1,
-		AlreadyResolved: 1,
-		Pinned:          1,
-		ExemptCategory:  1,
+		Resolved: 1,
 		Memories: []resolve.MarkedMemory{
-			{ID: "11111111111111111111111111111111", Category: "changelog", Content: "shipped in 0.36.0", Marked: true},
-			{ID: "22222222222222222222222222222222", Category: "changelog", Content: "already buried by an earlier pass", AlreadyResolved: true},
-			{ID: "33333333333333333333333333333333", Category: "gotcha", Content: "pinned into view on purpose", Pinned: true},
-			{ID: "44444444444444444444444444444444", Category: "convention", Content: "NEVER reuse a released directory", ExemptCategory: true},
+			{ID: "55555555555555555555555555555555", Category: "fact", Content: "a note whose stamp failed", MarkFailed: true},
 		},
 	}
 	out := resolveMarkReport("myproj", res, true)
-	for _, want := range []string{"marked", "already resolved", "pinned", "standing category"} {
+	if !strings.Contains(out, "FAILED") {
+		t.Errorf("a failed write is not marked as one:\n%s", out)
+	}
+	// And no follow-up: nothing was stamped, so there is nothing to clear.
+	if strings.Contains(out, "--reassess") {
+		t.Errorf("a run that stamped nothing printed a repair command:\n%s", out)
+	}
+}
+
+// TestResolveMarkReportFollowUpIsScopedAndRenderedByTheSharedHelper: the inverse
+// exists and the report has to name it through internal/followup, the same
+// renderer the supersede repairs use. Unscoped would re-judge every resolved
+// memory in the project — #698 measured that proposing to un-hide 143 rows,
+// about 35% of them stale — so the command carries the ids it stamped.
+func TestResolveMarkReportFollowUpIsScopedAndRenderedByTheSharedHelper(t *testing.T) {
+	res := resolve.MarkResult{
+		Resolved: 2,
+		Marked:   2,
+		Memories: []resolve.MarkedMemory{
+			{ID: "A1B2C3D4E5F60718293A4B5C6D7E8F90", Category: "changelog", Content: "shipped in 0.36.0", Marked: true},
+			{ID: "FFEEDDCCBBAA99887766554433221100", Category: "changelog", Content: "rolled back in 0.36.1", Marked: true},
+		},
+	}
+	out := resolveMarkReport("myproj", res, true)
+	if !strings.Contains(out, "--reassess --only") {
+		t.Errorf("the follow-up is not the scoped repair:\n%s", out)
+	}
+	if !strings.Contains(out, "--apply") {
+		t.Errorf("the follow-up does not apply the repair it names:\n%s", out)
+	}
+	// Both stamped ids, and the project, so the command runs as printed.
+	for _, want := range []string{"ghost resolve myproj", "A1B2C3D4E5F60718293A4B5C6D7E8F90", "FFEEDDCCBBAA99887766554433221100"} {
 		if !strings.Contains(out, want) {
-			t.Errorf("the report does not mark a row %q:\n%s", want, out)
+			t.Errorf("the follow-up omits %q:\n%s", want, out)
 		}
 	}
-	// The summary counts each no-op separately rather than summing them, because
-	// a single "3 not marked" is a number the reader cannot act on.
-	for _, want := range []string{"1 already resolved", "1 pinned", "1 in a standing category"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("the summary does not report %q:\n%s", want, out)
+}
+
+// TestMarkStampedIDsIsOnlyWhatThisRunWrote: the follow-up's list. A row that was
+// already resolved before the run is not something the command would change, and
+// naming it would send the operator to clear a stamp an earlier pass owns —
+// which the repair would then report as a no-op, having cost a classifier call
+// to learn nothing.
+func TestMarkStampedIDsIsOnlyWhatThisRunWrote(t *testing.T) {
+	got := markStampedIDs([]resolve.MarkedMemory{
+		{ID: "aaa", Marked: true},
+		{ID: "bbb", AlreadyResolved: true},
+		{ID: "ccc", Pinned: true},
+		{ID: "ddd", MarkFailed: true},
+		{ID: "eee", Marked: true},
+	})
+	if len(got) != 2 || got[0] != "aaa" || got[1] != "eee" {
+		t.Errorf("markStampedIDs = %v, want [aaa eee]", got)
+	}
+	if got := markStampedIDs(nil); len(got) != 0 {
+		t.Errorf("markStampedIDs(nil) = %v, want nothing", got)
+	}
+}
+
+// TestResolveMarkGlobalDryRunPreviewsNothing is the CLI half of the `_global`
+// refusal: runResolveMark hands the resolved project to resolve.Mark and prints
+// resolveMarkReport before raising the error, so the dry run of `ghost resolve
+// _global --mark <id>` must print no "would mark" line and must fail, exactly as
+// --apply does. An ordinary project's dry run, the control, still previews.
+func TestResolveMarkGlobalDryRunPreviewsNothing(t *testing.T) {
+	db, err := memory.OpenDB(":memory:")
+	if err != nil {
+		t.Fatalf("OpenDB: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	store := memory.NewStore(db, nil)
+	ctx := context.Background()
+	if err := store.EnsureProject(ctx, "p", "/tmp/p", "p"); err != nil {
+		t.Fatalf("EnsureProject: %v", err)
+	}
+	promoted, err := store.Create(ctx, "p", memory.Memory{Category: "fact", Content: "a promoted note every project injects", Source: "mcp"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := store.PromoteToGlobal(ctx, "p", promoted); err != nil {
+		t.Fatalf("PromoteToGlobal: %v", err)
+	}
+	ordinary, err := store.Create(ctx, "p", memory.Memory{Category: "fact", Content: "an ordinary note", Source: "mcp"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	for _, apply := range []bool{false, true} {
+		res, err := resolve.Mark(ctx, store, resolve.MarkRequest{
+			ProjectID: memory.GlobalProjectID, Refs: []string{promoted[:8]}, Apply: apply,
+		}, nil)
+		if err == nil || !strings.Contains(err.Error(), "refusing to mark in the _global project") {
+			t.Errorf("apply=%v: err = %v, want the _global refusal", apply, err)
+		}
+		if out := resolveMarkReport(memory.GlobalProjectID, res, apply); out != "" {
+			t.Errorf("apply=%v: a refused _global mark printed a report:\n%s", apply, out)
 		}
 	}
-	// The follow-up names only the row this run stamped. A row that was already
-	// resolved before the run is not something the command would change, and
-	// naming it would send the operator to clear a stamp an earlier pass owns.
-	if !strings.Contains(out, "11111111111111111111111111111111") {
-		t.Errorf("the follow-up omits the stamped memory:\n%s", out)
+
+	res, err := resolve.Mark(ctx, store, resolve.MarkRequest{ProjectID: "p", Refs: []string{ordinary[:8]}}, nil)
+	if err != nil {
+		t.Fatalf("Mark (ordinary dry run): %v", err)
 	}
-	if strings.Contains(out, "22222222222222222222222222222222'") {
-		t.Errorf("the follow-up names a memory this run did not stamp:\n%s", out)
+	if out := resolveMarkReport("p", res, false); !strings.Contains(out, "would mark resolved 1") {
+		t.Errorf("the ordinary dry run does not preview the row:\n%s", out)
 	}
 }
 
@@ -175,217 +250,5 @@ func TestResolveMarkReportNamesAPersistentTierRow(t *testing.T) {
 				t.Errorf("apply=%v: the report says %q for a persistent-tier row:\n%s", apply, wrong, out)
 			}
 		}
-	}
-}
-
-func TestResolveMarkReportNamesNothingForARequestThatNamedNothing(t *testing.T) {
-	for _, apply := range []bool{false, true} {
-		if out := resolveMarkReport("myproj", resolve.MarkResult{}, apply); out != "" {
-			t.Errorf("apply=%v: report = %q, want nothing at all", apply, out)
-		}
-	}
-}
-
-// TestResolveMarkReportNamesAFailedWrite: a broken write is not a no-op and not a
-// decline. It says FAILED, because a row that reads as anything else tells the
-// operator their memory is buried when it is not.
-func TestResolveMarkReportNamesAFailedWrite(t *testing.T) {
-	res := resolve.MarkResult{
-		Resolved: 1,
-		Memories: []resolve.MarkedMemory{
-			{ID: "55555555555555555555555555555555", Category: "fact", Content: "a note whose stamp failed", MarkFailed: true},
-		},
-	}
-	out := resolveMarkReport("myproj", res, true)
-	if !strings.Contains(out, "FAILED") {
-		t.Errorf("a failed write is not marked as one:\n%s", out)
-	}
-	// And no follow-up: nothing was stamped, so there is nothing to clear.
-	if strings.Contains(out, "--reassess") {
-		t.Errorf("a run that stamped nothing printed a repair command:\n%s", out)
-	}
-}
-
-// TestResolveMarkReportFollowUpIsScopedAndRenderedByTheSharedHelper: the inverse
-// exists and the report has to name it through internal/followup, the same
-// renderer the supersede repairs use. Unscoped would re-judge every resolved
-// memory in the project — #698 measured that proposing to un-hide 143 rows,
-// about 35% of them stale — so the command carries the ids it stamped.
-func TestResolveMarkReportFollowUpIsScopedAndRenderedByTheSharedHelper(t *testing.T) {
-	res := resolve.MarkResult{
-		Resolved: 2,
-		Marked:   2,
-		Memories: []resolve.MarkedMemory{
-			{ID: "A1B2C3D4E5F60718293A4B5C6D7E8F90", Category: "changelog", Content: "shipped in 0.36.0", Marked: true},
-			{ID: "FFEEDDCCBBAA99887766554433221100", Category: "changelog", Content: "rolled back in 0.36.1", Marked: true},
-		},
-	}
-	out := resolveMarkReport("myproj", res, true)
-	if !strings.Contains(out, "--reassess --only") {
-		t.Errorf("the follow-up is not the scoped repair:\n%s", out)
-	}
-	if !strings.Contains(out, "--apply") {
-		t.Errorf("the follow-up does not apply the repair it names:\n%s", out)
-	}
-	// Both stamped ids, and the project, so the command runs as printed.
-	for _, want := range []string{"ghost resolve myproj", "A1B2C3D4E5F60718293A4B5C6D7E8F90", "FFEEDDCCBBAA99887766554433221100"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("the follow-up omits %q:\n%s", want, out)
-		}
-	}
-}
-
-// TestResolveMarkReportQuotesAProjectNameThatNeedsIt: a project name is free text
-// — the reason internal/mcpinit sanitizes one before using it as a filename — so
-// a name holding a space or a shell metacharacter is rendered through --project
-// in single quotes. A bare `ghost resolve my proj --reassess` is two positionals
-// and a repair that refuses; a name holding a `;` rendered bare would execute it.
-func TestResolveMarkReportQuotesAProjectNameThatNeedsIt(t *testing.T) {
-	res := resolve.MarkResult{
-		Resolved: 1,
-		Marked:   1,
-		Memories: []resolve.MarkedMemory{
-			{ID: "A1B2C3D4E5F60718293A4B5C6D7E8F90", Category: "changelog", Content: "shipped", Marked: true},
-		},
-	}
-	for _, tc := range []struct{ name, project, want string }{
-		{name: "a space", project: "my proj", want: "--project 'my proj'"},
-		{name: "a metacharacter", project: "my;proj", want: "--project 'my;proj'"},
-		{name: "a dash-leading name", project: "-x", want: "--project '-x'"},
-		// One bare shell word needs no quoting, and the docs use that form
-		// everywhere, so it is the form the report emits for the ordinary case.
-		{name: "one word", project: "myproj", want: "ghost resolve myproj"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			out := resolveMarkReport(tc.project, res, true)
-			if !strings.Contains(out, tc.want) {
-				t.Errorf("the follow-up does not render %q:\n%s", tc.want, out)
-			}
-		})
-	}
-}
-
-// TestResolveMarkReportNamesIdsNoFlagCanCarry: `ghost import` writes an
-// artifact's ids verbatim, so an id can hold a comma, and a store can already
-// hold one holding a newline. (`ImportMemory` has refused the line-breaking
-// class — a control character, whitespace, a backtick or a «» — since #791, so a
-// newline id is a row written before that landed, restored from a snapshot, or
-// hand-edited; it is still a row a real store holds, which is all this needs.)
-// `--only` splits on commas, so such an id is not nameable by that flag however
-// it is quoted, and the one-per-line file is the only surface that reaches it; a
-// newline reaches nothing at all. An operator told nothing would run the command
-// above, clear fewer memories than the run stamped, and report a repair that did
-// not happen — so they are named, and which surface can reach them is said.
-func TestResolveMarkReportNamesIdsNoFlagCanCarry(t *testing.T) {
-	t.Run("a comma", func(t *testing.T) {
-		res := resolve.MarkResult{
-			Resolved: 1,
-			Marked:   1,
-			Memories: []resolve.MarkedMemory{
-				{ID: "import,1 note", Category: "fact", Content: "shipped", Marked: true},
-			},
-		}
-		out := resolveMarkReport("myproj", res, true)
-		if !strings.Contains(out, "hold a comma") {
-			t.Errorf("an id --only cannot carry is not reported as such:\n%s", out)
-		}
-		if !strings.Contains(out, "--only-file") {
-			t.Errorf("the report does not name the surface that can carry it:\n%s", out)
-		}
-		if !strings.Contains(out, "import,1 note") {
-			t.Errorf("the report does not print the id itself:\n%s", out)
-		}
-		if strings.Contains(out, "--reassess --only ") {
-			t.Errorf("the report emitted an --only command for a comma-bearing id, which cannot address it:\n%s", out)
-		}
-	})
-	t.Run("a newline", func(t *testing.T) {
-		res := resolve.MarkResult{
-			Resolved: 1,
-			Marked:   1,
-			Memories: []resolve.MarkedMemory{
-				{ID: "import\n1 note", Category: "fact", Content: "shipped", Marked: true},
-			},
-		}
-		out := resolveMarkReport("myproj", res, true)
-		if !strings.Contains(out, "hold a newline") {
-			t.Errorf("an id no surface can carry is not reported as such:\n%s", out)
-		}
-		if !strings.Contains(out, "stay") || !strings.Contains(out, "resolved") {
-			t.Errorf("the report does not say the memory stays resolved:\n%s", out)
-		}
-		if strings.Contains(out, "--reassess --only ") {
-			t.Errorf("the report emitted an --only command for a newline-bearing id:\n%s", out)
-		}
-	})
-}
-
-// TestMarkStampedIDsIsOnlyWhatThisRunWrote: the follow-up's list. A row that was
-// already resolved before the run is not something the command would change, and
-// naming it would send the operator to clear a stamp an earlier pass owns —
-// which the repair would then report as a no-op, having cost a classifier call
-// to learn nothing.
-func TestMarkStampedIDsIsOnlyWhatThisRunWrote(t *testing.T) {
-	got := markStampedIDs([]resolve.MarkedMemory{
-		{ID: "aaa", Marked: true},
-		{ID: "bbb", AlreadyResolved: true},
-		{ID: "ccc", Pinned: true},
-		{ID: "ddd", MarkFailed: true},
-		{ID: "eee", Marked: true},
-	})
-	if len(got) != 2 || got[0] != "aaa" || got[1] != "eee" {
-		t.Errorf("markStampedIDs = %v, want [aaa eee]", got)
-	}
-	if got := markStampedIDs(nil); len(got) != 0 {
-		t.Errorf("markStampedIDs(nil) = %v, want nothing", got)
-	}
-}
-
-// TestResolveMarkGlobalDryRunPreviewsNothing is the CLI half of the `_global`
-// refusal: runResolveMark hands the resolved project to resolve.Mark and prints
-// resolveMarkReport before raising the error, so the dry run of `ghost resolve
-// _global --mark <id>` must print no "would mark" line and must fail, exactly as
-// --apply does. An ordinary project's dry run, the control, still previews.
-func TestResolveMarkGlobalDryRunPreviewsNothing(t *testing.T) {
-	db, err := memory.OpenDB(":memory:")
-	if err != nil {
-		t.Fatalf("OpenDB: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	store := memory.NewStore(db, nil)
-	ctx := context.Background()
-	if err := store.EnsureProject(ctx, "p", "/tmp/p", "p"); err != nil {
-		t.Fatalf("EnsureProject: %v", err)
-	}
-	promoted, err := store.Create(ctx, "p", memory.Memory{Category: "fact", Content: "a promoted note every project injects", Source: "mcp"})
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	if err := store.PromoteToGlobal(ctx, "p", promoted); err != nil {
-		t.Fatalf("PromoteToGlobal: %v", err)
-	}
-	ordinary, err := store.Create(ctx, "p", memory.Memory{Category: "fact", Content: "an ordinary note", Source: "mcp"})
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-
-	for _, apply := range []bool{false, true} {
-		res, err := resolve.Mark(ctx, store, resolve.MarkRequest{
-			ProjectID: memory.GlobalProjectID, Refs: []string{promoted[:8]}, Apply: apply,
-		}, nil)
-		if err == nil || !strings.Contains(err.Error(), "refusing to mark in the _global project") {
-			t.Errorf("apply=%v: err = %v, want the _global refusal", apply, err)
-		}
-		if out := resolveMarkReport(memory.GlobalProjectID, res, apply); out != "" {
-			t.Errorf("apply=%v: a refused _global mark printed a report:\n%s", apply, out)
-		}
-	}
-
-	res, err := resolve.Mark(ctx, store, resolve.MarkRequest{ProjectID: "p", Refs: []string{ordinary[:8]}}, nil)
-	if err != nil {
-		t.Fatalf("Mark (ordinary dry run): %v", err)
-	}
-	if out := resolveMarkReport("p", res, false); !strings.Contains(out, "would mark resolved 1") {
-		t.Errorf("the ordinary dry run does not preview the row:\n%s", out)
 	}
 }

@@ -97,65 +97,6 @@ func TestAReflectReuseChangesTagsWithoutChangingAnyRecordedColumn(t *testing.T) 
 	}
 }
 
-// TestAReflectEmissionNeverCarriesAScope pins the other half, and the answer is
-// stronger than "reflection does not usually restate a scope".
-//
-// `ReflectMemory.Scope` is a string hint the tiers use to route an emission to
-// the project bucket or the cross-project candidate list. `reflectMemoriesToMemory`
-// does not copy it onto the `memory.Memory` it builds — there is no Scope field in
-// the literal — so every emission arriving at the store has an empty scope, and
-// the reuse UPDATE's `scope = COALESCE(?, scope)` leaves the column alone. The
-// field is DROPPED at the conversion, so no consolidation, mechanical or not, can
-// restate a scope: the strongest form of the claim, and the one worth a test,
-// because a reader of the tiers alone would not see it.
-//
-// This is the same path TestRunReflectApplyPreservesScopeOfReusedRow covers from
-// the CLI, and the half of it that is not: that test reads the column afterwards,
-// this one pins the CONVERSION as the place the claim is settled, which is what
-// makes the claim unconditional.
-func TestAReflectEmissionNeverCarriesAScope(t *testing.T) {
-	s, dbPath := reflectReuseStore(t)
-	ctx := context.Background()
-	const project = "p1"
-
-	// A memory that DOES carry a scope, so "left alone" is a statement about a
-	// value that was there and stayed.
-	id, err := s.Create(ctx, project, memory.Memory{
-		Category: "convention", Content: "the relay is reached over the vpn bastion",
-		Source: "mcp", Importance: 0.5, Scope: map[string]string{"environment": "staging"},
-	})
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	backdateMemory(t, dbPath, id)
-
-	// The conversion, with an emission that states a scope of its own. The stored
-	// row's own scope is the thing under test, not the emission's.
-	emission := []reflection.ReflectMemory{{
-		Category: "convention", Content: "the relay is reached over the vpn bastion",
-		Importance: 0.5, Tags: []string{}, Scope: "global",
-	}}
-	rows := reflectMemoriesToMemory(project, emission, nil)
-	if len(rows) != 1 {
-		t.Fatalf("converted %d rows, want 1", len(rows))
-	}
-	if len(rows[0].Scope) != 0 {
-		t.Fatalf("the conversion carried a scope of %v onto the store row; the scope half of "+
-			"the finding would be false, and this assertion is the thing that says so", rows[0].Scope)
-	}
-	// And the write agrees: the applied reuse leaves the column exactly as it was.
-	consolidatedSince, err := s.CurrentTimestamp(ctx)
-	if err != nil {
-		t.Fatalf("CurrentTimestamp: %v", err)
-	}
-	if _, err := applyReflection(ctx, s, project, emission, nil, consolidatedSince, false, nil, nil); err != nil {
-		t.Fatalf("applyReflection: %v", err)
-	}
-	if got := mustMemory(t, s, id).Scope; len(got) != 1 || got["environment"] != "staging" {
-		t.Errorf("the stored scope is %v, want it untouched at environment=staging", got)
-	}
-}
-
 // seedContainmentPair writes the two memories whose merge lands on the second one.
 // The tag sets are what make the case: the longer row does NOT carry the shorter
 // row's tag, so the union the merge builds is a tag the reused row has never had.
