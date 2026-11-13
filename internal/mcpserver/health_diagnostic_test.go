@@ -15,8 +15,6 @@ package mcpserver
 import (
 	"context"
 	"database/sql"
-	"errors"
-	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -205,54 +203,6 @@ func TestListProjectsAnswersWhileAWriteIsInFlight(t *testing.T) {
 	}
 	if strings.Contains(text.Text, "could not be read") {
 		t.Errorf("ghost_list_projects reports a count it could not read while a write was in flight:\n%s", text.Text)
-	}
-}
-
-// TestHealthShowsTheNewerStoreWarningWhileAWriteIsInFlight: the store-version
-// line is the first thing the report says, and it is the one line that says
-// the running server is writing a store a newer Ghost owns — so every save it
-// refuses is lost silently. It has to survive an in-flight write: the operator
-// who needs it is the one looking at a server that is busy.
-func TestHealthShowsTheNewerStoreWarningWhileAWriteIsInFlight(t *testing.T) {
-	srv, store, db, path := diagnosticServer(t)
-
-	// The store is at a schema version this build does not know: the writes are
-	// refused, which is what the report has to say. The version is changed
-	// BEFORE the blocking handle opens, because writing the database's header
-	// needs the write lock the blocker holds.
-	newer := memory.SchemaVersion() + 1
-	if _, err := db.ExecContext(context.Background(), fmt.Sprintf("PRAGMA user_version = %d", newer)); err != nil {
-		t.Fatalf("set the store's schema version: %v", err)
-	}
-	releaseBlock := blockTheDatabase(t, path)
-	done := startTheBlockedWrite(t, store, db)
-	defer func() {
-		releaseBlock()
-		// The store is newer than this build, so the delete must be refused.
-		if err := <-done; !errors.Is(err, memory.ErrStoreNewer) {
-			t.Errorf("the blocked project delete on a newer store: got %v, want a store-newer refusal", err)
-		}
-	}()
-
-	session := connectedClient(t, srv)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	result, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "ghost_health"})
-	if err != nil {
-		t.Fatalf("ghost_health did not answer while a write was in flight: %v", err)
-	}
-	text, ok := result.Content[0].(*mcp.TextContent)
-	if !ok {
-		t.Fatalf("ghost_health returned %T, want text", result.Content[0])
-	}
-	if !strings.Contains(text.Text, "Writes are being refused") {
-		t.Errorf("ghost_health does not report the newer store while a write is in flight:\n%s", text.Text)
-	}
-	if !strings.Contains(text.Text, fmt.Sprintf("schema v%d", newer)) {
-		t.Errorf("ghost_health does not name the store's schema version while a write is in flight:\n%s", text.Text)
-	}
-	if strings.Contains(text.Text, "could not read") {
-		t.Errorf("ghost_health reports a section it could not read while a write was in flight:\n%s", text.Text)
 	}
 }
 

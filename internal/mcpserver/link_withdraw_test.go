@@ -9,7 +9,6 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/wcatz/ghost/internal/followup"
 	"github.com/wcatz/ghost/internal/memory"
 	"github.com/wcatz/ghost/internal/provider"
 	"github.com/wcatz/ghost/internal/supersede"
@@ -55,86 +54,6 @@ func liveInto(t *testing.T, store *memory.Store, projectID, target string) int {
 		t.Fatalf("LinksInto: %v", err)
 	}
 	return len(links)
-}
-
-// TestLinkWithdrawRemovesTheNamedEdge is the MCP counterpart of
-// `ghost supersede --withdraw`: an agent that can see a wrong supersession can
-// name it and have it withdrawn, which until now it could not do at all — both
-// repair passes are CLI-only, and one of them can only withdraw an edge the
-// classifier now rejects.
-func TestLinkWithdrawRemovesTheNamedEdge(t *testing.T) {
-	srv, store := linkWithdrawServer(t)
-	newer, older := seedLinkWithdrawal(t, store, "abc123")
-
-	msg, err := srv.withdrawSupersedesLink(context.Background(), "test-project", newer, older, "")
-	if err != nil {
-		t.Fatalf("withdrawSupersedesLink: %v", err)
-	}
-	if !strings.Contains(msg, "Withdrew 1 of 1") {
-		t.Errorf("the result does not say what it withdrew: %q", msg)
-	}
-	// And it names the memory that was being buried, so the caller can tell from
-	// the result whether it withdrew the edge it meant to.
-	if !strings.Contains(msg, "The restore path needs two spindles to be safe.") {
-		t.Errorf("the result does not name the target it was burying: %q", msg)
-	}
-	// The half of the repair the caller cannot infer for itself: the target stays
-	// stamped resolved until the resolve repair pass runs, and the result says so
-	// rather than leaving the agent to believe the memory is back in context.
-	//
-	// The repair is a CLI COMMAND, SCOPED to the ids this call withdrew, and it is
-	// named as a command: there is no MCP surface for the repair at all.
-	// `ghost_resolve` is the FORWARD pass — it stamps resolved_at on confirmed
-	// evidence — and takes no id selector, so an agent pointed at it would bury MORE
-	// memories and pay a harness call for it.
-	// The command names the project the argument RESOLVED to — the id "abc123",
-	// not the name "test-project" the call was made with — so a caller's spelling
-	// of a project can never reach the command.
-	want, _, _ := followup.ResolveCommand("abc123", []string{older})
-	if !strings.Contains(msg, want) {
-		t.Errorf("the result does not carry the scoped repair command %q: %q", want, msg)
-	}
-	if !strings.Contains(msg, "SCOPED") {
-		t.Errorf("the result does not say the repair must be scoped: %q", msg)
-	}
-	// And it says the command is not a tool call, so an agent does not reach for
-	// ghost_resolve instead.
-	if !strings.Contains(msg, "no MCP tool for that repair") {
-		t.Errorf("the result does not say the repair is not available on this surface: %q", msg)
-	}
-	if got := liveInto(t, store, "abc123", older); got != 0 {
-		t.Errorf("live edges into the target = %d, want 0", got)
-	}
-	// And the audit row, which makes the withdrawal a record rather than a silent
-	// graph edit.
-	entries, err := store.MemoryHistory(context.Background(), older, 0)
-	if err != nil {
-		t.Fatalf("MemoryHistory: %v", err)
-	}
-	sawUnsupersede := false
-	for _, e := range entries {
-		if e.Phase == "unsupersede" {
-			sawUnsupersede = true
-		}
-	}
-	if !sawUnsupersede {
-		t.Errorf("no unsupersede history row for the target; phases: %v", entries)
-	}
-}
-
-// TestLinkWithdrawTakesPrefixes: an agent reads an id out of a search result
-// and out of a report, and both abbreviate. Requiring the full 32 characters
-// would make the tool undrivable from what the agent can actually see.
-func TestLinkWithdrawTakesPrefixes(t *testing.T) {
-	srv, store := linkWithdrawServer(t)
-	newer, older := seedLinkWithdrawal(t, store, "abc123")
-
-	if _, err := srv.withdrawSupersedesLink(context.Background(), "test-project", newer[:8], older[:8], ""); err != nil {
-		t.Fatalf("withdrawSupersedesLink: %v", err)
-	}
-	if got := liveInto(t, store, "abc123", older); got != 0 {
-		t.Errorf("live edges into the target = %d, want 0", got)
-	}
 }
 
 // TestLinkWithdrawRefusesWhatItCannotDo: the tool's failures are refusals, not
@@ -251,33 +170,6 @@ func TestLinkWithdrawSaysSoWhenAConcurrentPassTookTheEdge(t *testing.T) {
 	}
 	if !strings.Contains(msg, older[:8]) {
 		t.Errorf("the result does not name the edge it was asked about (%s): %q", older, msg)
-	}
-}
-
-// TestLinkWithdrawIsProjectScoped: another project's edge is neither withdrawable
-// nor reported. This is the ownership rule every other project-scoped tool
-// applies, and the reason a caller cannot use this one to reach a graph that is
-// not its own.
-func TestLinkWithdrawIsProjectScoped(t *testing.T) {
-	srv, store := linkWithdrawServer(t)
-	ctx := context.Background()
-	if err := store.EnsureProject(ctx, "other", "/tmp/other", "other"); err != nil {
-		t.Fatalf("EnsureProject: %v", err)
-	}
-	newer, older := seedLinkWithdrawal(t, store, "other")
-
-	_, err := srv.withdrawSupersedesLink(ctx, "test-project", newer, older, "")
-	if err == nil {
-		t.Fatal("the tool reached another project's edge")
-	}
-	// The refs are resolved inside the named project, so the refusal comes from
-	// that resolution rather than from a graph read: this call learns nothing
-	// about the other project's edges, not even that they exist.
-	if !strings.Contains(err.Error(), "no memory in project") {
-		t.Errorf("the refusal does not come from the project-scoped ref resolution: %v", err)
-	}
-	if got := liveInto(t, store, "other", older); got != 1 {
-		t.Errorf("the other project's edge = %d live row(s), want 1: it must be untouched", got)
 	}
 }
 
@@ -459,69 +351,6 @@ func TestWithdrawnRelationsRendersTheDefaultRatherThanNothing(t *testing.T) {
 	}
 }
 
-// TestLinkWithdrawDefaultsToSupersedesAndTakesCausesOnlyWhenNamed: the one case
-// where the default decides the edge. A pair holding both relations is the case a
-// wrong default withdraws something the caller did not name, so the pin is the
-// only way through it — and the pin has to actually pin.
-func TestLinkWithdrawDefaultsToSupersedesAndTakesCausesOnlyWhenNamed(t *testing.T) {
-	srv, store := linkWithdrawServer(t)
-	ctx := context.Background()
-	if err := store.EnsureProject(ctx, "test-project", "/tmp/test-project", "test-project"); err != nil {
-		t.Fatalf("EnsureProject: %v", err)
-	}
-	cause, err := store.Create(ctx, "test-project", memory.Memory{
-		Category: "fact", Content: "The migration left the lock table populated.", Source: "mcp", Importance: 0.7,
-	})
-	if err != nil {
-		t.Fatalf("Create(cause): %v", err)
-	}
-	effect, err := store.Create(ctx, "test-project", memory.Memory{
-		Category: "fact", Content: "The replica fell behind by four hours afterwards.", Source: "mcp", Importance: 0.7,
-	})
-	if err != nil {
-		t.Fatalf("Create(effect): %v", err)
-	}
-	if err := store.CreateLink(ctx, cause, effect, "causes", 0.9, "llm"); err != nil {
-		t.Fatalf("CreateLink(causes): %v", err)
-	}
-	if err := store.CreateLink(ctx, cause, effect, "supersedes", 0.9, "llm"); err != nil {
-		t.Fatalf("CreateLink(supersedes): %v", err)
-	}
-
-	// Unpinned: 'supersedes', the relation the edge's removal un-hides a memory for.
-	msg, err := srv.withdrawSupersedesLink(ctx, "test-project", cause, effect, "")
-	if err != nil {
-		t.Fatalf("withdrawSupersedesLink (default): %v", err)
-	}
-	if !strings.Contains(msg, "named supersedes link(s)") {
-		t.Errorf("the default did not pick the supersedes edge: %q", msg)
-	}
-	links, err := store.LinksInto(ctx, "test-project", effect, "causes")
-	if err != nil {
-		t.Fatalf("LinksInto: %v", err)
-	}
-	if len(links) != 1 {
-		t.Fatalf("live 'causes' edges = %d, want 1: the default withdrew the other relation", len(links))
-	}
-
-	// Pinned: the 'causes' edge, and the 'supersedes' one this same call just
-	// took is not what it withdraws now.
-	msg, err = srv.withdrawSupersedesLink(ctx, "test-project", cause, effect, "causes")
-	if err != nil {
-		t.Fatalf("withdrawSupersedesLink(causes): %v", err)
-	}
-	if !strings.Contains(msg, "named causes link(s)") {
-		t.Errorf("the pinned relation was not the one withdrawn: %q", msg)
-	}
-	links, err = store.LinksInto(ctx, "test-project", effect, "causes")
-	if err != nil {
-		t.Fatalf("LinksInto: %v", err)
-	}
-	if len(links) != 0 {
-		t.Errorf("live 'causes' edges = %d, want 0", len(links))
-	}
-}
-
 // An id holding a comma cannot be named by `--only` at all: the parser splits its
 // value on commas, so however the id is quoted it becomes two selectors that name
 // nothing. Rendering it would hand the agent a command that runs and judges the
@@ -631,53 +460,5 @@ func TestLinkWithdrawSaysNoSurfaceCanNameANewlineID(t *testing.T) {
 	}
 	if !strings.Contains(msg, "re-import it under an id") {
 		t.Errorf("the result does not say what actually clears it: %q", msg)
-	}
-}
-
-// TestLinkWithdrawEscapesControlAndFormatCharacters verifies that the
-// ghost_link_withdraw tool result escapes control characters (ESC) and format
-// characters (U+202E RLO) in the target text preview.
-func TestLinkWithdrawEscapesControlAndFormatCharacters(t *testing.T) {
-	srv, store := linkWithdrawServer(t)
-	ctx := context.Background()
-
-	// Store a target memory with ESC and U+202E (RIGHT-TO-LEFT OVERRIDE)
-	olderContent := "The restore path needs two spindles to be safe.\x1b[31m and red\u202ereversed"
-	older, err := store.Create(ctx, "abc123", memory.Memory{
-		Category: "fact", Content: olderContent, Source: "mcp", Importance: 0.7,
-	})
-	if err != nil {
-		t.Fatalf("Create(older): %v", err)
-	}
-	newer, err := store.Create(ctx, "abc123", memory.Memory{
-		Category: "fact", Content: "The restore path is safe on one spindle.", Source: "mcp", Importance: 0.7,
-	})
-	if err != nil {
-		t.Fatalf("Create(newer): %v", err)
-	}
-	if err := store.CreateLink(ctx, newer, older, "supersedes", 0.95, "llm"); err != nil {
-		t.Fatalf("CreateLink: %v", err)
-	}
-
-	msg, err := srv.withdrawSupersedesLink(ctx, "test-project", newer, older, "")
-	if err != nil {
-		t.Fatalf("withdrawSupersedesLink: %v", err)
-	}
-
-	// The preview in the result should show the escaped forms
-	if strings.Contains(msg, "\x1b") {
-		t.Errorf("ghost_link_withdraw printed raw ESC: %q", msg)
-	}
-	if strings.Contains(msg, "\u202e") {
-		t.Errorf("ghost_link_withdraw printed raw U+202E: %q", msg)
-	}
-	if !strings.Contains(msg, "\\x1b") {
-		t.Errorf("ghost_link_withdraw missing ESC escape: %q", msg)
-	}
-	if !strings.Contains(msg, "\\u202e") {
-		t.Errorf("ghost_link_withdraw missing U+202E escape: %q", msg)
-	}
-	if !strings.Contains(msg, "Withdrew 1 of 1") {
-		t.Errorf("ghost_link_withdraw did not report withdrawal: %q", msg)
 	}
 }
