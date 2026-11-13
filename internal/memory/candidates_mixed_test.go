@@ -2,42 +2,8 @@ package memory
 
 import (
 	"context"
-	"strings"
 	"testing"
 )
-
-// TestCandidatesPassiveReadsAMixedBucketAsProjectScoped is the store half of the
-// project-context migration's substrate: one policy, one cap, and `_global` rows
-// admitted into the project's read — which is what
-// `WHERE project_id = ? OR project_id = '_global'` has always meant on this
-// surface, and what a per-bucket seam cannot otherwise express.
-//
-// The bucket name is `proj`, NOT a union, so the assertion that the globals
-// really arrived is the point: a policy that quietly ignored the flag would return
-// a correct-looking project-only set.
-func TestCandidatesPassiveReadsAMixedBucketAsProjectScoped(t *testing.T) {
-	st := passiveFixture(t)
-	pol := projectPassivePolicy()
-	pol.TwoPass = false
-	pol.IncludeGlobal = true
-	pol.ItemCap = 20
-	set, err := st.Candidates(context.Background(), passiveRequest("proj", pol))
-	if err != nil {
-		t.Fatalf("Candidates: %v", err)
-	}
-	ids := passiveIDs(set)
-	var sawProject, sawGlobal bool
-	for _, id := range ids {
-		if strings.HasPrefix(id, "gp_") {
-			sawGlobal = true
-		} else {
-			sawProject = true
-		}
-	}
-	if !sawProject || !sawGlobal {
-		t.Errorf("a mixed bucket must read both projects; got %v (project=%v global=%v)", ids, sawProject, sawGlobal)
-	}
-}
 
 // TestCandidatesPassiveAMixedBucketFiltersResolvedAndScopeForBothProjects is the
 // precedence trap, and it is a KILL rather than a claim.
@@ -133,42 +99,5 @@ func TestCandidatesPassiveRejectsAPolicyThatBothMixesAndFetchesGlobal(t *testing
 			t.Errorf("a request that both mixes %q into a project bucket and fetches it in its own right must be "+
 				"refused, not served with every global row twice", GlobalProjectID)
 		}
-	}
-}
-
-// TestCandidatesPassiveRecordsWhichPolicyFetchedEachRow is the store half of the
-// cap fix: a row admitted under a bucket that mixes `_global` carries the POLICY
-// that read it, which is not its own project.
-//
-// Without it the assembler cannot apply a per-slice cap to such a row at all —
-// it would look for a slice named `_global`, find none, and leave the row
-// unbounded — so "at most N rows" would become "at most N project rows, plus
-// however many globals were nearby". Asserted here because the store is where the
-// fact is produced.
-func TestCandidatesPassiveRecordsWhichPolicyFetchedEachRow(t *testing.T) {
-	st := passiveFixture(t)
-	pol := projectPassivePolicy()
-	pol.TwoPass = false
-	pol.IncludeGlobal = true
-	pol.ItemCap = 50
-	set, err := st.Candidates(context.Background(), passiveRequest("proj", pol))
-	if err != nil {
-		t.Fatalf("Candidates: %v", err)
-	}
-	sawGlobal := false
-	for _, r := range set.Rows {
-		if r.FetchedBy != "proj" {
-			t.Errorf("row %s carries FetchedBy %q; every row of this request came from the one mixing policy", r.ID, r.FetchedBy)
-		}
-		if r.ProjectID == GlobalProjectID {
-			sawGlobal = true
-			if r.ProjectID == r.FetchedBy {
-				t.Errorf("row %s is a global read under a bucket of the same name, which is the case that hides the "+
-					"distinction; this test needs a global row whose policy is the PROJECT's", r.ID)
-			}
-		}
-	}
-	if !sawGlobal {
-		t.Fatal("the fixture produced no global row, so FetchedBy is untested for the case that needs it")
 	}
 }

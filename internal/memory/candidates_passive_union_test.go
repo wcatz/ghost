@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"math/rand"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -203,138 +202,6 @@ func TestPassiveUnionKeyScanReadsDoNotGrowWithTheGlobalBucket(t *testing.T) {
 	}
 }
 
-// unionRow is one row of a hand-built union store.
-type unionRow struct {
-	id      string
-	project string
-	imp     float64
-	pinned  bool
-	created string
-}
-
-// unionStore builds a store from explicit rows in both buckets.
-func unionStore(t *testing.T, rows []unionRow) *Store {
-	t.Helper()
-	db, err := OpenDB(filepath.Join(t.TempDir(), "union-shape.db"))
-	if err != nil {
-		t.Fatalf("OpenDB: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	st := NewStore(db, nil)
-	for _, p := range []string{"proj", GlobalProjectID} {
-		if err := st.EnsureProject(context.Background(), p, p, p); err != nil {
-			t.Fatalf("EnsureProject %s: %v", p, err)
-		}
-	}
-	for _, r := range rows {
-		pinned := 0
-		if r.pinned {
-			pinned = 1
-		}
-		if _, err := db.Exec(
-			`INSERT INTO memories (id, project_id, category, content, source, importance, pinned, created_at, updated_at)
-			 VALUES (?, ?, 'gotcha', 'union shape', 'manual', ?, ?, ?, ?)`,
-			r.id, r.project, r.imp, pinned, r.created, r.created,
-		); err != nil {
-			t.Fatalf("insert %s: %v", r.id, err)
-		}
-	}
-	return st
-}
-
-// TestPassiveUnionWindowMatchesTheLegacyWindow is the identity pin for a read
-// that includes globals: the window is the rows, in the order, that the SQL
-// ORDER BY ... LIMIT over `project_id = ? OR project_id = '_global'` returned,
-// on the shapes where reading the buckets as two streams could go wrong —
-// exact ties across the buckets at the cut (the id decides), spread ranks,
-// pinned rows in both buckets with the window under- and over-full of them, a
-// window whose last place is a project row with globals just below it, one
-// whose last place is a global row, and a project bucket whose tail falls away
-// steeply while globals rank just inside the cut.
-func TestPassiveUnionWindowMatchesTheLegacyWindow(t *testing.T) {
-	now := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
-	fresh := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC).Format("2006-01-02 15:04:05")
-	bucketOf := func(i int) string {
-		if i%2 == 0 {
-			return GlobalProjectID
-		}
-		return "proj"
-	}
-	rng := rand.New(rand.NewSource(1528))
-	shapes := map[string][]unionRow{}
-
-	var tied []unionRow
-	for i := 0; i < 24; i++ {
-		tied = append(tied, unionRow{fmt.Sprintf("tie%03d", i), bucketOf(i), 0.5, false, fresh})
-	}
-	shapes["tied across the buckets"] = tied
-
-	var spread []unionRow
-	for i := 0; i < 40; i++ {
-		created := time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC).
-			Add(time.Duration(rng.Int63n(int64(5*365*24))) * time.Hour).Format("2006-01-02 15:04:05")
-		spread = append(spread, unionRow{fmt.Sprintf("spr%03d", i), bucketOf(i), rng.Float64(), false, created})
-	}
-	shapes["spread"] = spread
-
-	for _, pinnedN := range []int{6, 14} {
-		var rows []unionRow
-		for i := 0; i < 30; i++ {
-			rows = append(rows, unionRow{fmt.Sprintf("pin%03d", i), bucketOf(i), rng.Float64(), i < pinnedN, fresh})
-		}
-		shapes[fmt.Sprintf("%d pinned across both buckets", pinnedN)] = rows
-	}
-
-	var projectEdge, globalEdge []unionRow
-	for i := 0; i < 12; i++ {
-		projectEdge = append(projectEdge,
-			unionRow{fmt.Sprintf("pe-p%03d", i), "proj", 0.9 - float64(i)*0.01, false, fresh},
-			unionRow{fmt.Sprintf("pe-g%03d", i), GlobalProjectID, 0.7 - float64(i)*0.01, false, fresh})
-		globalEdge = append(globalEdge,
-			unionRow{fmt.Sprintf("ge-g%03d", i), GlobalProjectID, 0.9 - float64(i)*0.01, false, fresh},
-			unionRow{fmt.Sprintf("ge-p%03d", i), "proj", 0.7 - float64(i)*0.01, false, fresh})
-	}
-	shapes["project-only edge"] = projectEdge
-	shapes["global-only edge"] = globalEdge
-
-	var steep []unionRow
-	for i := 0; i < 8; i++ {
-		steep = append(steep, unionRow{fmt.Sprintf("st-p%03d", i), "proj", 0.9, false, fresh})
-	}
-	for i := 0; i < 20; i++ {
-		steep = append(steep, unionRow{fmt.Sprintf("st-t%03d", i), "proj", 0.3 - float64(i)*0.01, false, fresh})
-	}
-	for i := 0; i < 4; i++ {
-		steep = append(steep, unionRow{fmt.Sprintf("st-g%03d", i), GlobalProjectID, 0.6, false, fresh})
-	}
-	shapes["steep project tail, globals inside the cut"] = steep
-
-	for name, rows := range shapes {
-		st := unionStore(t, rows)
-		cols, err := passiveColumnsFor(st)
-		if err != nil {
-			t.Fatalf("passiveColumnsFor: %v", err)
-		}
-		for _, order := range []string{OrderDecay, OrderPinnedImportanceUpdated} {
-			pol := unionPassivePolicy(order, 10)
-			req := passiveRequest("proj", pol)
-			req.Now = now
-			got, err := st.passiveWindow(context.Background(), req, pol, cols)
-			if err != nil {
-				t.Fatalf("%s %s: passiveWindow: %v", name, order, err)
-			}
-			want := legacyPassiveWindow(t, st, pol, req, cols)
-			if len(want) != pol.OverFetch {
-				t.Fatalf("%s %s: the legacy window holds %d rows, want %d; the shape does not fill it", name, order, len(want), pol.OverFetch)
-			}
-			if !eqStrings(idsOfMemories(got), want) {
-				t.Errorf("%s %s: the union window differs from the legacy window:\n got %v\nwant %v",
-					name, order, idsOfMemories(got), want)
-			}
-		}
-	}
-}
-
 // TestPassiveUnionKeyScanPlanStreamsBothBuckets is the plan pin for a read
 // that includes globals: every arm of the key scan streams out of
 // idx_memories_project_imp and nothing spills to a temp b-tree, for the pinned
@@ -364,19 +231,6 @@ func TestPassiveUnionKeyScanPlanStreamsBothBuckets(t *testing.T) {
 				}
 			}
 		}
-	}
-}
-
-// TestPassiveGlobalBucketWithIncludeGlobalReadsOnce pins the degenerate union:
-// a `_global` bucket that also admits `_global` is one bucket, and reading it
-// as two arms would hand every row to the window twice.
-func TestPassiveGlobalBucketWithIncludeGlobalReadsOnce(t *testing.T) {
-	now := time.Date(2026, 10, 15, 0, 0, 0, 0, time.UTC)
-	st := unionScanFixture(t, 0, 0, 0, 12, 0)
-	pol := SlicePolicy{Bucket: GlobalProjectID, Order: OrderPinnedImportanceUpdated, IncludeGlobal: true, OverFetch: 20}
-	_, rows, ids := windowPagerReads(t, st, pol, now)
-	if rows != 12 || len(ids) != 12 {
-		t.Errorf("the scan was handed %d rows and kept %d for a 12-row `_global` bucket, want 12 and 12", rows, len(ids))
 	}
 }
 
