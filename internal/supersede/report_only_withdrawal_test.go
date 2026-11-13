@@ -8,38 +8,20 @@ import (
 	"github.com/wcatz/ghost/internal/memory"
 )
 
-// The two bodies of the npm pair, named so a test that has to recognise the
-// pair INSIDE a classify call can. Classifier mocks are handed content, not
-// ids, so matching on content is also what a hook into the batch actually sees.
 const (
 	npmShippedContent = "note: the publishable npm package shipped on 2026-08-25"
 	npmRemovedContent = "note: the standalone npm package was removed on 2026-08-26"
 )
 
 // seedNpmPackagePair is #845's measured failure shape as a graph state: a live
-// 'supersedes'/'llm' edge over two notes where the NEWER one retires a single
 // claim of the older one and leaves the rest standing.
 //
-//   - older (2026-08-25): the publishable npm package shipped.
-//   - newer (2026-08-26): the standalone npm package was removed.
-//
-// A note that retires ONE claim of another is NEITHER under the every-claim rule
 // (#779) — the two notes are not the same fact, so there is no whole claim
-// standing behind the edge — and the measured shape of a WRONG withdrawal was
-// exactly this one: of eleven withdrawals the pass made over a real store, six
-// were wrong and the failure was a newer note retiring one claim of an older one
-// whose other claims were still true. The edge was correct, the verdict was a
-// fair reading of the two bodies, and the pass deleted a correct edge — a demotion
-// the ranking had been relying on, plus a `resolved_at` on the older note that
 // nothing in the graph clears.
 //
-// The link row is BACKDATED, so skip-if-unchanged releases the pair and the
-// reclassify half asks about it: the withdrawal in the issue was reached by a
 // re-judge, not by the first pass that wrote the edge.
 //
 // Timestamps are pinned to whole seconds and a day apart (#847): `orient` reads
-// `updated_at`, which is second-resolution, so a pair written inside one second
-// has no knowable direction and this fixture would test nothing.
 func seedNpmPackagePair(t *testing.T, store *memory.Store, db *sql.DB) (newer, older string) {
 	t.Helper()
 	ctx := context.Background()
@@ -55,32 +37,10 @@ func seedNpmPackagePair(t *testing.T, store *memory.Store, db *sql.DB) (newer, o
 // TestTheOrdinaryPassReportsTheSupersedesWithdrawalItRefusesToMake is #845, at
 // the layer the pass owns.
 //
-// The ordinary pass used to invalidate a live 'supersedes' edge on any denying
-// verdict, and the measurement says that verdict is wrong more often than it is
-// right: 4 of 11 withdrawals correct, 1 unsure, 6 wrong. So the pass now says
-// which edges it would withdraw and does not withdraw them, in BOTH modes —
-// `--apply` is a WRITE flag, not a licence to delete graph history, and the shape
-// that finally removes these edges is `ghost supersede --reassess` (or
-// `--withdraw`), both of which are a decision a human asked for.
-//
-// The three things the row has to carry, and the three the tests below hold
 // apart, are the same three #785 asked for: that the edge WAS this pair's
-// (`Reclassified`), that this call DID NOT move it (`Withdrawn`), and — new —
-// that this call declined to move it (`WithdrawSuppressed`). Without the third a
-// report could not tell a withheld withdrawal from a concurrent pass that took
-// the edge first, and the two are the same line of text with opposite advice.
 func TestTheOrdinaryPassReportsTheSupersedesWithdrawalItRefusesToMake(t *testing.T) {
-	// Every verdict that denies the replacement, in both modes. NEITHER is the
-	// shape the measurement is about; CAUSES and REVERSED reach the same
-	// withdrawal for the same reason and have to be held to the same rule.
 	//
-	// wantReclassified is per verdict rather than uniform, and the difference is
-	// the whole of what the rule withholds. NEITHER and REVERSED write nothing
-	// and, with the withdrawal withheld, move nothing — so the pair's live claim
-	// is exactly as the pass found it and "1 reclassified" would be the false
-	// claim `Withdrawn` used to make one field away. CAUSES writes a 'causes'
 	// edge (a WRITE, which #845 does not touch), so the pair's claim really did
-	// change and saying otherwise would be the mirror-image falsehood.
 	for _, tc := range []struct {
 		verdict          Relation
 		wantReclassified int
@@ -107,8 +67,6 @@ func TestTheOrdinaryPassReportsTheSupersedesWithdrawalItRefusesToMake(t *testing
 				if row.NewerID != newer || row.OlderID != older {
 					t.Fatalf("the row names %s→%s, want %s→%s", row.NewerID, row.OlderID, newer, older)
 				}
-				// The graph, which is the only independent witness. A pass that
-				// withdrew a correct edge cannot be argued back by any wording.
 				if got := liveSupersedes(t, store, "p"); got != 1 {
 					t.Errorf("live supersedes edge(s) = %d, want 1: the ordinary pass removed an edge on a verdict measured to be wrong more often than right", got)
 				}
@@ -129,17 +87,6 @@ func TestTheOrdinaryPassReportsTheSupersedesWithdrawalItRefusesToMake(t *testing
 	}
 }
 
-// TestASuppressedWithdrawalIsNotRecordedAndIsReportedAgainNextPass is the CACHE
-// half of the rule, and it is what keeps the report from decaying into silence.
-//
-// A NEITHER verdict is normally recorded in the content-keyed cache, and a cache
-// hit is a permanent skip for the life of that text. Recording it for a pair
-// whose withdrawal was SUPPRESSED would be worse than caching the wrong thing:
-// the graph still holds the edge, and a row saying the pair is not a relation
-// would be a claim the graph no longer agrees with — and the next pass would skip
-// the pair, so the edge would sit there with nothing re-judging it and nothing
-// reporting it. The pair is re-reported on every pass instead, because the edge's
-// stamp never moved: no invalidation, no re-stamp, and skip-if-unchanged reads
 // the endpoints against the row that is still there.
 func TestASuppressedWithdrawalIsNotRecordedAndIsReportedAgainNextPass(t *testing.T) {
 	store, db := seed(t)
@@ -161,7 +108,6 @@ func TestASuppressedWithdrawalIsNotRecordedAndIsReportedAgainNextPass(t *testing
 		if res.Skipped != 0 {
 			t.Errorf("pass %d: Skipped = %d, want 0: a NEITHER cache row for a pair whose live edge was left in place is a skip that hides the edge for the life of its text", pass, res.Skipped)
 		}
-		// And the cache itself, so the assertion above cannot be satisfied by a
 		// counter that happens to read zero.
 		checked, err := store.SupersedeChecked(ctx, "p")
 		if err != nil {
@@ -176,39 +122,21 @@ func TestASuppressedWithdrawalIsNotRecordedAndIsReportedAgainNextPass(t *testing
 	}
 }
 
-// TestAStaleWithheldWithdrawalSaysTheEdgeIsGoneBecauseItIs is the concurrent-
 // reflect race, and it exists because #845's flag is set BEFORE the pre-write
 // existence check rather than after it.
 //
-// The rule says a withheld edge is STILL LIVE — and in the ordinary case it is.
-// In THIS case it is not: `memory_links.source_id`/`target_id` are
-// `ON DELETE CASCADE`, so when reflect replaced the endpoint between the classify
-// call and the write, the replacement took the edge with it. A row left carrying
-// `WithdrawSuppressed` would assert the opposite of the truth for a memory that
-// no longer exists, and the summary's withheld line would compound it with "still
 // live and still demoting its target". Before #845 the same row fell through to
 // `already gone`, which is what actually happened.
 //
-// So the flag is cleared at the one site that learns the endpoint is gone, and the
-// count with it — the counter is the count OF those rows, so a row that is not
 // withheld cannot be counted as withheld.
 func TestAStaleWithheldWithdrawalSaysTheEdgeIsGoneBecauseItIs(t *testing.T) {
 	store, db := seed(t)
 	ctx := context.Background()
 	npmNew, npmOld := seedNpmPackagePair(t, store, db)
-	// A second pair so the batch is not a single row, which is what makes this a
-	// BATCH the write loop walks after one ClassifyBatch call rather than a shape
-	// the single-pair path could get right by accident. Its embeddings sit on a
-	// different axis from the npm pair's (cosine 0 across the two), so the two
-	// pairs stay separate candidates above the threshold and the deleted endpoint
 	// belongs to exactly one row.
 	otherNew := add(t, store, db, "note: the nightly backup moved to object storage", []float32{0, 1, 0}, "2026-08-27 09:00:00")
 	otherOld := add(t, store, db, "note: the nightly backup ran on the db host", []float32{0, 0.99, 0}, "2026-08-24 09:00:00")
 
-	// Delete an endpoint of the withheld pair from inside the classify call,
-	// which is where reflect's consolidation replacement lands in this race. A
-	// classifier is handed CONTENT, so the hook matches on content and deletes
-	// by id — the same two-step TestRunStalePairDoesNotRollBackNeitherCacheWrite
 	// uses, and the same race.
 	cls := &mockClassifier{verdict: func(newer, older string) Relation {
 		if newer == npmRemovedContent && older == npmShippedContent {
@@ -243,15 +171,9 @@ func TestAStaleWithheldWithdrawalSaysTheEdgeIsGoneBecauseItIs(t *testing.T) {
 		t.Error("WithdrawSuppressed = true on a stale row: the row claims an edge is STILL LIVE and the report would print `already gone` never, over a memory the concurrent pass deleted")
 	}
 
-	// The cascade is the reason, so it is asserted rather than assumed: the edge is
-	// gone from the graph, which is what the row now has to agree with.
 	if got := liveSupersedes(t, store, "p"); got != 0 {
 		t.Errorf("live supersedes edge(s) = %d, want 0: deleting the endpoint cascades the edge away, so the row's claim of a live edge would be false", got)
 	}
-	// And the OTHER pair in the batch is untouched by all of this: the fix is one
-	// field on one row, not a pass-wide suppression. It carried no live edge, so it
-	// never had a withdrawal to withhold — but it still has to be a row, or the
-	// batch would have been the single-pair shape this comment rules out.
 	if len(classified) != 2 {
 		t.Fatalf("classified = %d row(s), want 2: the batch has to hold a second pair for this to be the concurrent-reflect shape rather than a single-pair one", len(classified))
 	}
@@ -269,14 +191,8 @@ func TestAStaleWithheldWithdrawalSaysTheEdgeIsGoneBecauseItIs(t *testing.T) {
 	}
 }
 
-// TestReassessStillWithdrawsWhatTheOrdinaryPassOnlyReports is the other half of
-// the rule and the reason the rule is safe: the withdrawal is not lost, it moves
 // to the command that exists to be asked for it.
 //
-// `--reassess` re-judges every live 'supersedes'/'llm' edge under the current
-// rules and withdraws the ones that come back denied, so the same fixture and the
-// same NEITHER verdict that the ordinary pass now only reports still produce a
-// real withdrawal, a real `unsupersede` history row, and a `resolved_at` on the
 // target the operator is told how to clear. If this test fails, #845 has not moved
 // a withdrawal anywhere — it has deleted one.
 func TestReassessStillWithdrawsWhatTheOrdinaryPassOnlyReports(t *testing.T) {
@@ -303,17 +219,10 @@ func TestReassessStillWithdrawsWhatTheOrdinaryPassOnlyReports(t *testing.T) {
 	}
 }
 
-// TestTheOrdinaryPassStillWritesEveryLinkItsUnanimousVerdictNames is the other
 // half of the promise: #845 removes a DELETE, and nothing else. A new 'supersedes'
-// edge and a new 'causes' edge are still written under `--apply`, `--consensus`
 // unanimity still gates them (#779), and the ordinary pass still sweeps a
-// 'causes' edge that denies the supersession it just wrote — which is the shape
 // #823 relies on, and the reason a 'causes' cycle can converge at all (see
-// TestAWithheldSupersedesWithdrawalStillSweepsTheCausesCycleItDenies).
 //
-// The gate is checked on the write and not on the fixture: a fixture that asked
-// for one verdict three times proves the pass wrote a unanimous edge, which is
-// the claim, and a fixture that asked three times for three verdicts would prove
 // only that a model was scripted.
 func TestTheOrdinaryPassStillWritesEveryLinkItsUnanimousVerdictNames(t *testing.T) {
 	for _, tc := range []struct {
@@ -322,7 +231,6 @@ func TestTheOrdinaryPassStillWritesEveryLinkItsUnanimousVerdictNames(t *testing.
 	}{
 		{name: "supersedes", verdict: RelationSupersedes},
 		{
-			// 'causes' is written cause->effect, so it runs the other way round
 			// from the orientation the pair was asked in.
 			name:    "causes",
 			verdict: RelationCauses,
@@ -339,8 +247,6 @@ func TestTheOrdinaryPassStillWritesEveryLinkItsUnanimousVerdictNames(t *testing.
 			if err != nil {
 				t.Fatalf("RunWith: %v", err)
 			}
-			// Read back from the graph, in the direction each relation is
-			// written, so the assertion cannot be satisfied by a counter.
 			wantSupersedes := [][2]string(nil)
 			wantCauses := [][2]string(nil)
 			switch tc.verdict {
@@ -361,8 +267,6 @@ func TestTheOrdinaryPassStillWritesEveryLinkItsUnanimousVerdictNames(t *testing.
 			if res.Reclassified != 0 {
 				t.Errorf("Reclassified = %d over a pair the graph never linked, want 0", res.Reclassified)
 			}
-			// The write counts, in the tense the report counts them in: a
-			// unanimous three-pass verdict is acted on, which is the whole of what
 			// the gate is for.
 			switch tc.verdict {
 			case RelationSupersedes:
@@ -378,24 +282,11 @@ func TestTheOrdinaryPassStillWritesEveryLinkItsUnanimousVerdictNames(t *testing.
 	}
 }
 
-// TestAWithheldSupersedesWithdrawalStillSweepsTheCausesCycleItDenies is the
 // scope of #845, stated as a test rather than as a sentence in a pull request: the
-// rule covers the 'supersedes' edge and NOT the 'causes' edge, and the reason is
-// the one pairDirection and Result.Bidirectional already give.
 //
-// A 'causes' edge demotes nothing, so a wrong withdrawal of one costs a claim
-// about which note caused which rather than a memory's place in every later
-// session's context — which is the harm this pass is KEEP-biased against, and the
 // harm #845's measurement is about. More decisively there is no repair: Reassess
-// and `--withdraw` both load live 'supersedes'/'llm' edges and cannot see a
-// 'causes' one at all, so a withheld 'causes' withdrawal would be a contradiction
-// in the graph with a report pointing at a command that cannot remove it — the
-// exact shape Result.Bidirectional refuses to create when it declines to judge a
 // cycle.
 //
-// So a NEITHER verdict on a pair holding a supersession and a 'causes' cycle
-// leaves the SUPERSEDES edge in place and drops both 'causes' rows, and the row
-// says so: `Withdrawn` is false (the edge this row is about survived) and
 // `CausesDropped` is 2 (two rows really went).
 func TestAWithheldSupersedesWithdrawalStillSweepsTheCausesCycleItDenies(t *testing.T) {
 	store, db := seed(t)
@@ -429,14 +320,11 @@ func TestAWithheldSupersedesWithdrawalStillSweepsTheCausesCycleItDenies(t *testi
 	if !row.WithdrawSuppressed {
 		t.Error("WithdrawSuppressed = false, so the report cannot say the edge is still there")
 	}
-	// The pair's live claim DID change — two 'causes' rows went — so it is still
-	// a reclassification. What is withheld is the one row, not the finding.
 	if res.Reclassified != 1 || res.WithdrawSuppressed != 1 {
 		t.Errorf("Reclassified=%d WithdrawSuppressed=%d, want 1/1", res.Reclassified, res.WithdrawSuppressed)
 	}
 }
 
-// sameEdges compares a read-back edge set with a want list, so a fixture can name
 // "no edges" as `nil` and the comparison still holds.
 func sameEdges(got, want [][2]string) bool {
 	if len(got) != len(want) {

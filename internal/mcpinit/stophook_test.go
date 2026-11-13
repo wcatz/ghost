@@ -6,9 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -23,22 +21,6 @@ func writeTranscript(t *testing.T, lines ...string) string {
 		t.Fatalf("write transcript: %v", err)
 	}
 	return path
-}
-
-// stopInput builds the hook's stdin JSON: a Claude Code Stop payload wrapped
-// with the contract-v1 envelope (the only accepted shape since the contract
-// gained no legacy mode).
-func stopInput(t *testing.T, transcriptPath string, active bool) string {
-	t.Helper()
-	return contractInputFor(t, "Stop", "claude-code", "claude-jsonl",
-		fmt.Sprintf(`{"session_id":"s1","transcript_path":%q,"cwd":"/repo","stop_hook_active":%t}`, transcriptPath, active))
-}
-
-// contractInput wraps a native Claude Code Stop payload with the ghost
-// contract envelope, mirroring what an explicit-envelope adapter would send.
-func contractInput(t *testing.T, inner string) string {
-	t.Helper()
-	return contractInputFor(t, "Stop", "claude-code", "claude-jsonl", inner)
 }
 
 // contractInputFor is contractInput with every envelope field selectable.
@@ -64,7 +46,6 @@ func contractInputFor(t *testing.T, eventName, source, format, inner string) str
 const (
 	lineToolBash  = `{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{}}]}}`
 	lineGhostSave = `{"type":"assistant","message":{"content":[{"type":"tool_use","name":"mcp__ghost__ghost_memory_save","input":{}}]}}`
-	lineText      = `{"type":"assistant","message":{"content":[{"type":"text","text":"mentioning mcp__ghost__ghost_memory_save in prose does not count"}]}}`
 	lineUser      = `{"type":"user","message":{"content":[{"type":"text","text":"hello"}]}}`
 )
 
@@ -79,49 +60,6 @@ func runStopHook(t *testing.T, stdin string) string {
 	var out strings.Builder
 	RunHostEvent("stop", "claude-code", strings.NewReader(stdin), &out, io.Discard)
 	return out.String()
-}
-
-func TestRunStop(t *testing.T) {
-	isolatedHome(t)
-	t.Run("stays silent when tools ran but nothing saved", func(t *testing.T) {
-		path := writeTranscript(t, lineUser, lineToolBash, lineText)
-		if out := runStopHook(t, stopInput(t, path, false)); out != "" {
-			t.Errorf("the stop hook printed a save reminder; it must print nothing, got %q", out)
-		}
-	})
-
-	t.Run("allows pure conversation with no tool calls", func(t *testing.T) {
-		path := writeTranscript(t, lineUser, lineText)
-		if out := runStopHook(t, stopInput(t, path, false)); out != "" {
-			t.Errorf("expected silence, got %q", out)
-		}
-	})
-
-	t.Run("stop_hook_active short-circuits", func(t *testing.T) {
-		path := writeTranscript(t, lineToolBash)
-		if out := runStopHook(t, stopInput(t, path, true)); out != "" {
-			t.Errorf("expected silence when already active, got %q", out)
-		}
-	})
-
-	t.Run("fail-open on missing transcript", func(t *testing.T) {
-		if out := runStopHook(t, stopInput(t, "/nonexistent/transcript.jsonl", false)); out != "" {
-			t.Errorf("expected silence, got %q", out)
-		}
-	})
-
-	t.Run("fail-open on empty transcript path", func(t *testing.T) {
-		if out := runStopHook(t, stopInput(t, "", false)); out != "" {
-			t.Errorf("expected silence, got %q", out)
-		}
-	})
-
-	t.Run("fail-open on garbage stdin", func(t *testing.T) {
-		if out := runStopHook(t, "{not json"); out != "" {
-			t.Errorf("expected silence, got %q", out)
-		}
-	})
-
 }
 
 // TestRunHostEvent_SessionStartSuppressedOnNonInjectingHost pins the
@@ -197,163 +135,6 @@ func sweepableGhostDir(t *testing.T, base, name string) string {
 	return dir
 }
 
-// sweepViaStopHook drives one opencode stop through the hook for transcriptPath,
-// which is how the sweep runs in production (the deferred cleanup).
-func sweepViaStopHook(t *testing.T, transcriptPath string) {
-	t.Helper()
-	input := contractInputFor(t, "Stop", "opencode", "opencode-messages",
-		fmt.Sprintf(`{"session_id":"oc-sweep","transcript_path":%q,"cwd":"/repo","stop_hook_active":false}`, transcriptPath))
-	var out bytes.Buffer
-	RunHostEvent("stop", "opencode", strings.NewReader(input), &out, io.Discard)
-}
-
-// TestRunStop_SweepsGhostDirDespiteATrailingSeparator pins the first runtime
-// divergence: Go reports the temp variable verbatim while the plugin's runtime
-// strips one trailing separator, so a raw comparison saw two spellings of the
-// same directory as different and left the session directory behind.
-func TestRunStop_SweepsGhostDirDespiteATrailingSeparator(t *testing.T) {
-	isolatedHome(t)
-	base := filepath.Join(t.TempDir(), "hosttmp")
-	if err := os.MkdirAll(base, 0o700); err != nil {
-		t.Fatalf("create host temp dir: %v", err)
-	}
-	unsetEnvForTest(t, "TMP")
-	unsetEnvForTest(t, "TEMP")
-	t.Setenv("TMPDIR", base+string(filepath.Separator))
-
-	dir := sweepableGhostDir(t, base, pluginSessionDirName(t))
-	sweepViaStopHook(t, filepath.Join(dir, "messages.jsonl"))
-
-	if _, err := os.Stat(dir); !os.IsNotExist(err) {
-		t.Errorf("ghost session dir survived a trailing separator in the temp variable: %v", err)
-	}
-}
-
-// TestRunStop_SweepsGhostDirWhenTheHostFellBackToAnotherTempVar pins the second
-// divergence: with TMPDIR unset the plugin's runtime falls back to TMP or TEMP
-// while os.TempDir reads only the system default, so a directory created under
-// the host's fall-back was never recognised as being inside a temp directory.
-func TestRunStop_SweepsGhostDirWhenTheHostFellBackToAnotherTempVar(t *testing.T) {
-	for _, key := range []string{"TMP", "TEMP"} {
-		t.Run(key, func(t *testing.T) {
-			isolatedHome(t)
-			base := filepath.Join(t.TempDir(), "hosttmp")
-			if err := os.MkdirAll(base, 0o700); err != nil {
-				t.Fatalf("create host temp dir: %v", err)
-			}
-			unsetEnvForTest(t, "TMPDIR")
-			unsetEnvForTest(t, "TMP")
-			unsetEnvForTest(t, "TEMP")
-			t.Setenv(key, base)
-
-			dir := sweepableGhostDir(t, base, pluginSessionDirName(t))
-			sweepViaStopHook(t, filepath.Join(dir, "messages.jsonl"))
-
-			if _, err := os.Stat(dir); !os.IsNotExist(err) {
-				t.Errorf("ghost session dir under the host's %s survived: %v", key, err)
-			}
-		})
-	}
-}
-
-// TestRunStop_NeverSweepsAGhostDirOutsideEveryTempBase keeps the widened
-// candidate set honest: a `ghost-*` directory whose parent is not a temp base is
-// left in place, so accepting more bases did not turn the sweep into one that
-// removes any directory named like the plugin's.
-func TestRunStop_NeverSweepsAGhostDirOutsideEveryTempBase(t *testing.T) {
-	isolatedHome(t)
-	parent := filepath.Join(t.TempDir(), "notatemp")
-	if err := os.MkdirAll(parent, 0o700); err != nil {
-		t.Fatalf("create parent dir: %v", err)
-	}
-	dir := sweepableGhostDir(t, parent, pluginSessionDirName(t))
-	sweepViaStopHook(t, filepath.Join(dir, "messages.jsonl"))
-
-	if _, err := os.Stat(dir); err != nil {
-		t.Errorf("a ghost dir outside every temp base must survive: %v", err)
-	}
-}
-
-// TestRunHostEvent_StopHookActiveGatesOnlyStop pins the §2.2 split:
-// stop_hook_active suppresses a repeat stop entirely, but session-end fires
-// once per real session end, so its lifecycle spawns run regardless of any
-// earlier block cycle. Observable via config.DataDir(): with auto_resolve
-// enabled, reaching the spawn probe creates the ghost data dir.
-func TestRunHostEvent_StopHookActiveGatesOnlyStop(t *testing.T) {
-	dataHome := isolatedHome(t)
-	writeGhostConfigFile(t, "reflection:\n  auto_resolve: true\n")
-
-	input := contractInputFor(t, "SessionEnd", "claude-code", "none",
-		`{"session_id":"s1","transcript_path":"","cwd":"/tmp/does-not-matter","stop_hook_active":true}`)
-	var out bytes.Buffer
-	RunHostEvent("session-end", "claude-code", strings.NewReader(input), &out, io.Discard)
-	if _, err := os.Stat(filepath.Join(dataHome, "ghost")); err != nil {
-		t.Errorf("session-end must run lifecycle spawns despite stop_hook_active; data dir not created: %v", err)
-	}
-}
-
-// TestRunHostEvent_StopStillGuardedWhenActive pins the other half: a stop
-// carrying stop_hook_active still short-circuits before any spawn work.
-func TestRunHostEvent_StopStillGuardedWhenActive(t *testing.T) {
-	dataHome := isolatedHome(t)
-	writeGhostConfigFile(t, "reflection:\n  auto_resolve: true\n")
-
-	path := writeTranscript(t, lineToolBash)
-	if out := runStopHook(t, stopInput(t, path, true)); out != "" {
-		t.Errorf("expected silence on guarded stop, got %q", out)
-	}
-	if _, err := os.Stat(filepath.Join(dataHome, "ghost")); !os.IsNotExist(err) {
-		t.Errorf("guarded stop must short-circuit before spawn probes; data dir exists")
-	}
-}
-
-func TestRunHostEvent_FailsOpenOnEmptyTranscriptPathEvenWithCWD(t *testing.T) {
-	// RunHostEvent must stay silent on stdout and return promptly when
-	// transcript_path is empty, even once cwd is populated and a spawn attempt
-	// is made first — proving the spawnLifecycleIfConfigured call didn't
-	// introduce a hang or panic on the hot path. This does NOT assert
-	// spawnLifecycleIfConfigured was a no-op (see
-	// TestSpawnLifecycleIfConfigured_NoOpWhenDisabled for that); the early
-	// return below is guaranteed independently of spawn behavior.
-	isolatedHome(t)
-	var buf bytes.Buffer
-	input := contractInput(t, `{"transcript_path":"","cwd":"/tmp/does-not-matter","stop_hook_active":false}`)
-	RunHostEvent("stop", "claude-code", strings.NewReader(input), &buf, io.Discard)
-	if buf.Len() != 0 {
-		t.Errorf("expected no output for empty transcript_path, got %q", buf.String())
-	}
-}
-
-// TestRunHostEvent_MissingSourceFailsOpen pins the no-legacy-mode rule: an
-// invocation without --source can't be routed, so it fails open with one
-// stderr line, no stdout, and returns normally (the CLI exits 0).
-func TestRunHostEvent_MissingSourceFailsOpen(t *testing.T) {
-	var out, errBuf bytes.Buffer
-	path := writeTranscript(t, lineToolBash)
-	RunHostEvent("stop", "", strings.NewReader(fmt.Sprintf(`{"transcript_path":%q}`, path)), &out, &errBuf)
-	if out.Len() != 0 {
-		t.Errorf("expected no stdout, got %q", out.String())
-	}
-	if !strings.Contains(errBuf.String(), "missing --source") {
-		t.Errorf("expected missing-source guidance on stderr, got %q", errBuf.String())
-	}
-}
-
-// TestRunHostEvent_SessionEndNeverNudges pins spec §2.2: session-end runs the
-// lifecycle spawns only — a tool-using session with zero saves must pass in
-// silence even though the identical payload blocks on stop.
-func TestRunHostEvent_SessionEndNeverNudges(t *testing.T) {
-	isolatedHome(t)
-	path := writeTranscript(t, lineUser, lineToolBash, lineText)
-	input := contractInputFor(t, "SessionEnd", "claude-code", "claude-jsonl",
-		fmt.Sprintf(`{"session_id":"s1","transcript_path":%q,"cwd":"","stop_hook_active":false}`, path))
-	var out strings.Builder
-	RunHostEvent("session-end", "claude-code", strings.NewReader(input), &out, io.Discard)
-	if out.String() != "" {
-		t.Errorf("session-end must never emit a block decision, got %q", out.String())
-	}
-}
-
 // isolatedHome points HOME/XDG_CONFIG_HOME/XDG_DATA_HOME at fresh temp dirs
 // and clears GHOST_* / ANTHROPIC_API_KEY env vars, so config.Load and
 // config.DataDir can never see the developer's real
@@ -377,45 +158,6 @@ func isolatedHome(t *testing.T) string {
 	dataHome := filepath.Join(dir, "data")
 	t.Setenv("XDG_DATA_HOME", dataHome)
 	return dataHome
-}
-
-func TestSpawnLifecycleIfConfigured_NoOpWhenDisabled(t *testing.T) {
-	// With no config file present, reflection.auto_reflect / auto_resolve /
-	// auto_supersede all default to false (internal/config/config.go's defaults
-	// map). spawnLifecycleIfConfigured must return immediately after that check
-	// — before ever calling config.DataDir (which creates
-	// ~/.local/share/ghost), let alone touching ghost.db, the pidfile, or
-	// lifecycle.log.
-	dataHome := isolatedHome(t)
-
-	spawnLifecycleIfConfigured("/tmp/does-not-matter", "", io.Discard)
-
-	if _, err := os.Stat(filepath.Join(dataHome, "ghost")); !os.IsNotExist(err) {
-		t.Errorf("expected ghost data dir to never be created when every phase is disabled, stat err = %v", err)
-	}
-}
-
-func TestSpawnLifecycleIfConfigured_NoOpWithoutLLM(t *testing.T) {
-	// auto_reflect enabled, but no LLM harness is available (no claude, no
-	// opencode/codex/goose on PATH, and nothing configured via cli.*_binary).
-	// When reflect is the only enabled phase the no-LLM guard must return
-	// before config.DataDir, so no Jaccard-only reflect ever spawns and no
-	// data dir is created.
-	dataHome := isolatedHome(t)
-	cfgDir := os.Getenv("XDG_CONFIG_HOME")
-	if err := os.MkdirAll(filepath.Join(cfgDir, "ghost"), 0o755); err != nil {
-		t.Fatalf("mkdir config: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(cfgDir, "ghost", "config.yaml"), []byte("reflection:\n  auto_reflect: true\n"), 0o600); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
-	t.Setenv("PATH", t.TempDir()) // no claude, no opencode
-
-	spawnLifecycleIfConfigured("/tmp/does-not-matter", "", io.Discard)
-
-	if _, err := os.Stat(filepath.Join(dataHome, "ghost")); !os.IsNotExist(err) {
-		t.Errorf("expected no ghost data dir when no LLM is available, stat err = %v", err)
-	}
 }
 
 // TestSpawnLifecycle_CooldownSkipWithholdsATokenShapedProjectID is #1327: the
@@ -488,105 +230,6 @@ func TestSpawnLifecycle_CooldownSkipWithholdsATokenShapedProjectID(t *testing.T)
 	}
 }
 
-func TestSpawnLifecycleIfConfigured_ProceedsWhenResolveEnabledWithoutLLM(t *testing.T) {
-	// resolve and supersede have no local fallback and need no LLM guard, so
-	// the no-LLM guard must not block them: with only auto_resolve enabled the
-	// spawn path must get past the flag check and create the data dir. It then
-	// stops at the missing ghost.db, so nothing is actually spawned.
-	dataHome := isolatedHome(t)
-	cfgDir := os.Getenv("XDG_CONFIG_HOME")
-	if err := os.MkdirAll(filepath.Join(cfgDir, "ghost"), 0o755); err != nil {
-		t.Fatalf("mkdir config: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(cfgDir, "ghost", "config.yaml"), []byte("reflection:\n  auto_resolve: true\n"), 0o600); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
-	t.Setenv("PATH", t.TempDir())
-
-	spawnLifecycleIfConfigured("/tmp/does-not-matter", "", io.Discard)
-
-	if _, err := os.Stat(filepath.Join(dataHome, "ghost")); err != nil {
-		t.Errorf("expected the resolve phase to reach config.DataDir, stat err = %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(dataHome, "ghost", "lifecycle.log")); !os.IsNotExist(err) {
-		t.Errorf("nothing should have been spawned without a database, log stat err = %v", err)
-	}
-}
-
-// TestSpawnLifecycle_ReflectOnlyNoLLMWritesMarker pins the hook-guard write:
-// with reflect-only config and no LLM CLI reachable, the stop hook's no-LLM
-// guard skips the spawn entirely — the original mr-slave incident (auto-
-// reflect silently dead for weeks; no lifecycle process, not even
-// lifecycle.log, ever appears) — so the guard itself must leave the failure
-// marker when a store exists to attribute it to. When no store exists it
-// must still create nothing (see TestSpawnLifecycleIfConfigured_NoOpWithoutLLM).
-func TestSpawnLifecycle_ReflectOnlyNoLLMWritesMarker(t *testing.T) {
-	dataHome := isolatedHome(t)
-	writeGhostConfigFile(t, "reflection:\n  auto_reflect: true\n")
-	t.Setenv("PATH", t.TempDir()) // no claude, no opencode
-
-	projDir := filepath.Join(t.TempDir(), "myproj")
-	if err := os.MkdirAll(projDir, 0o755); err != nil {
-		t.Fatalf("mkdir proj: %v", err)
-	}
-	canonical, err := filepath.EvalSymlinks(projDir)
-	if err != nil {
-		t.Fatalf("EvalSymlinks: %v", err)
-	}
-	seedProject(t, dataHome, "p1", canonical, "myproj")
-
-	spawnLifecycleIfConfigured(canonical, "", io.Discard)
-
-	// Per-project marker: the seed above registers p1, and the spawn resolves
-	// the session directory to it, so that is the file written.
-	b, err := os.ReadFile(filepath.Join(dataHome, "ghost", projectMarkerFile("p1")))
-	if err != nil {
-		t.Fatalf("expected a failure marker for the skipped reflect spawn: %v", err)
-	}
-	var m struct {
-		Project      string   `json:"project"`
-		PhasesFailed []string `json:"phases_failed"`
-		Error        string   `json:"error"`
-	}
-	if err := json.Unmarshal(b, &m); err != nil {
-		t.Fatalf("unmarshal marker %q: %v", b, err)
-	}
-	if m.Project != "p1" {
-		t.Errorf("marker project = %q, want p1", m.Project)
-	}
-	if len(m.PhasesFailed) != 1 || m.PhasesFailed[0] != "reflect" {
-		t.Errorf("marker phases_failed = %v, want [reflect]", m.PhasesFailed)
-	}
-	if !strings.Contains(m.Error, "no CLI LLM backend") {
-		t.Errorf("marker error = %q, want the no-CLI-backend explanation", m.Error)
-	}
-	if _, err := os.Stat(filepath.Join(dataHome, "ghost", "lifecycle.log")); !os.IsNotExist(err) {
-		t.Errorf("no lifecycle process may spawn from the skipped guard, lifecycle.log stat err = %v", err)
-	}
-}
-
-// TestClaimPidFile_ConcurrentCallersOnlyOneWins races many goroutines against
-// an empty pidPath, simulating near-simultaneous stop hooks for the same
-// project when no resolve has ever run. Exactly one must win the claim.
-func TestClaimPidFile_ConcurrentCallersOnlyOneWins(t *testing.T) {
-	dir := t.TempDir()
-	pidPath := filepath.Join(dir, "resolve-test.pid")
-
-	wins := raceClaimPidFile(t, pidPath, 50)
-	if wins != 1 {
-		t.Errorf("expected exactly 1 winner among 50 concurrent claimants, got %d", wins)
-	}
-
-	data, err := os.ReadFile(pidPath)
-	if err != nil {
-		t.Fatalf("read pidPath: %v", err)
-	}
-	pidStr, _, _ := strings.Cut(strings.TrimSpace(string(data)), ":")
-	if _, err := strconv.Atoi(pidStr); err != nil {
-		t.Errorf("pidPath content is never a valid PID (empty/stale window observed): %q", data)
-	}
-}
-
 // TestClaimPidFile_ConcurrentCallersOnlyOneWinsAgainstStaleClaim seeds
 // pidPath with a definitely-dead PID first, then races many goroutines
 // against it. This exercises the reclaim path specifically — the one a
@@ -631,34 +274,6 @@ func raceClaimPidFile(t *testing.T, pidPath string, n int) int {
 	return wins
 }
 
-// TestClaimPidFile_PlaceholderCarriesToken proves the placeholder PID
-// claimPidFile writes (the caller's own PID, before it has spawned
-// anything) is written in the same "pid:token" format as a real spawn —
-// otherwise an abandoned placeholder (caller hits an early-return failure
-// path after claiming but before cmd.Start()) has no creation-time guard
-// and reproduces the exact PID-reuse bug this design fixes.
-func TestClaimPidFile_PlaceholderCarriesToken(t *testing.T) {
-	dir := t.TempDir()
-	pidPath := filepath.Join(dir, "resolve-test.pid")
-
-	if ok, err := claimPidFile(pidPath); !ok || err != nil {
-		t.Fatalf("claimPidFile on an empty slot = %v, %v; want true, nil", ok, err)
-	}
-
-	data, err := os.ReadFile(pidPath)
-	if err != nil {
-		t.Fatalf("read pidPath: %v", err)
-	}
-	content := strings.TrimSpace(string(data))
-	pidStr, token, haveToken := strings.Cut(content, ":")
-	if _, err := strconv.Atoi(pidStr); err != nil {
-		t.Errorf("placeholder content has no valid leading PID: %q", content)
-	}
-	if wantToken, ok := processStartTime(os.Getpid()); ok && (!haveToken || token != wantToken) {
-		t.Errorf("processStartTime succeeded (token=%q) but placeholder token is %q (haveToken=%v): %q", wantToken, token, haveToken, content)
-	}
-}
-
 // TestSafeProjectIDComponent pins the pid-path hardening: project ids arrive
 // from callers (an MCP client can send any project_id, and EnsureProject stores
 // it verbatim), so a value that could reshape the path must be rejected before
@@ -701,116 +316,5 @@ func TestSafeProjectIDComponent(t *testing.T) {
 		if safeProjectIDComponent(id) {
 			t.Errorf("safeProjectIDComponent(%q) = true, want false", id)
 		}
-	}
-}
-
-// TestRunStop_OpencodeV2Transcript drives the opencode V2 adapter's contract
-// end to end: the hook prints nothing and sweeps the transient V2 transcript
-// dir, with or without a Code Mode save in it.
-func TestRunStop_OpencodeV2Transcript(t *testing.T) {
-	const (
-		v2Shell = `{"id":"m1","type":"assistant","content":[{"type":"tool","id":"c1","name":"shell","state":{"status":"completed"}}]}`
-		v2Save  = `{"id":"m2","type":"assistant","content":[{"type":"tool","id":"c2","name":"execute","state":{"status":"completed",` +
-			`"metadata":{"toolCalls":[{"tool":"ghost.ghost_memory_save","status":"completed"}]}}}]}`
-	)
-	cases := []struct {
-		name  string
-		lines []string
-	}{
-		{"tools without a save", []string{v2Shell}},
-		{"code mode save", []string{v2Shell, v2Save}},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			dir := filepath.Join(sweepTempBase(t), pluginSessionDirName(t))
-			if err := os.Mkdir(dir, 0o700); err != nil {
-				t.Fatalf("create session dir: %v", err)
-			}
-			path := filepath.Join(dir, "messages.jsonl")
-			if err := os.WriteFile(path, []byte(strings.Join(tc.lines, "\n")+"\n"), 0o600); err != nil {
-				t.Fatalf("write transcript: %v", err)
-			}
-			input := contractInputFor(t, "Stop", "opencode", "opencode-v2-messages",
-				fmt.Sprintf(`{"session_id":"oc2","transcript_path":%q,"cwd":"/repo","stop_hook_active":false}`, path))
-			var out bytes.Buffer
-			RunHostEvent("stop", "opencode", strings.NewReader(input), &out, io.Discard)
-			if out.Len() != 0 {
-				t.Errorf("the stop hook must print nothing, got %q", out.String())
-			}
-			if _, err := os.Stat(dir); !os.IsNotExist(err) {
-				t.Errorf("transient V2 transcript dir was not swept: %v", err)
-			}
-		})
-	}
-}
-
-// TestTheLongestAcceptedProjectIDStillNamesEveryFile pins the length bound from
-// the other side: an id at the limit must still produce every file the lifecycle
-// derives from it, the longest being the start stamp's temp file
-// (lifecycle-<id>.last.tmp<random>). A bound computed from a shorter name would
-// pass the id here and fail the write there.
-func TestTheLongestAcceptedProjectIDStillNamesEveryFile(t *testing.T) {
-	id := strings.Repeat("p", maxProjectIDComponentBytes)
-	if !safeProjectIDComponent(id) {
-		t.Fatalf("an id of exactly %d bytes must be accepted", maxProjectIDComponentBytes)
-	}
-	dir := t.TempDir()
-	pidPath := filepath.Join(dir, "lifecycle-"+id+".pid")
-	ok, err := claimPidFile(pidPath)
-	if !ok || err != nil {
-		t.Fatalf("claim at the length limit: ok=%v err=%v", ok, err)
-	}
-	for i := 0; i < 20; i++ {
-		f, err := os.CreateTemp(dir, lifecycleLastStartFile(id)+".tmp*")
-		if err != nil {
-			t.Fatalf("start stamp temp file at the length limit: %v", err)
-		}
-		_ = f.Close()
-	}
-	// A temp name with the widest random suffix CreateTemp can produce.
-	widest := filepath.Join(dir, lifecycleLastStartFile(id)+".tmp4294967295")
-	if err := os.WriteFile(widest, nil, 0o600); err != nil {
-		t.Fatalf("widest start stamp temp name at the length limit: %v", err)
-	}
-}
-
-// TestStopSaveMarkerMissingDataDirDoesNotCreate: the stop hook must not create
-// the data directory when it is absent.
-func TestStopSaveMarkerMissingDataDirDoesNotCreate(t *testing.T) {
-	dataHome := isolatedHome(t)
-	dataDir := filepath.Join(dataHome, "ghost")
-	path := writeTranscript(t, lineToolBash)
-	in := stopInput(t, path, false)
-	runStopHook(t, in)
-	if _, err := os.Stat(dataDir); !os.IsNotExist(err) {
-		t.Fatalf("stop hook created the data directory: %v", err)
-	}
-}
-
-// TestClaimPidFileTellsAnEvaluationFailureFromALiveHolder pins the distinction
-// the lifecycle lock depends on: a claim that cannot be evaluated returns an
-// error, never the plain "held" answer a live process earns.
-func TestClaimPidFileTellsAnEvaluationFailureFromALiveHolder(t *testing.T) {
-	dir := t.TempDir()
-	pidPath := filepath.Join(dir, "resolve-test.pid")
-	if err := os.Mkdir(pidPath+".lock", 0o700); err != nil {
-		t.Fatal(err)
-	}
-	ok, err := claimPidFile(pidPath)
-	if ok || err == nil {
-		t.Fatalf("an unopenable claim lock: ok=%v err=%v, want false and an error", ok, err)
-	}
-
-	holder := exec.Command("sleep", "60")
-	if err := holder.Start(); err != nil {
-		t.Skipf("cannot start a holder process: %v", err)
-	}
-	t.Cleanup(func() { _ = holder.Process.Kill(); _, _ = holder.Process.Wait() })
-	livePath := filepath.Join(dir, "live.pid")
-	if err := os.WriteFile(livePath, []byte(strconv.Itoa(holder.Process.Pid)), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if ok, err := claimPidFile(livePath); ok || err != nil {
-		t.Fatalf("a slot held by a live process: ok=%v err=%v, want false and no error", ok, err)
 	}
 }

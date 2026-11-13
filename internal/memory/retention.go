@@ -29,13 +29,6 @@ var validRetention = map[string]bool{
 	RetentionPersistent: true,
 }
 
-// RetentionValues returns the supported retention tiers.
-func RetentionValues() []string {
-	out := make([]string, len(retentionTiers))
-	copy(out, retentionTiers)
-	return out
-}
-
 // IsValidRetention reports whether tier is supported.
 func IsValidRetention(tier string) bool { return validRetention[tier] }
 

@@ -13,8 +13,6 @@ import (
 	"github.com/wcatz/ghost/internal/provider"
 )
 
-// recordDecisionID records one decision through the tool and returns its
-// decision_id, failing the test on an error result.
 func recordDecisionID(t *testing.T, session *mcp.ClientSession, args map[string]any) string {
 	t.Helper()
 	res := callTool(t, session, "ghost_decision_record", args)
@@ -24,7 +22,6 @@ func recordDecisionID(t *testing.T, session *mcp.ClientSession, args map[string]
 	return labeledID(t, resultText(res), "decision_id: ")
 }
 
-// decisionPointer reads one decision's status and superseded_by.
 func decisionPointer(t *testing.T, db *sql.DB, id string) (status, supersededBy string) {
 	t.Helper()
 	var by sql.NullString
@@ -44,14 +41,6 @@ func countRows(t *testing.T, db *sql.DB, query string) int {
 }
 
 // TestDecisionSupersedeOfAnAlreadyReplacedDecisionIsRefused is #1144: A was
-// replaced by B, and a later record with supersedes=A used to answer "Decision
-// A is now marked superseded by this one." as a plain success while it
-// overwrote A's superseded_by from B to C. B and C were then both active, both
-// companion memories stayed live, and nothing could say B ever replaced A.
-//
-// The record is refused before anything is written: no C row, no companion
-// memory, A still points at B and B stays active. The answer names B and tells
-// the caller to pass supersedes=B, which is the decision that is current.
 func TestDecisionSupersedeOfAnAlreadyReplacedDecisionIsRefused(t *testing.T) {
 	db, session, _ := echoLogSession(t)
 	a := recordDecisionID(t, session, map[string]any{
@@ -96,10 +85,7 @@ func TestDecisionSupersedeOfAnAlreadyReplacedDecisionIsRefused(t *testing.T) {
 	}
 }
 
-// TestDecisionSupersedeRepointsWhenTheSuccessorWasItselfReplaced is the other
 // side of the #1144 rule: A was replaced by B and B was later replaced by D, so
-// A has no live successor left to lose. Pointing A at a new decision C is then a
-// repoint of a dead link, not the loss of a live one, and it proceeds as before.
 func TestDecisionSupersedeRepointsWhenTheSuccessorWasItselfReplaced(t *testing.T) {
 	db, session, _ := echoLogSession(t)
 	a := recordDecisionID(t, session, map[string]any{
@@ -128,22 +114,14 @@ func TestDecisionSupersedeRepointsWhenTheSuccessorWasItselfReplaced(t *testing.T
 	}
 }
 
-// staleSuccessorStore answers the handler's read-only successor check with
-// "none", as a store would when a second writer superseded the target between
-// that read and the supersede itself. Everything else is the real store, so the
-// supersede's own in-transaction guard is what has to catch it.
 type staleSuccessorStore struct{ provider.MemoryStore }
 
 func (staleSuccessorStore) LiveDecisionSuccessor(context.Context, string, string) (string, error) {
 	return "", nil
 }
 
-// TestDecisionSupersedeRaceKeepsTheNewDecisionAndDoesNotSendItRoundAgain is the
 // backstop behind the #1144 refusal: when the read before the write saw no live
-// successor but the supersede's transaction does, the new decision is already
 // committed. The answer is the #1041 partial failure, and it must not tell the
-// caller to record again with supersedes=<successor> — that would write a
-// second copy of the decision that just landed.
 func TestDecisionSupersedeRaceKeepsTheNewDecisionAndDoesNotSendItRoundAgain(t *testing.T) {
 	db, err := memory.OpenDB(":memory:")
 	if err != nil {

@@ -9,48 +9,8 @@ import (
 )
 
 // This file is #823: what a live 'causes' edge does to the pass, and what it does
-// NOT do.
-//
-// `ghost supersede` writes two directed relations and reconciled only one of
-// them. A 'supersedes' edge is reconciled on the UNORDERED pair and its direction
-// beats the scan's, skip-if-unchanged holds a pair whose endpoints have not moved
-// since the edge was written, a pair a live edge names is never cache-skipped,
-// and a write that would create the reverse of a live 'supersedes' edge is
-// refused inside the write transaction (memory.Store.CreateLinkUnopposed, #806).
-// A 'causes' edge got NONE of that: it is written older→newer, and the pair it
-// belongs to was reconciled by the same `pairKey` with no direction override, so
-// the direction came from the scan — from `orient`, from `updated_at`.
-//
-// So a pair carrying a live 'causes' edge whose direction disagrees with the
-// timestamps today:
-//
-//  1. is re-proposed by the scan every pass, in the direction the timestamps
-//     give, because nothing about a 'causes' edge holds the pair quiet — only a
-//     'supersedes' pair is ever stamped and only a 'supersedes' pair is ever
-//     cache-skipped;
-//  2. pays a classify call for that re-ask, on every pass, for as long as the
-//     edge lives;
-//  3. and answers CAUSES again, so the pass writes a 'causes' edge in the NEW
-//     direction — leaving the pair live in BOTH directions, a 'causes' cycle the
-//     store can produce and nothing demotes.
-//
-// Point 2 is the re-bill. Point 3 is the contradiction, and #819 refused to guard
-// the 'causes' write precisely because of point 2: a guard alone, with no
-// override, is a refusal that never converges, which costs a call per pass
-// forever. The two have to land TOGETHER, in this order — with the override in
-// place the pair is judged in the live edge's own direction, so the guarded
-// write is in that direction too and the refusal becomes the one-off race it is
-// for 'supersedes', rather than a state the pass re-enters. That ordering is the
-// whole fix, and it is why TestTheCausesWriteIsNotGuarded had to CHANGE rather
-// than be deleted: it pinned the asymmetry, and the asymmetry was the trap.
 
 // recordingCauses answers CAUSES to every pair and records every orientation it
-// was asked about, so a test can ask both questions at once: was the pair asked
-// about at all, and in which direction.
-//
-// CAUSES is the verdict that writes a 'causes' edge — the relation whose
-// direction is under test — so a fake answering anything else would settle the
-// question by never asking it.
 type recordingCauses struct {
 	judged [][2]string
 }
@@ -65,29 +25,9 @@ func (c *recordingCauses) ClassifyBatch(_ context.Context, pairs []Candidate) ([
 }
 
 // retagStamp is the ONE updated_at every retagged endpoint carries here. It is
-// later than both fixtures' created_at and later than the '2020-01-01' stamp
-// these pairs' edges are seeded with, so the only thing it has to be is THE SAME
-// on both endpoints — which is what makes `orient`'s tie fall to created_at, the
-// chronology the caller seeded on purpose (see retagBoth).
 const retagStamp = "2026-10-01 00:00:00"
 
 // retagBoth moves both endpoints' updated_at through the REAL writer, which is
-// what an operator's edit through a live `ghost mcp` does and what re-arms
-// skip-if-unchanged. A fixture that only poked the column directly would be
-// asserting something about the column rather than about the pass's freshness
-// test — and the tag is a real change, so the write is a real one.
-//
-// It then PINS both endpoints to one stamp. UpdateMemory stamps
-// updated_at = datetime('now') at SECOND resolution, so two of them a second
-// apart leave `older` holding the later stamp, and `orient` — which orders a pair
-// by updated_at and only then by created_at — asks the pair the other way round.
-// That is #847: the pair's direction became a function of whether the wall clock
-// ticked between two writes a fixture made microseconds apart, so these tests
-// failed on a slow runner for reasons that have nothing to do with what they
-// assert. Pinning after the real writes keeps the writer honest about what moved
-// (the text is unchanged, so the content cache is still a hit, which
-// TestALiveCausesEdgeIsNeverCacheSkipped depends on) and makes the direction a
-// property of the fixture.
 func retagBoth(t *testing.T, store *memory.Store, db *sql.DB, ids ...string) {
 	t.Helper()
 	ctx := context.Background()
@@ -104,21 +44,6 @@ func retagBoth(t *testing.T, store *memory.Store, db *sql.DB, ids ...string) {
 }
 
 // TestALiveCausesEdgeHoldsItsPairQuiet is the ordinary pass's half, and it is the
-// re-bill #823 is about: a live 'causes' edge whose direction disagrees with the
-// scan's must produce NO classify call, because neither endpoint has moved since
-// the edge was written.
-//
-// The observable is the call count, not the graph. A graph assertion alone would
-// be satisfied by a pass that asked the question and then declined to act on the
-// answer — which is the state #819 documented, and the one that costs a call per
-// pass forever.
-//
-// The edge's STAMP is what buys the quiet and nothing else. It is not a
-// direction the pair is judged in — see TestACausesEdgeCannotDecideTheDirectionASupersedesEdgeIsWrittenIn
-// for what reading it as one costs — so `OppositeLive` is 0 here where it was 1:
-// there is no refused orientation any more, because the pair is never proposed in
-// one that opposes the edge. A counted refusal was the wrong instrument for a
-// quiet, and the call count is the right one.
 func TestALiveCausesEdgeHoldsItsPairQuiet(t *testing.T) {
 	store, db := seed(t)
 	ctx := context.Background()
@@ -126,9 +51,6 @@ func TestALiveCausesEdgeHoldsItsPairQuiet(t *testing.T) {
 	newer := add(t, store, db, "the restore is being rewritten to run on one spindle", []float32{1, 0, 0}, "2026-09-01 00:00:00")
 	older := add(t, store, db, "the restore path on one spindle is safe and fast", []float32{0.98, 0.02, 0}, "2026-01-01 00:00:00")
 	// A live 'causes' edge running NEWER→OLDER, which is the reverse of the
-	// direction 'causes' is written in and so the reverse of what the timestamps
-	// propose. Stamped at the freshness of what a verdict was made against, which
-	// is what lets skip-if-unchanged hold the pair at all.
 	if err := store.CreateLinkJudged(ctx, newer, older, string(RelationCauses), 0.9, "llm", "2026-09-01 00:00:00"); err != nil {
 		t.Fatal(err)
 	}
@@ -169,20 +91,6 @@ func TestALiveCausesEdgeHoldsItsPairQuiet(t *testing.T) {
 
 // TestACausesVerdictCorrectsALiveCausesEdgeThatDisagreesWithTheTimestamps is the
 // half that cannot be reached through quiet: the endpoints HAVE moved, so
-// skip-if-unchanged releases the pair and the pass really does spend a classify
-// call.
-//
-// What it writes is the point. The pair is asked in the direction `orient` gives,
-// and a CAUSES verdict therefore writes `causes older→newer` — which is the
-// REVERSE of the edge a disagreeing store holds. It converges precisely because
-// the apply block drops what the pass read before it writes: the verdict
-// invalidates the live edge and then writes its own, so the pair ends up with ONE
-// 'causes' edge in the direction the model just chose. Asking the pair and then
-// refusing the write — a guard alone, which is what #819 shipped on purpose —
-// would converge on nothing and would re-ask forever, and writing the live edge's
-// direction instead would have meant asking a question the edge cannot answer,
-// since the edge is not a supersession (see
-// TestACausesEdgeCannotDecideTheDirectionASupersedesEdgeIsWrittenIn).
 func TestACausesVerdictCorrectsALiveCausesEdgeThatDisagreesWithTheTimestamps(t *testing.T) {
 	store, db := seed(t)
 	ctx := context.Background()
@@ -208,10 +116,6 @@ func TestACausesVerdictCorrectsALiveCausesEdgeThatDisagreesWithTheTimestamps(t *
 			len(cls.judged), cls.judged)
 	}
 	// The direction asked is the TIMESTAMPS'. The live edge runs newer→older,
-	// which asserts that the September note is the cause and the January one its
-	// effect, so a question in the edge's own direction would carry the edge's
-	// claim rather than the two notes' chronology — and a supersedes answer to it
-	// writes a demotion of the memory that is current.
 	if cls.judged[0] != [2]string{newer, older} {
 		t.Errorf("the pair was asked about as %v, want [%s %s]: the timestamps' direction, and a 'causes' edge is a claim about which note CAUSED which, not about which one replaces the other",
 			cls.judged[0], newer, older)
@@ -223,9 +127,6 @@ func TestACausesVerdictCorrectsALiveCausesEdgeThatDisagreesWithTheTimestamps(t *
 		t.Fatalf("classified = %+v, want one row marked reclassified: this is a verdict about an edge in the store, not about a proposal", classified)
 	}
 	// The write landed in the direction asked, and the edge it contradicts is
-	// gone: ONE live 'causes' edge, and the pair is not a cycle. The reverse is
-	// never left in place beside the write, which is the property the store-level
-	// guard exists to make impossible for a concurrent pass.
 	edges := liveCausesEdges(t, store, newer, older)
 	if len(edges) != 1 || edges[0] != [2]string{older, newer} {
 		t.Errorf("live 'causes' edges = %v, want exactly [%s %s]: the verdict's own direction was written and the edge it contradicted was dropped, so the pair converged on one edge rather than becoming a cycle",
@@ -254,11 +155,6 @@ func TestACausesVerdictCorrectsALiveCausesEdgeThatDisagreesWithTheTimestamps(t *
 }
 
 // TestACausesVerdictReAffirmsALiveCausesEdgeThatAgreesWithTheTimestamps is the
-// other half of the correction above, and the reason `Reclassified` is decided by
-// whether a ROW moved rather than by whether the relation changed. Here the live
-// edge already runs the way a CAUSES verdict writes, so the verdict re-stamps it
-// and the graph is unchanged — which is the one CAUSES outcome that is not a
-// reclassification.
 func TestACausesVerdictReAffirmsALiveCausesEdgeThatAgreesWithTheTimestamps(t *testing.T) {
 	store, db := seed(t)
 	ctx := context.Background()
@@ -298,10 +194,6 @@ func TestACausesVerdictReAffirmsALiveCausesEdgeThatAgreesWithTheTimestamps(t *te
 }
 
 // guardedWriterSpy records which of the two link writers the pass reached for.
-// It is a behavioural probe, not a source check: the defect this file is about is
-// WHICH writer a verdict uses, and the two writers differ in nothing a caller
-// can otherwise observe except whether the graph can end up holding a pair in
-// both directions.
 type guardedWriterSpy struct {
 	*memory.Store
 	unopposed []string
@@ -320,22 +212,6 @@ func (s *guardedWriterSpy) CreateLinkJudged(ctx context.Context, sourceID, targe
 
 // TestTheCausesWriteIsNowGuarded replaces TestTheCausesWriteIsNotGuarded, and
 // it changes its mind for the reason #823 gives rather than for tidiness.
-//
-// #819 shipped the 'causes' write unguarded and said why: the direction override
-// was built from live SUPERSEDES edges, so a pair whose 'causes' edge ran against
-// the timestamps was re-proposed flipped on every pass, answered CAUSES, and
-// would have been refused on every one — a refusal that never converges, at a
-// classify call per pass, for as long as the edge lives. That trade was worse
-// than the contradiction it prevented, and the asymmetry was pinned from the
-// pass's side so a later change could not "tidy" the guard onto both relations
-// for the sake of symmetry.
-//
-// The override is now built from BOTH relations, so a pair is judged in the live
-// edge's own direction and the write is in that direction too. The refusal is
-// therefore the same one 'supersedes' has: a cross-process race that costs one
-// call, not a state the pass re-enters. And the write has to go through the
-// guarded writer, because the state it closes is exactly one the pass's own
-// reads cannot see — two passes, or a pass and a pre-#823 store.
 func TestTheCausesWriteIsNowGuarded(t *testing.T) {
 	store, db := seed(t)
 	ctx := context.Background()
@@ -352,9 +228,6 @@ func TestTheCausesWriteIsNowGuarded(t *testing.T) {
 		t.Errorf("CausesCreated = %d, want 1: nothing opposed this write, and a guard that refuses an unopposed pair is not a guard", res.CausesCreated)
 	}
 	// And the WRITE count moves with it (#834). The two agree here because the
-	// write landed, which is the whole point of keeping them apart: a run whose
-	// write was refused has to be able to say so, and this is the counter that
-	// says it.
 	if res.CausesWritten != 1 {
 		t.Errorf("CausesWritten = %d, want 1: the verdict was written, and a write count that did not follow the write is the #834 asymmetry again", res.CausesWritten)
 	}
@@ -374,14 +247,6 @@ func TestTheCausesWriteIsNowGuarded(t *testing.T) {
 }
 
 // TestACausesVerdictReportsTheRelationItReplaced is the report's half, and it is
-// the reason Classified carries ReclassifiedFrom.
-//
-// A live 'causes' edge re-judged into SUPERSEDES is a change of relation: the
-// pair is now linked in the other relation, and the 'causes' row is gone. The
-// pass's own counter has to say so (Result.Reclassified) and the row has to carry
-// which relation it replaced, or a report prints the new 'supersedes' edge and
-// says nothing about the graph row that was removed — "0 reclassified" over a
-// pair whose relation changed is the same misleading line in a new place.
 func TestACausesVerdictReportsTheRelationItReplaced(t *testing.T) {
 	store, db := seed(t)
 	ctx := context.Background()
@@ -429,20 +294,6 @@ func TestACausesVerdictReportsTheRelationItReplaced(t *testing.T) {
 
 // TestALiveCausesEdgeIsNeverCacheSkipped is the NEITHER cache's half, and it is
 // the third thing a live 'causes' edge did not get.
-//
-// A cache skip is treated as equivalent to a NEITHER verdict — a pair whose
-// endpoints' text still matches a stored verdict is not re-asked. For a pair a
-// live 'supersedes' edge names that is impossible, and for a pair a live
-// 'causes' edge names it was a live hole until #823: the cache skip asserted the
-// edge was not there, and the edge's direction is what decides how the pair is
-// judged, so a skipped pair is a pair the graph and the pass disagree about while
-// the pass reports itself quiet.
-//
-// The fixture is the one state where the two rules collide: a stored NEITHER
-// verdict for the SCAN's orientation (which is what a previous pass would have
-// cached, before it could see the edge), a live 'causes' edge in the other
-// direction, and endpoints that have moved since both — so skip-if-unchanged
-// releases the pair and the cache is the only thing that could skip it.
 func TestALiveCausesEdgeIsNeverCacheSkipped(t *testing.T) {
 	store, db := seed(t)
 	ctx := context.Background()
@@ -456,19 +307,6 @@ func TestALiveCausesEdgeIsNeverCacheSkipped(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The cache rows a previous pass would have left. BOTH orientations, and that
-	// is what makes this a test of the rule rather than of a lookup that happens
-	// to miss: the cache is keyed by the ORDERED pair, and a store that has been
-	// judged in either orientation holds a row under each — #823 asked contested
-	// pairs in the live edge's direction, which for this fixture is older-first.
-	// Only the one the pass will look up is load-bearing, so seeding just the other
-	// one would let a regression hide behind a cache MISS.
-	//
-	// Each row carries the hashes of the notes ITS OWN key names — a row keyed
-	// (older, newer) records the older note's text under NewerHash — because the
-	// lookup reads them against the candidate's own orientation. Both rows are
-	// real hits: the retag below moves updated_at and changes no text, which is
-	// the whole point of a content-keyed cache and the reason a tag edit is the
-	// write that reaches it.
 	if err := store.MarkSupersedeNeither(ctx, "p", map[[2]string]memory.SupersedeCheck{
 		{newer, older}: {NewerHash: contentHash(newerText), OlderHash: contentHash(olderText)},
 		{older, newer}: {NewerHash: contentHash(olderText), OlderHash: contentHash(newerText)},
@@ -498,18 +336,6 @@ func TestALiveCausesEdgeIsNeverCacheSkipped(t *testing.T) {
 
 // TestASupersedesVerdictDropsTheCausesEdgeThatContradictsIt is the sweep a
 // verdict owes in BOTH directions, and it is a shape the pass used to leave
-// behind.
-//
-// A live 'supersedes' edge A→B says A is the newer note. A 'causes' edge A→B
-// says the opposite — its source is the CAUSE, so A is the older one and B the
-// effect. The two cannot both be true of the pair, and a SUPERSEDES verdict
-// denies the 'causes' claim whichever end it is written from: a pair whose newer
-// note retires the older one is not one note having caused the other.
-//
-// The pass has always swept the 'causes' edge in the direction a supersession
-// implies (older→newer), and the contradicting one was left in place — invisible
-// until the 'causes' edges became load-bearing and this shape became a pair the
-// reconciliation had to read rather than a row nobody looked at.
 func TestASupersedesVerdictDropsTheCausesEdgeThatContradictsIt(t *testing.T) {
 	store, db := seed(t)
 	ctx := context.Background()
@@ -556,20 +382,6 @@ func TestASupersedesVerdictDropsTheCausesEdgeThatContradictsIt(t *testing.T) {
 
 // TestACausesCycleIsSettledRatherThanFrozen is the case the pass does NOT
 // refuse, and the reason is in Result.Bidirectional.
-//
-// Two 'causes' edges in opposite directions assert that each of the pair's notes
-// caused the other, which is a contradiction rather than a cycle with harm in
-// flight: a 'supersedes' cycle is refused because both its edges demote one of
-// the pair's two memories, and no orientation of it can be judged into a state
-// worth keeping. Nothing demotes on a 'causes' edge.
-//
-// So this pair is judged ONCE, in the direction the timestamps give — the only
-// direction a pair whose two edges disagree has — and the ordinary verdict
-// converges it: an affirming verdict keeps the direction it was asked about and
-// drops the edge asserting the other, a denying one drops both. The alternative,
-// refusing it, would leave a contradiction no repair can reach, because
-// `ghost supersede --reassess` loads live 'supersedes'/'llm' edges and cannot see
-// a 'causes' one at all.
 func TestACausesCycleIsSettledRatherThanFrozen(t *testing.T) {
 	store, db := seed(t)
 	ctx := context.Background()
@@ -611,13 +423,6 @@ func TestACausesCycleIsSettledRatherThanFrozen(t *testing.T) {
 		t.Errorf("classified = %+v, want one row marked withdrawn: the run dropped a live graph row and the row has to say so", classified)
 	}
 	// The standing edge carries THIS verdict's stamp, and that is the ordering
-	// inside the apply block rather than an incidental detail: settled by writing
-	// first and sweeping after, the guarded write finds the cycle's other half
-	// live, refuses (correctly — it is the reverse of what it is about to write),
-	// and the sweep then drops that half, leaving the OLD edge with its OLD stamp.
-	// The graph looks the same and the pair is re-billed on the next pass for ever,
-	// which is the re-bill this whole change is about arriving through the back
-	// door.
 	var standing memory.Link
 	for _, l := range mustGetLinks(t, store, second) {
 		if l.Relation == string(RelationCauses) {
@@ -648,17 +453,6 @@ func TestACausesCycleIsSettledRatherThanFrozen(t *testing.T) {
 }
 
 // TestADryRunForecastsTheCausesCycleHalfItsVerdictWouldDrop is the preview half
-// of the test above, and it is the last thing a dry run got wrong: the verdict
-// deletes a live graph row, the applied run says so on the row, and the dry run
-// said nothing at all — because CausesDropped counts what --apply actually
-// invalidated, so a preview of a two-mutation verdict showed one of them.
-//
-// The forecast costs no read. It is counted off the same edges this pass loaded,
-// from the same claimsHold predicates the apply block's sweeps are gated on, so
-// the number the preview prints and the number the applied run reports are
-// computed from one snapshot and cannot disagree about whether there IS a row to
-// move. A prediction QUERY would have been the alternative and would have put a
-// second read's failure into a pass whose only fatal error is a write error.
 func TestADryRunForecastsTheCausesCycleHalfItsVerdictWouldDrop(t *testing.T) {
 	store, db := seed(t)
 	ctx := context.Background()
@@ -723,9 +517,6 @@ func mustGetLinks(t *testing.T, store *memory.Store, id string) []memory.Link {
 }
 
 // seedCausesCycle writes a pair live in BOTH directions of 'causes', which is the
-// state a pass before #823 could leave, and returns the two notes' ids with the
-// newer one first (their timestamps are a month apart, so the pair IS
-// judgeable — the shape whose repair #823 settled).
 func seedCausesCycle(t *testing.T, store *memory.Store, db *sql.DB) (newer, older string) {
 	t.Helper()
 	newer = add(t, store, db, "the restore is being rewritten to run on one spindle", []float32{1, 0, 0}, "2026-09-01 00:00:00")
@@ -739,15 +530,6 @@ func seedCausesCycle(t *testing.T, store *memory.Store, db *sql.DB) (newer, olde
 }
 
 // TestADenyingVerdictDropsBothOfACausesCyclesEdges is the review finding that the
-// first cut of this change missed: the both-directions sweep existed only on the
-// AFFIRMING branch.
-//
-// A 'causes' cycle is settled by an affirming verdict because the guarded write
-// in front of it closes the cycle. A DENYING verdict writes nothing, so the sweep
-// is the only thing that can, and stopping it at one direction left the pair's
-// other edge live: the graph went on asserting that each of the pair's notes
-// caused the other, while `Result.ReclassifiedNoWrite` and the row's `already
-// gone` marker both said the pair was unlinked.
 func TestADenyingVerdictDropsBothOfACausesCyclesEdges(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -790,16 +572,6 @@ func TestADenyingVerdictDropsBothOfACausesCyclesEdges(t *testing.T) {
 }
 
 // TestACausesCycleOnAPairHoldingASupersedesEdgeIsJudgedInTheEdgesDirection is the
-// second review finding, and it is the #641 shape wearing a 'causes' costume.
-//
-// `pairDirection` reported "no single stored direction" as soon as a pair's
-// 'causes' edges disagreed — before the rule that a 'supersedes' edge's direction
-// wins. A store a pre-#823 pass wrote is exactly that: a live 'supersedes' edge
-// with a 'causes' cycle beside it, because that writer shipped unguarded. The pair
-// then fell into the causes-cycle path, was judged in the TIMESTAMPS' direction,
-// and a NEITHER verdict invalidated 'supersedes' in the timestamps' direction —
-// which is not where the live edge is, so nothing was withdrawn while the report
-// said it was.
 func TestACausesCycleOnAPairHoldingASupersedesEdgeIsJudgedInTheEdgesDirection(t *testing.T) {
 	store, db := seed(t)
 	ctx := context.Background()
@@ -824,9 +596,6 @@ func TestACausesCycleOnAPairHoldingASupersedesEdgeIsJudgedInTheEdgesDirection(t 
 		t.Fatalf("classified = %+v, want one row whose live edge was 'supersedes'", classified)
 	}
 	// The verdict re-AFFIRMED that edge and still took the pair's two 'causes'
-	// rows, which is the whole of this finding: a supersession denies a 'causes'
-	// claim whichever end it is written from, so neither half of the cycle
-	// survives a pass that had every reason to end it.
 	if got := liveCausesEdges(t, store, newer, older); len(got) != 0 {
 		t.Errorf("live 'causes' edges = %v, want none: the pair is now a supersession, and a 'causes' claim in either direction is what that verdict denies", got)
 	}
@@ -839,13 +608,6 @@ func TestACausesCycleOnAPairHoldingASupersedesEdgeIsJudgedInTheEdgesDirection(t 
 }
 
 // TestACausesCycleSettledByACausesVerdictIsCountedAndPrinted is the third
-// finding: the row set `CausesDropped` and `Withdrawn`, and the report printed
-// it as an ordinary `causes` line.
-//
-// The relation did not change — the verdict came back CAUSES on a pair whose live
-// edge was a 'causes' one — so nothing counted it, and the one graph row the run
-// actually deleted was invisible on every surface while the summary read
-// "0 reclassified".
 func TestACausesCycleSettledByACausesVerdictIsCountedAndPrinted(t *testing.T) {
 	store, db := seed(t)
 	ctx := context.Background()
@@ -885,39 +647,6 @@ func (c *scriptedRelation) ClassifyBatch(_ context.Context, pairs []Candidate) (
 }
 
 // TestACausesEdgeCannotDecideTheDirectionASupersedesEdgeIsWrittenIn is a
-// BLOCKER, and it is the shape a live 'causes' override creates when it is allowed
-// to reach the supersedes relation.
-//
-// The fixture is the one the review reproduced, and it is deliberately the same
-// fixture as TestAPassNeverWritesTheReverseOfALiveCausesEdgeWhenItDoesReAsk with
-// the verdict changed:
-//
-//   - `newer` was created 2026-09, `older` 2026-01, so the CHRONOLOGY is
-//     unambiguous;
-//   - a live 'causes' edge runs `newer → older`, which asserts the opposite: that
-//     the September note is the cause and the January note its effect;
-//   - both endpoints moved, so skip-if-unchanged releases the pair;
-//   - the classifier answers SUPERSEDES.
-//
-// Read through the causes override, the pair is asked as (Newer=`older`,
-// Older=`newer`) — the prompt labelled the JANUARY note NEWER — and the
-// SUPERSEDES branch then writes `supersedes older → newer`. That edge DEMOTES the
-// September note, which the store's own ranking reads as the note that replaced
-// the January one, and it buries the memory that is actually current. This is
-// #641's damage produced by the pass rather than found by it, and it is worse than
-// a mislabelled prompt because the write is the thing the harm lands on.
-//
-// So the causes edge's direction may govern the CAUSES relation and nothing else.
-// Where the two disagree, the pair is asked in the direction `orient` gives —
-// which is what the pre-#823 pass did for every pair without a live supersedes
-// edge — so a SUPERSEDES verdict is written in the direction that can demote a
-// note and never in the one that buries it, and the prompt's NEWER label is the
-// chronologically newer note whenever the question is a supersedes one.
-//
-// A live SUPERSEDES edge keeps its own override, deliberately and for the reason
-// #641's repair needs: that edge IS the demotion, so the direction to judge it in
-// is the direction it was written in, and a REVERSED answer is how the model
-// declines a backwards claim.
 func TestACausesEdgeCannotDecideTheDirectionASupersedesEdgeIsWrittenIn(t *testing.T) {
 	store, db := seed(t)
 	ctx := context.Background()
@@ -960,9 +689,6 @@ func TestACausesEdgeCannotDecideTheDirectionASupersedesEdgeIsWrittenIn(t *testin
 }
 
 // recordingDirections answers SUPERSEDES to every pair and records each
-// orientation it was handed, which is the only way to see what the PROMPT said as
-// well as what the graph ended up holding. The two are different claims and the
-// blocker is about both.
 type recordingDirections struct{ asked [][2]string }
 
 func (c *recordingDirections) ClassifyBatch(_ context.Context, pairs []Candidate) ([]Relation, error) {
@@ -976,29 +702,11 @@ func (c *recordingDirections) ClassifyBatch(_ context.Context, pairs []Candidate
 
 // TestATiedCausesOnlyPairTheScanAlsoFoundIsCountedOnce is a report-counting
 // defect, and the only shape in this file that is about the total rather than
-// about the graph.
-//
-// `order` is the union of the scan's fresh candidates and the live-edge pairs,
-// deduped by pair key, so a tied `causes`-only pair is reached twice: once as a
-// near neighbour the scan refused to propose, and once as a live edge whose
-// endpoints the reconciliation cannot orient. Both halves answer "no chronology,
-// not judged", and both increment `Result.Unoriented`, so one pair prints as two
-// on the `not proposed` line — a line documented as a per-pair count, and reached
-// by exactly the corpus the new wording advertises (a bulk import stamps a whole
-// batch at once, so bulk-imported pairs tie by construction).
-//
-// A live `supersedes` edge does not have this problem because the `pairDirected`
-// path never calls `orient` at all: the edge carries a direction, so there is
-// nothing to refuse.
 func TestATiedCausesOnlyPairTheScanAlsoFoundIsCountedOnce(t *testing.T) {
 	store, db := seed(t)
 	ctx := context.Background()
 
 	// Two near neighbours sharing BOTH timestamps — a bulk import's stamp, so
-	// every pair in this fixture ties and only the vectors say which are
-	// neighbours. The two pairs live in ORTHOGONAL directions so the scan finds
-	// exactly the one it is meant to, and a count that is off by the number of
-	// pairs cannot be mistaken for a count that is off by one per sighting.
 	tied := add(t, store, db, "the restore is being rewritten to run on one spindle", []float32{1, 0, 0, 0}, "2026-09-20 09:26:05")
 	tiedOther := add(t, store, db, "the restore path on one spindle is safe and fast", []float32{0.99, 0, 0.14, 0}, "2026-09-20 09:26:05")
 	if err := store.CreateLinkJudged(ctx, tied, tiedOther, string(RelationCauses), 0.9, "llm", "2020-01-01 00:00:00"); err != nil {

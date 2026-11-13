@@ -30,13 +30,6 @@ var (
 
 const queryKeyRetryDelay = 30 * time.Second
 
-func resetQueryKeyCache() {
-	queryKeyMu.Lock()
-	defer queryKeyMu.Unlock()
-	queryKeyLoaded, queryKeyBytes_ = false, nil
-	queryKeyErr, queryKeyRetryAfter = nil, time.Time{}
-}
-
 func queryKey() ([]byte, error) {
 	queryKeyMu.Lock()
 	defer queryKeyMu.Unlock()

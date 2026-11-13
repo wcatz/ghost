@@ -6,114 +6,58 @@ import (
 	"testing"
 )
 
-// TestHarnessFailureOutputFallsBackToStdout is the defect behind issue #540's
-// "opencode exit 1 with empty stderr".
-//
-// Every client reported a failed run as `fmt.Errorf("...: %w: %s", err,
-// stderr.String())` — and opencode reports failures through its `--format
-// json` stream on STDOUT, not the console. So the message came out as
-//
-//	opencode run: exit status 1:
-//
-// with nothing after the colon, 357 times in lifecycle.log, and every
-// reflection, resolve and supersede failure for the day was undiagnosable:
-// the child had said exactly what went wrong, on the other stream, and Ghost
-// dropped it.
+// TestHarnessFailureOutputFallsBackToStdout is the defect behind issue #540.
 func TestHarnessFailureOutputFallsBackToStdout(t *testing.T) {
-	got := harnessFailureOutput(`{"error":"writeFile /x/.gitignore: ENOENT"}`, "")
-	if !strings.Contains(got, "ENOENT") {
-		t.Errorf("stdout was discarded when stderr was empty — the failure is invisible:\n%q", got)
+	if got := harnessFailureOutput(`{"error":"writeFile /x/.gitignore: ENOENT"}`, ""); !strings.Contains(got, "ENOENT") {
+		t.Errorf("stdout discarded when stderr empty: %q", got)
 	}
 }
 
-// TestHarnessFailureOutputPrefersStderr: stderr is the child's direct
-// complaint and is what the old code showed. Falling back must not displace it
-// — a long JSON stream on stdout must not bury the real diagnostic.
-func TestHarnessFailureOutputPrefersStderr(t *testing.T) {
-	got := harnessFailureOutput(`{"noise":"large json stream"}`, "permission denied writing config")
-	if !strings.Contains(got, "permission denied") {
-		t.Errorf("stderr missing: %q", got)
-	}
-	if strings.Contains(got, "large json stream") {
-		t.Errorf("stdout displaced stderr — the direct complaint must win: %q", got)
-	}
+func TestHarnessFailureOutput(t *testing.T) {
+	t.Run("prefers stderr", func(t *testing.T) {
+		got := harnessFailureOutput(`{"noise":"large json stream"}`, "permission denied writing config")
+		if !strings.Contains(got, "permission denied") || strings.Contains(got, "large json stream") {
+			t.Errorf("got %q", got)
+		}
+	})
+	t.Run("bounded and keeps tail", func(t *testing.T) {
+		big := strings.Repeat(`{"line":"filler"}`+"\n", 5000)
+		got := harnessFailureOutput(big, "")
+		if len(got) > harnessFailureOutputMax+64 || !strings.Contains(got, `{"line":"filler"}`) {
+			t.Errorf("len=%d", len(got))
+		}
+	})
+	t.Run("empty", func(t *testing.T) {
+		if got := harnessFailureOutput("", ""); got != "" {
+			t.Errorf("got %q", got)
+		}
+	})
+	t.Run("trims noise", func(t *testing.T) {
+		if got := harnessFailureOutput("   \n\n  actual failure line\nmore\n", ""); !strings.HasPrefix(got, "actual failure line") {
+			t.Errorf("got %q", got)
+		}
+	})
+	t.Run("guards tokens", func(t *testing.T) {
+		for _, token := range []string{"ghp_AbCdEfGhIjKlMnOpQrStUvWxYz1234567890", "AKIAIOSFODNN7EXAMPLE"} {
+			if got := harnessFailureOutput(token, ""); got == token {
+				t.Errorf("token leaked from stdout: %q", got)
+			}
+			if got := harnessFailureOutput("", token); got == token {
+				t.Errorf("token leaked from stderr: %q", got)
+			}
+		}
+	})
+	t.Run("guards token across cut", func(t *testing.T) {
+		token := "ghp_AbCdEfGhIjKlMnOpQrStUvWxYz1234567890"
+		input := strings.Repeat("=", harnessFailureOutputMax) + token + strings.Repeat("y", 1160)
+		for name, args := range map[string][2]string{"stdout": {input, ""}, "stderr": {"", input}} {
+			if got := harnessFailureOutput(args[0], args[1]); got == tail(input, harnessFailureOutputMax) {
+				t.Errorf("%s: token not withheld: %q", name, got)
+			}
+		}
+	})
 }
 
-// TestHarnessFailureOutputIsBounded: stdout on a successful-looking but
-// non-zero run can be a whole JSON-lines transcript. Attaching all of it to an
-// error that then travels into a marker rendered at session start would turn
-// the alert into a transcript too.
-func TestHarnessFailureOutputIsBounded(t *testing.T) {
-	big := strings.Repeat(`{"line":"filler"}`+"\n", 5000)
-	got := harnessFailureOutput(big, "")
-
-	if len(got) > harnessFailureOutputMax+64 {
-		t.Errorf("failure output grew to %d bytes, want <= %d", len(got), harnessFailureOutputMax)
-	}
-	// The TAIL is what matters: that is where the error sits, after the
-	// events that led to it.
-	if !strings.Contains(got, `{"line":"filler"}`) {
-		t.Errorf("no output survived at all: %q", got)
-	}
-}
-
-// TestHarnessFailureOutputBothEmpty: a child that says nothing must not panic
-// or return a lie — empty is the honest answer, and the caller's own
-// "exit status N" still carries the failure.
-func TestHarnessFailureOutputBothEmpty(t *testing.T) {
-	if got := harnessFailureOutput("", ""); got != "" {
-		t.Errorf("got %q, want empty", got)
-	}
-}
-
-// TestHarnessFailureOutputTrimsNoise: leading and trailing whitespace from a
-// captured stream makes the message look like it was mangled; the marker
-// renders the first line, so that line should be the child's first real one.
-func TestHarnessFailureOutputTrimsNoise(t *testing.T) {
-	got := harnessFailureOutput("   \n\n  actual failure line\nmore\n", "")
-	if !strings.HasPrefix(got, "actual failure line") {
-		t.Errorf("leading blank lines survived into the message: %q", got)
-	}
-}
-
-// TestHarnessFailureOutputGuardsTokens: a token-shaped string on stdout or
-// stderr must be withheld by the token guard before it reaches the error.
-func TestHarnessFailureOutputGuardsTokens(t *testing.T) {
-	token := "ghp_AbCdEfGhIjKlMnOpQrStUvWxYz1234567890"
-	if got := harnessFailureOutput(token, ""); got == token {
-		t.Errorf("github token was not withheld from stdout: %q", got)
-	}
-	if got := harnessFailureOutput("", token); got == token {
-		t.Errorf("github token was not withheld from stderr: %q", got)
-	}
-	akia := "AKIAIOSFODNN7EXAMPLE"
-	if got := harnessFailureOutput(akia, ""); got == akia {
-		t.Errorf("AKIA key was not withheld from stdout: %q", got)
-	}
-	if got := harnessFailureOutput("", akia); got == akia {
-		t.Errorf("AKIA key was not withheld from stderr: %q", got)
-	}
-}
-
-// TestHarnessFailureOutputGuardsTokensAcrossCut: a token that straddles the
-// tail cut is withheld by checking the full string before truncation.
-func TestHarnessFailureOutputGuardsTokensAcrossCut(t *testing.T) {
-	token := "ghp_AbCdEfGhIjKlMnOpQrStUvWxYz1234567890"
-	pad := strings.Repeat("=", harnessFailureOutputMax)
-	input := pad + token + strings.Repeat("y", 1160)
-	if got := harnessFailureOutput(input, ""); got == tail(input, harnessFailureOutputMax) {
-		t.Errorf("token straddling cut was not withheld: %q", got)
-	}
-	if got := harnessFailureOutput("", input); got == tail(input, harnessFailureOutputMax) {
-		t.Errorf("token straddling cut in stderr was not withheld: %q", got)
-	}
-}
-
-// TestCLIClientReportsAFailureTheChildPutOnStdout is the wiring test the
-// helper alone cannot give: it drives a real subprocess, so it fails if any
-// client stops routing through harnessFailureOutput and goes back to appending
-// stderr.String() — which is how every one of them reported opencode's failures
-// as "exit status 1: " with nothing after the colon.
 func TestCLIClientReportsAFailureTheChildPutOnStdout(t *testing.T) {
 	bin := fakeClaudeBinary(t, `
 printf 'config write failed: ENOENT'

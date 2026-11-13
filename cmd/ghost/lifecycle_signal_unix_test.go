@@ -2,21 +2,6 @@
 
 package main
 
-// The coordinator's interrupt handling, driven where it is wired: runLifecycle
-// in a built ghost binary, against a fake harness. The helpers it is made of
-// (interruptOutcome, applyInterrupt, awaitPhaseSweep, phaseWatchdog) have unit
-// tests of their own, but none of those can see whether runLifecycle calls
-// them, so a loop that dropped the stop between phases, the wait for the sweep
-// or the record of the phase in flight passed every one of them. These tests
-// read the outcome the run leaves behind, the failure marker, and the processes
-// it left alive or not.
-//
-// The binary is built with `go build` into the test's own directory and never
-// re-exec'd from the test binary (see CLAUDE.md), its environment is built from
-// an allowlist rather than filtered from os.Environ(), and HOME, every XDG_*
-// directory and TMPDIR point inside the test's directory: the coordinator's
-// audit sweep deletes stale files under os.TempDir().
-
 import (
 	"bytes"
 	"context"
@@ -63,18 +48,6 @@ func (b *lifecycleSignalBuffer) String() string {
 // signalHarnessScript is the fake claude the resolve phase calls. The two
 // capability checks the claude adapter makes are answered at once; any other
 // call is the classification the phase is blocked on, and it:
-//
-//   - starts a helper in the harness's OWN process group (production gives
-//     every harness a group of its own, internal/ai) that ignores SIGTERM, so
-//     only the harness escalation's group kill can end it;
-//   - records its own pid, its parent's (the phase process, the leader of the
-//     phase's group) and the helper's, then writes the ready file last, so a
-//     test that sees the ready file can read all three;
-//   - exits on SIGTERM, and otherwise waits, bounded so that nothing it starts
-//     can outlive a broken run by more than a couple of minutes.
-//
-// The waits are loops of short sleeps because a shell runs a trap only once
-// its current foreground child has finished.
 const signalHarnessScript = `#!/bin/sh
 dir=@DIR@
 case "$1" in
@@ -366,21 +339,6 @@ func waitGroupGone(pgid int, within time.Duration) error {
 // TestLifecycleInterruptDuringAPhaseRecordsItAndSweepsItsGroups signals the
 // coordinator while the resolve phase is blocked on its harness, with
 // supersede enabled behind it. It requires that:
-//
-//   - the phase's harness, in a process group of its own, is terminated and
-//     its group swept, which only happens when the phase's context derives
-//     from the coordinator's signal context;
-//   - the coordinator stays up, with no marker written, while a member of the
-//     PHASE's group that took the SIGTERM is still winding down: it waits for
-//     the sweep (awaitPhaseSweep) before it records the run and releases the
-//     claim, and only exits once that group is empty;
-//   - resolve is recorded as interrupted, not failed, and supersede never
-//     starts.
-//
-// The member of the phase's group is a shell the test starts into that group
-// (same session, so setpgid is allowed). It stands for any process left in the
-// phase's group that ignores the SIGTERM for a moment; it exits when the test
-// releases it, and it is the test's own child, so the test reaps it.
 func TestLifecycleInterruptDuringAPhaseRecordsItAndSweepsItsGroups(t *testing.T) {
 	s := newSignalSandbox(t)
 	s.seed(t)
@@ -388,9 +346,6 @@ func TestLifecycleInterruptDuringAPhaseRecordsItAndSweepsItsGroups(t *testing.T)
 		t.Fatalf("write config: %v", err)
 	}
 
-	// Registered before anything is started, so it runs after every other
-	// cleanup: whatever this run left alive is killed by pid, each one checked
-	// for liveness first so a reused pid is not hit.
 	t.Cleanup(func() {
 		for _, name := range []string{"helper.pid", "harness.pid", "member.pid"} {
 			if pid := recordedPid(filepath.Join(s.bin, name)); pid > 0 && processAlive(pid) {
@@ -456,9 +411,6 @@ func TestLifecycleInterruptDuringAPhaseRecordsItAndSweepsItsGroups(t *testing.T)
 		t.Fatalf("signal the coordinator: %v", err)
 	}
 
-	// The phase's group took the SIGTERM the phase's Cancel sends, and the
-	// harness's own group was terminated and swept: the harness took its
-	// SIGTERM, and the helper that ignores it was killed with its group.
 	waitForPath(t, c, termed, "the SIGTERM to the phase's group", 30*time.Second)
 	if err := waitGone(harnessPid, 30*time.Second); err != nil {
 		t.Fatalf("the harness (pid %d) survived the interrupt: %v\n%s", harnessPid, err, c.stderr.String())
@@ -476,11 +428,6 @@ func TestLifecycleInterruptDuringAPhaseRecordsItAndSweepsItsGroups(t *testing.T)
 		t.Fatal("the phase's group emptied before the member was released; this case is not covered")
 	}
 
-	// While the member is winding down the coordinator must wait for the sweep:
-	// no marker, no exit. This is an observation window, not a sync point; a
-	// coordinator that skipped the wait records and exits within milliseconds
-	// of the line above, and one that waits cannot leave it at all while the
-	// group is inhabited.
 	window := time.Now().Add(time.Second)
 	for time.Now().Before(window) {
 		if c.hasExited() {

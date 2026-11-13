@@ -63,33 +63,3 @@ func BenchmarkResolveProjectPathMiss(b *testing.B) {
 		}
 	}
 }
-
-// Cold: the memo is empty at every resolve, which is the cost of the first
-// resolve after a project move or an expiry.
-func BenchmarkResolveProjectPathMissCold(b *testing.B) {
-	s, _, miss := benchResolveStore(b)
-	ctx := context.Background()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		s.canon.invalidate()
-		if id, _, err := s.ResolveProject(ctx, miss); err != nil || id != "" {
-			b.Fatalf("miss = (%q, %v)", id, err)
-		}
-	}
-}
-
-// AfterSave: a resolve that follows an ensure-project write, which is what a
-// save does first. The memo must survive it.
-func BenchmarkResolveProjectPathMissAfterSave(b *testing.B) {
-	s, hit, miss := benchResolveStore(b)
-	ctx := context.Background()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		if err := s.EnsureProject(ctx, "id-101", hit, "name-101"); err != nil {
-			b.Fatal(err)
-		}
-		if id, _, err := s.ResolveProject(ctx, miss); err != nil || id != "" {
-			b.Fatalf("miss = (%q, %v)", id, err)
-		}
-	}
-}

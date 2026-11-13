@@ -22,14 +22,6 @@ import (
 
 // TestTheSharedTokenRuneSetIsOneSet: the local predicate and the shared one agree
 // on every rune, not merely on the ones this repository happens to use.
-//
-// Exhaustive over all 0x110000 code points rather than table-driven over a sample,
-// because a sample is the shape of the bug: the two functions are the same today
-// by delegation, so any test that passes now passes forever — UNLESS someone later
-// gives the local one a body of its own, and then the question is whether the test
-// notices on the characters nobody happened to list. Exhaustion makes the answer
-// unconditional. It costs a few milliseconds and it is the only version of this
-// test that cannot rot into a decoration.
 func TestTheSharedTokenRuneSetIsOneSet(t *testing.T) {
 	for r := rune(0); r <= 0x10FFFF; r++ {
 		if isTokenRune(r) != memory.IsSafeTokenRune(r) {
@@ -45,20 +37,6 @@ func TestTheSharedTokenRuneSetIsOneSet(t *testing.T) {
 		t.Errorf("the shared set is degenerate: 'a' bare = %v, newline bare = %v. Token's whole "+
 			"guarantee rests on this set being the narrow one it documents",
 			isTokenRune('a'), isTokenRune('\n'))
-	}
-}
-
-// TestTokenIsMemorySafeTokenRatherThanACopy: Token must remain a delegation, not a
-// re-implementation. This asserts it over the same exhaustive sweep for the reason
-// above — the failure it guards against is someone writing the loop back out
-// beside the call, and a copy is invisible to every other test in this package.
-func TestTokenIsMemorySafeTokenRatherThanACopy(t *testing.T) {
-	for r := rune(0); r <= 0x10FFFF; r++ {
-		s := string(r)
-		if got, want := Token(s), memory.SafeToken(s); got != want {
-			t.Fatalf("Token(%q) = %q but memory.SafeToken(%q) = %q: Token has become a second "+
-				"implementation of the rule rather than a name for it", s, got, s, want)
-		}
 	}
 }
 

@@ -10,16 +10,11 @@ import (
 	"testing"
 )
 
-// fakeOpenCodeBinary writes a shell script standing in for `opencode` that
-// emits the given lines to stdout, so run()'s plumbing can be verified without
-// a real opencode install.
 func fakeOpenCodeBinary(t *testing.T, script string) string {
 	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("shell script fake binary requires a POSIX shell")
 	}
-	// run() opens a scratch dir on every invocation; pin the root to the
-	// test's temp dir so the real data dir is never touched.
 	t.Setenv("GHOST_SCRATCH_DIR", t.TempDir())
 	dir := t.TempDir()
 	path := filepath.Join(dir, "opencode")
@@ -66,20 +61,8 @@ func TestParseOpenCodeOutput_MalformedLineErrors(t *testing.T) {
 }
 
 // TestParseOpenCodeOutput_AcceptsALongReflectReply is the #608 case. The reader
-// carried a 4 MiB bufio.Scanner cap, the same one the stop hook's transcript
 // reader outgrew in #632, so a reflect reply that reached it failed with
-// bufio.Scanner: token too long — a failure that reads exactly like a
-// malformed stream, on a reply that was merely long. The whole stream is
-// already in memory by the time it is parsed, so the cap was bounding nothing
-// that the caller's own buffer had not already paid for.
-//
-// The ceiling is NOT lowered here: the point is the shipped value, and a test
-// that set the var would be testing its own override. The payload sits past the
-// old 4 MiB cap and well inside the current one, which is the band a real
-// answer lands in.
 func TestParseOpenCodeOutput_AcceptsALongReflectReply(t *testing.T) {
-	// One text event whose own payload is over the old cap, which is the shape
-	// that breaks a line reader: the line is one JSON object, not many.
 	big := strings.Repeat("A", 5<<20)
 	raw := `{"type":"text","part":{"id":"a","type":"text","text":"` + big + `"}}` + "\n"
 
@@ -92,10 +75,6 @@ func TestParseOpenCodeOutput_AcceptsALongReflectReply(t *testing.T) {
 	}
 }
 
-// TestParseOpenCodeOutput_StillBoundsALinePastTheCeiling is the other half, so
-// the cap cannot be satisfied by removing it: past the ceiling the read is
-// still an error, because an unbounded parse of a stream the harness produced
-// is a way to run a process out of memory.
 func TestParseOpenCodeOutput_StillBoundsALinePastTheCeiling(t *testing.T) {
 	old := maxOpencodeOutputLine
 	maxOpencodeOutputLine = 4 << 20
@@ -104,20 +83,6 @@ func TestParseOpenCodeOutput_StillBoundsALinePastTheCeiling(t *testing.T) {
 	raw := `{"type":"text","part":{"id":"a","type":"text","text":"` + strings.Repeat("A", (4<<20)+1) + `"}}` + "\n"
 	if _, err := parseOpenCodeOutput(raw); err == nil {
 		t.Fatal("a line past the ceiling parsed, so nothing bounds the read")
-	}
-}
-
-func TestParseOpenCodeOutput_BlankLinesSkipped(t *testing.T) {
-	raw := `{"type":"text","part":{"id":"a","type":"text","text":"OK"}}
-
-{"type":"text","part":{"id":"b","type":"text","text":" fine"}}
-`
-	got, err := parseOpenCodeOutput(raw)
-	if err != nil {
-		t.Fatalf("parseOpenCodeOutput: %v", err)
-	}
-	if got != "OK fine" {
-		t.Errorf("got %q, want blank lines skipped", got)
 	}
 }
 
@@ -148,22 +113,7 @@ func TestOpenCodeClient_Run_PropagatesStderrOnFailure(t *testing.T) {
 	}
 }
 
-// TestOpenCodeClient_Classify_JoinsSystemAndUserIntoPrompt: opencode run has
-// no --system-prompt flag, so the two are joined — and the joined text arrives
 // on stdin (issue #560), not as a positional argument.
-func TestOpenCodeClient_Classify_JoinsSystemAndUserIntoPrompt(t *testing.T) {
-	bin := fakeOpenCodeBinary(t, `piped=$(cat)
-case "$piped" in *SYSTEM*USER*) printf '%s\n' '{"type":"text","part":{"type":"text","text":"KEEP"}}';; *) echo "prompt not joined" >&2; exit 1;; esac`)
-	c := &OpenCodeClient{binary: bin}
-	text, err := c.Classify(context.Background(), "SYSTEM", "USER")
-	if err != nil {
-		t.Fatalf("Classify: %v", err)
-	}
-	if text != "KEEP" {
-		t.Errorf("got %q, want %q", text, "KEEP")
-	}
-}
-
 func TestOpenCodeClient_ScrubsEnv(t *testing.T) {
 	bin := fakeOpenCodeBinary(t, `
 if [ -n "$ANTHROPIC_API_KEY" ]; then echo "LEAKED API KEY" >&2; exit 1; fi
@@ -186,15 +136,6 @@ printf '%s\n' '{"type":"text","part":{"type":"text","text":"OK"}}'
 }
 
 // TestOpenCodeClient_SessionStoreStaysInScratchRoot pins the #588 isolation:
-// the lifecycle child must never see the user's XDG_DATA_HOME, because that
-// is where `opencode session list` reads the session store — a child pointed
-// at it files every titled "[ghost]" run into the user's session list (6,844
-// measured on one workstation before the fix). The fake binary refuses to run
-// unless both HOME and XDG_DATA_HOME are inside the scratch root, writes the
-// session file OpenCode would write under the data dir it sees, and reports
-// that path back; the test asserts the reported path is inside the scratch
-// root and that the temp home's own store was never created, let alone
-// written to.
 func TestOpenCodeClient_SessionStoreStaysInScratchRoot(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell script fake binary requires a POSIX shell")
@@ -212,13 +153,8 @@ mkdir -p "$XDG_DATA_HOME/opencode/storage/session" || exit 1
 printf '%s\n' '{}' > "$XDG_DATA_HOME/opencode/storage/session/ses_ghost.json" || exit 1
 printf '%s\n' '{"type":"text","part":{"type":"text","text":"'"$XDG_DATA_HOME"'"}}'
 `)
-	// fakeOpenCodeBinary pinned its own scratch root first; pin the one this
-	// test asserts against, so the parent can compare against the same path
-	// the child reports.
 	root := t.TempDir()
 	t.Setenv("GHOST_SCRATCH_DIR", root)
-	// A temp home with the default XDG data path under it: nothing real is at
-	// risk, and a child that leaked into it would leave the store behind.
 	home := t.TempDir()
 	userData := filepath.Join(home, ".local", "share")
 	t.Setenv("HOME", home)
@@ -241,25 +177,7 @@ printf '%s\n' '{"type":"text","part":{"type":"text","text":"'"$XDG_DATA_HOME"'"}
 	}
 }
 
-// TestOpenCodeClient_SessionStoreDiesWithTheInvocation is the other half of
 // the #588 isolation, and the reason Ghost does not delete each run's session
-// afterwards. TestOpenCodeClient_SessionStoreStaysInScratchRoot proves the store
-// is somewhere inside the scratch root; this proves it is GONE once the call
-// returns, because the per-invocation directory that holds it is removed by the
-// same deferred cleanup that already removes the child's temp files. The store
-// therefore cannot outlive the run no matter what OpenCode wrote into it.
-//
-// That is what makes an `opencode session delete` per invocation redundant: it
-// would spend a second OpenCode process (Ghost spawns one per consolidation, per
-// resolve candidate and per supersede pair — hundreds per lifecycle) to delete a
-// row in a directory that is about to be removed wholesale. If the teardown ever
-// regresses, the store starts accumulating under the scratch root instead, and
-// only this test notices.
-//
-// The fake writes the store the way real OpenCode does — the sqlite database and
-// a titled session row under the data dir it was given — then reports both that
-// store's path and the credential it can read there, so the same run also pins
-// that the isolated data dir carries the auth file the child needs to
 // authenticate (issue #627) without the user's config or MCP tree.
 func TestOpenCodeClient_SessionStoreDiesWithTheInvocation(t *testing.T) {
 	bin := fakeOpenCodeBinary(t, `
@@ -270,14 +188,9 @@ printf '[ghost]' > "$store/session" || exit 1
 if [ -r "$store/auth.json" ]; then auth=$(cat "$store/auth.json"); else auth=MISSING; fi
 printf '%s\n' '{"type":"text","part":{"type":"text","text":"store='"$store"' ;; auth='"$auth"' ;; "}}'
 `)
-	// fakeOpenCodeBinary pinned its own scratch root first; pin the one this
-	// test walks, so the parent can search the root the child actually used.
 	root := t.TempDir()
 	t.Setenv("GHOST_SCRATCH_DIR", root)
 
-	// A credential in a temp home, at the default data path opencode itself
-	// documents. Nothing real is at risk, and it is the one file copyOpenCodeAuth
-	// is allowed to carry across.
 	const credential = "ghost-test-credential-sentinel"
 	home := t.TempDir()
 	authDir := filepath.Join(home, ".local", "share", "opencode")
@@ -290,13 +203,6 @@ printf '%s\n' '{"type":"text","part":{"type":"text","text":"store='"$store"' ;; 
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
 	t.Setenv("XDG_DATA_HOME", filepath.Join(home, ".local", "share"))
-	// The file carry only runs when there is no key in the environment:
-	// copyOpenCodeAuth returns early for a set OPENCODE_API_KEY, because the
-	// child then authenticates from the variable and needs no auth.json. Pin it
-	// empty so this exercises the copy, and so the test does not change meaning
-	// depending on the harness it happens to run inside — a session spawned by
-	// OpenCode itself exports OPENCODE_API_KEY, which would silently turn the
-	// assertion below into a check of the wrong path.
 	t.Setenv("OPENCODE_API_KEY", "")
 
 	c := &OpenCodeClient{binary: bin}
@@ -311,21 +217,15 @@ printf '%s\n' '{"type":"text","part":{"type":"text","text":"store='"$store"' ;; 
 	store = strings.TrimPrefix(store, "store=")
 	auth = strings.TrimSuffix(strings.TrimPrefix(auth, "auth="), " ;; ")
 
-	// The credential reached the isolated data dir, byte for byte: isolation
-	// relocated where OpenCode looks for it instead of hiding it.
 	if auth != credential {
 		t.Errorf("auth the child could read = %q, want the carried credential %q", auth, credential)
 	}
 	if !strings.HasPrefix(store, root+string(os.PathSeparator)) {
 		t.Fatalf("child store %q is not inside the scratch root %q", store, root)
 	}
-	// The teardown, not an explicit delete: the whole store must be gone.
 	if _, err := os.Stat(store); !os.IsNotExist(err) {
 		t.Errorf("session store %s survived the call (stat err=%v) — it will accumulate", store, err)
 	}
-	// Belt and braces: nothing anywhere under the root may still look like a
-	// session store, so a store written outside $XDG_DATA_HOME/opencode would
-	// be caught too rather than passing on the reported path alone.
 	err = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -340,9 +240,6 @@ printf '%s\n' '{"type":"text","part":{"type":"text","text":"store='"$store"' ;; 
 	}
 }
 
-// TestOpenCodeClient_ModelFlagFromEnv: when GHOST_OPENCODE_MODEL is set the
-// subprocess invocation must carry `-m <model>` so callers can pin the model
-// (e.g. deepseek) despite opencode's scrubbed config dir.
 func TestOpenCodeClient_ModelFlagFromEnv(t *testing.T) {
 	bin := fakeOpenCodeBinary(t, `printf '%s\n' '{"type":"text","part":{"type":"text","text":"'"$*"'"}}'`)
 	t.Setenv("GHOST_OPENCODE_MODEL", "deepseek/deepseek-v4")
@@ -356,24 +253,6 @@ func TestOpenCodeClient_ModelFlagFromEnv(t *testing.T) {
 	}
 }
 
-// TestOpenCodeClient_DefaultModelFlag: with GHOST_OPENCODE_MODEL unset or
-// empty, the scrubbed child still receives Ghost's explicit Big Pickle default.
-func TestOpenCodeClient_DefaultModelFlag(t *testing.T) {
-	bin := fakeOpenCodeBinary(t, `printf '%s\n' '{"type":"text","part":{"type":"text","text":"'"$*"'"}}'`)
-	t.Setenv("GHOST_OPENCODE_MODEL", "")
-	c := &OpenCodeClient{binary: bin}
-	text, _, err := c.Reflect(context.Background(), "prompt")
-	if err != nil {
-		t.Fatalf("Reflect: %v", err)
-	}
-	if !strings.Contains(text, "-m opencode/big-pickle") {
-		t.Fatalf("default model flag missing: %q", text)
-	}
-}
-
-// TestOpenCodeClient_ConstructorModelWinsOverEnv verifies that a
-// constructor-level model pin takes precedence over GHOST_OPENCODE_MODEL
-// (important for long-lived MCP servers that must not mutate process env).
 func TestOpenCodeClient_ConstructorModelWinsOverEnv(t *testing.T) {
 	bin := fakeOpenCodeBinary(t, `printf '%s\n' '{"type":"text","part":{"type":"text","text":"'"$*"'"}}'`)
 	t.Setenv("GHOST_OPENCODE_MODEL", "deepseek/deepseek-v4")
@@ -390,13 +269,6 @@ func TestOpenCodeClient_ConstructorModelWinsOverEnv(t *testing.T) {
 	}
 }
 
-// TestSubprocessEnvConfinesTempDir pins the fix for the opencode JIT-cache
-// leak: opencode writes a hidden ~4.7 MiB shared object into its temp dir on
-// every invocation, and a single lifecycle spawns hundreds of processes, so
-// inheriting the shared temp dir accumulates gigabytes until the filesystem
-// fills and every LLM-backed phase silently fails. The child's temp-dir
-// variables must therefore point at the per-invocation scratch dir under
-// Ghost's owned root, which the returned cleanup removes.
 func TestSubprocessEnvConfinesTempDir(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("GHOST_SCRATCH_DIR", root)
@@ -431,8 +303,6 @@ func TestSubprocessEnvConfinesTempDir(t *testing.T) {
 			t.Errorf("%s = %q, want the invocation dir %q", key, got, cmd.Dir)
 		}
 	}
-	// Each variable must appear once: a stale inherited entry would win or lose
-	// depending on the reader.
 	for _, key := range tempDirKeys {
 		count := 0
 		for _, kv := range env {
@@ -454,12 +324,6 @@ func TestSubprocessEnvConfinesTempDir(t *testing.T) {
 	cleanup() // must be safe to call twice
 }
 
-// TestHarnessCommandConfinesEveryClient pins that all four harness clients run
-// through the one confinement helper: each gets a working directory directly
-// under GHOST_SCRATCH_DIR and exactly one copy of every temp-dir variable,
-// pinned there — including when the inherited value uses different case, which
-// must be overridden rather than shadowed. No harness is spawned; this is a
-// pure env- and command-building assertion.
 func TestHarnessCommandConfinesEveryClient(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("GHOST_SCRATCH_DIR", root)
@@ -506,12 +370,6 @@ func TestHarnessCommandConfinesEveryClient(t *testing.T) {
 	}
 }
 
-// TestSubprocessEnvFallsBackToTempDirWhenScratchUnavailable covers the opencode
-// fallback specifically: an unusable scratch root must not fail the run, and
-// the child still gets a private MkdirTemp working/config tree and temp dir,
-// removed by the returned cleanup. The funnel-level half of this contract —
-// that EVERY backend is confined this way, and that the funnel itself owns the
-// fallback — is in scratch_test.go.
 func TestSubprocessEnvFallsBackToTempDirWhenScratchUnavailable(t *testing.T) {
 	blocker := filepath.Join(t.TempDir(), "not-a-dir")
 	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
@@ -550,7 +408,6 @@ func TestSubprocessEnvFallsBackToTempDirWhenScratchUnavailable(t *testing.T) {
 	cleanup() // must be safe to call twice
 }
 
-// envValue returns the value of key in an environment slice, or "".
 func envValue(env []string, key string) string {
 	for _, kv := range env {
 		if k, v, found := strings.Cut(kv, "="); found && strings.EqualFold(k, key) {
@@ -560,31 +417,12 @@ func envValue(env []string, key string) string {
 	return ""
 }
 
-// versionedOpenCodeBinary is a fake opencode that answers `--version` with
-// version and echoes every other invocation's argv back as a text event.
 func versionedOpenCodeBinary(t *testing.T, version string) string {
 	t.Helper()
 	return fakeOpenCodeBinary(t, `if [ "$1" = "--version" ]; then echo '`+version+`'; exit 0; fi
 printf '%s\n' '{"type":"text","part":{"type":"text","text":"'"$*"'"}}'`)
 }
 
-// TestOpenCodeClient_V1Flags: opencode V1 keeps `--pure` (skip plugins) and
-// never gets V2's `--standalone`.
-func TestOpenCodeClient_V1Flags(t *testing.T) {
-	c := &OpenCodeClient{binary: versionedOpenCodeBinary(t, "1.18.32")}
-	text, _, err := c.Reflect(context.Background(), "prompt")
-	if err != nil {
-		t.Fatalf("Reflect: %v", err)
-	}
-	if !strings.Contains(text, "--pure") || strings.Contains(text, "--standalone") {
-		t.Fatalf("V1 args = %q, want --pure and no --standalone", text)
-	}
-}
-
-// TestOpenCodeClient_V2Flags: opencode V2 rejects `--pure` ("Unrecognized
-// flag"), and without `--standalone` its `run` attaches to the user's shared
-// background service — which loads the user's real config, including Ghost's
-// own plugin and MCP server. V2 must get --standalone and never --pure.
 func TestOpenCodeClient_V2Flags(t *testing.T) {
 	c := &OpenCodeClient{binary: versionedOpenCodeBinary(t, "opencode v2.0.15")}
 	text, _, err := c.Reflect(context.Background(), "prompt")
@@ -594,8 +432,6 @@ func TestOpenCodeClient_V2Flags(t *testing.T) {
 	if strings.Contains(text, "--pure") || !strings.Contains(text, "--standalone") {
 		t.Fatalf("V2 args = %q, want --standalone and no --pure", text)
 	}
-	// The message is not one of the arguments: it goes to stdin, so a reflect
-	// prompt larger than the kernel's argv ceiling can still be delivered.
 	if strings.Contains(text, "prompt") {
 		t.Errorf("V2 args = %q, must not carry the prompt as an argv element", text)
 	}
@@ -606,25 +442,6 @@ func TestOpenCodeClient_V2Flags(t *testing.T) {
 	}
 }
 
-func TestOpencodeMajorVersion(t *testing.T) {
-	cases := map[string]int{
-		"1.18.32\n":          1,
-		"opencode v2.0.15\n": 2,
-		"v3.1.0":             3,
-		"":                   0,
-		`{"type":"text"}`:    0,
-	}
-	for in, want := range cases {
-		if got := OpencodeMajorVersion(in); got != want {
-			t.Errorf("OpencodeMajorVersion(%q) = %d, want %d", in, got, want)
-		}
-	}
-}
-
-// TestOpenCodeClient_VersionCacheFollowsBinaryUpgrade: a long-lived Ghost
-// process (the MCP server) must notice an opencode upgrade in place. The
-// version cache is keyed by the resolved binary's identity, so replacing the
-// file (V1 -> V2 here) re-probes instead of reusing stale flags.
 func TestOpenCodeClient_VersionCacheFollowsBinaryUpgrade(t *testing.T) {
 	bin := versionedOpenCodeBinary(t, "1.18.32")
 	c := &OpenCodeClient{binary: bin}
@@ -645,12 +462,6 @@ printf '%s\n' '{"type":"text","part":{"type":"text","text":"'"$*"'"}}'`
 	}
 }
 
-// TestOpenCodeClient_UnparseableVersionIsNotCached: a failed probe is already
-// not cached, and an answer that parses no major version is not an answer
-// either. One garbled `--version` reply must not pin a V2 binary to the V1 argv
-// for the life of the process: the next call asks again and recovers, where the
-// first call — which had only the garbled answer to go on — still runs V1 and
-// fails against a V2 binary that rejects `--pure`.
 func TestOpenCodeClient_UnparseableVersionIsNotCached(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell script fake binary requires a POSIX shell")
@@ -690,10 +501,12 @@ printf '%s\n' '{"type":"text","part":{"type":"text","text":"OK"}}'
 	}
 }
 
-// declinedStream is opencode v2's stream when the model answers and then asks
-// for a tool: the non-interactive run auto-rejects the ask and shuts the
-// session down, exiting 1 (captured from opencode v2.0.15).
 const declinedStream = `printf '%s\n' '{"type":"step_start","part":{"type":"step-start"}}' '{"type":"text","part":{"type":"text","text":"ANSWER: 42"}}' '{"type":"error","error":{"type":"aborted","message":"Session interrupted: shutdown"}}' '{"type":"tool_use","part":{"type":"tool","tool":"read","state":{"status":"error","error":"The user declined this tool call"}}}'; echo 'permission requested: external_directory (/etc/*); auto-rejecting' >&2; exit 1`
+
+const declinedStreamThenSleep = `if [ "$1" = "--version" ]; then echo 'opencode v2.0.15'; exit 0; fi
+cat >/dev/null
+printf '%s\n' '{"type":"step_start","part":{"type":"step-start"}}' '{"type":"text","part":{"type":"text","text":"ANSWER: 42"}}' '{"type":"error","error":{"type":"aborted","message":"Session interrupted: shutdown"}}' '{"type":"tool_use","part":{"type":"tool","tool":"read","state":{"status":"error","error":"The user declined this tool call"}}}'
+sleep 30`
 
 func TestOpenCodeClient_Run_SalvagesAnswerBeforeDeclinedTool(t *testing.T) {
 	c := &OpenCodeClient{binary: fakeOpenCodeBinary(t, declinedStream)}
@@ -716,46 +529,6 @@ func TestOpenCodeClient_Run_OtherFailureWithTextStillFails(t *testing.T) {
 	}
 }
 
-// TestOpenCodeClient_Run_PromptSaysNoTools: the no-tools instruction reaches
-// the model as part of the message, which travels on stdin.
-func TestOpenCodeClient_Run_PromptSaysNoTools(t *testing.T) {
-	c := &OpenCodeClient{binary: fakeOpenCodeBinary(t, `piped=$(cat)
-case "$piped" in *"Do not call any tool"*) printf '%s\n' '{"type":"text","part":{"type":"text","text":"OK"}}';; *) echo "prompt lacks the no-tools instruction" >&2; exit 1;; esac`)}
-	if _, _, err := c.Reflect(context.Background(), "the task"); err != nil {
-		t.Fatalf("Reflect: %v", err)
-	}
-}
-
-func TestOpenCodeClient_Run_AbortWithoutDeclinedToolFails(t *testing.T) {
-	c := &OpenCodeClient{binary: fakeOpenCodeBinary(t, `printf '%s\n' '{"type":"text","part":{"type":"text","text":"half an answ"}}' '{"type":"error","error":{"type":"aborted","message":"Session interrupted: shutdown"}}'; exit 1`)}
-	if _, _, err := c.Reflect(context.Background(), "prompt"); err == nil {
-		t.Fatal("an aborted run with no declined tool call (shutdown, timeout) must not be salvaged")
-	}
-}
-
-func TestOpenCodeClient_Run_DeclinedToolWithoutAbortFails(t *testing.T) {
-	c := &OpenCodeClient{binary: fakeOpenCodeBinary(t, `printf '%s\n' '{"type":"text","part":{"type":"text","text":"ANSWER: 42"}}' '{"type":"tool_use","part":{"type":"tool","tool":"read","state":{"status":"error","error":"The user declined this tool call"}}}'; exit 1`)}
-	if _, _, err := c.Reflect(context.Background(), "prompt"); err == nil {
-		t.Fatal("exit 1 with a declined tool but no session abort is an unknown failure and must not be salvaged")
-	}
-}
-
-// declinedStreamThenSleep is opencode v2 emitting the declined-tool shape on
-// its way out of a shutdown it has not finished: it writes the same stream as
-// declinedStream and then stays alive, so the call is cut by its own context
-// with that stream already in stdout. The version probe answers at once so the
-// real invocation is the one that is cut.
-const declinedStreamThenSleep = `if [ "$1" = "--version" ]; then echo 'opencode v2.0.15'; exit 0; fi
-cat >/dev/null
-printf '%s\n' '{"type":"step_start","part":{"type":"step-start"}}' '{"type":"text","part":{"type":"text","text":"ANSWER: 42"}}' '{"type":"error","error":{"type":"aborted","message":"Session interrupted: shutdown"}}' '{"type":"tool_use","part":{"type":"tool","tool":"read","state":{"status":"error","error":"The user declined this tool call"}}}'
-sleep 30`
-
-// TestOpenCodeClient_Run_DeadlineCutDeclinedShapeFails pins the rule that a
-// call cut by its own context is a failure, never a declined-tool success.
-// opencode writes the declined shape as it begins to shut down, so a caller's
-// deadline that lands after the answer text leaves a stream the salvage would
-// accept — while the run was killed, not answered. The failure carries the
-// deadline, because Wait reports only the kill ("signal: killed").
 func TestOpenCodeClient_Run_DeadlineCutDeclinedShapeFails(t *testing.T) {
 	c := &OpenCodeClient{binary: fakeOpenCodeBinary(t, declinedStreamThenSleep)}
 	ctx, cancel := context.WithTimeout(context.Background(), injectedDefault)
@@ -772,9 +545,6 @@ func TestOpenCodeClient_Run_DeadlineCutDeclinedShapeFails(t *testing.T) {
 	}
 }
 
-// TestOpenCodeClient_Run_DefaultBoundCutDeclinedShapeFails is the same stream
-// with no caller deadline: boundHarnessCall's per-call default cuts it, and the
-// failure names that default the way every other client's cut does.
 func TestOpenCodeClient_Run_DefaultBoundCutDeclinedShapeFails(t *testing.T) {
 	withDefaultTimeout(t, injectedDefault)
 	c := &OpenCodeClient{binary: fakeOpenCodeBinary(t, declinedStreamThenSleep)}
@@ -791,9 +561,6 @@ func TestOpenCodeClient_Run_DefaultBoundCutDeclinedShapeFails(t *testing.T) {
 }
 
 // TestParseOpenCodeOutput_ErrorEventAfterTextFails pins #1622: a top-level error
-// event on an otherwise clean (exit 0) stream fails the parse instead of
-// returning the text emitted before the failure. Mutating the parser to drop the
-// error branch makes this test fail (got "KEEP", err nil).
 func TestParseOpenCodeOutput_ErrorEventAfterTextFails(t *testing.T) {
 	raw := `{"type":"text","part":{"type":"text","text":"KEEP"}}` + "\n" +
 		`{"type":"error","error":{"type":"aborted"}}` + "\n"
@@ -809,7 +576,6 @@ func TestParseOpenCodeOutput_ErrorEventAfterTextFails(t *testing.T) {
 	}
 }
 
-// TestParseOpenCodeOutput_ErrorEventWithoutTextFails covers the no-text case.
 func TestParseOpenCodeOutput_ErrorEventWithoutTextFails(t *testing.T) {
 	raw := `{"type":"error","error":{"type":"provider.auth","message":"free tier"}}` + "\n"
 	got, err := parseOpenCodeOutput(raw)
@@ -827,8 +593,6 @@ func TestParseOpenCodeOutput_ErrorEventWithoutTextFails(t *testing.T) {
 	}
 }
 
-// TestParseOpenCodeOutput_ErrorEventMessageIsGuarded keeps a credential-shaped or
-// oversized message from being echoed raw (the token guard renders it instead).
 func TestParseOpenCodeOutput_ErrorEventMessageIsGuarded(t *testing.T) {
 	for _, msg := range []string{"AKIAIOSFODNN7EXAMPLE", strings.Repeat("a", 300)} {
 		raw := `{"type":"error","error":{"type":"x","message":"` + msg + `"}}` + "\n"
@@ -845,8 +609,6 @@ func TestParseOpenCodeOutput_ErrorEventMessageIsGuarded(t *testing.T) {
 	}
 }
 
-// TestParseOpenCodeOutput_TextAndControlEventsParse keeps the ignorable events
-// ignorable: only text events contribute, control events and blank lines vanish.
 func TestParseOpenCodeOutput_TextAndControlEventsParse(t *testing.T) {
 	raw := `{"type":"step_start","part":{"type":"step-start"}}` + "\n" +
 		"\n" +

@@ -28,8 +28,6 @@ var upgradeBudget = 12 * time.Minute
 
 type upgradeStreams struct{ out, err io.Writer }
 
-func discardStreams() upgradeStreams { return upgradeStreams{out: io.Discard, err: io.Discard} }
-
 type upgradeDeps struct {
 	fetch   func(context.Context) (*selfupdate.Release, error)
 	install func([]byte) error

@@ -1,12 +1,5 @@
 package main
 
-// parseLifecycleArgs refuses a second positional argument and an unknown flag,
-// and both refusals used to quote the caller's text with a plain %q: unbounded
-// and without the token guard (#1122). `--project=<value>` reaches the
-// unknown-flag path as one argument, so a pasted config value came back out on
-// stderr, which the detached path appends to lifecycle.log. The tests drive the
-// built binary, because the exit code and the stderr bytes are the contract.
-
 import (
 	"bytes"
 	"os"

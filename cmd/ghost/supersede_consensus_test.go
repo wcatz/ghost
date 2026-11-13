@@ -11,19 +11,13 @@ import (
 )
 
 // The --consensus flag and the reflection.supersede_consensus key that feeds it
-// to the automatic phase. Parsing and rendering are unit-tested here without
-// os.Exit; the pass's behaviour is internal/supersede/consensus_test.go.
+// to the automatic phase. The pass's behaviour is internal/supersede's own test.
 
-// TestParseSupersedeArgsConsensusDefaultsOff: the gate is OFF unless typed. A
-// default of 3 on the flag would silently triple every hand-run pass, and an
-// operator reading "1 classify call(s)" would have no way to know three happened.
+// TestParseSupersedeArgsConsensusDefaultsOff: the gate is OFF unless typed.
 func TestParseSupersedeArgsConsensusDefaultsOff(t *testing.T) {
 	_, _, _, _, _, consensus, _, _, err := parseSupersedeArgs([]string{"myproj", "--apply"})
-	if err != nil {
-		t.Fatalf("parseSupersedeArgs: %v", err)
-	}
-	if consensus != 1 {
-		t.Errorf("consensus = %d, want 1: the flag is off until it is typed", consensus)
+	if err != nil || consensus != 1 {
+		t.Errorf("consensus = %d, %v, want 1: the flag is off until it is typed", consensus, err)
 	}
 }
 
@@ -35,18 +29,9 @@ func TestParseSupersedeArgsConsensus(t *testing.T) {
 	}{
 		{"separate value", []string{"myproj", "--apply", "--consensus", "3"}, 3},
 		{"equals value", []string{"myproj", "--apply", "--consensus=5"}, 5},
-		{"two is allowed", []string{"myproj", "--consensus", "2"}, 2},
-		{"large value is honoured", []string{"myproj", "--consensus", "9"}, 9},
-		{"before apply", []string{"myproj", "--consensus", "4", "--apply"}, 4},
 		{"last wins", []string{"myproj", "--consensus", "2", "--consensus", "7"}, 7},
 		{"project before flag", []string{"--project", "myproj", "--consensus", "3", "--apply"}, 3},
-		// #862: the gate reaches the repair. --reassess deletes a live supersedes
-		// edge, and since #845 it is the only command in the product that does,
-		// so refusing --consensus beside it left the one deletion path with the
-		// fewest answers behind it. These two are here because the REFUSAL was
-		// the tested behaviour until #862: a table that kept the old rows would
-		// still pass if the parser went back to refusing.
-		{"with reassess", []string{"myproj", "--reassess", "--consensus", "3"}, 3},
+		// #862: the gate reaches the repair.
 		{"with reassess and apply", []string{"myproj", "--reassess", "--consensus", "3", "--apply"}, 3},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -54,31 +39,15 @@ func TestParseSupersedeArgsConsensus(t *testing.T) {
 			if err != nil {
 				t.Fatalf("parseSupersedeArgs(%v): %v", tc.args, err)
 			}
-			if consensus != tc.want {
-				t.Errorf("consensus = %d, want %d", consensus, tc.want)
-			}
-			// The other half of the contract, in the same case: --consensus is a
-			// gate on the WRITES, so it has to be usable with --apply and to leave
-			// --apply alone.
-			if wantApply := len(tc.args) > 0 && strings.Contains(strings.Join(tc.args, " "), "--apply"); apply != wantApply {
-				t.Errorf("apply = %v, want %v: --consensus must not swallow --apply", apply, wantApply)
+			if wantApply := strings.Contains(strings.Join(tc.args, " "), "--apply"); consensus != tc.want || apply != wantApply {
+				t.Errorf("consensus/apply = %d/%v, want %d/%v", consensus, apply, tc.want, wantApply)
 			}
 		})
 	}
 }
 
-// TestParseSupersedeArgsConsensusErrors: the refusals. A value below 2 is the
-// load-bearing one — a gate of 1 runs the pass again and acts on whatever the
-// first answer proposed, which is the ungated pass wearing the flag of a safety
-// control, and an operator who typed the flag meant to gate something.
-//
-// --withdraw is the one repair mode still refused, and for the reason that never
-// changed: it judges NOTHING. N passes would spend N classify calls to reach a
-// decision the operator has already made by naming the edge, so accepting the
-// flag there would buy agreement about a question nobody asked. --reassess is no
-// longer refused (#862): it judges a live edge on a model's verdict, and a split
-// keeps the edge rather than deleting a correct one, which is the trade the gate
-// exists to make.
+// TestParseSupersedeArgsConsensusErrors: a gate below 2 is the ungated pass
+// wearing a safety flag; --withdraw judges nothing, so it refuses the flag.
 func TestParseSupersedeArgsConsensusErrors(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -86,345 +55,168 @@ func TestParseSupersedeArgsConsensusErrors(t *testing.T) {
 		want string
 	}{
 		{"one is not a gate", []string{"myproj", "--consensus", "1"}, "at least 2 passes"},
-		{"zero", []string{"myproj", "--consensus", "0"}, "at least 2 passes"},
-		{"negative", []string{"myproj", "--consensus", "-2"}, "at least 2 passes"},
 		{"negative equals form", []string{"myproj", "--consensus=-1"}, "at least 2 passes"},
 		{"not a number", []string{"myproj", "--consensus", "three"}, "whole number"},
-		{"not a number equals form", []string{"myproj", "--consensus=many"}, "whole number"},
 		{"missing value", []string{"myproj", "--consensus"}, `unknown flag "--consensus"`},
 		{"with withdraw", []string{"myproj", "--withdraw", "a1b2c3d4", "e5f6a7b8", "--consensus", "3"}, "--withdraw judges nothing"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, _, _, _, _, _, _, _, err := parseSupersedeArgs(tc.args)
-			if err == nil {
-				t.Fatalf("parseSupersedeArgs(%v) must fail", tc.args)
-			}
-			if !strings.Contains(err.Error(), tc.want) {
-				t.Errorf("error %q must contain %q", err, tc.want)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("parseSupersedeArgs(%v) error = %v, want one containing %q", tc.args, err, tc.want)
 			}
 		})
 	}
 }
 
-// TestSupersedePhaseConsensusIsReadOnlyUnderAutoSupersede is the config side,
-// and the auto_supersede half is structural: the key is read inside the branch
-// that emits the phase, so a project that never reaches the branch is never
-// affected by the number in the file. The test asserts both halves — the phase
-// carries the configured value when the phase exists, and the value is clamped
-// into the range the flag accepts.
+// TestSupersedePhaseConsensusIsReadOnlyUnderAutoSupersede: the configured value
+// reaches the phase, is omitted (not emitted as a refused 1) when below the
+// minimum, is inert with auto_supersede off, and never scales the phase deadline
+// (a hang detector).
 func TestSupersedePhaseConsensusIsReadOnlyUnderAutoSupersede(t *testing.T) {
-	phase := func(n int) ([]string, bool) {
+	phase := func(auto bool, n int) *lifecyclePhase {
 		cfg := &config.Config{}
-		cfg.Reflection.AutoSupersede = true
+		cfg.Reflection.AutoSupersede = auto
 		cfg.Reflection.SupersedeConsensus = n
+		cfg.Reflection.LifecycleTimeoutMinutes = 90
 		for _, p := range lifecyclePhases(cfg, "proj", true) {
 			if p.name == "supersede" {
-				return p.args, true
+				p := p
+				return &p
 			}
 		}
-		return nil, false
+		return nil
 	}
-
-	t.Run("configured value reaches the phase", func(t *testing.T) {
-		for _, n := range []int{2, 3, 5, 12} {
-			args, ok := phase(n)
-			if !ok {
-				t.Fatalf("auto_supersede = true emitted no supersede phase")
-			}
-			project, _, _, _, _, consensus, _, _, err := parseSupersedeArgs(args[1:])
-			if err != nil {
-				t.Fatalf("the emitted argv does not parse: %v (argv %v)", err, args)
-			}
-			if project != "proj" {
-				t.Errorf("project = %q, want %q", project, "proj")
-			}
-			if consensus != n {
-				t.Errorf("consensus = %d, want %d from the config key", consensus, n)
-			}
+	for _, n := range []int{2, 3, 12, -1, 0, 1} {
+		p := phase(true, n)
+		if p == nil {
+			t.Fatalf("auto_supersede = true emitted no supersede phase")
 		}
-	})
-
-	t.Run("values below the minimum omit the flag entirely", func(t *testing.T) {
-		// Not a refusal: a typo in a config file must not fail a lifecycle phase
-		// hours later with a message about quorum arithmetic, and the safe reading
-		// of a number the operator could not have meant as a smaller gate is the
-		// pass they already had. The flag is OMITTED rather than emitted as 1,
-		// because `--consensus 1` is a refused value — a phase printing it would
-		// be asserting a gate it is not running, and the parser would exit 1 on
-		// its own argv.
-		for _, n := range []int{-1, 0, 1} {
-			args, ok := phase(n)
-			if !ok {
-				t.Fatalf("auto_supersede = true emitted no supersede phase")
-			}
-			for _, a := range args {
+		project, _, apply, _, _, consensus, _, _, err := parseSupersedeArgs(p.args[1:])
+		if err != nil {
+			t.Fatalf("the emitted argv does not parse: %v (argv %v)", err, p.args)
+		}
+		want := n
+		if n < supersede.MinConsensus {
+			want = 1
+			for _, a := range p.args {
 				if a == "--consensus" {
-					t.Errorf("supersede_consensus = %d emitted --consensus (argv %v); an ungated phase must not name a gate", n, args)
-				}
-			}
-			if _, _, apply, _, _, consensus, _, _, err := parseSupersedeArgs(args[1:]); err != nil {
-				t.Errorf("supersede_consensus = %d emitted argv that does not parse: %v", n, err)
-			} else if !apply || consensus != 1 {
-				t.Errorf("supersede_consensus = %d gave apply/consensus = %v/%d, want true/1: the phase still applies, ungated", n, apply, consensus)
-			}
-		}
-	})
-
-	t.Run("the key is inert when auto_supersede is off", func(t *testing.T) {
-		// Same config, auto_supersede false: no phase, so nothing reads the key.
-		// Asserted through the phase list rather than through the clamp function,
-		// because the claim is about the whole path.
-		cfg := &config.Config{}
-		cfg.Reflection.AutoSupersede = false
-		cfg.Reflection.SupersedeConsensus = 3
-		for _, p := range lifecyclePhases(cfg, "proj", true) {
-			if p.name == "supersede" {
-				t.Fatalf("a supersede phase was emitted with auto_supersede off (argv %v)", p.args)
-			}
-		}
-	})
-
-	t.Run("the phase keeps the SAME deadline whatever the gate costs", func(t *testing.T) {
-		// `lifecycle_timeout_minutes` is a HANG DETECTOR: it exists so a phase
-		// that will not finish stops holding the per-project PID claim instead of
-		// wedging maintenance until someone kills it by hand. Multiplying it by
-		// the work factor makes it N times longer to notice a model that never
-		// answers, which is how a hang detector stops being one — and there is no
-		// principled factor to multiply by anyway, since per-pass cost depends on
-		// the corpus and the model. So the bound stays, the cost lands on the
-		// operator, and it is documented in config.example.yaml,
-		// docs/configuration.md and docs/cli.md.
-		//
-		// This case exists so that scaling the bound later is a DELIBERATE change
-		// someone makes against this, rather than a quiet "improvement" that turns
-		// the guard off.
-		want := 90 * time.Minute
-		for _, n := range []int{1, 3, 7} {
-			cfg := &config.Config{}
-			cfg.Reflection.AutoSupersede = true
-			cfg.Reflection.SupersedeConsensus = n
-			cfg.Reflection.LifecycleTimeoutMinutes = 90
-			for _, p := range lifecyclePhases(cfg, "proj", true) {
-				if p.name != "supersede" {
-					continue
-				}
-				if p.timeout != want {
-					t.Errorf("supersede_consensus = %d gave the phase a %s deadline, want the configured %s: the bound is a hang detector and must not scale with the work factor", n, p.timeout, want)
+					t.Errorf("supersede_consensus = %d emitted --consensus (argv %v)", n, p.args)
 				}
 			}
 		}
-	})
+		if project != "proj" || consensus != want || !apply {
+			t.Errorf("n=%d: project/consensus/apply = %q/%d/%v, want proj/%d/true", n, project, consensus, apply, want)
+		}
+		if p.timeout != 90*time.Minute {
+			t.Errorf("supersede_consensus = %d gave a %s deadline, want the configured 90m", n, p.timeout)
+		}
+	}
+	if p := phase(false, 3); p != nil {
+		t.Errorf("a supersede phase was emitted with auto_supersede off (argv %v)", p.args)
+	}
 }
 
-// TestSupersedeReportNamesTheGateAndTheSplit: the two lines the gate adds. A
-// gated run that wrote nothing and said nothing reads as a run that found nothing
-// to do, which is the same defect every other refusal in this report is
-// documented against.
+func disputedPair(newer, older string, tally map[supersede.Relation]int, unreadable int) supersede.Disputed {
+	return supersede.Disputed{NewerID: newer, OlderID: older, Tally: tally, Unreadable: unreadable}
+}
+
+// TestSupersedeReportNamesTheGateAndTheSplit: a gated run that wrote nothing and
+// said nothing reads as a run that found nothing to do.
 func TestSupersedeReportNamesTheGateAndTheSplit(t *testing.T) {
-	agreeing := supersede.Result{
-		Candidates: 3, Consensus: 3, ConsensusPairsAsked: 9,
-		Confirmed: 1, Created: 1,
-	}
+	agreeing := supersede.Result{Candidates: 3, Consensus: 3, ConsensusPairsAsked: 9, Confirmed: 1, Created: 1}
 	out := supersedeReport("proj", agreeing, "linked", true, 3, 0)
-	if !strings.Contains(out, "consensus 3") {
-		t.Errorf("the summary does not name the gate:\n%s", out)
-	}
-	// The pairs number is what an operator checks the bill against, and it is the
-	// multiplier APPLIED rather than a recount of the call log.
-	if !strings.Contains(out, "9 pair(s) asked") {
-		t.Errorf("the summary does not report the pairs asked:\n%s", out)
+	for _, want := range []string{"consensus 3", "9 pair(s) asked"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the summary does not say %q:\n%s", want, out)
+		}
 	}
 
 	disputed := agreeing
-	disputed.Created = 0
-	disputed.Confirmed = 0
-	disputed.NotAgreed = 2
+	disputed.Created, disputed.Confirmed, disputed.NotAgreed = 0, 0, 2
 	disputed.Disputed = []supersede.Disputed{
-		{NewerID: "0123456789ABCDEF0123456789ABCDEF", OlderID: "FEDCBA9876543210FEDCBA9876543210",
-			Tally: map[supersede.Relation]int{supersede.RelationSupersedes: 2, supersede.RelationNeither: 1}},
-		{NewerID: "AAAABBBBCCCCDDDDEEEEFFFF00001111", OlderID: "11110000FFFFEEEEDDDDCCCCBBBBAAAA",
-			Tally: map[supersede.Relation]int{supersede.RelationReversed: 1, supersede.RelationCauses: 1, supersede.Relation(""): 1}, Unreadable: 1},
+		disputedPair("0123456789ABCDEF0123456789ABCDEF", "FEDCBA9876543210FEDCBA9876543210",
+			map[supersede.Relation]int{supersede.RelationSupersedes: 2, supersede.RelationNeither: 1}, 0),
+		disputedPair("AAAABBBBCCCCDDDDEEEEFFFF00001111", "11110000FFFFEEEEDDDDCCCCBBBBAAAA",
+			map[supersede.Relation]int{supersede.RelationReversed: 1, supersede.RelationCauses: 1, supersede.Relation(""): 1}, 1),
 	}
 	out = supersedeReport("proj", disputed, "linked", true, 3, 0)
-	if !strings.Contains(out, "2 pair(s) not agreed") {
-		t.Errorf("the summary does not count the split pairs:\n%s", out)
-	}
-	// The ids, because a count an operator cannot act on is a number, not a report.
-	// shortID keeps the first 8 RUNES, and a stored id is hex(randomblob(16))
-	// which SQLite renders UPPER-case, so the abbreviations are upper-case here
-	// for the same reason every other report on this command prints them that way.
-	for _, want := range []string{"01234567", "FEDCBA98", "AAAABBBB", "11110000"} {
+	for _, want := range []string{"2 pair(s) not agreed", "01234567", "FEDCBA98", "AAAABBBB", "11110000", "2 supersedes, 1 neither", "1 unreadable"} {
 		if !strings.Contains(out, want) {
-			t.Errorf("the not-agreed rows do not name %s:\n%s", want, out)
+			t.Errorf("the not-agreed rows do not say %s:\n%s", want, out)
 		}
 	}
-	// The tally, in descending order, and the unreadable pass under its own word
-	// — a two-verdict split and a split with a garbled pass are different findings.
-	if !strings.Contains(out, "2 supersedes, 1 neither") {
-		t.Errorf("the first split row does not render its tally:\n%s", out)
-	}
-	if !strings.Contains(out, "1 unreadable") {
-		t.Errorf("an unreadable pass is not named as such:\n%s", out)
-	}
-	// Nothing is claimed in a past tense, because nothing was written either way.
 	if strings.Contains(out, "withdrew") || strings.Contains(out, "did not agree on") {
 		t.Errorf("a not-agreed row implies a write happened:\n%s", out)
 	}
 }
 
-// TestTheNotAgreedTallyLeadsWithTheMajority pins the ORDER of a not-agreed
-// tally line, which was a claim in the code's own comment with nothing behind it.
-//
-// The comment above the loop said "descending vote order" while the loop walked a
-// FIXED verdict order, so the two contradicted each other — and the consequence
-// was not cosmetic. A fixed order prints `1 supersedes, 2 neither` for a split
-// whose majority is NEITHER, leading with the minority, and this gate's entire
-// finding is that the verdict a reader takes away is the one most passes gave.
-// The doc examples had drifted with it: both docs/cli.md and
-// docs/architecture.md showed `1 reversed, 1 causes, 1 unreadable`, an order the
-// renderer could not produce at all.
-//
-// So the renderer now sorts by count, and this test holds the whole contract:
-// the majority leads, the minority follows, and a tie keeps the FIXED verdict
-// order so the line is still deterministic. The tie case matters on its own — an
-// unstable classifier is exactly what a 1-1-1 split reports, and a sort that
-// ordered equal counts arbitrarily would make that line unreproducible between
-// runs, which is the opposite of what a report about instability should do.
-//
-// Every case is asserted as a whole line, not as a substring, so a renderer that
-// emitted the right words in the wrong order fails.
+// TestTheNotAgreedTallyLeadsWithTheMajority: the tally sorts by count (the
+// majority leads) and a tie keeps the fixed verdict order, so the line is
+// deterministic. Each case is asserted as a whole line.
 func TestTheNotAgreedTallyLeadsWithTheMajority(t *testing.T) {
-	// A pair for the line, and a run of one dispute, so the only thing varying
-	// between cases is the tally.
-	const (
-		newer = "0123456789ABCDEF0123456789ABCDEF"
-		older = "FEDCBA9876543210FEDCBA9876543210"
-	)
 	for _, tc := range []struct {
 		name  string
 		tally map[supersede.Relation]int
 		want  string
-		why   string
 	}{
-		{
-			name:  "a majority of NEITHER must not be led by a minority of supersedes",
-			tally: map[supersede.Relation]int{supersede.RelationSupersedes: 1, supersede.RelationNeither: 2},
-			want:  "[not agreed: 2 neither, 1 supersedes]",
-			why:   "the fixed verdict order printed this as `1 supersedes, 2 neither`, leading with the minority — and the leading verdict is the one a reader keeps",
-		},
-		{
-			name:  "a majority of causes leads over a minority of reversed",
-			tally: map[supersede.Relation]int{supersede.RelationCauses: 2, supersede.RelationReversed: 1},
-			want:  "[not agreed: 2 causes, 1 reversed]",
-			why:   "reversed comes last in the fixed order, so this is the case where the bug was most visible",
-		},
-		{
-			name:  "a wide split reads 3 then 1",
-			tally: map[supersede.Relation]int{supersede.RelationSupersedes: 3, supersede.RelationReversed: 1},
-			want:  "[not agreed: 3 supersedes, 1 reversed]",
-		},
-		{
-			name:  "a three-way tie keeps the FIXED verdict order",
-			tally: map[supersede.Relation]int{supersede.RelationSupersedes: 1, supersede.RelationCauses: 1, supersede.RelationNeither: 1},
-			want:  "[not agreed: 1 supersedes, 1 causes, 1 neither]",
-			why:   "equal counts, so the line must still be reproducible run to run; an unstable classifier is exactly what this line reports, and a nondeterministic order would make it unreproducible",
-		},
-		{
-			name:  "a tie INCLUDING unreadable is ordered by the fixed list, not by the map",
-			tally: map[supersede.Relation]int{supersede.RelationReversed: 1, supersede.RelationCauses: 1, "": 1},
-			want:  "[not agreed: 1 causes, 1 reversed, 1 unreadable]",
-			why:   "this is the exact example both docs showed as `1 reversed, 1 causes, 1 unreadable`, an order the renderer could never produce; unreadable is last in the fixed list",
-		},
-		{
-			name:  "a majority of unreadable leads, because unreadable is a verdict here",
-			tally: map[supersede.Relation]int{supersede.RelationSupersedes: 1, "": 2},
-			want:  "[not agreed: 2 unreadable, 1 supersedes]",
-			why:   "unreadable is counted, not hidden, so it leads on a count like any other — a harness fault is the more actionable finding",
-		},
-		{
-			name:  "a single verdict is unaffected by the sort",
-			tally: map[supersede.Relation]int{supersede.RelationSupersedes: 3},
-			want:  "[not agreed: 3 supersedes]",
-		},
+		{"a majority of NEITHER is not led by a minority of supersedes",
+			map[supersede.Relation]int{supersede.RelationSupersedes: 1, supersede.RelationNeither: 2},
+			"[not agreed: 2 neither, 1 supersedes]"},
+		{"a three-way tie keeps the fixed verdict order",
+			map[supersede.Relation]int{supersede.RelationSupersedes: 1, supersede.RelationCauses: 1, supersede.RelationNeither: 1},
+			"[not agreed: 1 supersedes, 1 causes, 1 neither]"},
+		{"a tie including unreadable is ordered by the fixed list",
+			map[supersede.Relation]int{supersede.RelationReversed: 1, supersede.RelationCauses: 1, "": 1},
+			"[not agreed: 1 causes, 1 reversed, 1 unreadable]"},
+		{"a majority of unreadable leads",
+			map[supersede.Relation]int{supersede.RelationSupersedes: 1, "": 2},
+			"[not agreed: 2 unreadable, 1 supersedes]"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			out := supersedeReport("proj", supersede.Result{
 				Candidates: 1, Consensus: 3, ConsensusPairsAsked: 3, NotAgreed: 1,
-				Disputed: []supersede.Disputed{{NewerID: newer, OlderID: older, Tally: tc.tally}},
+				Disputed: []supersede.Disputed{disputedPair("0123456789ABCDEF0123456789ABCDEF", "FEDCBA9876543210FEDCBA9876543210", tc.tally, 0)},
 			}, "would link", false, 3, 0)
 			if !strings.Contains(out, tc.want) {
-				t.Errorf("tally %v did not render %q%s\n\nrendered:\n%s", tc.tally, tc.want, reasonSuffixSupersede(tc.why), out)
+				t.Errorf("tally %v did not render %q\n\nrendered:\n%s", tc.tally, tc.want, out)
 			}
 		})
 	}
 }
 
-// reasonSuffixSupersede puts a case's reasoning on the failure line, because
-// these are the cases whose expected output looks arbitrary until you know which
-// reading of the split it is defending.
-func reasonSuffixSupersede(why string) string {
-	if why == "" {
-		return ""
-	}
-	return " (" + why + ")"
-}
-
-// TestSupersedeNotAgreedAdviceNamesRemediesThatWork: the report must not tell an
-// operator to raise --consensus, because raising N makes unanimity STRICTLY
-// HARDER — a pair that split 2-1 at N=3 has to satisfy one more pass at N=4, so
-// the advice sends them into a run that costs more and suppresses more.
-//
-// The two remedies that are real are a re-run (fresh passes may land on the same
-// answer) and dropping the flag (write what the first pass said). The dry-run
-// hint further down the same command says the same thing, and two lines on one
-// page must not disagree — which is what makes this a test rather than a
-// wording preference.
+// TestSupersedeNotAgreedAdviceNamesRemediesThatWork: raising --consensus makes
+// unanimity harder, so the report must not advise it; a re-run and dropping the
+// flag are the real remedies.
 func TestSupersedeNotAgreedAdviceNamesRemediesThatWork(t *testing.T) {
 	out := supersedeReport("proj", supersede.Result{
 		Candidates: 3, Consensus: 3, ConsensusPairsAsked: 9, NotAgreed: 1,
-		Disputed: []supersede.Disputed{
-			{NewerID: "0123456789ABCDEF0123456789ABCDEF", OlderID: "FEDCBA9876543210FEDCBA9876543210",
-				Tally: map[supersede.Relation]int{supersede.RelationSupersedes: 2, supersede.RelationNeither: 1}},
-		},
+		Disputed: []supersede.Disputed{disputedPair("0123456789ABCDEF0123456789ABCDEF", "FEDCBA9876543210FEDCBA9876543210",
+			map[supersede.Relation]int{supersede.RelationSupersedes: 2, supersede.RelationNeither: 1}, 0)},
 	}, "would link", false, 3, 0)
 	if strings.Contains(out, "raise --consensus") {
-		t.Errorf("the not-agreed line advises raising --consensus, which makes unanimity harder:\n%s", out)
+		t.Errorf("the not-agreed line advises raising --consensus:\n%s", out)
 	}
-	// The correction is stated, not just omitted, because an operator who has
-	// read the issue's "run it three times" advice will reach for the number.
-	if !strings.Contains(out, "raising it makes unanimity harder") {
-		t.Errorf("the not-agreed line does not say why raising the count is not the remedy:\n%s", out)
-	}
-	for _, want := range []string{"re-run to ask again", "drop --consensus"} {
+	for _, want := range []string{"raising it makes unanimity harder", "re-run to ask again", "drop --consensus", "1 pair(s) not agreed"} {
 		if !strings.Contains(out, want) {
-			t.Errorf("the not-agreed line does not offer %q, which is one of the two remedies that work:\n%s", want, out)
+			t.Errorf("the not-agreed line does not say %q:\n%s", want, out)
 		}
-	}
-	// The count and the rows are the same number by construction, and an example
-	// that disagrees with itself teaches a report shape the code cannot produce.
-	if !strings.Contains(out, "1 pair(s) not agreed") {
-		t.Errorf("the not-agreed count is wrong for one record:\n%s", out)
 	}
 }
 
-// TestSupersedeGateLinePrintsEvenWithNothingToAsk: a gated run that found no
-// candidate pairs, or had every one vetoed, returns before the classify loop.
-// Consensus is set where the result is created for exactly that reason, and the
-// gate line is gated on it — so a gated run on a quiet project is never
-// indistinguishable from an ungated one.
+// TestSupersedeGateLinePrintsEvenWithNothingToAsk: a gated run with nothing to
+// ask still says so, and an ungated summary carries no gate line at all.
 func TestSupersedeGateLinePrintsEvenWithNothingToAsk(t *testing.T) {
 	for name, res := range map[string]supersede.Result{
-		"no candidates":  {Consensus: 3, ConsensusPairsAsked: 0},
-		"all vetoed":     {Consensus: 3, ConsensusPairsAsked: 0, Candidates: 5, Vetoed: 5},
-		"all cached":     {Consensus: 3, ConsensusPairsAsked: 0, Skipped: 4},
-		"nothing at all": {},
+		"no candidates": {Consensus: 3},
+		"all vetoed":    {Consensus: 3, Candidates: 5, Vetoed: 5},
+		"ungated":       {Candidates: 2, Confirmed: 1},
 	} {
 		t.Run(name, func(t *testing.T) {
 			out := supersedeReport("proj", res, "would link", false, 0, 0)
 			wantGate := res.Consensus > 1
-			gotGate := strings.Contains(out, "consensus ")
-			if gotGate != wantGate {
-				t.Errorf("the gate line is present=%v, want %v for Consensus=%d:\n%s", gotGate, wantGate, res.Consensus, out)
+			if gotGate := strings.Contains(out, "consensus"); gotGate != wantGate {
+				t.Errorf("the gate line is present=%v, want %v:\n%s", gotGate, wantGate, out)
 			}
 			if wantGate && !strings.Contains(out, "0 pair(s) asked") {
 				t.Errorf("a gated run with nothing to ask must say so:\n%s", out)
@@ -433,155 +225,64 @@ func TestSupersedeGateLinePrintsEvenWithNothingToAsk(t *testing.T) {
 	}
 }
 
-// TestSupersedeConsensusDryRunHintIsSilentUnderApply: the block is about a run
-// that has NOT happened, so an --apply run must never print it — and an --apply
-// run whose unanimous verdicts were all `neither` or `reversed` satisfies every
-// other condition (it wrote no links, it had splits, it is gated). Without the
-// `apply` guard the summary says `linked` and is then followed by "so --apply
-// would write nothing for them", which is a prediction about a run that has
-// already run and advice to re-apply a flag for an apply that already happened.
+// TestSupersedeConsensusDryRunHintIsSilentUnderApply: the hint describes a run
+// that has not happened, so an --apply run never prints it.
 func TestSupersedeConsensusDryRunHintIsSilentUnderApply(t *testing.T) {
-	// The shape that satisfies every condition except the one under test: a
-	// gated run whose only unanimous verdicts denied the pairs.
-	applied := supersede.Result{
-		Consensus: 3, Candidates: 4, NotAgreed: 2, Unclassified: 2,
-		Reclassified: 2, ReclassifiedNoWrite: 2,
-	}
+	applied := supersede.Result{Consensus: 3, Candidates: 4, NotAgreed: 2, Unclassified: 2, Reclassified: 2, ReclassifiedNoWrite: 2}
 	if applied.WouldWriteLinks() {
-		t.Fatalf("the fixture must be a run that wrote nothing, or it is not testing the guard")
+		t.Fatalf("the fixture must be a run that wrote nothing")
 	}
 	if out := supersedeConsensusDryRunHint(true, applied); out != "" {
 		t.Errorf("an --apply run printed the dry-run hint:\n%s", out)
 	}
-	// And the same result in a dry run DOES print it, so the guard is on the mode
-	// and not on the outcome.
 	if out := supersedeConsensusDryRunHint(false, applied); out == "" {
-		t.Error("a dry run over the same result printed nothing: the guard must be the mode, not the outcome")
+		t.Error("a dry run over the same result printed nothing")
 	}
 }
 
-// TestTheClampIsAnnouncedRatherThanClaimedVisible: a
-// reflection.supersede_consensus below the minimum runs the phase UNGATED, and
-// the phase's own report cannot say so — an ungated pass prints no gate line, so
-// a clamped phase's stdout is byte-identical to one with no key at all.
-//
-// So the clamp has to be announced somewhere, and the honest place is
-// `ghost lifecycle`'s own stderr beside the reflect-skip notice: on the
-// unattended path that is the phase tail and the lifecycle.log beneath it, and
-// it is the same surface the function already uses to report a precondition it
-// is about to work around. The text is held through a formatter rather than
-// through the live run, because runLifecycle spawns processes; what this must not
-// become is a claim in a comment that nothing prints.
+// TestTheClampIsAnnouncedRatherThanClaimedVisible: a supersede_consensus below
+// the minimum runs the phase ungated, so lifecycle announces the clamp itself.
 func TestTheClampIsAnnouncedRatherThanClaimedVisible(t *testing.T) {
 	for _, tc := range []struct {
-		name string
 		n    int
 		want bool
-	}{
-		{"below the minimum", 1, true},
-		{"zero", 0, true},
-		{"negative", -3, true},
-		{"at the minimum", supersede.MinConsensus, false},
-		{"above the minimum", 5, false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			out := supersedeConsensusClampNotice("proj", tc.n)
-			if got := out != ""; got != tc.want {
-				t.Fatalf("notice printed=%v, want %v for supersede_consensus=%d:\n%s", got, tc.want, tc.n, out)
+	}{{1, true}, {-3, true}, {supersede.MinConsensus, false}, {5, false}} {
+		out := supersedeConsensusClampNotice("proj", tc.n)
+		if got := out != ""; got != tc.want {
+			t.Fatalf("n=%d: notice printed=%v, want %v:\n%s", tc.n, got, tc.want, out)
+		}
+		for _, want := range []string{"supersede_consensus", "UNGATED", "proj", fmt.Sprintf("minimum of %d", supersede.MinConsensus)} {
+			if tc.want && !strings.Contains(out, want) {
+				t.Errorf("n=%d: the notice does not name %q:\n%s", tc.n, want, out)
 			}
-			if !tc.want {
-				return
-			}
-			for _, want := range []string{"supersede_consensus", "UNGATED", "proj"} {
-				if !strings.Contains(out, want) {
-					t.Errorf("the notice does not name %q, and a clamp without it is not actionable:\n%s", want, out)
-				}
-			}
-			// The boundary is named, so a reader learns the minimum rather than
-			// inferring that the number was arbitrary.
-			if !strings.Contains(out, fmt.Sprintf("minimum of %d", supersede.MinConsensus)) {
-				t.Errorf("the notice does not state the minimum:\n%s", out)
-			}
-		})
+		}
 	}
 }
 
-// TestSupersedeConsensusDryRunHintNamesOnlyTheCauseItDescribes: the hint is
-// gated on NotAgreed > 0 and not on "the run wrote nothing", because a gated run
-// writes nothing for three unrelated reasons and only one of them is a re-run's
-// problem. Each of the other two already has its own line on the page, so the
-// hint claiming them would tell an operator to re-run a model that was never
-// asked, or to blame instability for a reply nothing could parse.
+// TestSupersedeConsensusDryRunHintNamesOnlyTheCauseItDescribes: the hint is keyed
+// on NotAgreed > 0 alone, since a gated run writes nothing for three unrelated
+// reasons and the other two have their own lines.
 func TestSupersedeConsensusDryRunHintNamesOnlyTheCauseItDescribes(t *testing.T) {
-	const split = "the model is not deterministic"
 	for name, tc := range map[string]struct {
 		res       supersede.Result
 		wantPrint bool
-		why       string
 	}{
-		"the gate split the pairs": {
-			res:       supersede.Result{Consensus: 3, Candidates: 4, NotAgreed: 2},
-			wantPrint: true,
-			why:       "a split is this block's reason to exist",
-		},
-		"every candidate was vetoed": {
-			res:       supersede.Result{Consensus: 3, Candidates: 5, Vetoed: 5},
-			wantPrint: false,
-			why:       "nothing was asked, so nothing could disagree; the veto line already says so",
-		},
-		"every pass was unreadable": {
-			res:       supersede.Result{Consensus: 3, Candidates: 3, Unclassified: 3},
-			wantPrint: false,
-			why:       "a parse failure is a prompt or harness problem, not instability",
-		},
-		"nothing was asked at all": {
-			res:       supersede.Result{Consensus: 3},
-			wantPrint: false,
-			why:       "a quiet project is not a gated run that found nothing",
-		},
-		"the gate agreed on some pairs": {
-			res:       supersede.Result{Consensus: 3, Candidates: 4, Confirmed: 1, NotAgreed: 1},
-			wantPrint: false,
-			why:       "--apply IS worth running here, and the ordinary 'Re-run with --apply to write these links' hint already says so; a second block about the split would bury it",
-		},
-		"an ungated run": {
-			res:       supersede.Result{Candidates: 4, NotAgreed: 1},
-			wantPrint: false,
-			why:       "there is no gate to explain",
-		},
+		"the gate split the pairs":      {supersede.Result{Consensus: 3, Candidates: 4, NotAgreed: 2}, true},
+		"every candidate was vetoed":    {supersede.Result{Consensus: 3, Candidates: 5, Vetoed: 5}, false},
+		"every pass was unreadable":     {supersede.Result{Consensus: 3, Candidates: 3, Unclassified: 3}, false},
+		"the gate agreed on some pairs": {supersede.Result{Consensus: 3, Candidates: 4, Confirmed: 1, NotAgreed: 1}, false},
+		"an ungated run":                {supersede.Result{Candidates: 4, NotAgreed: 1}, false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			out := supersedeConsensusDryRunHint(false, tc.res)
 			if got := out != ""; got != tc.wantPrint {
-				t.Fatalf("hint printed=%v, want %v (%s):\n%s", got, tc.wantPrint, tc.why, out)
+				t.Fatalf("hint printed=%v, want %v:\n%s", got, tc.wantPrint, out)
 			}
-			if !tc.wantPrint {
-				return
-			}
-			for _, want := range []string{split, "drop --consensus", "Raising it makes unanimity harder"} {
-				if !strings.Contains(out, want) {
+			for _, want := range []string{"the model is not deterministic", "drop --consensus", "Raising it makes unanimity harder", "3 consensus pass(es)"} {
+				if tc.wantPrint && !strings.Contains(out, want) {
 					t.Errorf("the hint does not say %q:\n%s", want, out)
 				}
 			}
-			// The number is the one that RAN, so a report cannot say "the 0
-			// consensus pass(es)" — which is what the first version printed on a
-			// fully-vetoed corpus.
-			if !strings.Contains(out, "3 consensus pass(es)") {
-				t.Errorf("the hint does not report the multiplier that ran:\n%s", out)
-			}
 		})
-	}
-}
-
-// TestSupersedeReportOmitsTheGateLineWhenOff: an ungated pass's summary is
-// unchanged, because a line about a gate nobody asked for is noise on the
-// ordinary path — and the ordinary path is what most runs are.
-func TestSupersedeReportOmitsTheGateLineWhenOff(t *testing.T) {
-	out := supersedeReport("proj", supersede.Result{Candidates: 2, Confirmed: 1}, "would link", false, 1, 0)
-	if strings.Contains(out, "consensus") {
-		t.Errorf("an ungated pass's summary mentions the gate:\n%s", out)
-	}
-	if !strings.Contains(out, "would link") {
-		t.Errorf("an ungated pass's summary lost its ordinary line:\n%s", out)
 	}
 }

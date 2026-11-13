@@ -2,12 +2,6 @@
 
 package main
 
-// The between-phases half of the coordinator's interrupt tests. It is Linux
-// only because the way it parks the coordinator is: it reads the pipe's size
-// with F_GETPIPE_SZ and finds the coordinator's blocked write in
-// /proc/<pid>/task/<tid>/syscall. The sandbox, the fake harness and the
-// coordinator helpers are in lifecycle_signal_unix_test.go.
-
 import (
 	"bytes"
 	"errors"
@@ -125,16 +119,6 @@ func blockedOnStderr(pid int) (blocked, ok bool) {
 // loop. The pipe is drained only after the signal has left the pending set,
 // and the loop's check at the top of every phase is what must then stop the
 // chain.
-//
-// The stderr pipe, and not the config file the coordinator reads, is the
-// rendezvous because a config layer that is not a regular file is skipped
-// unread: a FIFO config no longer holds the coordinator, and the run went on
-// with the defaults before the signal was sent.
-//
-// The record must name NO phase — none started — and must say which phase was
-// never reached. Without the check the next phase is started under the
-// cancelled context, dies with "context canceled", and is recorded as a
-// failure of work that never ran.
 func TestLifecycleInterruptBetweenPhasesStartsNoPhase(t *testing.T) {
 	s := newSignalSandbox(t)
 	s.seed(t)
@@ -172,24 +156,6 @@ func TestLifecycleInterruptBetweenPhasesStartsNoPhase(t *testing.T) {
 	if err := c.cmd.Process.Signal(os.Interrupt); err != nil {
 		t.Fatalf("signal the coordinator: %v", err)
 	}
-	// The runtime's handler has taken the signal once it is no longer pending.
-	// What this cannot see is the step after it: the signal reaches
-	// NotifyContext's goroutine, which cancels the root context, a couple of
-	// goroutine hand-offs later, and the coordinator exposes nothing an outside
-	// test can read when that lands — no log line, no file, no marker until the
-	// run is over. So the pipe is drained only after signalCancelMargin on top.
-	//
-	// That margin is why this is safe on a slow -race runner. For its whole
-	// length the coordinator's main goroutine is blocked in its stderr write,
-	// with its thread handed back to the scheduler, so nothing in the process
-	// competes with the goroutine doing the cancel, and a scheduling delay of a
-	// quarter of a second for a runnable goroutine in an otherwise idle process
-	// is not something a loaded machine produces. The coordinator's remaining
-	// pre-loop work after the write (the audit sidecar sweep, the start stamp)
-	// adds to it. The built binary is not race-instrumented, whatever flags the
-	// test runs under. A run where the cancel still lost would fail loudly, as
-	// resolve "interrupted after" instead of "interrupted before", rather than
-	// pass.
 	deadline = time.Now().Add(10 * time.Second)
 	for {
 		pending, ok := signalPending(c.cmd.Process.Pid, syscall.SIGINT)

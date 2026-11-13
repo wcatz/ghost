@@ -35,10 +35,8 @@ func pgxQueryRequest() Request {
 }
 
 // TestRunQueryOrdersAValueReplacementAheadOfTheRowItReplaced is the defect a
-// search in the old wording shows before any supersede pass: both pins come
-// back, the replaced one first, and the reader meets the stale claim before the
-// current one. After the relevance verdict is decided, the newer row of a
-// lexical replacement pair is shown directly ahead of the older one.
+// search in the old wording shows before any supersede pass: both pins come back,
+// the replaced one first.
 func TestRunQueryOrdersAValueReplacementAheadOfTheRowItReplaced(t *testing.T) {
 	r := newReplacementStore(t)
 	older, newer := addPair(r, dep(pgxV4, 0.8), dep(pgxV5, 0.7))
@@ -59,12 +57,9 @@ func TestRunQueryOrdersAValueReplacementAheadOfTheRowItReplaced(t *testing.T) {
 	}
 }
 
-// TestRunQueryKeepsAReplacementACosineEdgeCallsANearDuplicate: the linking
-// worker writes a cosine `related` edge between exactly such rows, and one at or
-// above the demotion threshold is a near-duplicate edge. Ranked below the older
-// row by an old-wording query, the newer row was the pair's loser and the
-// retriever removed it, so the reader got the stale claim alone. A lexical
-// replacement is not a duplicate: both rows stay, newer first.
+// TestRunQueryKeepsAReplacementACosineEdgeCallsANearDuplicate: the linking worker
+// writes a cosine `related` edge between exactly such rows, and one at or above
+// the demotion threshold is a near-duplicate edge.
 func TestRunQueryKeepsAReplacementACosineEdgeCallsANearDuplicate(t *testing.T) {
 	r := newReplacementStore(t)
 	older, newer := addPair(r, dep(pgxV4, 0.8), dep(pgxV5, 0.7))
@@ -96,10 +91,9 @@ func TestRunQueryKeepsAReplacementACosineEdgeCallsANearDuplicate(t *testing.T) {
 	}
 }
 
-// TestRunQueryExplainNamesTheRowAReplacementMovedAheadOf: the explain row of
-// the moved replacement says which row it was moved ahead of, and every rank is
-// the RELEVANCE rank, the row's place before the display move. The older row
-// names nothing.
+// TestRunQueryExplainNamesTheRowAReplacementMovedAheadOf: the explain row of the
+// moved replacement says which row it was moved ahead of, and every rank is the
+// RELEVANCE rank, the row's place before the display move.
 func TestRunQueryExplainNamesTheRowAReplacementMovedAheadOf(t *testing.T) {
 	r := newReplacementStore(t)
 	older, newer := addPair(r, dep(pgxV4, 0.8), dep(pgxV5, 0.7))
@@ -200,9 +194,8 @@ func TestRunQueryMoveNeverCrossesThePageBoundary(t *testing.T) {
 }
 
 // TestRunQueryByteCapCutsTheRelevanceLowestRow: the response-fit pass trims on
-// relevance order, before the move, so the row it cuts is the relevance-lowest
-// one — here the replacement — and not whichever row the move would have left
-// last on the page.
+// relevance order, before the move, so the row it cuts is the relevance-lowest one
+// — here the replacement.
 func TestRunQueryByteCapCutsTheRelevanceLowestRow(t *testing.T) {
 	// Rows long enough that cutting one frees more bytes than the cut notice
 	// that says so costs.
@@ -230,8 +223,7 @@ func TestRunQueryByteCapCutsTheRelevanceLowestRow(t *testing.T) {
 
 // TestRunQueryMoveLeavesTheVerdictAsRelevanceDecidedIt: the outcome, its reason,
 // the abstention sentence, the machine line and the notes are decided on the
-// relevance order, so the same page with and without the pair carries the same
-// verdict, an answerable one and a weak one alike, and the same response bytes.
+// relevance order.
 func TestRunQueryMoveLeavesTheVerdictAsRelevanceDecidedIt(t *testing.T) {
 	build := func(paired, weak bool) *memory.CandidateSet {
 		rows := queryRows("a", "old", "b", "new")
@@ -306,9 +298,7 @@ func TestRunQueryDoesNotMoveRowsWhoseScopesDiffer(t *testing.T) {
 
 	plain := newReplacementStore(t)
 	po, pn := addPair(plain, dep(pgxV4, 0.8), dep(pgxV5, 0.7))
-	// The control: the same pair unscoped is moved, so the scoped pair's order
-	// below is the scope rule's doing and not a ranking that already put the
-	// replacement first.
+	// The control: the same pair unscoped is moved.
 	ctl := run(t, plain.s, pgxQueryRequest())
 	if indexOf(ctl.Items, pn) > indexOf(ctl.Items, po) {
 		t.Fatalf("precondition: the unscoped pair %v was not reordered", itemIDs(ctl.Items))
@@ -326,9 +316,8 @@ func TestRunQueryDoesNotMoveRowsWhoseScopesDiffer(t *testing.T) {
 }
 
 // TestRunQueryKeepsTheOlderRowOfAPairACosineEdgeLinks is the other half of the
-// veto: when the replacement outranks the row it replaced, the older row was
-// the near-duplicate loser and left the answer. The lexical guess never
-// withholds a row, so it stays, behind its replacement and marked.
+// veto: when the replacement outranks the row it replaced, the older row was the
+// near-duplicate loser and left the answer.
 func TestRunQueryKeepsTheOlderRowOfAPairACosineEdgeLinks(t *testing.T) {
 	r := newReplacementStore(t)
 	older := r.add(dep(pgxV4, 0.8), 20)
@@ -361,10 +350,8 @@ func TestRunQueryStillDropsANearDuplicateThatIsNotAReplacement(t *testing.T) {
 	}
 }
 
-// TestRunPassiveGlobalBucketKeepsBothRowsOfAReplacementPair: the `_global`
-// bucket DROPS its near-duplicate losers, so the same cosine edge removed one
-// claim of a replacement pair from the session-start block before the pair was
-// named. Both stay, the newer first.
+// TestRunPassiveGlobalBucketKeepsBothRowsOfAReplacementPair: the `_global` bucket
+// DROPS its near-duplicate losers.
 func TestRunPassiveGlobalBucketKeepsBothRowsOfAReplacementPair(t *testing.T) {
 	r := newReplacementStore(t)
 	ctx := context.Background()

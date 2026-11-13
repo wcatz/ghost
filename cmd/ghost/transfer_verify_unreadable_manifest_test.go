@@ -2,9 +2,7 @@ package main
 
 import (
 	"context"
-	"io"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -12,29 +10,9 @@ import (
 	"github.com/wcatz/ghost/internal/memory"
 )
 
-// A manifest that is present but cannot be read is a refusal, and it is not a
-// reason to print nothing. The report used to stop at the manifest, with no
-// size and no rows; the checks that need nothing from it — the size, the
-// integrity check and the schema version — must still be reported, and the two
-// that compare against it shown as skipped with the manifest as the reason.
-
-// backedUpSnapshot writes a one-memory backup and returns the snapshot's path.
-func backedUpSnapshot(t *testing.T) string {
-	t.Helper()
-	ctx := context.Background()
-	store := transferTestStore(t)
-	if err := store.EnsureProject(ctx, "p1", "/src/p1", "one"); err != nil {
-		t.Fatalf("EnsureProject: %v", err)
-	}
-	if _, err := store.Create(ctx, "p1", memory.Memory{Category: "fact", Content: "one", Source: "mcp"}); err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	dest := filepath.Join(t.TempDir(), "snap.db")
-	if err := runBackupCore(ctx, store, io.Discard, dest); err != nil {
-		t.Fatalf("runBackupCore: %v", err)
-	}
-	return dest
-}
+// A manifest that is present but cannot be read is a refusal that still reports
+// the checks needing nothing from it (size, integrity, schema version), with the
+// two that compare against it skipped and the manifest named as the reason.
 
 // verifyReportOf runs the command over dest and returns what it printed.
 func verifyReportOf(dest string) (string, error) {
@@ -90,35 +68,39 @@ func requireUnreadableManifestReport(t *testing.T, dest, text string, runErr err
 	}
 }
 
-func TestRunBackupVerifyCoreReportsTheManifestFreeChecksForATruncatedManifest(t *testing.T) {
-	dest := backedUpSnapshot(t)
-	if err := os.WriteFile(memory.ManifestPath(dest), []byte("{\n"), 0o600); err != nil {
-		t.Fatalf("truncate the manifest: %v", err)
-	}
-	text, err := verifyReportOf(dest)
-	requireUnreadableManifestReport(t, dest, text, err)
-	if !strings.Contains(err.Error(), "unexpected end of JSON input") {
-		t.Errorf("error = %v, want the decoder's reason:\n%s", err, text)
-	}
-}
-
-func TestRunBackupVerifyCoreReportsTheManifestFreeChecksForANonDigestSHA256(t *testing.T) {
-	dest := backedUpSnapshot(t)
-	path := memory.ManifestPath(dest)
-	m, err := memory.ReadBackupManifest(path)
-	if err != nil {
-		t.Fatalf("ReadBackupManifest: %v", err)
-	}
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read manifest: %v", err)
-	}
-	if err := os.WriteFile(path, []byte(strings.Replace(string(raw), m.SHA256, "ABC", 1)), 0o600); err != nil {
-		t.Fatalf("write manifest: %v", err)
-	}
-	text, verr := verifyReportOf(dest)
-	requireUnreadableManifestReport(t, dest, text, verr)
-	if !strings.Contains(verr.Error(), "sha256") {
-		t.Errorf("error = %v, want it to name the sha256 field:\n%s", verr, text)
+func TestRunBackupVerifyCoreReportsTheManifestFreeChecksForAnUnreadableManifest(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		damage func(t *testing.T, path string)
+		want   string
+	}{
+		{"truncated", func(t *testing.T, path string) {
+			if err := os.WriteFile(path, []byte("{\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}, "unexpected end of JSON input"},
+		{"non-digest sha256", func(t *testing.T, path string) {
+			m, err := memory.ReadBackupManifest(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(strings.Replace(string(raw), m.SHA256, "ABC", 1)), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}, "sha256"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dest := snapshotForVerify(t)
+			tc.damage(t, memory.ManifestPath(dest))
+			text, err := verifyReportOf(dest)
+			requireUnreadableManifestReport(t, dest, text, err)
+			if err != nil && !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error = %v, want it to contain %q:\n%s", err, tc.want, text)
+			}
+		})
 	}
 }

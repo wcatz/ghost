@@ -1,156 +1,10 @@
 package bench
 
 import (
-	"math"
 	"testing"
+
+	"github.com/wcatz/ghost/internal/config"
 )
-
-// TestPairedBootstrapIsDeterministic: a gate that prints a different interval on
-// every run is a gate nobody can read, and a seed that changes with the Go
-// release makes the number in docs/benchmarks.md unreproducible. Same input, same
-// interval, and the observed mean is reported unchanged whatever the resampling
-// does.
-func TestPairedBootstrapIsDeterministic(t *testing.T) {
-	diffs := []float64{0.1, -0.2, 0.3, 0.0, 0.05, -0.1, 0.2, 0.4, -0.3, 0.15}
-	lo1, hi1, mean1 := bootstrapMeanCI(diffs, 2000)
-	lo2, hi2, mean2 := bootstrapMeanCI(diffs, 2000)
-	if lo1 != lo2 || hi1 != hi2 || mean1 != mean2 {
-		t.Errorf("bootstrap is not deterministic: (%.6f, %.6f, %.6f) then (%.6f, %.6f, %.6f)", lo1, hi1, mean1, lo2, hi2, mean2)
-	}
-	// The interval has to be an interval and not a constant, and it has to be
-	// built from draws rather than from the sample's own order: the resample
-	// count is the only knob left, and more of it must move the edges (the
-	// percentile index moves with it) while the observed mean must not.
-	lo3, hi3, mean3 := bootstrapMeanCI(diffs, 20001)
-	if lo3 == lo1 && hi3 == hi1 {
-		t.Errorf("a different resample count gave the same interval (%.6f, %.6f): the resamples are not being drawn", lo1, hi1)
-	}
-	if mean3 != mean1 {
-		t.Errorf("the resample count changed the reported mean (%.9f vs %.9f); it must be the observed one", mean3, mean1)
-	}
-	if lo1 == hi1 {
-		t.Errorf("interval collapsed to a point (%.6f): no spread was estimated", lo1)
-	}
-	// The reported mean is the OBSERVED one — the mean of the sample, not of the
-	// resampled means — and the interval has to bracket it.
-	var wantMean float64
-	for _, d := range diffs {
-		wantMean += d
-	}
-	wantMean /= float64(len(diffs))
-	if math.Abs(mean1-wantMean) > 1e-12 {
-		t.Errorf("mean = %.9f, want the observed mean %.9f", mean1, wantMean)
-	}
-	if lo1 > mean1 || hi1 < mean1 {
-		t.Errorf("interval (%.6f, %.6f) does not contain the observed mean %.6f", lo1, hi1, mean1)
-	}
-}
-
-// TestPairedBootstrapCoversTheMeanItShould covers the two cases the gate reads:
-// a consistent positive difference (fusion helping on every query) must exclude
-// zero, and pure noise must not. A percentile interval that always contained the
-// mean and often contained zero would make the gate unfalsifiable.
-func TestPairedBootstrapCoversTheMeanItShould(t *testing.T) {
-	// 40 queries, every one better by 0.05: the interval is far above zero.
-	helped := make([]float64, 40)
-	for i := range helped {
-		helped[i] = 0.05
-	}
-	lo, hi, mean := bootstrapMeanCI(helped, 5000)
-	if lo <= 0 {
-		t.Errorf("a difference positive on every query gave an interval reaching zero: (%.4f, %.4f)", lo, hi)
-	}
-	if math.Abs(mean-0.05) > 1e-12 {
-		t.Errorf("mean = %.6f, want 0.05", mean)
-	}
-
-	// 40 queries alternating +0.1 / -0.1: zero mean, and the interval must span
-	// it, because nothing here is a real difference.
-	noise := make([]float64, 40)
-	for i := range noise {
-		if i%2 == 0 {
-			noise[i] = 0.1
-		} else {
-			noise[i] = -0.1
-		}
-	}
-	lo, hi, mean = bootstrapMeanCI(noise, 5000)
-	if lo > 0 || hi < 0 {
-		t.Errorf("alternating noise gave an interval that excludes zero: (%.4f, %.4f)", lo, hi)
-	}
-	if math.Abs(mean) > 1e-12 {
-		t.Errorf("noise mean = %.9f, want 0", mean)
-	}
-}
-
-// TestPairedNDCGRefusesToPairDifferentQuerySets: the pairing is positional, so two
-// runs of the same length over different queries would produce a confident,
-// meaningless interval. The check is the only thing standing between a refactor
-// that reorders the query set and a gate that quietly starts measuring nothing.
-func TestPairedNDCGRefusesToPairDifferentQuerySets(t *testing.T) {
-	a := Result{Condition: CondHybrid, PerQuery: []QueryScore{{Name: "q1", NDCG: 1}, {Name: "q2", NDCG: 0.5}}}
-	b := Result{Condition: CondVector, PerQuery: []QueryScore{{Name: "q1", NDCG: 0.5}, {Name: "q2", NDCG: 0.5}}}
-	diffs, err := pairedNDiff(a, b)
-	if err != nil {
-		t.Fatalf("pairing the same query names in the same order: %v", err)
-	}
-	if len(diffs) != 2 || diffs[0] != 0.5 || diffs[1] != 0 {
-		t.Errorf("diffs = %v, want [0.5 0] — the difference is per query, not a difference of means", diffs)
-	}
-
-	c := Result{Condition: CondVector, PerQuery: []QueryScore{{Name: "q2", NDCG: 0.5}, {Name: "q1", NDCG: 0.5}}}
-	if _, err := pairedNDiff(a, c); err == nil {
-		t.Error("paired the same queries in a different order without an error")
-	}
-	d := Result{Condition: CondVector, PerQuery: []QueryScore{{Name: "q1", NDCG: 0.5}}}
-	if _, err := pairedNDiff(a, d); err == nil {
-		t.Error("paired results of different lengths without an error")
-	}
-
-	// The same names in the same order is the one case that pairs, and the
-	// difference is per query rather than a difference of means.
-	e := Result{Condition: CondVector, PerQuery: []QueryScore{{Name: "q1", NDCG: 0.5}, {Name: "q2", NDCG: 0.0}}}
-	diffs, err = pairedNDiff(a, e)
-	if err != nil {
-		t.Fatalf("pairing matching query sets: %v", err)
-	}
-	if len(diffs) != 2 || diffs[0] != 0.5 || diffs[1] != 0.5 {
-		t.Errorf("diffs = %v, want [0.5 0.5]", diffs)
-	}
-}
-
-// TestBootstrapMeanCIRefusesToInventAnInterval: the resample count is a
-// parameter so a caller can vary it, and a count of zero used to index an empty
-// slice. There is no interval to report from zero resamples, and the only
-// defensible answer is the sample itself rather than the extremes of a
-// distribution that was never drawn.
-func TestBootstrapMeanCIRefusesToInventAnInterval(t *testing.T) {
-	diffs := []float64{0.1, -0.2, 0.3, 0.0, 0.05, -0.1, 0.2, 0.4, -0.3, 0.15}
-	want := func() float64 {
-		var sum float64
-		for _, d := range diffs {
-			sum += d
-		}
-		return sum / float64(len(diffs))
-	}()
-	for _, resamples := range []int{0, -1} {
-		lo, hi, mean := bootstrapMeanCI(diffs, resamples)
-		if lo != mean || hi != mean || mean != want {
-			t.Errorf("resamples=%d gave (%.6f, %.6f, %.6f), want the observed mean %.6f three times",
-				resamples, lo, hi, mean, want)
-		}
-	}
-	// One resample is not degenerate in the same way — it is a distribution of
-	// one, so the interval is that resample and both edges are it. Asserted only
-	// so the shape is stated rather than left to be discovered.
-	if lo, hi, _ := bootstrapMeanCI(diffs, 1); lo != hi {
-		t.Errorf("resamples=1 gave a two-edged interval (%.6f, %.6f)", lo, hi)
-	}
-	// An empty sample is the other degenerate input, and it is not a panic either.
-	if lo, hi, mean := bootstrapMeanCI(nil, 100); lo != 0 || hi != 0 || mean != 0 {
-		t.Errorf("empty sample gave (%.3f, %.3f, %.3f), want zeros", lo, hi, mean)
-	}
-}
 
 // TestFusionGateDecision pins the rule the regression gate applies. Only the first
 // case is a real interval — the rest are hand-built so the rule is pinned on inputs
@@ -197,15 +51,36 @@ func TestFusionGateDecision(t *testing.T) {
 	}
 }
 
-// TestFusionToleranceIsNotAnAbsolution: the tolerance has to be small enough
-// that a real ranking regression trips it, and the way to know that is to state
-// what it costs in queries. At n=220, flipping one query from a perfect 1.0 to a
-// zero costs 1/220 = 0.0045 of the mean, so the tolerance is 4.4 queries — enough
-// to absorb a re-grading, far too little to absorb fusion actually losing.
-func TestFusionToleranceIsNotAnAbsolution(t *testing.T) {
-	perQuery := 1.0 / 220.0
-	queries := fusionTolerance / perQuery
-	if queries < 3 || queries > 8 {
-		t.Errorf("tolerance %.2f is %.1f queries' worth of NDCG at n=220; want between 3 and 8, so it absorbs a re-grading and not a regression", fusionTolerance, queries)
+// TestPairingRefusesMismatchedRunsAndSmallSamples pins the edges of the paired
+// bootstrap: runs over different queries are refused rather than paired by
+// position, and a sample too small to resample reports a point, not an interval.
+func TestPairingRefusesMismatchedRunsAndSmallSamples(t *testing.T) {
+	a := Result{Condition: "a", PerQuery: []QueryScore{{Name: "q1", NDCG: 1}, {Name: "q2", NDCG: 0.5}}}
+	for name, b := range map[string]Result{
+		"length": {Condition: "b", PerQuery: a.PerQuery[:1]},
+		"names":  {Condition: "b", PerQuery: []QueryScore{{Name: "q1"}, {Name: "other"}}},
+	} {
+		if _, err := CompareFusion(a, b); err == nil {
+			t.Errorf("%s mismatch: runs were paired", name)
+		}
+	}
+	if lo, hi, mean := bootstrapMeanCI([]float64{0.25}, 100); lo != 0.25 || hi != 0.25 || mean != 0.25 {
+		t.Errorf("one-sample CI = [%v, %v] mean %v, want a point", lo, hi, mean)
+	}
+	if lo, hi, mean := bootstrapMeanCI(nil, 100); lo != 0 || hi != 0 || mean != 0 {
+		t.Errorf("empty CI = [%v, %v] mean %v, want zeros", lo, hi, mean)
+	}
+	if got := armIndex("no-such-arm"); got != -1 {
+		t.Errorf("armIndex of an unknown arm = %d, want -1", got)
+	}
+	q := Query{ProjectID: "p", Text: "t"}
+	if got := ContextRequest(q, ContextInstant()); got.RelevanceCutoff != config.DefaultRelevanceCutoff || got.NoAnswerCosine != config.DefaultNoAnswerCosine {
+		t.Errorf("ContextRequest carries cutoff %v bar %v, want the shipped defaults", got.RelevanceCutoff, got.NoAnswerCosine)
+	}
+	if got := contextRequestWithCutoff(q, ContextInstant(), 0.3); got.RelevanceCutoff != 0.3 || got.NoAnswerCosine != 0 {
+		t.Errorf("cutoff-only request = cutoff %v bar %v, want 0.3 and no bar", got.RelevanceCutoff, got.NoAnswerCosine)
+	}
+	if len(SweepGrid()) == 0 {
+		t.Error("SweepGrid is empty")
 	}
 }

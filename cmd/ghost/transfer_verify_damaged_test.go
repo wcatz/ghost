@@ -11,137 +11,70 @@ import (
 	"github.com/wcatz/ghost/internal/memory"
 )
 
-// The cases a damaged sidecar and an unstat'ed file produce, which are the two
-// ways this report used to describe something it had not measured.
-
-// TestRunBackupVerifyCoreDistinguishesADamagedManifestFromAMissingOne: the two
-// are opposites and "no manifest" is wrong for one of them. A missing sidecar is
-// expected and merely limits what was checked; a sidecar that is there and cannot
-// be read is DAMAGE, and telling that reader to go looking for a file sitting
-// right beside the snapshot is the "treating it as absent" the command is built
-// not to do.
+// TestRunBackupVerifyCoreDistinguishesADamagedManifestFromAMissingOne: a missing
+// sidecar merely limits what was checked, but one that is there and cannot be
+// read (garbage, or a symlink whose target is gone) is DAMAGE: a refusal that
+// names the sidecar and the real error, never "no manifest at" (which sends the
+// reader looking for a file beside the snapshot) and never a nil error.
 func TestRunBackupVerifyCoreDistinguishesADamagedManifestFromAMissingOne(t *testing.T) {
-	ctx := context.Background()
-	store := transferTestStore(t)
-	if err := store.EnsureProject(ctx, "p1", "/src/p1", "one"); err != nil {
-		t.Fatalf("EnsureProject: %v", err)
-	}
-	dest := filepath.Join(t.TempDir(), "snap.db")
-	if err := runBackupCore(ctx, store, os.Stderr, dest); err != nil {
-		t.Fatalf("runBackupCore: %v", err)
-	}
-	manifest := memory.ManifestPath(dest)
-	if err := os.WriteFile(manifest, []byte("{ not json"), 0o600); err != nil {
-		t.Fatalf("damage the manifest: %v", err)
-	}
-
-	var out strings.Builder
-	if err := runBackupVerifyCore(ctx, &out, dest); err == nil {
-		t.Fatalf("verify accepted a damaged manifest:\n%s", out.String())
-	}
-	text := out.String()
-	if !strings.Contains(text, "present but could not be read") {
-		t.Errorf("the report does not say the sidecar is present and damaged:\n%s", text)
-	}
-	if strings.Contains(text, "no manifest at") {
-		t.Errorf("the report calls a present sidecar absent, sending the reader to look for a file that is there:\n%s", text)
-	}
-	if !strings.Contains(text, manifest) {
-		t.Errorf("the report does not name the sidecar:\n%s", text)
-	}
-}
-
-// TestRunBackupVerifyCoreRefusesADanglingManifestSymlink: the same case one
-// level up — the report a user reads and the exit code a script branches on. A
-// sidecar the filesystem lists but whose link target is gone used to print
-// "present but could not be read: <nil>" and exit 0 under a "checked" verdict:
-// the footer said damage, the verdict said absence, and the nil error is the
-// tell. It must be a refusal naming the real error.
-func TestRunBackupVerifyCoreRefusesADanglingManifestSymlink(t *testing.T) {
-	ctx := context.Background()
-	store := transferTestStore(t)
-	if err := store.EnsureProject(ctx, "p1", "/src/p1", "one"); err != nil {
-		t.Fatalf("EnsureProject: %v", err)
-	}
-	dest := filepath.Join(t.TempDir(), "snap.db")
-	if err := runBackupCore(ctx, store, os.Stderr, dest); err != nil {
-		t.Fatalf("runBackupCore: %v", err)
-	}
-	manifest := memory.ManifestPath(dest)
-	if err := os.Remove(manifest); err != nil {
-		t.Fatalf("remove the manifest: %v", err)
-	}
-	if err := os.Symlink(filepath.Join(t.TempDir(), "gone.json"), manifest); err != nil {
-		t.Skipf("symlinks unavailable: %v", err)
-	}
-
-	var out strings.Builder
-	if err := runBackupVerifyCore(ctx, &out, dest); err == nil {
-		t.Fatalf("verify accepted a dangling manifest symlink:\n%s", out.String())
-	}
-	text := out.String()
-	if !strings.Contains(text, "refusing ") {
-		t.Errorf("the verdict is not a refusal:\n%s", text)
-	}
-	if !strings.Contains(text, "present but could not be read") {
-		t.Errorf("the report does not say the sidecar is present and damaged:\n%s", text)
-	}
-	if strings.Contains(text, "<nil>") {
-		t.Errorf("the report names a nil error:\n%s", text)
-	}
-	if strings.Contains(text, "no manifest at") {
-		t.Errorf("the report calls a present sidecar absent:\n%s", text)
-	}
-	if !strings.Contains(text, manifest) {
-		t.Errorf("the report does not name the sidecar:\n%s", text)
+	for _, damage := range []string{"garbage", "dangling symlink"} {
+		t.Run(damage, func(t *testing.T) {
+			dest := snapshotForVerify(t)
+			manifest := memory.ManifestPath(dest)
+			if damage == "garbage" {
+				if err := os.WriteFile(manifest, []byte("{ not json"), 0o600); err != nil {
+					t.Fatalf("damage the manifest: %v", err)
+				}
+			} else {
+				if err := os.Remove(manifest); err != nil {
+					t.Fatalf("remove the manifest: %v", err)
+				}
+				if err := os.Symlink(filepath.Join(t.TempDir(), "gone.json"), manifest); err != nil {
+					t.Skipf("symlinks unavailable: %v", err)
+				}
+			}
+			var out strings.Builder
+			if err := runBackupVerifyCore(context.Background(), &out, dest); err == nil {
+				t.Fatalf("verify accepted a damaged manifest:\n%s", out.String())
+			}
+			text := out.String()
+			for _, want := range []string{"refusing ", "present but could not be read", manifest} {
+				if !strings.Contains(text, want) {
+					t.Errorf("the report does not say %q:\n%s", want, text)
+				}
+			}
+			for _, unwanted := range []string{"no manifest at", "<nil>"} {
+				if strings.Contains(text, unwanted) {
+					t.Errorf("the report says %q for a present, damaged sidecar:\n%s", unwanted, text)
+				}
+			}
+		})
 	}
 }
 
 // TestRunBackupVerifyCoreClaimsNoSizeForAFileItCouldNotStat: a run that fails
-// before the stat has measured nothing, and "0 bytes" is a claim about a file —
-// the same reason CountsRead exists for row counts. A snapshot that is not there
-// beside a damaged sidecar is the reachable case: the manifest is still the
-// diagnosis, and the stat that follows it has nothing to measure.
+// before the stat has measured nothing ("0 bytes" would be a claim about a
+// file), while a run that got as far as the stat reports the measured size.
 func TestRunBackupVerifyCoreClaimsNoSizeForAFileItCouldNotStat(t *testing.T) {
-	dir := t.TempDir()
-	dest := filepath.Join(dir, "snap.db")
+	dest := filepath.Join(t.TempDir(), "snap.db")
 	if err := os.WriteFile(memory.ManifestPath(dest), []byte("{ not json"), 0o600); err != nil {
 		t.Fatalf("damage the manifest: %v", err)
 	}
-
 	var out strings.Builder
 	if err := runBackupVerifyCore(context.Background(), &out, dest); err == nil {
 		t.Fatalf("verify accepted a damaged manifest:\n%s", out.String())
 	}
-	text := out.String()
-	if strings.Contains(text, " bytes") {
-		t.Errorf("the report states a size for a file it never stat'ed:\n%s", text)
+	if strings.Contains(out.String(), " bytes") || !strings.Contains(out.String(), "not checked") {
+		t.Errorf("the report states a size for a file it never stat'ed, or does not say it was not measured:\n%s", out.String())
 	}
-	if !strings.Contains(text, "not checked") {
-		t.Errorf("the report does not say the file was not measured:\n%s", text)
-	}
-}
 
-// TestRunBackupVerifyCoreStillReportsAMeasuredSize: the other half, so the
-// assertion above is not satisfied by simply never printing one. A run that got
-// as far as the stat must report it.
-func TestRunBackupVerifyCoreStillReportsAMeasuredSize(t *testing.T) {
-	ctx := context.Background()
-	store := transferTestStore(t)
-	if err := store.EnsureProject(ctx, "p1", "/src/p1", "one"); err != nil {
-		t.Fatalf("EnsureProject: %v", err)
-	}
-	dest := filepath.Join(t.TempDir(), "snap.db")
-	if err := runBackupCore(ctx, store, os.Stderr, dest); err != nil {
-		t.Fatalf("runBackupCore: %v", err)
-	}
-	info, err := os.Stat(dest)
+	real := snapshotForVerify(t)
+	info, err := os.Stat(real)
 	if err != nil {
 		t.Fatalf("stat: %v", err)
 	}
-
-	var out strings.Builder
-	if err := runBackupVerifyCore(ctx, &out, dest); err != nil {
+	out.Reset()
+	if err := runBackupVerifyCore(context.Background(), &out, real); err != nil {
 		t.Fatalf("runBackupVerifyCore: %v\n%s", err, out.String())
 	}
 	if want := strconv.FormatInt(info.Size(), 10) + " bytes"; !strings.Contains(out.String(), want) {

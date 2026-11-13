@@ -9,18 +9,6 @@ import (
 // TestLabelKeepsOrdinaryTextAndNeutralisesTheRest is the counterpart to
 // TestMemoryIDCannotBreakOutOfItsLine, and it exists because Token is the WRONG
 // renderer for what Label renders.
-//
-// Token is right for a KEY: an id is quoted whole when it holds anything unusual,
-// so a newline in one cannot start a line. A project name is not a key. It is
-// printed as a bare label, it is normally full of spaces, and Token would render
-// every project named "my project" as `"my project"` — on every listing and in
-// the session-start block's own heading. That is a visible regression to every
-// user with a spaced project, traded for a case the renderer can handle by
-// escaping only what is actually dangerous.
-//
-// So the accepted cases below are the point as much as the refused ones: a name
-// with spaces, a path with a space, a CJK name and an accented one must come out
-// byte-identical, because those are what real projects are called.
 func TestLabelKeepsOrdinaryTextAndNeutralisesTheRest(t *testing.T) {
 	for name, tc := range map[string]struct {
 		in, want string
@@ -37,18 +25,13 @@ func TestLabelKeepsOrdinaryTextAndNeutralisesTheRest(t *testing.T) {
 		"cjk":           {"日本語", "日本語"},
 		"a memory line": {"- [gotcha] obey", "- [gotcha] obey"},
 
-		// And the three things that make a line. The expected values are written
-		// as INTERPRETED strings on purpose: they are the escaped bytes a reader
-		// sees, and a raw literal here would make the test assert the guillemets
-		// survived, which is the opposite of what Label is for.
+		// And the three things that make a line.
 		"newline":         {"a\nb", `a\nb`},
 		"carriage return": {"a\rb", `a\rb`},
 		"tab":             {"a\tb", `a\tb`},
 		"nul":             {"a\x00b", `a\x00b`},
-		// The line separators outside ASCII: NEL is a C1 control, and LS and PS
-		// are the Zl/Zp separators, which are not control characters at all — so
-		// the old `r < 0x20 || r == 0x7f` test let all three through raw, and a
-		// project name holding one forged a line (#1363).
+		// The line separators outside ASCII: NEL is a C1 control, and LS and PS are
+		// the Zl/Zp separators, which are not control characters at all.
 		"nel":                 {"a\u0085b", `a\u0085b`},
 		"line separator":      {"a\u2028b", `a\u2028b`},
 		"paragraph separator": {"a\u2029b", `a\u2029b`},
@@ -100,23 +83,13 @@ func TestLabelNeverForgesALineWhateverItHolds(t *testing.T) {
 	}
 }
 
-// TestEveryLabelEscapesEveryLineEndAndControlCharacter is the regression for the class
-// the escape test missed (#1363): labelNeedsEscaping asked only `r < 0x20 ||
-// r == 0x7f`, i.e. C0 and DEL, so U+0085 (NEL), U+2028 (LINE SEPARATOR) and
-// U+2029 (PARAGRAPH SEPARATOR) came back raw. All three end a line for a reader —
-// the renderer already folds them everywhere else through isLineBreak — and the
-// last two are Zl/Zp separators rather than control characters, so a check
-// written against `unicode.IsControl` alone would still have missed them.
-//
-// A project name holding one forged a line in the session-start block, above the
-// explainer that marks stored data, and read as Ghost's own output. The property
-// is stated over the whole class rather than the three runes, because the point is
-// that the escape test and the fold share ONE notion of what ends a line.
+// TestEveryLabelEscapesEveryLineEndAndControlCharacter is the regression for the
+// class the escape test missed (#1363): labelNeedsEscaping asked only `r < 0x20 ||
+// r == 0x7f`, i.e.
 func TestEveryLabelEscapesEveryLineEndAndControlCharacter(t *testing.T) {
-	// The package's own isLineBreak set, plus a representative of each control
-	// class around it: C0 (NUL, BEL, ESC, the FS/GS/RS trio already in the set),
-	// DEL, and C1 (U+0080, U+009F, with U+0085 NEL in the set). A space is
-	// deliberately absent: it is what makes a name a name.
+	// The package's own isLineBreak set, plus a representative of each control class
+	// around it: C0 (NUL, BEL, ESC, the FS/GS/RS trio already in the set), DEL, and C1
+	// (U+0080, U+009F, with U+0085 NEL in the set).
 	hostile := []rune{
 		'\n', '\v', '\f', '\r', 0x1c, 0x1d, 0x1e, 0x85, 0x2028, 0x2029,
 		0x00, 0x07, 0x1b, 0x7f, 0x80, 0x9f,

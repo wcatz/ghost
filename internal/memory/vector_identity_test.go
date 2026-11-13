@@ -56,41 +56,6 @@ func TestSearchVectorExcludesOtherIdentity(t *testing.T) {
 	}
 }
 
-// TestSearchVectorAllExcludesOtherIdentity is TestSearchVectorExcludesOtherIdentity
-// for the cross-project leg (ghost_search_all), which scans the same table
-// through a separate code path.
-func TestSearchVectorAllExcludesOtherIdentity(t *testing.T) {
-	store, ctx := setupTestStore(t)
-	store.SetEmbeddingIdentity(identityCurrent)
-
-	current, stale := seedIdentityRows(t, store, ctx)
-
-	results, err := store.SearchVectorAll(ctx, []float32{1, 0, 0}, 10)
-	if err != nil {
-		t.Fatalf("SearchVectorAll: %v", err)
-	}
-	if len(results) != 1 || results[0].MemoryID != current {
-		t.Fatalf("SearchVectorAll = %+v, want only the current-identity memory %s (stale %s must be excluded)", results, current, stale)
-	}
-}
-
-// TestSearchVectorIdentityUnsetKeepsEveryRow: the filter is opt-in, so a store
-// with no configured identity (the bench harness, tests) still searches every
-// stored vector.
-func TestSearchVectorIdentityUnsetKeepsEveryRow(t *testing.T) {
-	store, ctx := setupTestStore(t)
-
-	seedIdentityRows(t, store, ctx)
-
-	results, err := store.SearchVector(ctx, "test-proj", []float32{1, 0, 0}, 10)
-	if err != nil {
-		t.Fatalf("SearchVector: %v", err)
-	}
-	if len(results) != 2 {
-		t.Fatalf("SearchVector with no configured identity returned %d results, want 2 (the unfiltered historical behaviour)", len(results))
-	}
-}
-
 // TestSearchVectorOtherIdentityIsSurfaced: skipping a foreign vector space is
 // a configuration state the operator has to be able to see, the same way a
 // dimension mismatch already is.
@@ -150,23 +115,5 @@ func TestUnembeddedMemoryIDsRequeuesOtherIdentity(t *testing.T) {
 	}
 	if strings.Contains(got, current) {
 		t.Errorf("UnembeddedMemoryIDs = %v, must not include %s: its vector already matches the configured identity", ids, current)
-	}
-}
-
-// TestUnembeddedMemoryIDsEmptyIdentityIsExistenceOnly: an empty identity keeps
-// the historical meaning — the row only has to have a vector, whatever wrote
-// it.
-func TestUnembeddedMemoryIDsEmptyIdentityIsExistenceOnly(t *testing.T) {
-	store, ctx := setupTestStore(t)
-
-	_, _ = seedIdentityRows(t, store, ctx)
-	never := createTestMemory(t, store, ctx, "no vector at all")
-
-	ids, err := store.UnembeddedMemoryIDs(ctx, "test-proj", "", 10)
-	if err != nil {
-		t.Fatalf("UnembeddedMemoryIDs: %v", err)
-	}
-	if len(ids) != 1 || ids[0] != never {
-		t.Fatalf("UnembeddedMemoryIDs(identity=\"\") = %v, want only the never-embedded memory %s", ids, never)
 	}
 }

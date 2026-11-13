@@ -1002,14 +1002,6 @@ func importOptionsFrom(opts importOptions) portable.ImportOptions {
 	return portable.ImportOptions{Apply: opts.Apply, TrustProvenance: opts.TrustProvenance}
 }
 
-func runImportCore(ctx context.Context, store *memory.Store, path string, opts portable.ImportOptions, out io.Writer) error {
-	a, err := openImportArtifact(path)
-	if err != nil {
-		return err
-	}
-	return runImportReader(ctx, store, path, a, opts, out)
-}
-
 func runImportReader(ctx context.Context, store *memory.Store, path string, a *portable.Artifact, opts portable.ImportOptions, out io.Writer) error {
 	report, err := a.Import(ctx, store, opts, func(r portable.RecordResult) {
 		_ = printRecordLine(out, r)

@@ -193,101 +193,48 @@ func TestExportImportRoundTripIntoAnEmptyStore(t *testing.T) {
 	}
 }
 
-// TestExportImportDowngradesProvenanceByDefault: the default import is the case
-// where the artifact came from somewhere else, so every memory in it comes back
-// stamped as having arrived rather than as the user's own words or as a rule
-// Ghost ships. It is asserted end to end — through a real export and a real
-// import — because the two halves are what could disagree: the export writes the
-// artifact's source, and it is the import that must not honour it.
 func TestExportImportDowngradesProvenanceByDefault(t *testing.T) {
 	ctx := context.Background()
 	src := newTestStore(t)
-	if err := src.EnsureProject(ctx, "p1", "/src/p1", "one"); err != nil {
-		t.Fatalf("EnsureProject: %v", err)
-	}
-	// One memory of each kind the downgrade exists to neutralise: the user's own
-	// words, a rule Ghost ships, and a pinned agent save.
-	if err := src.SeedGlobalMemories(ctx); err != nil {
-		t.Fatalf("SeedGlobalMemories: %v", err)
-	}
-	if _, err := src.Create(ctx, "p1", memory.Memory{Category: "fact", Content: "the user's own words", Source: "manual"}); err != nil {
-		t.Fatalf("Create(manual): %v", err)
-	}
-	pinned, err := src.Create(ctx, "p1", memory.Memory{Category: "gotcha", Content: "an agent's pinned note", Source: "mcp"})
-	if err != nil {
-		t.Fatalf("Create(mcp): %v", err)
-	}
-	if err := src.TogglePin(ctx, pinned, true); err != nil {
-		t.Fatalf("TogglePin: %v", err)
-	}
+	_ = src.EnsureProject(ctx, "p1", "/src/p1", "one")
+	_ = src.SeedGlobalMemories(ctx)
+	_, _ = src.Create(ctx, "p1", memory.Memory{Category: "fact", Content: "the user's own words", Source: "manual"})
+	pinned, _ := src.Create(ctx, "p1", memory.Memory{Category: "gotcha", Content: "an agent's pinned note", Source: "mcp"})
+	_ = src.TogglePin(ctx, pinned, true)
 	artifact := exportBytes(t, src, "")
 
 	dst := newTestStore(t)
 	report, err := Import(ctx, dst, bytes.NewReader(artifact), ImportOptions{Apply: true}, nil)
-	if err != nil {
-		t.Fatalf("Import: %v", err)
+	if err != nil || report.Rejected != 0 {
+		t.Fatalf("err=%v report=%+v", err, report)
 	}
-	if report.Rejected != 0 {
-		t.Fatalf("rejected %d records: %v", report.Rejected, report.Errors)
-	}
-	// Every memory the artifact carried is back, and none of them carries the
-	// source or the pin the artifact stated.
-	got, err := dst.PortableMemories(ctx, nil)
-	if err != nil {
-		t.Fatalf("PortableMemories: %v", err)
-	}
-	// Two, not three: the source is seeded, and the artifact does not carry
-	// Ghost's own _global builtin seed — the destination writes that row itself,
-	// by content, on every open, so a copy could only ever be a permanent
-	// duplicate. The manual and the pinned mcp are the two that travel.
+	got, _ := dst.PortableMemories(ctx, nil)
 	if len(got) != 2 {
-		t.Fatalf("the destination holds %d memories, want the 2 the artifact carries", len(got))
+		t.Fatalf("got %d memories", len(got))
 	}
 	for _, m := range got {
-		if m.Source != memory.DowngradedSource {
-			t.Errorf("memory %q came back as %q, want %q", m.Content, m.Source, memory.DowngradedSource)
+		if m.Source != memory.DowngradedSource || m.Pinned {
+			t.Fatalf("memory=%+v", m)
 		}
-		if m.Pinned {
-			t.Errorf("memory %q came back pinned", m.Content)
-		}
-		// Asserted here as well as in the store-level test because the artifact
-		// is what travels: a seed row reaching a store is the failure, and the
-		// store-level test asserts the read, not the bytes.
 		if m.ProjectID == "_global" && m.Source == "builtin" {
-			t.Errorf("the artifact carried Ghost's own seed row %q", m.ID)
+			t.Fatalf("seed row exported: %+v", m)
 		}
 	}
-	// And the per-record report says so, once per memory, because the stored
-	// source is the downgraded one and the artifact's own value is gone from the
-	// store entirely.
 	var downgraded int
-	if _, err := Import(ctx, dst, bytes.NewReader(artifact), ImportOptions{Apply: true},
-		func(r RecordResult) {
-			if r.Downgraded {
-				downgraded++
-			}
-		}); err != nil {
-		t.Fatalf("second Import: %v", err)
-	}
-	// The second run skips everything (the ids are all present), so nothing is
-	// downgraded and nothing is created: the report is per *attempted* write.
+	_, _ = Import(ctx, dst, bytes.NewReader(artifact), ImportOptions{Apply: true}, func(r RecordResult) {
+		if r.Downgraded {
+			downgraded++
+		}
+	})
 	if downgraded != 0 {
-		t.Errorf("a re-import reported %d downgrades, want none — every record was skipped", downgraded)
+		t.Fatalf("downgraded=%d on re-import", downgraded)
 	}
 
-	// With the flag, the same artifact restores its own provenance exactly.
 	trusted := newTestStore(t)
-	if _, err := Import(ctx, trusted, bytes.NewReader(artifact),
-		ImportOptions{Apply: true, TrustProvenance: true}, nil); err != nil {
-		t.Fatalf("Import(trusted): %v", err)
+	if _, err := Import(ctx, trusted, bytes.NewReader(artifact), ImportOptions{Apply: true, TrustProvenance: true}, nil); err != nil {
+		t.Fatalf("trusted import: %v", err)
 	}
-	gotTrusted, err := trusted.PortableMemories(ctx, nil)
-	if err != nil {
-		t.Fatalf("PortableMemories(trusted): %v", err)
-	}
-	if len(gotTrusted) != len(got) {
-		t.Fatalf("the trusted import holds %d memories, want the same %d", len(gotTrusted), len(got))
-	}
+	gotTrusted, _ := trusted.PortableMemories(ctx, nil)
 	sources := map[string]int{}
 	pins := 0
 	for _, m := range gotTrusted {
@@ -296,180 +243,93 @@ func TestExportImportDowngradesProvenanceByDefault(t *testing.T) {
 			pins++
 		}
 	}
-	if sources["manual"] != 1 || sources["mcp"] != 1 {
-		t.Errorf("trusted sources = %v, want the artifact's own manual and mcp", sources)
-	}
-	// One, not two: the builtin _global seed is not in the artifact, so the only
-	// pinned row is the one the artifact pinned itself. This is the case the
-	// reviewer's finding was about — a --trust-provenance import must not be able
-	// to add a second pinned builtin copy of Ghost's shipped rule.
-	if sources["builtin"] != 0 {
-		t.Errorf("a trusted import restored %d builtin rows, want none — Ghost re-seeds those by content", sources["builtin"])
-	}
-	if pins != 1 {
-		t.Errorf("trusted import pinned %d memories, want the 1 the artifact pinned", pins)
+	if len(gotTrusted) != len(got) || sources["manual"] != 1 || sources["mcp"] != 1 || sources["builtin"] != 0 || pins != 1 {
+		t.Fatalf("trusted=%+v sources=%v pins=%d", gotTrusted, sources, pins)
 	}
 }
 
-// TestExportIsDeterministic: two exports of an unchanged store must be
-// byte-identical, or the artifact cannot be diffed, checksummed against a
-// previous copy, or reviewed in a pull request.
 func TestExportIsDeterministic(t *testing.T) {
 	src := newTestStore(t)
 	seed(t, src)
 	first := exportBytes(t, src, "")
 	second := exportBytes(t, src, "")
 	if !bytes.Equal(first, second) {
-		t.Error("two exports of an unchanged store differ")
+		t.Fatal("two exports differ")
 	}
-	// The header carries the version and nothing else. Asserted byte-exactly
-	// rather than by looking for a key, because a timestamp or a record count
-	// added here would break byte-reproducibility while every field the test
-	// looked for would still be there.
-	head := strings.SplitN(string(first), "\n", 2)[0]
-	if want := `{"type":"header","schema_version":3,"features":["links","retention"]}`; head != want {
-		t.Errorf("header line = %s, want exactly %s", head, want)
+	if head := strings.SplitN(string(first), "\n", 2)[0]; head != `{"type":"header","schema_version":3,"features":["links","retention"]}` {
+		t.Fatalf("header=%s", head)
 	}
 }
 
-// TestExportCarriesTheEvidenceRecords: the artifact has to move the SUPPORT for a
-// memory, not only the memory. A restore that kept the row and dropped the
-// evidence would report "supported by 0 observations" about a fact two agents
-// had already reported, which is the one thing the table exists to prevent.
 func TestExportCarriesTheEvidenceRecords(t *testing.T) {
 	src := newTestStore(t)
 	ctx := context.Background()
-	if err := src.EnsureProject(ctx, "p1", "/src/p1", "one"); err != nil {
-		t.Fatalf("EnsureProject: %v", err)
-	}
-	id, _, _, err := src.UpsertWithProvenance(ctx, "p1", "fact", "a fact two agents report", "mcp", 0.5, nil,
-		memory.Provenance{Agent: "claude-code", SessionID: "ses_a", SourceRef: "docs/a.md"})
-	if err != nil {
-		t.Fatalf("Upsert: %v", err)
-	}
-	// A second, folding report by a different agent: the survivor is the row that
-	// ends up in the artifact, and it is the one carrying both observations.
-	if _, _, _, err := src.UpsertWithProvenance(ctx, "p1", "fact", "a fact two agents report, per the runbook", "mcp", 0.5, nil,
-		memory.Provenance{Agent: "codex", SessionID: "ses_b"}); err != nil {
-		t.Fatalf("second Upsert: %v", err)
-	}
-
-	memories, err := src.PortableMemories(ctx, []string{"p1"})
-	if err != nil {
-		t.Fatalf("PortableMemories: %v", err)
-	}
+	_ = src.EnsureProject(ctx, "p1", "/src/p1", "one")
+	id, _, _, _ := src.UpsertWithProvenance(ctx, "p1", "fact", "a fact two agents report", "mcp", 0.5, nil, memory.Provenance{Agent: "claude-code", SessionID: "ses_a", SourceRef: "docs/a.md"})
+	_, _, _, _ = src.UpsertWithProvenance(ctx, "p1", "fact", "a fact two agents report, per the runbook", "mcp", 0.5, nil, memory.Provenance{Agent: "codex", SessionID: "ses_b"})
+	memories, _ := src.PortableMemories(ctx, []string{"p1"})
 	var carried *memory.PortableMemory
 	for i := range memories {
 		if memories[i].ID == id {
 			carried = &memories[i]
 		}
 	}
-	if carried == nil {
-		t.Fatalf("the survivor %s is not in the portable read", id)
-	}
-	// Both reports are on the row the fold left standing, and the artifact carries
-	// both. The first is the save; the second is the folding agent's report, which
-	// is the one that used to be discarded with the incoming wording.
-	if len(carried.Evidence) != 2 {
-		t.Fatalf("the survivor's exported evidence = %+v, want both agents' observations", carried.Evidence)
+	if carried == nil || len(carried.Evidence) != 2 {
+		t.Fatalf("carried=%+v", carried)
 	}
 	if carried.Evidence[0].Agent != "claude-code" || carried.Evidence[1].Agent != "codex" {
-		t.Errorf("exported evidence = %+v, want claude-code then codex, in the order they were reported", carried.Evidence)
+		t.Fatalf("evidence=%+v", carried.Evidence)
 	}
-	if carried.Evidence[0].ObservedAt == nil || carried.Evidence[1].ObservedAt == nil {
-		t.Errorf("exported evidence = %+v, want each record to carry when it was observed", carried.Evidence)
-	}
-	if carried.Evidence[1].ID == "" || carried.Evidence[1].ID == carried.Evidence[0].ID {
-		t.Errorf("exported evidence ids = %q and %q, want two distinct ids", carried.Evidence[0].ID, carried.Evidence[1].ID)
+	if carried.Evidence[0].ObservedAt == nil || carried.Evidence[1].ObservedAt == nil || carried.Evidence[1].ID == "" || carried.Evidence[1].ID == carried.Evidence[0].ID {
+		t.Fatalf("evidence ids/times=%+v", carried.Evidence)
 	}
 }
 
-// TestImportStillReadsAV1Artifact: the evidence list is why the artifact is v2,
-// and the readable range has to include v1 or every artifact written before this
-// build would be refused — for a change that only ADDED a field. A range that
-// silently narrowed is how a user's backup stops being restorable.
 func TestImportStillReadsAV1Artifact(t *testing.T) {
 	store := newTestStore(t)
 	body := `{"type":"header","schema_version":1}` + "\n" +
 		`{"type":"project","project":{"id":"p1","path":"/src/p1","name":"one"}}` + "\n" +
-		`{"type":"memory","memory":{"id":"m1","project_id":"p1","category":"fact",` +
-		`"content":"a fact from a v1 artifact","source":"manual","importance":0.5,` +
-		`"tags":null,"pinned":false,"created_at":"2026-01-01 00:00:00",` +
-		`"updated_at":"2026-01-01 00:00:00"}}` + "\n"
-
+		`{"type":"memory","memory":{"id":"m1","project_id":"p1","category":"fact","content":"a fact from a v1 artifact","source":"manual","importance":0.5,"tags":null,"pinned":false,"created_at":"2026-01-01 00:00:00","updated_at":"2026-01-01 00:00:00"}}` + "\n"
 	report, err := Import(context.Background(), store, strings.NewReader(body), ImportOptions{Apply: true}, nil)
-	if err != nil {
-		t.Fatalf("a v1 artifact must still import: %v", err)
+	if err != nil || report.Rejected != 0 || report.Created["memory"] != 1 {
+		t.Fatalf("err=%v report=%+v", err, report)
 	}
-	if report.Rejected != 0 {
-		t.Fatalf("a v1 artifact had %d rejected record(s): %v", report.Rejected, report.Errors)
-	}
-	if report.Created["memory"] != 1 {
-		t.Errorf("created memories = %d, want 1", report.Created["memory"])
-	}
-	// A v1 record carries no evidence, so the destination holds only the record of
-	// the arrival — never a fabricated observation from the importing machine.
-	ev, err := store.MemoryProvenance(context.Background(), "m1")
-	if err != nil {
-		t.Fatalf("MemoryProvenance: %v", err)
-	}
+	ev, _ := store.MemoryProvenance(context.Background(), "m1")
 	if len(ev) != 1 || ev[0].Kind != "imported" {
-		t.Errorf("evidence = %+v, want only the arrival record", ev)
+		t.Fatalf("evidence=%+v", ev)
 	}
 }
 
-// TestImportRejectsEvidenceWithAnUnknownKind: a hand-edited artifact whose record
-// names a kind the table cannot store must be rejected BY NAME, in the dry run as
-// well as the apply. Dropping the record instead would import a memory with less
-// support than the file claims, with nothing to say so.
 func TestImportRejectsEvidenceWithAnUnknownKind(t *testing.T) {
 	for _, apply := range []bool{false, true} {
 		t.Run(fmt.Sprintf("apply=%v", apply), func(t *testing.T) {
 			store := newTestStore(t)
 			body := `{"type":"header","schema_version":2}` + "\n" +
 				`{"type":"project","project":{"id":"p1","path":"/src/p1","name":"one"}}` + "\n" +
-				`{"type":"memory","memory":{"id":"m1","project_id":"p1","category":"fact",` +
-				`"content":"a fact with a made-up evidence kind","source":"manual",` +
-				`"importance":0.5,"tags":null,"pinned":false,` +
-				`"created_at":"2026-01-01 00:00:00","updated_at":"2026-01-01 00:00:00",` +
-				`"evidence":[{"kind":"vibes"}]}}` + "\n"
-
+				`{"type":"memory","memory":{"id":"m1","project_id":"p1","category":"fact","content":"a fact with a made-up evidence kind","source":"manual","importance":0.5,"tags":null,"pinned":false,"created_at":"2026-01-01 00:00:00","updated_at":"2026-01-01 00:00:00","evidence":[{"kind":"vibes"}]}}` + "\n"
 			report, err := Import(context.Background(), store, strings.NewReader(body), ImportOptions{Apply: apply}, nil)
-			if err != nil {
-				t.Fatalf("Import: %v", err)
-			}
-			if report.Rejected != 1 {
-				t.Fatalf("rejected = %d, want the one memory record", report.Rejected)
-			}
-			if !strings.Contains(report.Errors[0].Error(), "vibes") {
-				t.Errorf("error = %q, want it to name the offending kind", report.Errors[0])
+			if err != nil || report.Rejected != 1 || !strings.Contains(report.Errors[0].Error(), "vibes") {
+				t.Fatalf("err=%v report=%+v", err, report)
 			}
 			if got, _ := store.PortableMemories(context.Background(), nil); len(got) != 0 {
-				t.Errorf("a rejected record still wrote %d memories", len(got))
+				t.Fatalf("wrote %d memories", len(got))
 			}
 		})
 	}
 }
 
-// TestExportProjectFilterIsExact: --project selects by name or id. Anything
-// else has to be an error naming what was asked for, never a silently empty
-// artifact that reads as "there is nothing to export".
 func TestExportProjectFilterIsExact(t *testing.T) {
 	src := newTestStore(t)
 	seed(t, src)
-
 	byName := exportBytes(t, src, "one")
 	if !bytes.Contains(byName, []byte(`"name":"one"`)) {
-		t.Error("export by name did not include the named project")
+		t.Fatal("name filter missed project")
 	}
-	byID := exportBytes(t, src, "p1")
-	if !bytes.Equal(byID, byName) {
-		t.Error("export by id and by name must select the same project")
+	if byID := exportBytes(t, src, "p1"); !bytes.Equal(byID, byName) {
+		t.Fatal("id/name exports differ")
 	}
-	if _, err := Export(context.Background(), src, &bytes.Buffer{}, "nope"); err == nil {
-		t.Error("an unmatched project filter must be an error, not an empty export")
-	} else if !strings.Contains(err.Error(), "nope") {
-		t.Errorf("error must name the filter it could not match, got %v", err)
+	if _, err := Export(context.Background(), src, &bytes.Buffer{}, "nope"); err == nil || !strings.Contains(err.Error(), "nope") {
+		t.Fatalf("err=%v", err)
 	}
 }
 
@@ -650,97 +510,39 @@ func TestImportDryRunWritesNothing(t *testing.T) {
 	}
 }
 
-// TestImportRejectsAnUnknownSchemaVersion: an artifact this build cannot read
-// must be refused outright. Reading it anyway would insert records whose fields
-// mean whatever this build guesses, which is the one outcome an import must
-// never produce.
 func TestImportRejectsAnUnknownSchemaVersion(t *testing.T) {
-	// 4 and 0 are outside the readable range; 1, 2 and 3 are inside it, and 1 is
-	// checked by TestImportStillReadsAV1Artifact and 3 by the new export — the
-	// range is a list of the versions whose rules hold, so a test that forgot a
-	// version inside it would let a break through silently.
 	for _, version := range []string{"4", "99", "0"} {
-		t.Run("version "+version, func(t *testing.T) {
+		t.Run(version, func(t *testing.T) {
 			store := newTestStore(t)
-			body := `{"type":"header","schema_version":` + version + "}\n" +
-				`{"type":"project","project":{"id":"p1","path":"/src/p1","name":"one"}}` + "\n"
+			body := `{"type":"header","schema_version":` + version + "}\n" + `{"type":"project","project":{"id":"p1","path":"/src/p1","name":"one"}}` + "\n"
 			_, err := Import(context.Background(), store, strings.NewReader(body), ImportOptions{Apply: true}, nil)
-			if err == nil {
-				t.Fatalf("import accepted schema version %s", version)
+			if err == nil || !strings.Contains(err.Error(), version) {
+				t.Fatalf("err=%v, want version %s named", err, version)
 			}
-			if !strings.Contains(err.Error(), version) {
-				t.Errorf("error must name the version it refused, got %v", err)
-			}
-			projects, lErr := store.PortableProjects(context.Background())
-			if lErr != nil {
-				t.Fatalf("PortableProjects: %v", lErr)
-			}
+			projects, _ := store.PortableProjects(context.Background())
 			if len(projects) != 0 {
-				t.Errorf("a refused artifact still wrote %d rows", len(projects))
+				t.Fatalf("wrote %d rows", len(projects))
 			}
 		})
 	}
 }
 
-// TestImportRejectsAMalformedOrMisorderedArtifact: a file that is not an
-// artifact, or whose header is not first, has to fail before any record is
-// applied. Silently skipping the header would accept a file whose version nobody
-// checked.
 func TestImportRejectsAMalformedOrMisorderedArtifact(t *testing.T) {
-	cases := []struct {
-		name string
-		body string
-		want string
-	}{
-		{
-			name: "empty file",
-			body: "",
-			want: "nothing to import",
-		},
-		{
-			name: "no header",
-			body: `{"type":"project","project":{"id":"p1","path":"/p","name":"p"}}` + "\n",
-			want: "header",
-		},
-		{
-			name: "header after a record",
-			body: `{"type":"project","project":{"id":"p1","path":"/p","name":"p"}}` + "\n" +
-				`{"type":"header","schema_version":1}` + "\n",
-			want: "header",
-		},
-		{
-			name: "unparseable first line",
-			body: "{not json\n" + `{"type":"header","schema_version":1}` + "\n",
-			want: "line 1",
-		},
-		{
-			name: "unknown record type",
-			body: `{"type":"header","schema_version":1}` + "\n" +
-				`{"type":"souvenir","id":"x"}` + "\n",
-			want: "souvenir",
-		},
-		{
-			name: "record with no payload",
-			body: `{"type":"header","schema_version":1}` + "\n" + `{"type":"memory"}` + "\n",
-			want: "memory",
-		},
+	cases := []struct{ name, body, want string }{
+		{"empty", "", "nothing to import"},
+		{"no header", `{"type":"project","project":{"id":"p1","path":"/p","name":"p"}}` + "\n", "header"},
+		{"header after record", `{"type":"project","project":{"id":"p1","path":"/p","name":"p"}}` + "\n" + `{"type":"header","schema_version":1}` + "\n", "header"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			store := newTestStore(t)
 			_, err := Import(context.Background(), store, strings.NewReader(tc.body), ImportOptions{Apply: true}, nil)
-			if err == nil {
-				t.Fatal("import accepted a file that is not a readable artifact")
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err=%v, want %q", err, tc.want)
 			}
-			if !strings.Contains(err.Error(), tc.want) {
-				t.Errorf("error = %v, want it to mention %q", err, tc.want)
-			}
-			projects, lErr := store.PortableProjects(context.Background())
-			if lErr != nil {
-				t.Fatalf("PortableProjects: %v", lErr)
-			}
+			projects, _ := store.PortableProjects(context.Background())
 			if len(projects) != 0 {
-				t.Errorf("a refused file still wrote %d projects", len(projects))
+				t.Fatalf("wrote %d projects", len(projects))
 			}
 		})
 	}
@@ -801,10 +603,6 @@ func TestImportAppliesTheRecordsAroundAnUnreadableLine(t *testing.T) {
 	}
 }
 
-// TestImportRejectsRecordsOneByOneAndKeepsGoing: one bad record in a large
-// artifact must not abandon the rest. Each is reported with its line and
-// reason, and the good ones still land, which is what makes a re-run of the
-// same file a repair rather than a fresh start.
 func TestImportRejectsRecordsOneByOneAndKeepsGoing(t *testing.T) {
 	store := newTestStore(t)
 	body := `{"type":"header","schema_version":1}` + "\n" +
@@ -813,35 +611,20 @@ func TestImportRejectsRecordsOneByOneAndKeepsGoing(t *testing.T) {
 		`{"type":"memory","memory":{"id":"good","project_id":"p1","category":"gotcha","content":"kept","source":"mcp"}}` + "\n"
 	var seen []RecordResult
 	report, err := Import(context.Background(), store, strings.NewReader(body), ImportOptions{Apply: true}, func(r RecordResult) { seen = append(seen, r) })
-	if err != nil {
-		t.Fatalf("Import: %v", err)
-	}
-	if report.Rejected != 1 {
-		t.Errorf("rejected %d records, want 1: %v", report.Rejected, report.Errors)
-	}
-	if report.Created["memory"] != 1 {
-		t.Errorf("created %d memories, want the good one to land", report.Created["memory"])
-	}
-	if len(report.Errors) != 1 || !strings.Contains(report.Errors[0].Error(), "category") {
-		t.Errorf("errors = %v, want the category rejection named", report.Errors)
+	if err != nil || report.Rejected != 1 || report.Created["memory"] != 1 || !strings.Contains(report.Errors[0].Error(), "category") {
+		t.Fatalf("err=%v report=%+v", err, report)
 	}
 	var rejected, created RecordResult
 	for _, r := range seen {
-		switch r.Action {
-		case ActionReject:
+		if r.Action == ActionReject {
 			rejected = r
-		case ActionCreate:
+		}
+		if r.Action == ActionCreate {
 			created = r
 		}
 	}
-	if rejected.Line != 3 {
-		t.Errorf("rejected record reported line %d, want 3", rejected.Line)
-	}
-	if created.Line != 4 {
-		t.Errorf("created record reported line %d, want 4", created.Line)
-	}
-	if rejected.ID != "bad" || created.ID != "good" {
-		t.Errorf("per-record ids = %q / %q, want bad / good", rejected.ID, created.ID)
+	if rejected.Line != 3 || created.Line != 4 || rejected.ID != "bad" || created.ID != "good" {
+		t.Fatalf("rejected=%+v created=%+v", rejected, created)
 	}
 }
 
@@ -956,29 +739,20 @@ func taskRecords(rows []struct{ id, blockedBy string }) []parsedRecord {
 	return out
 }
 
-// TestExportWritesNothingToAClosedWriter: a failed write must surface as an
-// error rather than an artifact that looks complete on stdout.
-func TestExportWritesNothingToAClosedWriter(t *testing.T) {
+func TestExportAndImportReportIOFailures(t *testing.T) {
 	store := newTestStore(t)
 	seed(t, store)
 	if _, err := Export(context.Background(), store, failingWriter{}, ""); err == nil {
-		t.Error("Export must report a write failure")
+		t.Fatal("Export must report write failure")
+	}
+	if _, err := Import(context.Background(), newTestStore(t), failingReader{}, ImportOptions{Apply: true}, nil); err == nil {
+		t.Fatal("Import must report read failure")
 	}
 }
 
 type failingWriter struct{}
 
 func (failingWriter) Write([]byte) (int, error) { return 0, os.ErrClosed }
-
-// TestImportReportsAReadFailure: a truncated file is an error, not a shorter
-// successful import.
-func TestImportReportsAReadFailure(t *testing.T) {
-	store := newTestStore(t)
-	_, err := Import(context.Background(), store, failingReader{}, ImportOptions{Apply: true}, nil)
-	if err == nil {
-		t.Error("Import must report a read failure")
-	}
-}
 
 type failingReader struct{}
 

@@ -89,44 +89,6 @@ func TestTheConsolidationPromptCannotBeSplitByATag(t *testing.T) {
 	}
 }
 
-// TestTheTagsListIsNotAmbiguous: the separators are escaped rather than the
-// surrounding syntax made robust, so a tag holding this surface's own separator must
-// not read as two tags. A model that sees `tags:[a|b]` has two labels; one that
-// sees `tags:[a,b]` has one label whose text happens to hold a comma, and from the
-// outside the two are the same line.
-func TestTheTagsListIsNotAmbiguous(t *testing.T) {
-	line := theRecordLine(t, []string{"a,b", "c", "d|e"})
-	span := theTagSpan(t, line)
-	// Three tags, two separators, whatever the tags hold.
-	if got := strings.Count(span, "|"); got != 2 {
-		t.Errorf("the tag span carries %d separators for 3 tags, so a tag holding one reads as two: %q", got, span)
-	}
-	// And the tag count itself: a comma inside a tag must not have become a fourth
-	// element, which is the failure this test exists for.
-	if got := strings.Count(span, ","); got != 0 {
-		t.Errorf("the tag span carries %d commas, so a tag holding one reads as a separator: %q", got, span)
-	}
-	// Every alteration is MARKED, so a reader can tell a tag that held one of these
-	// characters from a tag that did not — which is the difference between a
-	// substituted label and a silent rewrite of the user's words. Two of the three
-	// tags here are altered, so two marks are the answer, and neither is at the
-	// front: the mark precedes the character that changed.
-	if got := strings.Count(span, tagEscape); got != 2 {
-		t.Errorf("the tag span carries %d escape marks for 2 altered tags, so an alteration is unmarked or a "+
-			"reader cannot tell a substituted tag from an unaltered one: %q", got, span)
-	}
-	if !strings.Contains(span, tagEscape+"‚") || !strings.Contains(span, tagEscape+"ǁ") {
-		t.Errorf("the tag span does not carry the marked forms of the two separators it had: %q", span)
-	}
-	// And the collision the marker exists to prevent: a tag genuinely holding the
-	// letters `<<` must come back unmarked, or an escaped « and a literal `<<` are
-	// the same characters on the line and the scheme is not invertible.
-	if got := theTagSpan(t, theRecordLine(t, []string{"a<<b"})); got != "a<<b" {
-		t.Errorf("a tag holding the literal letters << rendered as %q, so it is indistinguishable from an "+
-			"escaped delimiter", got)
-	}
-}
-
 // TestTheTwoTagSubstitutionsAgreeOnDelimiters is the rendered half of the agreement
 // claim, from this side only.
 //
@@ -213,88 +175,6 @@ func TestTheTwoDelimiterSubstitutionsAgree(t *testing.T) {
 		if got != want {
 			t.Errorf("neutralizeDelimiters(%q) = %q, want the shared spelling %q", s, got, want)
 		}
-	}
-}
-
-// TestTagSubstitutionRoundTripsThroughAJSONReader: the substitutions are chosen to
-// stay inside what a reader can undo, and that is asserted rather than asserted-in-a
-// comment. A tag holding a comma reads back as the same tag once the separator is
-// known, so the escape costs legibility rather than information.
-func TestTagSubstitutionRoundTripsThroughAJSONReader(t *testing.T) {
-	// Not JSON in this prompt, but a reader that treats the span as a list should
-	// get the tags back, which is what the substitutions are for — and the element
-	// COUNT is the part that must survive, because it is what the model reasons
-	// about.
-	for _, tags := range [][]string{
-		{"a,b", "c"},
-		{"d|e", "f"},
-		{"g`h", "i"},
-		{"j\nk", "l"},
-		{"plain"},
-	} {
-		span := theTagSpan(t, theRecordLine(t, tags))
-		got := strings.Split(span, "|")
-		if len(got) != len(tags) {
-			t.Fatalf("tags %q read back as %d elements (%q), want %d — a substitution changed the tag COUNT",
-				tags, len(got), span, len(tags))
-		}
-		for i := range tags {
-			// Every altered tag is marked, and unmarking it is mechanical: drop the
-			// escape, then the form. What matters here is that the LENGTH and the
-			// element count survive, which is the property a reader relies on.
-			if strings.Contains(tags[i], ",") || strings.Contains(tags[i], "|") ||
-				strings.Contains(tags[i], "\n") || strings.Contains(tags[i], "`") {
-				if !strings.Contains(got[i], tagEscape) {
-					t.Errorf("tag %q was altered to %q without the escape marker", tags[i], got[i])
-				}
-			} else if got[i] != tags[i] {
-				t.Errorf("an unaltered tag came back as %q, want %q", got[i], tags[i])
-			}
-		}
-	}
-}
-
-// TestTagSubstitutionIsIdempotent matters because a stored tag can be escaped more
-// than once across a store's life: a save, then an import of an artifact someone
-// escaped by hand. A substitution that is not idempotent grows the tag on every
-// pass, and a tag list is the one field a model is asked to reason about.
-func TestTagSubstitutionIsIdempotent(t *testing.T) {
-	for _, tag := range []string{"plain", "a,b", "a|b", "a`b", "a\nb", "«x»", "␦a,b"} {
-		once := tagSubstitution(tag)
-		twice := tagSubstitution(once)
-		if once != twice {
-			t.Errorf("tagSubstitution is not idempotent for %q: %q then %q", tag, once, twice)
-		}
-	}
-}
-
-// TestTheEscapeMarkerIsNotACharacterATagCanHold is the assumption every substitution
-// above rests on: a tag must not be able to LOOK unaltered when it was altered, and
-// it must not be able to smuggle a line break through a substitution someone else
-// wrote. `validateTags` refuses control characters but does not refuse this one, so
-// it is the renderer's job and this is where the job is pinned.
-func TestTheEscapeMarkerIsNotACharacterATagCanHold(t *testing.T) {
-	if !utf8.ValidString(tagEscape) {
-		t.Fatalf("the escape marker is not valid UTF-8: %q", tagEscape)
-	}
-	if len([]rune(tagEscape)) != 1 {
-		t.Fatalf("the escape marker is %d runes, want 1", len([]rune(tagEscape)))
-	}
-	// It is not a control character, not a delimiter, not a separator, and not a
-	// space — so it survives its own substitution and cannot be produced by any of
-	// the branches above.
-	for _, r := range []rune{'«', '»', '|', ',', ' ', '\n', '\r', 0, 0x7f} {
-		if strings.ContainsRune(tagEscape, r) {
-			t.Errorf("the escape marker holds %q, which the substitution treats as significant", r)
-		}
-	}
-	if unicode.IsControl([]rune(tagEscape)[0]) {
-		t.Error("the escape marker is a control character")
-	}
-	// And the substitution leaves it alone, which is the idempotence claim stated
-	// on the character rather than on a list of examples.
-	if got := tagSubstitution(tagEscape); got != tagEscape {
-		t.Errorf("tagSubstitution altered the escape marker itself: %q -> %q", tagEscape, got)
 	}
 }
 

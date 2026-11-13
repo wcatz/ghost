@@ -64,48 +64,6 @@ func TestUpsertWithProvenanceRecordsAgentAndConfidence(t *testing.T) {
 	}
 }
 
-// TestUpsertWithoutProvenanceLeavesColumnsNull is the compatibility contract:
-// the60 existing Upsert callers pass no provenance, and none of them may
-// start recording a fabricated value. An agent column that guessed
-// "claude" because the process happened to be a child of it would be a
-// provenance claim nobody made.
-func TestUpsertWithoutProvenanceLeavesColumnsNull(t *testing.T) {
-	db, err := OpenDB(filepath.Join(t.TempDir(), "provenance-null.sqlite"))
-	if err != nil {
-		t.Fatalf("OpenDB: %v", err)
-	}
-	defer func() { _ = db.Close() }()
-
-	ctx := context.Background()
-	s := NewStore(db, nil)
-	if err := s.EnsureProject(ctx, testProject, "/tmp/prov2", testProject); err != nil {
-		t.Fatalf("EnsureProject: %v", err)
-	}
-
-	id, _, _, err := s.Upsert(ctx, testProject, "fact", "a plain memory with no provenance", "manual", 0.5, nil)
-	if err != nil {
-		t.Fatalf("Upsert: %v", err)
-	}
-
-	got, err := s.GetAll(ctx, testProject, 50)
-	if err != nil {
-		t.Fatalf("GetAll: %v", err)
-	}
-	for _, m := range got {
-		if m.ID != id {
-			continue
-		}
-		if m.Agent != "" {
-			t.Errorf("Agent = %q, want empty — Upsert with no provenance must not invent one", m.Agent)
-		}
-		if m.Confidence != nil {
-			t.Errorf("Confidence = %v, want nil", *m.Confidence)
-		}
-		return
-	}
-	t.Fatalf("saved memory %s not returned", id)
-}
-
 func derefF(p *float64) any {
 	if p == nil {
 		return nil

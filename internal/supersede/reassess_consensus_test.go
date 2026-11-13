@@ -10,46 +10,8 @@ import (
 )
 
 // The gate on the REPAIR pass (#862). Everything here uses a fake classifier and
-// an in-memory store: no harness, no network.
-//
-// After #845 the ordinary pass reports a supersedes withdrawal instead of
-// making one, so `ghost supersede --reassess --apply` is the one path that
-// removes a live 'supersedes' edge — and it was acting on ONE classifier verdict
-// per edge while `--consensus` was refused beside it. That made the only
-// deletion path in the product the least-gated of the two, and #845's own
-// measurement (6 of 11 withdrawals wrong even on a UNANIMOUS NEITHER) is the
-// reason it has to be gated at all.
-//
-// The gate is the ordinary pass's (#779): N independent ClassifyBatch calls over
-// the same pairs, and an edge moves only when all N name the same outcome. A
-// split keeps the edge exactly as the pass found it and is REPORTED.
-//
-// The one population the gate does NOT cover is the DETERMINISTIC VETO, and
-// TestReassessWithdrawsAVetoedEdgeUnderTheGate is the pass's own half of that:
-// the veto is settled before the gate exists, so a vetoed edge is withdrawn with
-// no classify call at all. The help and docs state the exemption, and a stated
-// exemption nothing tests is a promise about code that may change under it.
-//
-// What the gate covers is the classifier's three REFUSING verdicts, and each is
-// pinned here in both states it can be in — unanimous (the edge goes, with the
-// reason and the sweep that verdict implies) and split (nothing moves, and the
-// split is reported). CAUSES and REVERSED also differ from NEITHER in what they
-// sweep, which is a second reason they need their own assertions rather than a
-// shared one: a denial takes the 'causes' row that contradicts it with it, and a
-// CAUSES verdict affirms that very relation, so its row sweeps nothing.
 
 // TestReassessWithdrawsAVetoedEdgeUnderTheGate: #862's help says the gate covers
-// the classifier's verdicts and not the deterministic veto. This is the other
-// half of that sentence, in the graph.
-//
-// A vetoed edge is settled into `settled` before any candidate reaches `open`,
-// so under `--consensus 3` it is withdrawn after ZERO classify calls — not three
-// of them, and not a vote the three passes would have to agree on. The fake is
-// scripted to return SUPERSEDES on every pass, so if the veto were ever moved
-// behind the gate this run would end with a unanimous confirmation and a LIVE
-// edge: the test would fail on both counts, which is the point. Asserting only
-// "withdrawn" would not catch that, because the ungated pass withdraws it too —
-// the call count is the half that distinguishes the two behaviours.
 func TestReassessWithdrawsAVetoedEdgeUnderTheGate(t *testing.T) {
 	store, db := seed(t)
 	ctx := context.Background()
@@ -101,16 +63,6 @@ func TestReassessWithdrawsAVetoedEdgeUnderTheGate(t *testing.T) {
 }
 
 // TestReassessKeepsAnEdgeTheConsensusPassesSplitOn is the issue's own case, in
-// the pass's own graph: NEITHER, NEITHER, SUPERSEDES over three passes.
-//
-// Two of three passes said both notes are still true, which is the single
-// ungated verdict that would have deleted a correct edge. Under the gate it is
-// not a majority to act on — unanimity is the rule, and #779's measurement is
-// why a 2-of-3 rule is not offered: it writes exactly the middle row.
-//
-// The assertions are the graph first and the report second. A withdrawn edge
-// cannot be argued back by any wording, and the report is only meaningful once
-// the edge is known to be there.
 func TestReassessKeepsAnEdgeTheConsensusPassesSplitOn(t *testing.T) {
 	store, db := seed(t)
 	ctx := context.Background()
@@ -163,9 +115,6 @@ func TestReassessKeepsAnEdgeTheConsensusPassesSplitOn(t *testing.T) {
 }
 
 // TestReassessWithdrawsOnAUnanimousDenial is the other half: the gate must not
-// become a block on the repair. Three NEITHER passes agree the two notes are
-// both still true, and that is the one answer every pass gave — so the edge
-// goes, with the unsupersede history row, exactly as the ungated pass does.
 func TestReassessWithdrawsOnAUnanimousDenial(t *testing.T) {
 	store, db := seed(t)
 	ctx := context.Background()
@@ -197,15 +146,6 @@ func TestReassessWithdrawsOnAUnanimousDenial(t *testing.T) {
 }
 
 // TestReassessWithoutConsensusReadsOneVerdictPerEdge is the DEFAULT, and the
-// reason the gate is opt-in: an existing script's `--reassess --apply` must do
-// what it did yesterday, on one verdict, with no extra classify calls.
-//
-// The classifier answers NEITHER on the first pass and SUPERSEDES on the two
-// after it, so a run that asked more than once would show it — and would, under
-// a gate, have kept the edge. It is asked once, and the first verdict is acted
-// on. That asymmetry is the price of not changing the default, and it is the
-// reason the CLI prints a note recommending --consensus 3 rather than turning
-// it on.
 func TestReassessWithoutConsensusReadsOneVerdictPerEdge(t *testing.T) {
 	store, db := seed(t)
 	ctx := context.Background()
@@ -237,13 +177,6 @@ func TestReassessWithoutConsensusReadsOneVerdictPerEdge(t *testing.T) {
 }
 
 // TestReassessKeepsACycleWhosePassesSplit is the cycle shape under the gate.
-//
-// A pair live in BOTH directions is judged ONCE and its verdict read as a
-// direction, so a split is the one thing it must never be: a half-withdrawn
-// cycle leaves a live edge this pass never judged, which is indistinguishable
-// from the cycle the repair was run to clear. Both edges therefore stand and the
-// pair is reported as not agreed — which is why the outcome is its own value
-// rather than CycleNoVerdict, since the passes DID answer and disagreed.
 func TestReassessKeepsACycleWhosePassesSplit(t *testing.T) {
 	store, db := seed(t)
 	ctx := context.Background()
@@ -277,16 +210,6 @@ func TestReassessKeepsACycleWhosePassesSplit(t *testing.T) {
 }
 
 // TestAGatedReassessLeavesEveryPairLiveWhenAPassFails: the failure contract
-// under a gate.
-//
-// The ungated pass keeps the partial repair #699 needed — the chunks that
-// answered are applied and only the failed call's pairs wait for a rerun. Under
-// a gate that is no longer available and pretending otherwise would be the
-// worst kind of quiet: a pair answered on one of three passes has NOT been
-// agreed by three passes, so it cannot be acted on, and withdrawing it on the
-// strength of the one answer is exactly the ungated behaviour the gate exists to
-// remove. So a failed pass leaves every edge it carried LIVE, reports them
-// unjudged, and still returns the error so the exit says "rerun me".
 func TestAGatedReassessLeavesEveryPairLiveWhenAPassFails(t *testing.T) {
 	store, db := seed(t)
 	ctx := context.Background()
@@ -313,14 +236,6 @@ func TestAGatedReassessLeavesEveryPairLiveWhenAPassFails(t *testing.T) {
 }
 
 // TestAGatedReassessSettlesThePairsThatReachedAQuorum is the claim that keeps
-// the gate from being all-or-nothing, and it is per PAIR rather than per pass.
-//
-// Two live edges, one batch, one verdict list: the first pair is answered NEITHER
-// by all three passes and the second splits. The gate must move exactly the
-// first and leave the second alone — a gate that refused everything because one
-// pair disagreed would be a repair that cannot repair anything on a corpus where
-// the model is unstable about one pair, which is the corpus #845 was measured
-// on. The graph is the witness: exactly one edge gone.
 func TestAGatedReassessSettlesThePairsThatReachedAQuorum(t *testing.T) {
 	store, db := seed(t)
 	ctx := context.Background()
@@ -345,9 +260,6 @@ func TestAGatedReassessSettlesThePairsThatReachedAQuorum(t *testing.T) {
 	}
 
 	// The export pair is denied on all three passes; the relay pair answers
-	// SUPERSEDES once and NEITHER twice, so it splits 2-1. The fake is handed
-	// CONTENT rather than ids, so the script matches on the newer note's text —
-	// which is also why the two pairs must carry distinct text.
 	says := func(relay Relation) func(string, string) Relation {
 		return func(newer, _ string) Relation {
 			if newer == newerB {
@@ -382,19 +294,9 @@ func TestAGatedReassessSettlesThePairsThatReachedAQuorum(t *testing.T) {
 }
 
 // TestAReassessOptionsBelowTheMinimumIsTheUngatedRepair: the clamp, stated so a
-// programmatic caller is not surprised by it.
-//
-// ReassessOptions is exported and MinConsensus is a refusal the CLI makes at its
-// own boundary, so the pass reads a smaller number the way RunWith reads its own:
-// as the ungated repair, with Result.Consensus carrying back what actually ran.
-// A caller that expected an error would have to handle one this function never
-// returns, and a caller that expected a gate must ask for MinConsensus.
 func TestAReassessOptionsBelowTheMinimumIsTheUngatedRepair(t *testing.T) {
 	for _, n := range []int{0, 1, -3} {
 		// A fresh store and a fresh classifier per case: the pass above withdraws
-		// the edge, and perPassClassifier indexes its script by how many passes it
-		// has already answered, so a reused fake would hand the second case the
-		// second script entry.
 		store, db := seed(t)
 		ctx := context.Background()
 		_, _ = seedNpmPackagePair(t, store, db)
@@ -418,15 +320,6 @@ func TestAReassessOptionsBelowTheMinimumIsTheUngatedRepair(t *testing.T) {
 }
 
 // TestAGatedReassessLeavesAnUnreadablePairAlone is the third state, and the one
-// a majority rule would have got wrong in the other direction: all N passes
-// answered UNREADABLY.
-//
-// That is `undecided`, not `disputed` — the ordinary pass's own distinction, read
-// through the same quorum function — and it must not become a withdrawal or a
-// split report. Nothing was voted for, so the edge stands, the pair is counted
-// as UNKNOWN (which is the bucket a later parser improvement must be able to
-// fall out of without the meaning of the count moving), and no NotAgreed row is
-// printed for a harness fault.
 func TestAGatedReassessLeavesAnUnreadablePairAlone(t *testing.T) {
 	store, db := seed(t)
 	ctx := context.Background()
@@ -460,20 +353,6 @@ func TestAGatedReassessLeavesAnUnreadablePairAlone(t *testing.T) {
 }
 
 // seedPairWithAContradictingCausesEdge is the graph the two REFUSING verdicts
-// need, and it is a pair plus one row: a live 'supersedes' edge newer→older, and
-// a live 'causes' edge older→newer saying the pair stands. Those two assert
-// opposite things about one pair, so whichever withdrawal settles the pair has to
-// say what became of the other relation's row — and that is reported two ways, a
-// count on the withdrawal and the edges left in the store, which is why the tests
-// below assert both rather than trusting either.
-//
-// The 'causes' edge runs older→newer, the reverse of 'supersedes', because it is
-// the direction the ordinary pass writes it in. Seeding it the other way round
-// would put the contradicting row where the sweep does not look, so the count
-// would read 0 and the test would be failing about its fixture.
-//
-// seedNpmPackagePair's timestamps are pinned a day apart and its link is
-// backdated, so `orient` knows the direction and the pair is a candidate.
 func seedPairWithAContradictingCausesEdge(t *testing.T) (store *memory.Store, newer, older string) {
 	t.Helper()
 	store, db := seed(t)
@@ -483,15 +362,6 @@ func seedPairWithAContradictingCausesEdge(t *testing.T) (store *memory.Store, ne
 }
 
 // TestReassessWithdrawsOnAUnanimousReversedVerdict: REVERSED under the gate, in
-// the state where every pass gave it.
-//
-// REVERSED names the note the pass was asked ABOUT as the obsolete one, so it
-// denies that this edge asserts — the same denial NEITHER makes, arrived at from
-// the other direction, and it takes the 'causes' row with it. Leaving that row
-// live would replace one contradiction with another while the report claimed a
-// repair, so the sweep is asserted as well as the withdrawal: a change that kept
-// the first and dropped the second still "withdrew the edge", and the operator
-// reading the count is the one who has to be able to tell.
 func TestReassessWithdrawsOnAUnanimousReversedVerdict(t *testing.T) {
 	store, newer, older := seedPairWithAContradictingCausesEdge(t)
 	ctx := context.Background()
@@ -552,14 +422,6 @@ func TestReassessWithdrawsOnAUnanimousReversedVerdict(t *testing.T) {
 }
 
 // TestReassessKeepsAnEdgeWhenAReversedVerdictSplits: the same verdict, split
-// 2-1, and the edge stays exactly as it was.
-//
-// Two of three passes said the note this edge supersedes is the obsolete one.
-// Under the gate that is not a majority to act on — unanimity is the rule — and
-// the cost of holding it is a wrong edge left in place for one run, against a
-// wrong withdrawal that no rerun would notice. The second row is asserted too:
-// a split must move no relation's rows, so the 'causes' row that still stands is
-// not swept by a verdict that was never agreed on.
 func TestReassessKeepsAnEdgeWhenAReversedVerdictSplits(t *testing.T) {
 	store, newer, older := seedPairWithAContradictingCausesEdge(t)
 	ctx := context.Background()
@@ -600,17 +462,6 @@ func TestReassessKeepsAnEdgeWhenAReversedVerdictSplits(t *testing.T) {
 
 // TestReassessWithdrawsOnAUnanimousCausesVerdict: CAUSES under the gate, and the
 // one refusal whose withdrawal sweeps NOTHING.
-//
-// CAUSES says the older note is still independently true, so it denies that the
-// newer one replaced it — the 'supersedes' edge asserts exactly what was denied,
-// and the edge goes with the reason named after the verdict. But it affirms the
-// 'causes' relation rather than denying it, so the live 'causes' row on this pair
-// is a row this verdict ENDORSES. Sweeping it would delete the one edge that
-// records what the classifier found, in the name of applying what it found, so
-// the row's sweep count is asserted to be zero and the edge is asserted still
-// live. That asymmetry is why CAUSES cannot share NEITHER's assertions: the two
-// verdicts both withdraw the supersedes edge, and only one of them touches the
-// second relation.
 func TestReassessWithdrawsOnAUnanimousCausesVerdict(t *testing.T) {
 	store, newer, older := seedPairWithAContradictingCausesEdge(t)
 	ctx := context.Background()
@@ -655,12 +506,6 @@ func TestReassessWithdrawsOnAUnanimousCausesVerdict(t *testing.T) {
 }
 
 // TestReassessKeepsAnEdgeWhenTheCausesVerdictSplits: CAUSES split 2-1, and the
-// edge stays.
-//
-// The same rule as the reversed split, asserted over the other refusal because a
-// test that only ever splits one verdict tests the split once: two passes saying
-// the older note still stands is not agreement about what replaced it, and the
-// 'supersedes' row asserting that is the row this run leaves for the next one.
 func TestReassessKeepsAnEdgeWhenTheCausesVerdictSplits(t *testing.T) {
 	store, newer, older := seedPairWithAContradictingCausesEdge(t)
 	ctx := context.Background()
@@ -697,15 +542,6 @@ func TestReassessKeepsAnEdgeWhenTheCausesVerdictSplits(t *testing.T) {
 }
 
 // partialOnPassNClassifier answers NEITHER for every pair on every pass, except
-// the pass named by partialAt: that call answers only the first `answered` pairs
-// and reports the rest as a chunk that died, which is the shape
-// RelationClassifier returns when one batched chunk came back and the next did
-// not.
-//
-// The pair order the pass handed this call is recorded rather than assumed —
-// LinksByRelationSource has no ORDER BY, so a test that pinned "the first pair is
-// the export pair" would be reading the store's row order, and would quietly be
-// testing the wrong pair on a different store or after a VACUUM.
 type partialOnPassNClassifier struct {
 	partialAt  int
 	answered   int
@@ -742,15 +578,6 @@ func fill(rel Relation, n int) []Relation {
 }
 
 // TestAGatedReassessStillAppliesAPairAnsweredByEveryPassWhenALaterChunkDies:
-// docs/cli.md promises a gated repair is not all-or-nothing under a FAILURE too,
-// not only under a split, and this is that promise in the graph.
-//
-// classifyVotes stops asking once a call fails, so a pair the failed call did not
-// answer is short of a quorum and stays live — but a pair the failing pass DID
-// answer, in the prefix its partial error declares complete, holds all N answers
-// and is settled like any other. Without this the doc's claim rests on a reading
-// of the loop, and the opposite reading (the loop stops, so nothing settles once
-// anything fails) is one edit away.
 func TestAGatedReassessStillAppliesAPairAnsweredByEveryPassWhenALaterChunkDies(t *testing.T) {
 	store, db := seed(t)
 	ctx := context.Background()

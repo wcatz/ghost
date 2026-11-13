@@ -16,10 +16,6 @@ func namesOf(env []string) map[string]string {
 	return out
 }
 
-// TestHarnessEnvDropsCredentialsNotOurs: children receive memory text, and
-// memory text routinely contains third-party content read out of a repository.
-// They used to inherit almost everything and strip only three LLM keys, so
-// AWS, GitHub, SOPS, age and kube credentials rode along merely for being set.
 func TestHarnessEnvDropsCredentialsNotOurs(t *testing.T) {
 	base := []string{
 		"PATH=/usr/bin", "HOME=/home/u",
@@ -55,9 +51,6 @@ func TestHarnessEnvDropsCredentialsNotOurs(t *testing.T) {
 	}
 }
 
-// TestHarnessEnvKeepsWhatAHarnessNeeds is the other half: an allowlist that is
-// too tight breaks every harness invocation in ways that only show up against
-// a real binary, so the required set is asserted explicitly.
 func TestHarnessEnvKeepsWhatAHarnessNeeds(t *testing.T) {
 	base := []string{
 		"PATH=/usr/bin", "HOME=/home/u", "USER=u", "LOGNAME=u", "SHELL=/bin/sh",
@@ -77,14 +70,10 @@ func TestHarnessEnvKeepsWhatAHarnessNeeds(t *testing.T) {
 		"PATH": "/usr/bin", "HOME": "/home/u", "TMPDIR": "/tmp/ghost",
 		"LANG": "C.UTF-8", "XDG_CONFIG_HOME": "/home/u/.config",
 		"HTTP_PROXY": "http://proxy:3128", "SSL_CERT_FILE": "/etc/ssl/certs/ca.pem",
-		"GHOST_OPENCODE_MODEL":       "opencode/big-pickle",
-		"GHOST_EMBEDDING_OLLAMA_URL": "http://localhost:11434",
-		"GHOST_CLI_CLAUDE_BINARY":    "/usr/local/bin/claude",
-		"GHOST_SCRATCH_DIR":          "/tmp/scratch",
-		// A configuration variable must reach a harness child on the same terms
-		// as every other one: a reflect/resolve/supersede phase that spawns
-		// opencode must not see a different configuration than the lifecycle
-		// coordinator that spawned it.
+		"GHOST_OPENCODE_MODEL":         "opencode/big-pickle",
+		"GHOST_EMBEDDING_OLLAMA_URL":   "http://localhost:11434",
+		"GHOST_CLI_CLAUDE_BINARY":      "/usr/local/bin/claude",
+		"GHOST_SCRATCH_DIR":            "/tmp/scratch",
 		"GHOST_LIFECYCLE_MIN_INTERVAL": "30m",
 	} {
 		if got[k] != want {
@@ -93,10 +82,6 @@ func TestHarnessEnvKeepsWhatAHarnessNeeds(t *testing.T) {
 	}
 }
 
-// TestHarnessEnvPassthroughEscapeHatch: a deny-by-default policy fails closed
-// in ways that are invisible from outside — the symptom is a harness that
-// stops working for a reason readable only inside this file. There has to be a
-// way out that does not require patching Ghost.
 func TestHarnessEnvPassthroughEscapeHatch(t *testing.T) {
 	t.Setenv("GHOST_PASSTHROUGH_ENV", "MY_SITE_VAR, ANOTHER_ONE")
 
@@ -112,10 +97,6 @@ func TestHarnessEnvPassthroughEscapeHatch(t *testing.T) {
 	}
 }
 
-// TestHarnessEnvNeverPassesLLMKeysEvenWhenOptedIn: harness calls are
-// subscription-billed and must never silently become direct API calls. That
-// invariant should not depend on remembering to leave a name off a list, so
-// the strip runs after the allowlist and after the escape hatch.
 func TestHarnessEnvNeverPassesLLMKeysEvenWhenOptedIn(t *testing.T) {
 	t.Setenv("GHOST_PASSTHROUGH_ENV", "ANTHROPIC_API_KEY,OPENAI_API_KEY,GOOSE_PROVIDER__API_KEY")
 	t.Setenv("ANTHROPIC_API_KEY", "sk-should-never-pass")
@@ -136,9 +117,6 @@ func TestHarnessEnvNeverPassesLLMKeysEvenWhenOptedIn(t *testing.T) {
 	}
 }
 
-// TestCLIClient_ChildDoesNotInheritSecrets is the focused Claude wiring
-// regression. The table-driven policy tests in harness_policy_test.go cover
-// the same spawn funnel for all four clients.
 func TestCLIClient_ChildDoesNotInheritSecrets(t *testing.T) {
 	bin := fakeClaudeBinary(t, `
 for v in AWS_SECRET_ACCESS_KEY GITHUB_TOKEN SOPS_AGE_KEY_FILE KUBECONFIG; do
@@ -165,23 +143,17 @@ printf '%s' '{"memories":[]}'
 	}
 }
 
-// TestHarnessEnvSurvivesAnEmptyParent keeps the function total: a parent with
-// no environment produces an empty child environment, while any PATH present
-// in the parent is never silently dropped.
 func TestHarnessEnvSurvivesAnEmptyParent(t *testing.T) {
 	got := namesOf(harnessEnv(nil, harnessClaude))
 	if len(got) != 0 {
 		t.Errorf("with no parent env the child should get nothing, got %v", got)
 	}
-	// The real guarantee: if PATH exists it is kept, never silently dropped.
 	got = namesOf(harnessEnv([]string{"PATH=/bin"}, harnessClaude))
 	if got["PATH"] != "/bin" {
 		t.Errorf("PATH = %q, want /bin", got["PATH"])
 	}
 }
 
-// lookupFold finds a variable the way Windows treats them — by name, not by
-// the exact spelling the parent happened to use.
 func lookupFold(env []string, want string) (string, bool) {
 	for _, kv := range env {
 		if k, v, ok := strings.Cut(kv, "="); ok && strings.EqualFold(k, want) {
@@ -191,13 +163,6 @@ func lookupFold(env []string, want string) (string, bool) {
 	return "", false
 }
 
-// TestHarnessEnvAcceptsWindowsVariableSpelling: Windows spells these Path and
-// Home, and os.Environ() hands back exactly that case. A case-sensitive map
-// lookup dropped them, so a harness child on Windows started without a PATH
-// and could not find its own binaries — the allowlist failing in the one
-// place deny-by-default is hardest to diagnose.
-//
-// isTempDirKey already normalizes with EqualFold for the same reason.
 func TestHarnessEnvAcceptsWindowsVariableSpelling(t *testing.T) {
 	got := harnessEnv([]string{
 		"Path=C:\\Windows\\system32", // Windows' own spelling of PATH

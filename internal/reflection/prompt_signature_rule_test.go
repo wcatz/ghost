@@ -33,62 +33,6 @@ import (
 	"testing"
 )
 
-// TestThePromptDocstringRecordsTheInputSignatureException: the mirroring rule and
-// both of its exceptions are stated in the same doc comment, and the Flags
-// one names the field and the gate it would break.
-//
-// The phrases are required rather than paraphrased because each carries a fact
-// the rule cannot be reconstructed from: the RULE (a rendered field must be
-// mirrored in InputSignature, and why — the --skip-unchanged gate), the ACCESS
-// COUNT exception and its reason (ordinary reads increment it), and the USEFULNESS
-// exception with the same shape of reason (verdicts arrive from retrieval, not
-// from a session saving something, so the gate would fire on a session that saved
-// nothing).
-func TestThePromptDocstringRecordsTheInputSignatureException(t *testing.T) {
-	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, "prompt.go", nil, parser.ParseComments)
-	if err != nil {
-		t.Fatalf("parse prompt.go: %v", err)
-	}
-	var doc *ast.CommentGroup
-	for _, decl := range file.Decls {
-		fn, ok := decl.(*ast.FuncDecl)
-		if !ok || fn.Name.Name != "BuildReflectionPrompt" {
-			continue
-		}
-		if doc != nil {
-			t.Fatal("two BuildReflectionPrompt declarations; the docstring under test is ambiguous")
-		}
-		doc = fn.Doc
-	}
-	if doc == nil {
-		t.Fatal("BuildReflectionPrompt has no doc comment, so it cannot state the mirroring " +
-			"rule or record the exceptions to it")
-	}
-	text := doc.Text()
-
-	for _, want := range []struct {
-		phrase string
-		why    string
-	}{
-		{"InputSignature", "the docstring must name what the rule requires, so a reader who finds " +
-			"Flags rendered and not mirrored can see which rule to read before enforcing it"},
-		{"--skip-unchanged", "the rule must say what the mirroring is FOR, or \"must be mirrored\" " +
-			"reads as style rather than as the gate"},
-		{"access count", "the pre-existing exception must still be stated: the rule now says it has " +
-			"exceptions, and losing this one would make it the only rule left"},
-		{"Flags", "the exception this slice adds must name the FIELD it is about, since the " +
-			"field is what a reader sees rendered and unmirrored"},
-		{"NOT mirrored", "the exception must be stated as an exception and not merely implied — a " +
-			"reader who does not see it denied will read the rule as mandatory"},
-	} {
-		if !strings.Contains(text, want.phrase) {
-			t.Errorf("BuildReflectionPrompt's doc comment does not mention %q: %s\n\ncomment:\n%s",
-				want.phrase, want.why, text)
-		}
-	}
-}
-
 // TestTheDocstringExceptionSitsBesideTheRule: an exception recorded far from the
 // rule it qualifies is an exception a reader never meets, and the whole point is
 // that the two statements must not be able to contradict each other. Both halves

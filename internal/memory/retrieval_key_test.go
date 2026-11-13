@@ -1,8 +1,5 @@
 package memory
 
-// #646: the per-install key behind the retrieval record's query digest, and the
-// properties that make it a privacy control rather than a hash.
-
 import (
 	"bytes"
 	"context"
@@ -20,14 +17,6 @@ import (
 	"time"
 )
 
-// useQueryKeyDir points the key at a temp tree and clears the per-process cache,
-// because the key is resolved once and a test cannot otherwise see the second
-// resolution it is asking about.
-//
-// It takes the ghost DATA directory (what fakeDataDir returns) and points
-// XDG_DATA_HOME at its parent, because config.DataDirPath joins "ghost" onto
-// XDG_DATA_HOME itself. Both are cleared on cleanup: the env var, or one test
-// would point the next one's key at the wrong tree.
 func useQueryKeyDir(t *testing.T, dataDir string) {
 	t.Helper()
 	t.Setenv("XDG_DATA_HOME", filepath.Dir(dataDir))
@@ -35,21 +24,6 @@ func useQueryKeyDir(t *testing.T, dataDir string) {
 	t.Cleanup(resetQueryKeyCache)
 }
 
-// TestTheAssemblerCannotCreateAKeyOnTheMachineItRunsOn: the property that made
-// the key a SEAM method rather than a package call, pinned from this side.
-//
-// A per-install key is resolved through the filesystem, so any code that reaches
-// for it can write to the machine it happens to be running on. That is exactly
-// what happened: the assembler resolved the key itself, and running this
-// repository's own assemble suite CREATED A KEY IN THE DEVELOPER'S REAL DATA
-// DIRECTORY — silently, and then reused the one a previous run had left, so the
-// suite's behaviour depended on the state of the machine.
-//
-// So the key is reachable only through a Store's DigestQuery method, and this
-// asserts the reachability rather than the hygiene: the digest exists, the sink
-// can produce it, and nothing in the assembling path needs a filesystem. The
-// hygiene half is the mcpserver TestMain that sandboxes the XDG roots, which is
-// what a run of that suite depends on.
 func TestTheAssemblerCannotCreateAKeyOnTheMachineItRunsOn(t *testing.T) {
 	dir := fakeDataDir(t)
 	useQueryKeyDir(t, dir)
@@ -62,8 +36,6 @@ func TestTheAssemblerCannotCreateAKeyOnTheMachineItRunsOn(t *testing.T) {
 	if len(digest) != 64 {
 		t.Fatalf("the store's digest is %d characters, want 64: %q", len(digest), digest)
 	}
-	// The key is the STORE's, so the store's own reader is the only thing that has
-	// to agree with it about what a digest looks like.
 	if err := s.RecordRetrieval(context.Background(), RetrievalRecord{
 		ProjectID: testProject, Source: "search", QueryHash: digest,
 		Outcome: "answerable", Reason: "floor_met",
@@ -80,15 +52,6 @@ func TestTheAssemblerCannotCreateAKeyOnTheMachineItRunsOn(t *testing.T) {
 	}
 }
 
-// TestQueryDigestIsKeyedNotAPlainHashOfTheQuery: the reason the digest is an
-// HMAC, asserted against the thing it replaces.
-//
-// A bare sha256 of a query is a fingerprint, not a privacy property. The question
-// is short ("who owns the k8s cluster?"), the store's own memories are a
-// ready-made dictionary of the things a user would ask, and hashing stops
-// neither — a party who can guess the question can CONFIRM it, which is all a
-// fingerprint has to do. A key is what makes a guess insufficient, so the
-// assertion is the direct one: the digest must not be the unsalted hash.
 func TestQueryDigestIsKeyedNotAPlainHashOfTheQuery(t *testing.T) {
 	useQueryKeyDir(t, fakeDataDir(t))
 
@@ -110,15 +73,6 @@ func TestQueryDigestIsKeyedNotAPlainHashOfTheQuery(t *testing.T) {
 	}
 }
 
-// TestQueryDigestGroupsWithinAStoreAndNotAcross: what the audit can and cannot
-// group, which is the one thing the key is allowed to change.
-//
-// Grouping by "the same question was asked" is the column's whole purpose, and
-// an HMAC keeps it inside one store: the same query under the same key is the
-// same digest. Across two keys it is not, and that is the deliberate cost — a
-// `ghost backup` restored on another machine re-keys every row it carries, so the
-// restored records do not group with the original's, and nothing groups them by
-// content either. That is the point of the key rather than a defect in it.
 func TestQueryDigestGroupsWithinAStoreAndNotAcross(t *testing.T) {
 	useQueryKeyDir(t, fakeDataDir(t))
 
@@ -147,8 +101,6 @@ func TestQueryDigestGroupsWithinAStoreAndNotAcross(t *testing.T) {
 	}
 }
 
-// TestQueryDigestForAnEmptyQueryIsEmpty: a call with no question carries no
-// fingerprint, and a session-start injection is exactly that.
 func TestQueryDigestForAnEmptyQueryIsEmpty(t *testing.T) {
 	useQueryKeyDir(t, fakeDataDir(t))
 	got, err := QueryDigest("")
@@ -160,15 +112,6 @@ func TestQueryDigestForAnEmptyQueryIsEmpty(t *testing.T) {
 	}
 }
 
-// TestTheQueryKeyLivesOutsideTheDatabaseAndIsNotInABackup: where the key is, and
-// the reason it is not in the database file.
-//
-// `ghost backup` is a VACUUM INTO of ghost.db, so anything inside ghost.db is in
-// every backup the user keeps — and a backup is the single most ordinary thing to
-// hand a colleague. A key stored in the database would ship with the very records
-// it protects. So the key is a sibling FILE in the data directory, and this
-// asserts both halves: it exists there with no group or other access, and its
-// bytes are absent from the database file itself.
 func TestTheQueryKeyLivesOutsideTheDatabaseAndIsNotInABackup(t *testing.T) {
 	dir := fakeDataDir(t)
 	useQueryKeyDir(t, dir)
@@ -184,11 +127,6 @@ func TestTheQueryKeyLivesOutsideTheDatabaseAndIsNotInABackup(t *testing.T) {
 	if len(raw) < 32 {
 		t.Errorf("the key file holds %d bytes, want at least 32", len(raw))
 	}
-	// The one POSIX-only claim in this file, and skipped rather than costing the
-	// whole file a //go:build !windows tag: Windows has no group or other bits, so
-	// the mode there says nothing about the key's protection. Everything else here
-	// — the key's location, its atomic publish, its refusal on a corrupt file — is
-	// platform-independent and worth running there.
 	if runtime.GOOS != "windows" {
 		info, err := os.Stat(keyPath)
 		if err != nil {
@@ -199,7 +137,6 @@ func TestTheQueryKeyLivesOutsideTheDatabaseAndIsNotInABackup(t *testing.T) {
 		}
 	}
 
-	// A real store beside it, and the key must not be inside.
 	dbPath := filepath.Join(dir, "ghost.db")
 	db, err := OpenDB(dbPath)
 	if err != nil {
@@ -221,7 +158,6 @@ func TestTheQueryKeyLivesOutsideTheDatabaseAndIsNotInABackup(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("RecordRetrieval: %v", err)
 	}
-	// Fold the WAL back, so the bytes we read are the whole database.
 	if _, err := db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
 		t.Fatalf("checkpoint: %v", err)
 	}
@@ -235,20 +171,7 @@ func TestTheQueryKeyLivesOutsideTheDatabaseAndIsNotInABackup(t *testing.T) {
 	}
 }
 
-// TestQueryDigestSaysSoWhenTheKeyCannotBeRead: the failure path, and it refuses
-// to record a fingerprint rather than falling back to an unsalted one.
-//
-// A key that cannot be created — a read-only data directory, a permissions
-// problem — must NOT degrade to a bare sha256, because that is exactly the
-// fingerprint the key exists to remove, and it would degrade silently. The digest
-// comes back EMPTY with the reason; the record still carries its verdicts, and
-// the caller logs that the grouping is unavailable.
 func TestQueryDigestSaysSoWhenTheKeyCannotBeRead(t *testing.T) {
-	// A regular FILE where the data directory's parent should be, so creating the
-	// key's directory fails with ENOTDIR. A read-only directory would have been the
-	// obvious fixture and it is the wrong one: the suite can run as root, where a
-	// mode of 0500 stops nothing, and a test that passes because the OS ignored it
-	// is worse than no test.
 	root := t.TempDir()
 	blocker := filepath.Join(root, "not-a-directory")
 	if err := os.WriteFile(blocker, nil, 0o600); err != nil {
@@ -267,22 +190,11 @@ func TestQueryDigestSaysSoWhenTheKeyCannotBeRead(t *testing.T) {
 	}
 }
 
-// TestAFailedKeyIsRetriedOnABackoffRatherThanEverySearch: the cost of not having
-// a key, which has two wrong answers and one right one.
-//
-// Caching the failure forever makes one unlucky moment permanent — a server that
-// started a moment before its key existed would record an empty hash forever.
-// NEVER caching it is worse than that: every search would re-run the whole
-// resolution — data-directory lookup, read, mkdir, rand, a temp file, an fsync
-// and a link — while holding the cache mutex, for a store that simply cannot keep
-// a key. So a failure is remembered WITH A BACKOFF: cheap to repeat, and not
-// permanent.
 func TestAFailedKeyIsRetriedOnABackoffRatherThanEverySearch(t *testing.T) {
 	dataDir := fakeDataDir(t)
 	useQueryKeyDir(t, dataDir)
 	keyPath := filepath.Join(dataDir, queryKeyFileName)
 
-	// Present but unusable: a corrupt key file is a refusal, not a race.
 	if err := os.WriteFile(keyPath, []byte("not hex at all"), 0o600); err != nil {
 		t.Fatalf("seed a corrupt key: %v", err)
 	}
@@ -291,8 +203,6 @@ func TestAFailedKeyIsRetriedOnABackoffRatherThanEverySearch(t *testing.T) {
 	if first == nil {
 		t.Fatal("QueryDigest accepted a key file that is not hex")
 	}
-	// Within the backoff the SAME failure comes back, and the cost is a map
-	// lookup rather than the whole resolution.
 	_, second := store.DigestQuery("who owns the k8s cluster")
 	if second == nil {
 		t.Fatal("QueryDigest succeeded on the second call inside the backoff")
@@ -300,15 +210,11 @@ func TestAFailedKeyIsRetriedOnABackoffRatherThanEverySearch(t *testing.T) {
 	if second.Error() != first.Error() {
 		t.Errorf("the cached failure changed between calls:\n first:  %v\n second: %v", first, second)
 	}
-	// The backoff is bounded, or "not permanent" would be a claim with no number
-	// behind it.
 	if queryKeyRetryDelay <= 0 || queryKeyRetryDelay > 5*time.Minute {
 		t.Errorf("the retry delay is %v, want a positive value short enough that a recovered key is "+
 			"picked up while a server runs", queryKeyRetryDelay)
 	}
 
-	// Repair it the way an operator would. An ordinary call is still inside the
-	// backoff, so it does NOT pick it up — and that is the point of the backoff.
 	good := strings.Repeat("ab", queryKeyBytes)
 	if err := os.WriteFile(keyPath, []byte(good), 0o600); err != nil {
 		t.Fatalf("repair the key: %v", err)
@@ -316,7 +222,6 @@ func TestAFailedKeyIsRetriedOnABackoffRatherThanEverySearch(t *testing.T) {
 	if _, err := store.DigestQuery("who owns the k8s cluster"); err == nil {
 		t.Error("a call inside the backoff picked up a repaired key — the backoff is not being honoured")
 	}
-	// And the warm path forces the attempt, which is what a server restart is.
 	if err := store.WarmQueryKey(); err != nil {
 		t.Fatalf("WarmQueryKey after a repair: %v — startup must not inherit a cached failure", err)
 	}
@@ -338,25 +243,6 @@ func mustDecodeHex(t *testing.T, s string) []byte {
 	return b
 }
 
-// TestWarmingTheQueryKeyTakesTheFilesystemOffTheSearchPath: the placement fix, and
-// it is asserted by removing the filesystem rather than by timing anything.
-//
-// Resolving the key costs a data-directory resolution, a read, and on a first
-// install a mkdir and a create. That work happened inside every search, on the
-// first call of every process — unbounded filesystem I/O between the answer being
-// computed and Run returning, which is precisely the wait the record write's own
-// 250ms budget was added to prevent, and it landed on the first search a user
-// ever ran. WarmQueryKey moves it to startup.
-//
-// The test deletes the key file after warming — and only the file, which is the
-// stronger claim: the data directory still exists and is still writable, so a later
-// digest that failed could only have failed because the key came from memory rather
-// than from disk. A warm key that still reads the file fails here.
-//
-// This is a property of the KEY's cache, not of the placement; what asserts the
-// placement — that mcpserver.New actually calls the warmer — is
-// internal/mcpserver/retrieval_warm_test.go. Both are needed, because either alone
-// leaves the search path resolving a key on its first call.
 func TestWarmingTheQueryKeyTakesTheFilesystemOffTheSearchPath(t *testing.T) {
 	dataDir := fakeDataDir(t)
 	useQueryKeyDir(t, dataDir)
@@ -370,7 +256,6 @@ func TestWarmingTheQueryKeyTakesTheFilesystemOffTheSearchPath(t *testing.T) {
 		t.Fatalf("DigestQuery: %v", err)
 	}
 
-	// Remove the key entirely. A warmed key must not need it again.
 	if err := os.RemoveAll(filepath.Join(dataDir, queryKeyFileName)); err != nil {
 		t.Fatalf("remove the key file: %v", err)
 	}
@@ -384,26 +269,11 @@ func TestWarmingTheQueryKeyTakesTheFilesystemOffTheSearchPath(t *testing.T) {
 	}
 }
 
-// TestAShortKeyFileIsTreatedAsStillBeingWrittenRatherThanCorrupt: the retry
-// loop's two verdicts, and the one that was missing.
-//
-// A key file that is ABSENT, and a key file that is present but TOO SHORT, are
-// both what a write in progress looks like — the no-hard-link fallback creates
-// then writes, and a process that crashed mid-write leaves the same state. Both
-// are worth a few tens of milliseconds of retry. A file of full length that is
-// not hex is something else: corruption, or a human's edit, and re-reading it on
-// a loop is work for the same answer.
-//
-// The first version of the loop bailed on anything that was not os.ErrNotExist,
-// so the short-file case -- the one the loop exists for -- was refused on the first
-// attempt. The short read must be a distinguishable verdict, not a generic
-// "unreadable", or the loop cannot tell them apart.
 func TestAShortKeyFileIsTreatedAsStillBeingWrittenRatherThanCorrupt(t *testing.T) {
 	dataDir := fakeDataDir(t)
 	useQueryKeyDir(t, dataDir)
 	keyPath := filepath.Join(dataDir, queryKeyFileName)
 
-	// A full-length but non-hex file: corruption, and an immediate refusal.
 	store := testStore(t)
 	corrupt := strings.Repeat("z", queryKeyBytes*2)
 	if err := os.WriteFile(keyPath, []byte(corrupt), 0o600); err != nil {
@@ -420,14 +290,6 @@ func TestAShortKeyFileIsTreatedAsStillBeingWrittenRatherThanCorrupt(t *testing.T
 		t.Error("a full-length non-hex file was reported as short — the retry loop would spin on it")
 	}
 
-	// A short file: the "still being written" verdict, which the loop retries. The
-	// store is warmed between the two scenarios so the second is a REAL attempt and
-	// not the first scenario's cached refusal.
-	//
-	// The content is deliberately NOT valid hex, and that is what makes the test
-	// bite: a short VALID-hex file decodes to a short key and is caught by the
-	// decoded-length check, so removing the raw-length check would not be visible.
-	// A short file that is also not hex can ONLY be reported as short.
 	if err := os.WriteFile(keyPath, []byte("zz"), 0o600); err != nil {
 		t.Fatalf("seed a short key: %v", err)
 	}
@@ -441,25 +303,11 @@ func TestAShortKeyFileIsTreatedAsStillBeingWrittenRatherThanCorrupt(t *testing.T
 	if !errors.Is(err, errQueryKeyShort) {
 		t.Errorf("a 2-byte file is reported as %v, want the errQueryKeyShort verdict so the loop retries it", err)
 	}
-	// And after the loop's attempts, the message names the size and the remedy,
-	// because a short file a human has to act on is different from a race.
 	if !strings.Contains(err.Error(), "too short") {
 		t.Errorf("the short-file message does not say what is wrong: %v", err)
 	}
 }
 
-// scriptedKeyReader hands out a fixed sequence of outcomes and counts the calls,
-// which is how "keeps looking" and "refuses immediately" are asserted at all:
-// both are claims about the NUMBER of attempts, and with a real file that number
-// would have to be observed through a 40ms window and a goroutine, which is a
-// clock in a test of a clock.
-//
-// The first version of these tests did exactly that, and a reviewer's point about
-// it was correct: with attempts at ~0/10/20/30/40ms and the writer publishing at
-// 30ms, only ~10ms of slack remained, and a late timer under a saturated runner
-// would fail them with the production code perfectly correct. The filesystem
-// version readPublishedKey sits behind is now covered by the entry-point test
-// below; the POLICY is here, with no clock in it at all.
 type scriptedKeyReader struct {
 	outcomes []keyOutcome
 	calls    int
@@ -474,8 +322,6 @@ func (s *scriptedKeyReader) read() ([]byte, error) {
 	i := s.calls
 	s.calls++
 	if i >= len(s.outcomes) {
-		// Past the end: repeat the last outcome, so a loop that keeps going is
-		// visibly still going rather than panicking.
 		i = len(s.outcomes) - 1
 	}
 	return s.outcomes[i].key, s.outcomes[i].err
@@ -490,8 +336,6 @@ func corruptKeyError() error {
 		"edited; delete it to start a new key")
 }
 
-// TestTheLosersRetryKeepsLookingWhileAKeyIsStillBeingWritten: the first "not
-// ready" state, asserted by attempt COUNT rather than by elapsed time.
 func TestTheLosersRetryKeepsLookingWhileAKeyIsStillBeingWritten(t *testing.T) {
 	want := []byte("a finished key")
 	reader := &scriptedKeyReader{outcomes: []keyOutcome{
@@ -513,9 +357,6 @@ func TestTheLosersRetryKeepsLookingWhileAKeyIsStillBeingWritten(t *testing.T) {
 	}
 }
 
-// TestTheLosersRetryKeepsLookingWhileAKeyIsNotThereYet: the other "not ready"
-// state, previously untested, and the arm the short-file fix sits beside — so the
-// pair is pinned together.
 func TestTheLosersRetryKeepsLookingWhileAKeyIsNotThereYet(t *testing.T) {
 	want := []byte("a key that appeared")
 	reader := &scriptedKeyReader{outcomes: []keyOutcome{
@@ -535,13 +376,6 @@ func TestTheLosersRetryKeepsLookingWhileAKeyIsNotThereYet(t *testing.T) {
 	}
 }
 
-// TestTheLosersRetryRefusesACorruptKeyWithoutLookingAgain: the third state, and
-// the reason the other two are told apart.
-//
-// The claim is that a corrupt key is refused on the FIRST attempt, and one
-// attempted read is exactly that claim — where the earlier version had to publish
-// a valid key mid-window and infer it from the absence of a result. Corrupt however
-// many times it is offered; if the loop retried, calls would exceed 1.
 func TestTheLosersRetryRefusesACorruptKeyWithoutLookingAgain(t *testing.T) {
 	reader := &scriptedKeyReader{outcomes: []keyOutcome{
 		{err: corruptKeyError()},
@@ -564,10 +398,6 @@ func TestTheLosersRetryRefusesACorruptKeyWithoutLookingAgain(t *testing.T) {
 	}
 }
 
-// TestTheLosersRetryTellsItsTwoExhaustedStatesApart: after its attempts are spent,
-// the loop still says WHICH state it gave up on, because the two call for different
-// remedies — a truncated file an operator can act on, versus a file that never
-// appeared at all.
 func TestTheLosersRetryTellsItsTwoExhaustedStatesApart(t *testing.T) {
 	short := &scriptedKeyReader{outcomes: []keyOutcome{{err: shortKeyError()}}}
 	_, shortErr := readPublishedKey(short.read, readPublishedAttempts, 0, "/somewhere")
@@ -577,13 +407,6 @@ func TestTheLosersRetryTellsItsTwoExhaustedStatesApart(t *testing.T) {
 	if !strings.Contains(shortErr.Error(), "too short") {
 		t.Errorf("the too-short message does not say what is wrong: %v", shortErr)
 	}
-	// The short verdict is returned AS IT IS, with no wrapper of its own, and that
-	// is the assertion that actually pins the branch: the never-appeared case adds
-	// "did not become readable" because os.ErrNotExist says nothing about the file
-	// an operator would need to look at, while the classifier's message already
-	// names the size, the file and the remedy. errors.Is alone cannot tell these
-	// apart, because the wrapper preserves both the verdict and the inner text —
-	// deleting the branch left every assertion here passing.
 	if strings.Contains(shortErr.Error(), "did not become readable") {
 		t.Errorf("a too-short key is reported as merely unreadable: %v \u2014 the two exhausted states "+
 			"are then indistinguishable in the message, and the size and remedy are buried", shortErr)
@@ -602,11 +425,6 @@ func TestTheLosersRetryTellsItsTwoExhaustedStatesApart(t *testing.T) {
 	}
 }
 
-// TestReadPublishedQueryKeyReachesThePolicyThroughTheFile: the entry point, so
-// the split is not a way to leave the real path untested. A good file is read on
-// the first attempt, and a corrupt one is refused with the classifier's verdict —
-// which also pins that the wrapper passes the CLASSIFIER's errors through rather
-// than swallowing them.
 func TestReadPublishedQueryKeyReachesThePolicyThroughTheFile(t *testing.T) {
 	dataDir := fakeDataDir(t)
 	useQueryKeyDir(t, dataDir)
