@@ -82,6 +82,13 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 	logLine(dir, name+".answers", "--- "+kind+" ---\n"+answer)
 
+	if name == "claude" {
+		// The Claude backend returns stdout verbatim and the batch parsers read
+		// numbered text lines; a JSONL event would reach them as unparseable
+		// text. opencode still needs the event envelope.
+		_, _ = fmt.Fprintln(stdout, answer)
+		return 0
+	}
 	event := map[string]any{"type": "text", "part": map[string]any{"type": "text", "text": answer}}
 	b, err := json.Marshal(event)
 	if err != nil {
