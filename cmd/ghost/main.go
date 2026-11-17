@@ -169,6 +169,9 @@ func dispatchCommand(argv []string) int {
 		case "bench":
 			runBench()
 			return 0
+		case "replay":
+			runReplay()
+			return 0
 		case "context":
 
 			return runContext()
@@ -269,6 +272,10 @@ Commands:
                               to delete, --grace 1h, --limit 20000)
   bench [--sweep]             Run the retrieval-quality benchmark (built-in dataset);
                               --sweep grid-searches the fusion parameters
+  replay --snapshot <db> [flags]
+                              Replay recorded search queries against a pinned snapshot
+                              and diff them against the recorded or a baseline build's
+                              ranked results (keyword-only, offline)
   backup [--out <path>]       Snapshot the live database — consistent, safe
                                while the MCP server runs; prints path, row
                                counts and the sidecar manifest it wrote

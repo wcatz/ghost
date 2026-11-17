@@ -410,12 +410,46 @@ type Server struct {
 	embedder  Embedder
 	projectCh chan<- string // notify embedding worker of new memories
 
-	resolveCLI     config.CLIConfig
-	contextCfg     config.ContextConfig
-	searchMaxBytes int
-	clock          func() time.Time
-	hostSessionID  string
-	workingDir     string
+	resolveCLI      config.CLIConfig
+	contextCfg      config.ContextConfig
+	searchMaxBytes  int
+	searchRecording bool // search.record_queries; on unless opted out
+	clock           func() time.Time
+	hostSessionID   string
+	workingDir      string
+}
+
+// searchRecordingStore is the narrow seam the search recorder writes through.
+// It is a type assertion rather than part of provider.MemoryStore so a test
+// double that never records a search does not have to implement it.
+type searchRecordingStore interface {
+	RecordSearch(ctx context.Context, rec memory.SearchRecord) error
+}
+
+const searchRecordWriteBudget = 250 * time.Millisecond
+
+// recordSearch appends a real search call so a retrieval change can be replayed
+// against the queries agents actually send. A token-shaped query is a refusal
+// at the write boundary, not a search failure: the row is dropped and only the
+// source and the refusal are named in the log, never the query text.
+func (s *Server) recordSearch(ctx context.Context, rec memory.SearchRecord) {
+	if !s.searchRecording {
+		return
+	}
+	sink, ok := s.store.(searchRecordingStore)
+	if !ok {
+		return
+	}
+	writeCtx, cancel := context.WithTimeout(ctx, searchRecordWriteBudget)
+	defer cancel()
+	if err := sink.RecordSearch(writeCtx, rec); err != nil {
+		if errors.Is(err, memory.ErrSecretContent) {
+			s.logger.Warn("search query not recorded: it is token-shaped", "source", rec.Source)
+			return
+		}
+		s.logger.Warn("search query not recorded; the replay gate is missing this call",
+			"source", rec.Source, "error", err)
+	}
 }
 
 const hostSessionEnv = ai.HostSessionEnv
@@ -562,11 +596,12 @@ func New(store provider.MemoryStore, logger *slog.Logger, version string) *Serve
 		version = "dev"
 	}
 	s := &Server{
-		store:          store,
-		logger:         logger,
-		searchMaxBytes: searchResponseMaxBytes,
-		hostSessionID:  hostSessionResolver(),
-		workingDir:     workingDirResolver(),
+		store:           store,
+		logger:          logger,
+		searchMaxBytes:  searchResponseMaxBytes,
+		searchRecording: true,
+		hostSessionID:   hostSessionResolver(),
+		workingDir:      workingDirResolver(),
 	}
 
 	if env := hostSessionIDFromEnv(); env != "" && s.hostSessionID == "" {
@@ -687,6 +722,12 @@ func (s *Server) SetResolveCLI(cfg config.CLIConfig) {
 // different floor, it is running the default one.
 func (s *Server) SetContextConfig(cfg config.ContextConfig) {
 	s.contextCfg = cfg
+}
+
+// SetSearchRecording applies search.record_queries. Off means no query text is
+// kept in audit_log at all; the search itself is unaffected.
+func (s *Server) SetSearchRecording(enabled bool) {
+	s.searchRecording = enabled
 }
 
 // Run starts the MCP server on stdio transport. Blocks until done.
@@ -1395,6 +1436,27 @@ func (s *Server) registerTools() {
 			}
 			return nil, nil, fmt.Errorf("search could not be completed, so it is unknown whether anything matches (the answer is incomplete, not empty \u2014 retry, or read the log): %w", err)
 		}
+		if !args.Explain {
+			ids := make([]string, 0, len(result.Items))
+			for _, item := range result.Items {
+				ids = append(ids, item.ID)
+			}
+			asOfText := ""
+			if asOf != nil {
+				asOfText = asOf.Format(time.RFC3339)
+			}
+			s.recordSearch(ctx, memory.SearchRecord{
+				ProjectID: args.ProjectID,
+				Source:    string(assemble.SourceSearch),
+				Query:     args.Query,
+				Scope:     scopeFilter,
+				Category:  args.Category,
+				Retention: args.Retention,
+				Results:   ids,
+				AsOf:      asOfText,
+				Limit:     args.Limit,
+			})
+		}
 		if args.Explain {
 			payload, mErr := json.MarshalIndent(result.Explain, "", "  ")
 			if mErr != nil {
@@ -1915,6 +1977,17 @@ func (s *Server) registerTools() {
 		if err != nil {
 			return nil, nil, fmt.Errorf("search failed: %w", err)
 		}
+		ids := make([]string, 0, len(memories))
+		for _, m := range memories {
+			ids = append(ids, m.ID)
+		}
+		s.recordSearch(ctx, memory.SearchRecord{
+			ProjectID: "_global", // the whole-corpus read names no one project
+			Source:    memory.SearchAllSource,
+			Query:     args.Query,
+			Results:   ids,
+			Limit:     args.Limit,
+		})
 		if len(memories) == 0 {
 			return &mcp.CallToolResult{
 				Content: []mcp.Content{&mcp.TextContent{Text: "No matching memories found."}},

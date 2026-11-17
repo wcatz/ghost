@@ -61,6 +61,9 @@ func runMCP() {
 	// user set reaches ghost_memory_search's floor. Its zero value is the
 	// shipped default (arm B off), so this is a no-op until somebody sets one.
 	srv.SetContextConfig(cfg.Context)
+	// Real search queries are recorded for the retrieval replay gate unless
+	// search.record_queries turns them off.
+	srv.SetSearchRecording(cfg.Search.RecordQueries)
 
 	if cfg.Embedding.Enabled {
 		embedClient := embedding.NewClient(cfg.Embedding.OllamaURL, cfg.Embedding.Model, cfg.Embedding.Dimensions)

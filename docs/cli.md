@@ -1423,6 +1423,35 @@ Plain `ghost bench` prints the three-conditions table (keyword, vector, fused) o
 
 `--no-answer-sweep` is a sixth report: it measures the query-mode no-answer bar (`context.no_answer_cosine`) over the same graded corpus and fixed clock, at the shipped relevance cutoff, with the 24 no-answer queries as the false-positive half. Per rule and setting it prints the no-answer false-positive rate (no-answer queries that still got rows), the answerable queries refused (of 220), the graded-relevant rows still admitted, context precision, estimated tokens per answer and whether the gate is met (false-positive rate at most 0.500, at most 7 answerable queries refused). Three rule families are in it: the cosine floor the assembler ships (every row is the real assembler path), and a fused-score floor and a cosine-plus-keyword rule that are measured from the block and not built. It is report-only and cannot be combined with another mode. See [Benchmarks and methodology](benchmarks.md#the-no-answer-bar-ghost-bench---no-answer-sweep).
 
+### `ghost replay`
+
+Replays the search queries recorded in `audit_log` against a pinned snapshot and reports where two builds disagree. A retrieval change ships with this diff, and every changed top hit is explained in the change's review; the command is the gate that makes that diff cheap to produce. It is local only — it opens a SQLite snapshot and, for the keyword ranking, calls no network or LLM endpoint:
+
+```bash
+ghost replay --snapshot /path/to/ghost.db.backup-... [--baseline /path/to/old/ghost]
+ghost replay --rank --snapshot /path/to/ghost.db.backup-... --record /path/to/query.json
+```
+
+| Flag | Meaning |
+|---|---|
+| `--snapshot <db>` | The pinned snapshot to replay against. Required. Opened read-only, never migrated or written. |
+| `--baseline <binary>` | A second ghost build to rank the queries through this command's rank mode instead of comparing against the ids the queries recorded when they ran. Use it for a true A/B: the recorded ids came from the live build's hybrid search, while this command's current side is keyword-only. |
+| `--limit N` | Max rows the ranking returns per query (default 10), further bounded by the limit each call recorded: a call that asked for one row is compared at one row. |
+| `--top-k N` | Size of the result window the overlap and membership are measured over (default 5); rank shifts are still read from the full lists. |
+| `--max-queries N` | Replay only the newest N recorded calls (default 0 = all). |
+| `--rank` | Ranking mode, not a report: read one JSON search record from `--record` and print a JSON array of ranked memory ids. This is the stable contract a `--baseline` binary calls. |
+| `--record <file>` | The JSON search record for `--rank`. Refused in report mode. |
+
+The report prints, per recorded query, the top-k overlap and Jaccard, every id that moved rank with its old and new position, the ids that entered or left the window, and — the line a review has to answer — `changed top hit: <old> -> <new>` whenever the first result differs. It ends with a count of queries and changed top hits. A query one build cannot rank is reported as an error for that query and does not stop the rest. Query text is printed through the shared data renderer and ids through the shared token renderer, so neither can forge a line of the report.
+
+Each call is re-ranked at the instant its audit row records, not at the replay's wall clock and not at a fixed instant: a memory whose validity window had not opened, or a version that did not exist yet, must stay out of the replay the same way it stayed out of the answer. A call made with `as_of` carries that instant into the replay, so a historical question still reads the version the caller saw rather than a memory edited since; the recorded per-call limit bounds both sides of the comparison, so a one-row answer is not compared against a wider current ranking. A row whose recorded time or `as_of` cannot be read is reported as an error for that query rather than silently re-ranked at some other instant.
+
+The default baseline is the recorded result set, so read it with care: those ids were ranked by the build that recorded them, normally with hybrid vector fusion, while this command ranks the current side with keywords alone. A recorded-vs-current diff is therefore only meaningful for keyword-only recordings — on an embedding-enabled install most queries would show a diff no retrieval change caused. Pass `--baseline` to compare two builds through the same rank mode instead; the report prints that caveat when no baseline was given.
+
+Replay is deliberately keyword-only. The snapshot's vectors describe the stored memories, not a fresh query, so producing a query vector would need the embedding endpoint; the gate compares lexical result sets and calls no endpoint. This makes the diff deterministic and local, and it means a vector-only retrieval change needs its own evidence — the built-in `ghost bench` reports — beside the replay diff. A recorded `ghost_search_all` call is replayed as the whole-corpus read it was, not scoped to `_global`: it uses the same keyword-only `SearchHybridAll` path over every project, so a memory in an ordinary project still ranks on both sides.
+
+Search calls are recorded only while `search.record_queries` is on (the default); see [configuration](configuration.md#search-ranking). The audit write refuses a token-shaped query and drops that call, so a query holding a credential never reaches the snapshot or the report.
+
 ## Scratch hygiene
 
 ### `ghost maintenance status`
