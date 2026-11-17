@@ -79,8 +79,8 @@ func (s *Store) RecordSearch(ctx context.Context, rec SearchRecord) error {
 	// The explicit type is not decoration: the package's write-guard scan
 	// recognises a *sql.Tx by its declared type, so this write is checked as
 	// one already inside beginScopedWrite's guarded transaction.
-	var tx *sql.Tx = conn.tx
-	defer tx.Rollback() //nolint:errcheck // no-op after Commit
+	var tx *sql.Tx = conn.tx //nolint:staticcheck // QF1011: the write-guard scan recognises *sql.Tx by its declared type
+	defer tx.Rollback()      //nolint:errcheck // no-op after Commit
 
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO audit_log (action, project_id, details)
