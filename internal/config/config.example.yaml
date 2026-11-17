@@ -51,6 +51,14 @@
 # (this one empties the vector leg, leaving keyword-only answers).
 # search:
 #   min_similarity: 0.0
+#   # Record each real search call (its query, project, scope/filters and the
+#   # ranked memory ids) in audit_log under action "search", so a retrieval
+#   # change can be replayed against the queries agents actually send with
+#   # `ghost replay` and judged as a regression gate. On by default; set false
+#   # to keep no query text at all. A query the token guard recognises is
+#   # dropped rather than stored, and the search itself still succeeds.
+#   # (env: GHOST_SEARCH_RECORD_QUERIES)
+#   record_queries: true
 
 # --- Context assembly / abstention ---
 # Cosine floor for the assembler's vector arm: a returned memory "clears the
