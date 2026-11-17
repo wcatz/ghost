@@ -1432,13 +1432,15 @@ ghost replay --rank --snapshot /path/to/ghost.db.backup-... --record /path/to/qu
 |---|---|
 | `--snapshot <db>` | The pinned snapshot to replay against. Required. Opened read-only, never migrated or written. |
 | `--baseline <binary>` | A second ghost build to rank the queries through this command's rank mode instead of comparing against the ids the queries recorded when they ran. Use it for a true A/B: the recorded ids came from the live build's hybrid search, while this command's current side is keyword-only. |
-| `--limit N` | Max rows the ranking returns per query (default 10). |
+| `--limit N` | Max rows the ranking returns per query (default 10), further bounded by the limit each call recorded: a call that asked for one row is compared at one row. |
 | `--top-k N` | Size of the result window the overlap and membership are measured over (default 5); rank shifts are still read from the full lists. |
 | `--max-queries N` | Replay only the newest N recorded calls (default 0 = all). |
 | `--rank` | Ranking mode, not a report: read one JSON search record from `--record` and print a JSON array of ranked memory ids. This is the stable contract a `--baseline` binary calls. |
 | `--record <file>` | The JSON search record for `--rank`. Refused in report mode. |
 
 The report prints, per recorded query, the top-k overlap and Jaccard, every id that moved rank with its old and new position, the ids that entered or left the window, and — the line a review has to answer — `changed top hit: <old> -> <new>` whenever the first result differs. It ends with a count of queries and changed top hits. A query one build cannot rank is reported as an error for that query and does not stop the rest. Query text is printed through the shared data renderer and ids through the shared token renderer, so neither can forge a line of the report.
+
+Each call is re-ranked at the instant its audit row records, not at the replay's wall clock and not at a fixed instant: a memory whose validity window had not opened, or a version that did not exist yet, must stay out of the replay the same way it stayed out of the answer. A call made with `as_of` carries that instant into the replay, so a historical question still reads the version the caller saw rather than a memory edited since; the recorded per-call limit bounds both sides of the comparison, so a one-row answer is not compared against a wider current ranking. A row whose recorded time or `as_of` cannot be read is reported as an error for that query rather than silently re-ranked at some other instant.
 
 The default baseline is the recorded result set, so read it with care: those ids were ranked by the build that recorded them, normally with hybrid vector fusion, while this command ranks the current side with keywords alone. A recorded-vs-current diff is therefore only meaningful for keyword-only recordings — on an embedding-enabled install most queries would show a diff no retrieval change caused. Pass `--baseline` to compare two builds through the same rank mode instead; the report prints that caveat when no baseline was given.
 
