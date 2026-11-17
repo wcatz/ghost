@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log/slog"
+	"os"
 	"time"
 
 	"github.com/wcatz/ghost/internal/memory"
@@ -109,7 +110,14 @@ type RejectedPair struct {
 // uses, so a reader matching the trace against a candidate or an edge reads one
 // direction. A pair tying on both stamps has no orientation; the raw scan order
 // is kept there rather than inventing one from the ids.
+//
+// Rejected pairs are tracked only to serve the optional trace: when tracing is
+// off, or once the bounded trace is full, nothing is retained, so a large scan
+// does not accumulate unbounded dedupe state.
 func (s *Selection) addNotProposed(m, other memory.Memory, reason string) {
+	if os.Getenv("GHOST_SUPERSEDE_TRACE") == "" || len(s.NotProposed) >= maxTracedRejections {
+		return
+	}
 	key := newPairKey(m.ID, other.ID)
 	if s.rejected == nil {
 		s.rejected = make(map[pairKey]bool)
@@ -118,9 +126,6 @@ func (s *Selection) addNotProposed(m, other memory.Memory, reason string) {
 		return
 	}
 	s.rejected[key] = true
-	if len(s.NotProposed) >= maxTracedRejections {
-		return
-	}
 	newer, older, ok := orient(m, other)
 	if !ok {
 		newer, older = m, other

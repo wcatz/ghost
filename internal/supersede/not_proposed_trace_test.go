@@ -3,6 +3,7 @@ package supersede
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -32,6 +33,7 @@ func addWithImportance(t *testing.T, store *memory.Store, db *sql.DB, content, s
 // one. The trace must still name the newer endpoint first, and the two visits
 // of one unordered pair must spend only one entry of the bounded trace.
 func TestNotProposedIsOrientedWhenTheOlderRowIsScannedFirst(t *testing.T) {
+	t.Setenv("GHOST_SUPERSEDE_TRACE", "1")
 	store, db := seed(t)
 	ctx := context.Background()
 	older := addWithImportance(t, store, db,
@@ -63,6 +65,7 @@ func TestNotProposedIsOrientedWhenTheOlderRowIsScannedFirst(t *testing.T) {
 // persistent endpoint and two rows with no usable chronology are different
 // findings with different remedies.
 func TestNotProposedTracesEveryObservedDropReason(t *testing.T) {
+	t.Setenv("GHOST_SUPERSEDE_TRACE", "1")
 	t.Run("persistent endpoint", func(t *testing.T) {
 		store, db := seed(t)
 		ctx := context.Background()
@@ -126,4 +129,45 @@ func assertRejected(t *testing.T, sel Selection, newer, older, reason string) {
 	if !strings.Contains(got.Reason, reason) {
 		t.Errorf("trace reason %q does not name %q", got.Reason, reason)
 	}
+}
+
+// TestRejectedPairTrackingHonoursTraceState: rejected-pair dedupe exists only
+// to serve the trace, so with tracing off the scan must not retain it, and with
+// tracing on it must not grow past the bounded trace.
+func TestRejectedPairTrackingHonoursTraceState(t *testing.T) {
+	mk := func(i int) (memory.Memory, memory.Memory) {
+		a := memory.Memory{ID: fmt.Sprintf("n%04d", i), CreatedAt: "2026-07-01 00:00:00"}
+		b := memory.Memory{ID: fmt.Sprintf("o%04d", i), CreatedAt: "2026-01-01 00:00:00"}
+		return a, b
+	}
+
+	t.Run("tracing off keeps no rejected state", func(t *testing.T) {
+		t.Setenv("GHOST_SUPERSEDE_TRACE", "")
+		var sel Selection
+		for i := 0; i < 10; i++ {
+			a, b := mk(i)
+			sel.addNotProposed(a, b, "below the cosine floor and no lexical replacement")
+		}
+		if len(sel.NotProposed) != 0 {
+			t.Errorf("NotProposed = %d with tracing off, want 0", len(sel.NotProposed))
+		}
+		if len(sel.rejected) != 0 {
+			t.Errorf("rejected map holds %d entries with tracing off, want 0", len(sel.rejected))
+		}
+	})
+
+	t.Run("tracing on never exceeds the cap", func(t *testing.T) {
+		t.Setenv("GHOST_SUPERSEDE_TRACE", "1")
+		var sel Selection
+		for i := 0; i < maxTracedRejections+50; i++ {
+			a, b := mk(i)
+			sel.addNotProposed(a, b, "below the cosine floor and no lexical replacement")
+		}
+		if len(sel.NotProposed) != maxTracedRejections {
+			t.Errorf("NotProposed = %d, want cap %d", len(sel.NotProposed), maxTracedRejections)
+		}
+		if len(sel.rejected) != maxTracedRejections {
+			t.Errorf("rejected map holds %d entries, want cap %d", len(sel.rejected), maxTracedRejections)
+		}
+	})
 }
