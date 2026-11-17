@@ -1441,6 +1441,10 @@ func (s *Server) registerTools() {
 			for _, item := range result.Items {
 				ids = append(ids, item.ID)
 			}
+			asOfText := ""
+			if asOf != nil {
+				asOfText = asOf.Format(time.RFC3339)
+			}
 			s.recordSearch(ctx, memory.SearchRecord{
 				ProjectID: args.ProjectID,
 				Source:    string(assemble.SourceSearch),
@@ -1449,6 +1453,8 @@ func (s *Server) registerTools() {
 				Category:  args.Category,
 				Retention: args.Retention,
 				Results:   ids,
+				AsOf:      asOfText,
+				Limit:     args.Limit,
 			})
 		}
 		if args.Explain {
@@ -1980,6 +1986,7 @@ func (s *Server) registerTools() {
 			Source:    memory.SearchAllSource,
 			Query:     args.Query,
 			Results:   ids,
+			Limit:     args.Limit,
 		})
 		if len(memories) == 0 {
 			return &mcp.CallToolResult{

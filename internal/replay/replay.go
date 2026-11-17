@@ -8,6 +8,8 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/wcatz/ghost/internal/assemble"
@@ -19,12 +21,51 @@ import (
 // the audit adds later.
 type Query = memory.SearchRecord
 
-// replayClock pins decay against a fixed instant so two runs of one build on
-// one snapshot print the same ids. Replay is deliberately keyword-only and
-// offline: a snapshot's vectors describe the stored memories, not the fresh
-// query, and producing a query vector would need the embedding endpoint. The
-// gate therefore compares lexical result sets, which need no network at all.
-var replayClock = time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+// Replay is deliberately keyword-only and offline: a snapshot's vectors
+// describe the stored memories, not the fresh query, and producing a query
+// vector would need the embedding endpoint. The gate therefore compares
+// lexical result sets, which need no network at all.
+
+// recordedInstant is the audit row's own timestamp. A search is a question
+// about the store as it stood when the caller asked it, so decay, validity and
+// version selection are judged at that instant — never at the replay's wall
+// clock and never at a pinned constant.
+func recordedInstant(q Query) (time.Time, error) {
+	raw := strings.TrimSpace(q.RecordedAt)
+	for _, layout := range []string{memory.StoredStampLayout, time.RFC3339} {
+		if at, err := time.Parse(layout, raw); err == nil {
+			return at.UTC(), nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("unreadable recorded time %q: replay needs the call's own instant", raw)
+}
+
+// recordedAsOf returns the historical binding the live call asked about, or
+// nil for a present-day search. A recorded as_of is a binding, not a filter:
+// without it a call over a since-edited memory ranks today's version.
+func recordedAsOf(q Query) (*time.Time, error) {
+	raw := strings.TrimSpace(q.AsOf)
+	if raw == "" {
+		return nil, nil
+	}
+	at, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		return nil, fmt.Errorf("unreadable recorded as_of %q: %w", raw, err)
+	}
+	utc := at.UTC()
+	return &utc, nil
+}
+
+// effectiveLimit keeps a call's own answer window. A caller that asked for one
+// row has a one-row baseline, so comparing it against the command-wide budget
+// would read the missing positions as ranking changes.
+func effectiveLimit(q Query, commandLimit int) int {
+	limit := commandLimit
+	if q.Limit > 0 && (limit <= 0 || q.Limit < limit) {
+		limit = q.Limit
+	}
+	return limit
+}
 
 // Runner ranks one recorded query against a pinned snapshot.
 type Runner interface {
@@ -38,6 +79,7 @@ type StoreRunner struct {
 }
 
 func (r StoreRunner) Rank(ctx context.Context, q Query) ([]string, error) {
+	limit := effectiveLimit(q, r.Limit)
 	if q.Source == memory.SearchAllSource {
 		// ghost_search_all never goes through the assembler: it is one
 		// whole-corpus SearchHybridAll read, and its ProjectID is the "_global"
@@ -45,7 +87,7 @@ func (r StoreRunner) Rank(ctx context.Context, q Query) ([]string, error) {
 		// would rank a different corpus and report a regression that is only
 		// the replay's own mistake. nil keeps it keyword-only like the rest
 		// of the gate; the id order is the ranking the tool returned.
-		rows, err := r.Store.SearchHybridAll(ctx, q.Query, nil, r.Limit)
+		rows, err := r.Store.SearchHybridAll(ctx, q.Query, nil, limit)
 		if err != nil {
 			return nil, err
 		}
@@ -55,6 +97,14 @@ func (r StoreRunner) Rank(ctx context.Context, q Query) ([]string, error) {
 		}
 		return ids, nil
 	}
+	at, err := recordedInstant(q)
+	if err != nil {
+		return nil, err
+	}
+	asOf, err := recordedAsOf(q)
+	if err != nil {
+		return nil, err
+	}
 	req := assemble.Request{
 		ProjectID: q.ProjectID,
 		Query:     q.Query,
@@ -62,9 +112,10 @@ func (r StoreRunner) Rank(ctx context.Context, q Query) ([]string, error) {
 		Category:  q.Category,
 		Retention: q.Retention,
 		Source:    assemble.SourceSearch,
-		Budget:    assemble.Budget{MaxItems: r.Limit},
+		Budget:    assemble.Budget{MaxItems: limit},
 		Condition: assemble.CondFTSOnly,
-		Now:       replayClock,
+		Now:       at,
+		AsOf:      asOf,
 	}
 	res, err := assemble.Run(ctx, r.Store, req)
 	if err != nil {
@@ -92,6 +143,7 @@ func (RecordedRunner) Rank(_ context.Context, q Query) ([]string, error) {
 type BinaryRunner struct {
 	Binary   string
 	Snapshot string
+	Limit    int
 }
 
 func (r BinaryRunner) Rank(ctx context.Context, q Query) ([]string, error) {
@@ -108,7 +160,11 @@ func (r BinaryRunner) Rank(ctx context.Context, q Query) ([]string, error) {
 	if err := f.Close(); err != nil {
 		return nil, fmt.Errorf("write query for the baseline build: %w", err)
 	}
-	cmd := exec.CommandContext(ctx, r.Binary, "replay", "--rank", "--snapshot", r.Snapshot, "--record", name)
+	args := []string{"replay", "--rank", "--snapshot", r.Snapshot, "--record", name}
+	if limit := effectiveLimit(q, r.Limit); limit > 0 {
+		args = append(args, "--limit", strconv.Itoa(limit))
+	}
+	cmd := exec.CommandContext(ctx, r.Binary, args...)
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("baseline build could not rank the query: %w", err)
@@ -171,6 +227,12 @@ func OpenSnapshot(snapshot string) (*memory.Store, func(), error) {
 func Run(ctx context.Context, queries []Query, baseline, current Runner, topK int) []Result {
 	out := make([]Result, 0, len(queries))
 	for _, q := range queries {
+		// A call's own answer window decides the comparison: a limit-1 call
+		// has one baseline position, so the top-k window for it is one too.
+		k := topK
+		if q.Limit > 0 && q.Limit < k {
+			k = q.Limit
+		}
 		baseIDs, err := baseline.Rank(ctx, q)
 		if err != nil {
 			out = append(out, Result{Query: q, Err: fmt.Errorf("baseline: %w", err)})
@@ -181,7 +243,7 @@ func Run(ctx context.Context, queries []Query, baseline, current Runner, topK in
 			out = append(out, Result{Query: q, Err: fmt.Errorf("current: %w", err)})
 			continue
 		}
-		out = append(out, Result{Query: q, Diff: ComputeDiff(baseIDs, currIDs, topK)})
+		out = append(out, Result{Query: q, Diff: ComputeDiff(baseIDs, currIDs, k)})
 	}
 	return out
 }

@@ -183,7 +183,7 @@ func runReplayReport(opts replayOptions) {
 
 	baseline := replay.Runner(replay.RecordedRunner{})
 	if opts.baseline != "" {
-		baseline = replay.BinaryRunner{Binary: opts.baseline, Snapshot: opts.snapshot}
+		baseline = replay.BinaryRunner{Binary: opts.baseline, Snapshot: opts.snapshot, Limit: opts.limit}
 	}
 	store, closeStore, err := replay.OpenSnapshot(opts.snapshot)
 	if err != nil {

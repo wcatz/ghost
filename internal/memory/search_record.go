@@ -19,14 +19,22 @@ import (
 // (or scope value) the same way every other store write does; a refused search
 // is dropped, not stored, and the refusal never quotes the text it refused.
 type SearchRecord struct {
-	ProjectID  string            `json:"project_id"`
-	Source     string            `json:"source"`
-	Query      string            `json:"query"`
-	Scope      map[string]string `json:"scope,omitempty"`
-	Category   string            `json:"category,omitempty"`
-	Retention  string            `json:"retention,omitempty"`
-	Results    []string          `json:"results"`
-	RecordedAt string            `json:"recorded_at,omitempty"`
+	ProjectID string            `json:"project_id"`
+	Source    string            `json:"source"`
+	Query     string            `json:"query"`
+	Scope     map[string]string `json:"scope,omitempty"`
+	Category  string            `json:"category,omitempty"`
+	Retention string            `json:"retention,omitempty"`
+	Results   []string          `json:"results"`
+	// AsOf is the RFC 3339 instant a historical call asked about, empty for a
+	// present-day one. It is a binding, not a filter, so replay must hand it
+	// back to the assembler or it ranks today's versions of a since-edited row.
+	AsOf string `json:"as_of,omitempty"`
+	// Limit is the caller's result limit. A call that asked for one row has a
+	// one-row baseline; ranking it against the command-wide budget would read
+	// the missing positions as ranking changes.
+	Limit      int    `json:"limit,omitempty"`
+	RecordedAt string `json:"recorded_at,omitempty"`
 }
 
 // searchRecordRowsCap bounds how many search calls one store keeps, counted

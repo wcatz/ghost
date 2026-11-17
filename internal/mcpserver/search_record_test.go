@@ -96,6 +96,30 @@ func TestSearchAllRecordsTheWholeCorpusQuery(t *testing.T) {
 	}
 }
 
+func TestMemorySearchRecordsAsOfAndTheRequestedLimit(t *testing.T) {
+	srv, store := newRecordingSearchSession(t, limitProbeRows(3))
+	session := connectedClient(t, srv)
+	res := callTool(t, session, "ghost_memory_search", map[string]any{
+		"project_id": "test-project",
+		"query":      "probe",
+		"as_of":      "2026-09-01T13:00:00Z",
+		"limit":      2,
+	})
+	if res.IsError {
+		t.Fatalf("search failed: %s", resultText(res))
+	}
+	rows := recordedSearches(t, store)
+	if len(rows) != 1 {
+		t.Fatalf("recorded %d searches, want 1", len(rows))
+	}
+	if rows[0].AsOf != "2026-09-01T13:00:00Z" {
+		t.Errorf("recorded as_of = %q, want the instant the caller asked about", rows[0].AsOf)
+	}
+	if rows[0].Limit != 2 {
+		t.Errorf("recorded limit = %d, want 2", rows[0].Limit)
+	}
+}
+
 func TestMemorySearchRecordingIsOptOut(t *testing.T) {
 	srv, store := newRecordingSearchSession(t, limitProbeRows(2))
 	srv.SetSearchRecording(false)
