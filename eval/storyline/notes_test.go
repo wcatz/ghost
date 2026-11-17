@@ -126,13 +126,13 @@ func TestSummaryAndExitWithTheNotesArm(t *testing.T) {
 		{story: story, arm: armWithGhost, run: 1, res: ok},
 		{story: story, arm: armFlatNotes, run: 1, res: miss},
 	}
-	if got := exitFailures(cells); len(got) != 0 {
+	if got := exitFailures(cells, defaultMinQualified); len(got) != 0 {
 		t.Errorf("a notes-arm miss counted: %v", got)
 	}
-	if got := exitFailures([]cell{{story: story, arm: armFlatNotes, run: 1, err: context.Canceled}}); len(got) != 1 {
+	if got := exitFailures([]cell{{story: story, arm: armFlatNotes, run: 1, err: context.Canceled}}, defaultMinQualified); len(got) != 1 {
 		t.Errorf("an errored notes run did not count: %v", got)
 	}
-	out := formatSummary(cells, 1)
+	out := formatSummary(cells, 1, defaultMinQualified)
 	if !strings.Contains(out, "| flat-notes | 1 |") || !strings.Contains(out, "n/a (every note)") {
 		t.Errorf("summary has no notes row:\n%s", out)
 	}

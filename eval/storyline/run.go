@@ -87,6 +87,10 @@ type Result struct {
 	FlatNotes    bool
 	FakeHarness  bool
 	Probes       map[string]string
+	// Disqualified is empty when the run counts toward its arm's scores. A
+	// non-empty value is the reason it measured nothing and was dropped before
+	// grading: the checks and the judge never run for such a result.
+	Disqualified string
 }
 
 // Arm names the arm a result came from, for reports and summaries.
@@ -309,6 +313,10 @@ func (r *Run) Execute(ctx context.Context) (*Result, error) {
 		if err := r.arcStages(ctx, res, order); err != nil {
 			return nil, err
 		}
+	}
+	if reason := qualify(res); reason != "" {
+		res.Disqualified = reason
+		return res, nil
 	}
 	res.Checks = grade(res)
 	if r.Judge != nil {
