@@ -647,16 +647,16 @@ func TestExitFailuresIgnoreControlMissesButNotControlErrors(t *testing.T) {
 	ghostMiss.WithoutGhost = false
 	ok := answersResult(story, []string{"", "pg-queue-03.corp.example:6432", "pg-queue-03.corp.example:6432"})
 	ok.WithoutGhost = false
-	if got := exitFailures([]cell{{story: story, arm: armWithoutGhost, run: 1, res: miss}, {story: story, arm: armWithGhost, run: 1, res: ok}}); len(got) != 0 {
+	if got := exitFailures([]cell{{story: story, arm: armWithoutGhost, run: 1, res: miss}, {story: story, arm: armWithGhost, run: 1, res: ok}}, defaultMinQualified); len(got) != 0 {
 		t.Errorf("a control miss counted: %v", got)
 	}
-	if got := exitFailures([]cell{{story: story, arm: armWithoutGhost, run: 1, err: context.Canceled}}); len(got) != 1 || !strings.Contains(got[0], "errored") {
+	if got := exitFailures([]cell{{story: story, arm: armWithoutGhost, run: 1, err: context.Canceled}}, defaultMinQualified); len(got) != 1 || !strings.Contains(got[0], "errored") {
 		t.Errorf("an errored control run did not count: %v", got)
 	}
-	if got := exitFailures([]cell{{story: story, arm: armWithGhost, run: 1, res: ghostMiss}}); len(got) != 1 {
+	if got := exitFailures([]cell{{story: story, arm: armWithGhost, run: 1, res: ghostMiss}}, defaultMinQualified); len(got) != 1 {
 		t.Errorf("a Ghost-arm miss did not count: %v", got)
 	}
-	if got := exitFailures([]cell{{story: story, arm: armWithGhost, run: 1, res: ok, reportErr: context.Canceled}}); len(got) != 1 {
+	if got := exitFailures([]cell{{story: story, arm: armWithGhost, run: 1, res: ok, reportErr: context.Canceled}}, defaultMinQualified); len(got) != 1 {
 		t.Errorf("a missing report did not count: %v", got)
 	}
 }

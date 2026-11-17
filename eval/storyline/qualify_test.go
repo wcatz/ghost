@@ -70,6 +70,32 @@ func TestDisqualifiedRunsAreKeptOutOfTheArmScore(t *testing.T) {
 	}
 }
 
+// TestInconclusiveGhostArmDoesNotFailTheRun: the threshold that marks an arm
+// inconclusive in the summary also makes it neutral at exit. One qualified
+// failure in ten is below the default threshold, so its failed checks must not
+// make run() return an error; with no threshold the same run does count.
+func TestInconclusiveGhostArmDoesNotFailTheRun(t *testing.T) {
+	story := OpsFact()
+	qualifiedFailure := answersResult(story, []string{"", "no idea", "no idea"})
+	qualifiedFailure.WithoutGhost = false
+	if qualifiedFailure.Passed() {
+		t.Fatal("fixture should fail")
+	}
+	cells := []cell{{story: story, arm: armWithGhost, run: 1, res: qualifiedFailure}}
+	for n := 2; n <= 10; n++ {
+		cells = append(cells, cell{
+			story: story, arm: armWithGhost, run: n,
+			res: &Result{Story: story, Disqualified: "no ghost tool call was observed"},
+		})
+	}
+	if err := exitError(cells, defaultMinQualified); err != nil {
+		t.Fatalf("an inconclusive arm failed the run: %v", err)
+	}
+	if err := exitError(cells, 0); err == nil {
+		t.Fatal("the same failing run counted with no qualification threshold")
+	}
+}
+
 // TestRunRejectsAnOutOfRangeMinQualified: the fraction that decides whether an
 // arm is inconclusive has to be a fraction; the check runs before any work.
 func TestRunRejectsAnOutOfRangeMinQualified(t *testing.T) {

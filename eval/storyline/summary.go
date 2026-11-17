@@ -111,8 +111,22 @@ func (t armTally) ratio(n int) string { return fmt.Sprintf("%d/%d", n, t.runs) }
 
 func (t armTally) qualifiedRatio() string { return fmt.Sprintf("%d/%d", t.runs, t.completed) }
 
-func (t armTally) inconclusive(min float64) bool {
-	return t.completed > 0 && float64(t.runs)/float64(t.completed) < min
+// armInconclusive is the same test the summary applies when it marks an arm
+// inconclusive, so the exit decision cannot disagree with the table the reader
+// saw. A completed run is one that reached a result, qualified or not; an errored
+// run is reported as a failure in its own right and does not dilute the fraction.
+func armInconclusive(cells []cell, storyKey, arm string, min float64) bool {
+	qualified, completed := 0, 0
+	for _, c := range cells {
+		if c.story.Key != storyKey || c.arm != arm || c.err != nil || c.res == nil {
+			continue
+		}
+		completed++
+		if c.res.Disqualified == "" {
+			qualified++
+		}
+	}
+	return completed > 0 && float64(qualified)/float64(completed) < min
 }
 
 func formatSummary(cells []cell, runs int, minQualified float64) string {
@@ -187,7 +201,7 @@ func formatSummary(cells []cell, runs int, minQualified float64) string {
 				runsCol += fmt.Sprintf(" (%d report not written)", t.noReport)
 			}
 			qualifiedCol := t.qualifiedRatio()
-			if t.inconclusive(minQualified) {
+			if armInconclusive(cells, story.Key, arm, minQualified) {
 				qualifiedCol += " (inconclusive)"
 			}
 			fmt.Fprintf(&b, "| %s | %s | %s | %s | %s | %s | %s | %s |\n",

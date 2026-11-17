@@ -174,7 +174,12 @@ func run(cfg config) error {
 		fmt.Printf("scratch kept under: %s\n", sandboxRoot)
 	}
 
-	failed := exitFailures(cells)
+	return exitError(cells, cfg.minQualified)
+}
+
+// exitError is the error run() reports once its cells are finished.
+func exitError(cells []cell, minQualified float64) error {
+	failed := exitFailures(cells, minQualified)
 	if len(failed) > 0 {
 		return fmt.Errorf("%d run(s) failed: %s", len(failed), strings.Join(failed, "; "))
 	}
@@ -262,9 +267,12 @@ func writeCellReport(dir string, story Storyline, arm string, n int, res *Result
 	return writeReportAs(dir, fmt.Sprintf("%s-%s-run%d.md", story.Key, arm, n), res, model)
 }
 
-func exitFailures(cells []cell) []string {
+func exitFailures(cells []cell, minQualified float64) []string {
 	var failed []string
 	for _, c := range cells {
+		if armInconclusive(cells, c.story.Key, c.arm, minQualified) {
+			continue
+		}
 		if c.reportErr != nil {
 			failed = append(failed, fmt.Sprintf("%s %s run %d: report not written: %v", c.story.Key, c.arm, c.run, c.reportErr))
 		}
