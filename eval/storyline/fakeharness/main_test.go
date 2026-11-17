@@ -65,3 +65,30 @@ func TestRunSpeaksTheOpencodeContract(t *testing.T) {
 		t.Fatalf("claude name: code %d, stdout %q; want a refusal with no answer", code, out.String())
 	}
 }
+
+// TestRunServesClaudeCode: claude-code is a first-class source for the run: the
+// capability check reads --help, the classify call answers the same oracle from
+// stdin, and an unrelated name still refuses.
+func TestRunServesClaudeCode(t *testing.T) {
+	var out, errb bytes.Buffer
+	var ev struct {
+		Type string `json:"type"`
+		Part struct {
+			Text string `json:"text"`
+		} `json:"part"`
+	}
+	if code := run([]string{"/x/claude", "--help"}, strings.NewReader(""), &out, &errb); code != 0 || !strings.Contains(out.String(), "--safe-mode") {
+		t.Fatalf("claude --help: code %d, out %q, stderr %q", code, out.String(), errb.String())
+	}
+	out.Reset()
+	if code := run([]string{"/x/claude", "-p"}, strings.NewReader("closed-by: rubric\n1.\nnote a\n"), &out, &errb); code != 0 {
+		t.Fatalf("claude resolve: code %d, stderr %q", code, errb.String())
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(out.Bytes()), &ev); err != nil || ev.Part.Text != "1: KEEP" {
+		t.Fatalf("claude resolve answer %q (err %v)", out.String(), err)
+	}
+	out.Reset()
+	if code := run([]string{"/x/other", "-p"}, strings.NewReader("anything"), &out, &errb); code == 0 || out.Len() != 0 {
+		t.Fatalf("unrelated name: code %d, stdout %q; want a refusal with no answer", code, out.String())
+	}
+}

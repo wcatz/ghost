@@ -31,14 +31,23 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	dir := ownDir()
 	logLine(dir, name+".argv", "ARGV "+strings.Join(args[1:], " "))
 
-	if name != "opencode" {
-		_, _ = fmt.Fprintf(stderr, "fake %s: the storyline runner routes every phase to opencode; this call is a routing defect\n", name)
+	// The runner can pin a source: opencode is the default, claude-code is the
+	// one the annotated-edge misses were observed on. Both reach this same oracle,
+	// and each logs under its own binary name so a run can be attributed to the
+	// source that actually classified it.
+	if name != "opencode" && name != "claude" {
+		_, _ = fmt.Fprintf(stderr, "fake %s: the storyline runner routes phases to opencode or claude; this call is a routing defect\n", name)
 		return 3
 	}
 	if len(args) > 1 {
 		switch args[1] {
 		case "--version":
 			_, _ = fmt.Fprintln(stdout, "2.0.15")
+			return 0
+		case "--help":
+			// claudeCapabilitiesFor probes the binary before the first call and
+			// refuses one that lacks the no-tools flags. Advertise them.
+			_, _ = fmt.Fprintln(stdout, "--safe-mode --restricted --strict-mcp-config --disable-slash-commands --tools --disallowedTools --setting-sources")
 			return 0
 		case "session":
 			_, _ = fmt.Fprint(stdout, "[]")
@@ -53,8 +62,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 	text := string(in)
 	kind := classify(text)
-	logLine(dir, "opencode.kinds", kind)
-	logLine(dir, "opencode.requests", "--- "+kind+" ---\n"+text)
+	logLine(dir, name+".kinds", kind)
+	logLine(dir, name+".requests", "--- "+kind+" ---\n"+text)
 
 	var answer string
 	switch kind {
@@ -71,7 +80,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintf(stderr, "fake opencode: unrecognised %s request (first 200 bytes: %q)\n", kind, head(text, 200))
 		return 5
 	}
-	logLine(dir, "opencode.answers", "--- "+kind+" ---\n"+answer)
+	logLine(dir, name+".answers", "--- "+kind+" ---\n"+answer)
 
 	event := map[string]any{"type": "text", "part": map[string]any{"type": "text", "text": answer}}
 	b, err := json.Marshal(event)

@@ -7,9 +7,12 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/wcatz/ghost/internal/ai"
 )
 
 type config struct {
@@ -28,6 +31,7 @@ type config struct {
 	timeout      time.Duration
 	fake         bool
 	minQualified float64
+	source       string
 }
 
 func main() {
@@ -45,7 +49,8 @@ func main() {
 	flag.StringVar(&cfg.authFile, "opencode-auth-file", "", "optional path to an opencode auth.json copied into the scratch data dir so sandboxed sessions authenticate")
 	flag.StringVar(&cfg.resultsDir, "results-dir", "eval/storyline/results", "directory for the run report")
 	flag.DurationVar(&cfg.timeout, "timeout", defaultTimeout, "max time for one session or one arc stage")
-	flag.BoolVar(&cfg.fake, "fake-harness", false, "run with no model at all: sessions get a fixed answer, and supersede/resolve reach a deterministic fake opencode whose classifier is an oracle built from the storyline's own annotations; only the block and store lines are graded")
+	flag.BoolVar(&cfg.fake, "fake-harness", false, "run with no model at all: sessions get a fixed answer, and supersede/resolve reach a deterministic fake harness whose classifier is an oracle built from the storyline's own annotations; only the block and store lines are graded")
+	flag.StringVar(&cfg.source, "source", "opencode", "CLI source the lifecycle phases classify through (claude-code, opencode, codex or goose); claude-code reproduces the source the annotated-edge misses were observed on")
 	flag.Float64Var(&cfg.minQualified, "min-qualified", defaultMinQualified, "minimum fraction of runs per arm that must qualify to count; an arm below it is reported as inconclusive")
 	flag.Parse()
 
@@ -101,6 +106,9 @@ func run(cfg config) error {
 	}
 	if cfg.runs < 1 {
 		return fmt.Errorf("-runs must be at least 1, got %d", cfg.runs)
+	}
+	if !slices.Contains(ai.KnownSources(), cfg.source) {
+		return fmt.Errorf("unknown -source %q (have: %s)", cfg.source, strings.Join(ai.KnownSources(), ", "))
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -219,7 +227,7 @@ func runCell(ctx context.Context, cfg config, sandboxRoot, bin, fakeBin, model s
 	fmt.Printf("scratch: %s\n", scratch)
 
 	ghost := newBinaryGhost(bin, env, story.Project, workDir,
-		filepath.Join(dirs["data"], "ghost", "ghost.db"), cfg.ollamaURL, cfg.drainTO, os.Stderr)
+		filepath.Join(dirs["data"], "ghost", "ghost.db"), cfg.ollamaURL, cfg.source, cfg.drainTO, os.Stderr)
 	if err := ghost.start(ctx); err != nil {
 		return nil, err
 	}

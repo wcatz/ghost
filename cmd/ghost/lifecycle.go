@@ -3764,6 +3764,7 @@ func runSupersede() {
 		fmt.Printf("  %d pair(s) refused: reversed verdict — the older note is the current one, so no supersedes link is written and the verdict is not cached (re-asked on a later pass); under --apply the pair's live causes link is dropped, while a backwards supersedes link is only reported (this pass withdraws no supersedes edge)\n", res.Reversed)
 	}
 	fmt.Print(supersedePairLines(apply, classified))
+	fmt.Print(supersedeTraceLines(res, classified))
 	// The second half of the repair, over the same rows the block above names:
 	// every withdrawal orphans a `resolved_at` the edge's piggyback stamped on
 	// its target, and nothing in the graph clears it. Only an --apply run has
@@ -4113,6 +4114,29 @@ func supersedePairLines(apply bool, classified []supersede.Classified) string {
 		case supersede.RelationReversed:
 			fmt.Fprintf(&b, "  %s  reversed, not written: %s supersedes it\n", shortID(c.NewerID), shortID(c.OlderID))
 		}
+	}
+	return b.String()
+}
+
+// supersedeTraceLines is the per-pair diagnosis of a pass, printed only when a
+// caller asks for it. A report that shows only the edges a pass wrote cannot
+// answer why an annotated pair has no edge: the pair may never have been proposed
+// (candidate generation) or it may have been proposed and rejected (classifier).
+// Both halves are printed so a tracker of a truth-change arc can tell which stage
+// to fix from the run's own output. The knob is not a command flag: it changes no
+// decision the pass makes, only what it prints, and the eval runner is its one
+// caller.
+func supersedeTraceLines(res supersede.Result, classified []supersede.Classified) string {
+	if os.Getenv("GHOST_SUPERSEDE_TRACE") == "" {
+		return ""
+	}
+	var b strings.Builder
+	for _, p := range res.NotProposed {
+		fmt.Fprintf(&b, "  TRACE %s -> %s not proposed: %s\n", shortID(p.NewerID), shortID(p.OlderID), p.Reason)
+	}
+	for _, c := range classified {
+		fmt.Fprintf(&b, "  TRACE %s -> %s proposed: classifier verdict %s\n",
+			shortID(c.NewerID), shortID(c.OlderID), string(c.Relation))
 	}
 	return b.String()
 }

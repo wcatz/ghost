@@ -440,7 +440,11 @@ them were they in one category (the bar is the same whatever their categories), 
 another that differs (a version, a path, a name), no plain word swapped in the same place
 (`auth-service` / `billing-service`, `staging` / `reporting`, `make test` / `make lint` are
 two parallel facts, not a replacement), and nothing relates them yet — no live
-`supersedes` or `contradicts` edge, and neither is resolved. Only those two relations
+`supersedes` or `contradicts` edge, and neither is resolved. A newer note that says a value
+of the older one "no longer holds" is a replacement even when the older note itself uses a
+phrase like "no longer" about something else (a fix saying the crash no longer happens):
+the retirement is read in the clause that names the shared value, so the note that retires
+a fix is marked as its replacement. Only those two relations
 exclude a pair: a cosine `related` edge, which the linking worker writes between exactly
 such rows, does not. That is the state a default install leaves a change of truth in until
 a supersede pass runs. The older row is marked, never withheld. On

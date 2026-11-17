@@ -243,6 +243,30 @@ func TestLexicalReplacementsAcrossCategoriesKeepsEveryOtherRule(t *testing.T) {
 	}
 }
 
+// The regressed-fix storyline's pair, word for word: the fix is a fact, and the
+// regression that retires it is a gotcha. The fix says the crash it addressed
+// "no longer" happens, so the older note carries a retirement phrase of its own.
+const (
+	exportFixed   = "Fixed in commit 4f2a9c1: the exporter initialises the per-tenant totals map before the loop, so a tenant with no usage rows no longer crashes the nightly export; the job has been green since."
+	exportRegress = "Regression: the nightly export panics again with 'assignment to entry in nil map' when a tenant has no usage rows; the tenant-loader refactor in commit 9be71d0 dropped the totals-map initialisation that 4f2a9c1 added, so the 4f2a9c1 change no longer holds."
+)
+
+// TestLexicalReplacementsPairsARegressionThatRetiresAFix: a later note that says
+// a fix "no longer holds" retires the fix, so the fix is marked as replaced in
+// the injected block. The older note itself says the crash "no longer" happens —
+// a retirement phrase about the crash, not a claim that the fix note is a
+// retirement — and that must not put the pair past the matcher.
+func TestLexicalReplacementsPairsARegressionThatRetiresAFix(t *testing.T) {
+	now := time.Date(2026, 9, 30, 0, 0, 0, 0, time.UTC)
+	rows := []Candidate{
+		lexRowIn("fixed", "fact", "2026-01-02 00:00:00", exportFixed),
+		lexRowIn("regressed", "gotcha", "2026-01-04 00:00:00", exportRegress),
+	}
+	if got := lexicalReplacements(rows, nil, now); !reflect.DeepEqual(got, map[string][]string{"fixed": {"regressed"}}) {
+		t.Errorf("fix then regression pairs %v, want fixed replaced by regressed", got)
+	}
+}
+
 // TestLexicalReplacementsPairsAStandingCategoryRow: convention and preference are
 // standing categories resolve never retires, but that exemption is about a WRITE;
 // the replacement guess writes nothing, so a standing row is a party to a pair
