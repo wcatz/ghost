@@ -38,6 +38,23 @@ type StoreRunner struct {
 }
 
 func (r StoreRunner) Rank(ctx context.Context, q Query) ([]string, error) {
+	if q.Source == memory.SearchAllSource {
+		// ghost_search_all never goes through the assembler: it is one
+		// whole-corpus SearchHybridAll read, and its ProjectID is the "_global"
+		// label meaning "no one project". Scoping it to project "_global"
+		// would rank a different corpus and report a regression that is only
+		// the replay's own mistake. nil keeps it keyword-only like the rest
+		// of the gate; the id order is the ranking the tool returned.
+		rows, err := r.Store.SearchHybridAll(ctx, q.Query, nil, r.Limit)
+		if err != nil {
+			return nil, err
+		}
+		ids := make([]string, 0, len(rows))
+		for _, m := range rows {
+			ids = append(ids, m.ID)
+		}
+		return ids, nil
+	}
 	req := assemble.Request{
 		ProjectID: q.ProjectID,
 		Query:     q.Query,

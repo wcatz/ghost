@@ -29,12 +29,19 @@ type SearchRecord struct {
 	RecordedAt string            `json:"recorded_at,omitempty"`
 }
 
-// searchRecordRowsCap bounds how many search calls one store keeps. It is a
-// var so the retention test can lower it without waiting for ten thousand
-// inserts; production never changes it.
+// searchRecordRowsCap bounds how many search calls one store keeps, counted
+// over action='search' rows rather than over the audit table's rowid: another
+// action's writes must not spend any of this cap. It is a var so the retention
+// test can lower it without waiting for ten thousand inserts; production never
+// changes it.
 var searchRecordRowsCap = 10000
 
 const searchAuditAction = "search"
+
+// SearchAllSource is the source a whole-corpus ghost_search_all call records.
+// Both the writer and the replay name it, so the gate cannot miss those rows
+// by a spelling difference.
+const SearchAllSource = "search_all"
 
 // RecordSearch appends one search call to audit_log. A token-shaped query or
 // scope value is refused before anything is written: the error unwraps to
@@ -75,20 +82,27 @@ func (s *Store) RecordSearch(ctx context.Context, rec SearchRecord) error {
 	var tx *sql.Tx = conn.tx
 	defer tx.Rollback() //nolint:errcheck // no-op after Commit
 
-	var rowid int64
-	if err := tx.QueryRowContext(ctx, `
+	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO audit_log (action, project_id, details)
 		VALUES (?, ?, ?)
-		RETURNING rowid
-	`, searchAuditAction, rec.ProjectID, string(details)).Scan(&rowid); err != nil {
+	`, searchAuditAction, rec.ProjectID, string(details)); err != nil {
 		return fmt.Errorf("record search: %w", err)
 	}
 
-	if rowid > int64(searchRecordRowsCap) {
-		if _, err := tx.ExecContext(ctx,
-			`DELETE FROM audit_log WHERE action = ? AND rowid <= ?`,
-			searchAuditAction, rowid-int64(searchRecordRowsCap),
-		); err != nil {
+	// Count SEARCH rows, not the table's rowid: another audit action's writes
+	// move rowid on without using any of this cap. Counting first also keeps
+	// the common case to one read when the log is under its bound.
+	var searchRows int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT count(*) FROM audit_log WHERE action = ?`, searchAuditAction,
+	).Scan(&searchRows); err != nil {
+		return fmt.Errorf("record search: count search rows: %w", err)
+	}
+	if excess := searchRows - searchRecordRowsCap; excess > 0 {
+		if _, err := tx.ExecContext(ctx, `
+			DELETE FROM audit_log WHERE rowid IN (
+				SELECT rowid FROM audit_log WHERE action = ? ORDER BY rowid ASC LIMIT ?
+			)`, searchAuditAction, excess); err != nil {
 			return fmt.Errorf("record search: cap table size: %w", err)
 		}
 	}

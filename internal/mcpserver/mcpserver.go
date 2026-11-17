@@ -1977,7 +1977,7 @@ func (s *Server) registerTools() {
 		}
 		s.recordSearch(ctx, memory.SearchRecord{
 			ProjectID: "_global", // the whole-corpus read names no one project
-			Source:    "search_all",
+			Source:    memory.SearchAllSource,
 			Query:     args.Query,
 			Results:   ids,
 		})

@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -144,6 +145,60 @@ func TestRecordSearchEvictsOldestSearchRowsOnly(t *testing.T) {
 	}
 	if reflect != 1 {
 		t.Errorf("non-search audit rows = %d, want 1", reflect)
+	}
+}
+
+func TestRecordSearchCapCountsSearchRowsNotAuditRowids(t *testing.T) {
+	s := testStore(t)
+	oldCap := searchRecordRowsCap
+	searchRecordRowsCap = 3
+	t.Cleanup(func() { searchRecordRowsCap = oldCap })
+	ctx := context.Background()
+
+	// Interleave an unrelated audit action so the table's rowid runs well past
+	// the cap while the number of SEARCH rows does not. A rowid-window cap would
+	// evict a search here even though the search log is still under its bound.
+	for i := 0; i < 3; i++ {
+		if _, err := s.db.Exec(`INSERT INTO audit_log (action, details) VALUES ('reflect', '{}')`); err != nil {
+			t.Fatalf("seed non-search row %d: %v", i, err)
+		}
+		rec := sampleSearchRecord()
+		rec.Query = fmt.Sprintf("query-%d", i)
+		if err := s.RecordSearch(ctx, rec); err != nil {
+			t.Fatalf("RecordSearch %d: %v", i, err)
+		}
+	}
+	rows, err := s.SearchRecords(ctx, 100)
+	if err != nil {
+		t.Fatalf("SearchRecords: %v", err)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("searches kept = %d, want 3 (all under the cap)", len(rows))
+	}
+
+	// One more search crosses the cap: exactly the oldest SEARCH row goes, and
+	// none of the interleaved non-search rows is touched.
+	rec := sampleSearchRecord()
+	rec.Query = "query-3"
+	if err := s.RecordSearch(ctx, rec); err != nil {
+		t.Fatalf("RecordSearch 4: %v", err)
+	}
+	rows, err = s.SearchRecords(ctx, 100)
+	if err != nil {
+		t.Fatalf("SearchRecords: %v", err)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("searches kept = %d, want 3", len(rows))
+	}
+	if rows[0].Query != "query-3" || rows[2].Query != "query-1" {
+		t.Errorf("kept = %q,%q,%q; want query-3, query-2, query-1", rows[0].Query, rows[1].Query, rows[2].Query)
+	}
+	var reflect int
+	if err := s.db.QueryRow(`SELECT count(*) FROM audit_log WHERE action = 'reflect'`).Scan(&reflect); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if reflect != 3 {
+		t.Errorf("non-search audit rows = %d, want 3", reflect)
 	}
 }
 

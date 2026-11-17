@@ -17,13 +17,17 @@ const replayUsage = `Usage: ghost replay [--snapshot <db>] [--baseline <binary>]
        ghost replay --rank --snapshot <db> --record <file.json>
 
 Replays the search queries recorded in audit_log against a pinned snapshot.
-The default baseline is the result set each query recorded when it ran; with
---baseline a second ghost build ranks the same queries through this command's
-rank mode instead. The report shows, per query, top-k overlap, rank shifts and
-every changed top hit. Ranking is keyword-only and offline: the snapshot's
-vectors describe stored memories, not a fresh query, so no embedding endpoint
-is called. --rank is that stable ranking contract for a baseline binary: it
-reads one JSON query and prints a JSON array of ranked memory ids.
+The default baseline is the result set each query recorded when it ran, but
+that set came from the live build's hybrid search while this command's current
+side is keyword-only: a recorded-vs-current diff is only meaningful for
+keyword-only recordings. On an embedding-enabled install use --baseline for a
+true A/B against another build through the same rank mode. With --baseline a
+second ghost build ranks the same queries through this command's rank mode
+instead. The report shows, per query, top-k overlap, rank shifts and every
+changed top hit. Ranking is keyword-only and offline: the snapshot's vectors
+describe stored memories, not a fresh query, so no embedding endpoint is
+called. --rank is that stable ranking contract for a baseline binary: it reads
+one JSON query and prints a JSON array of ranked memory ids.
 `
 
 type replayOptions struct {
@@ -188,6 +192,10 @@ func runReplayReport(opts replayOptions) {
 	}
 	defer closeStore() //nolint:errcheck
 
+	if opts.baseline == "" {
+		fmt.Println("note: comparing recorded hybrid result sets with a keyword-only current ranking; " +
+			"a diff here is not by itself a retrieval regression — use --baseline for a true A/B")
+	}
 	results := replay.Run(context.Background(), queries, baseline,
 		replay.StoreRunner{Store: store, Limit: opts.limit}, opts.topK)
 	fmt.Print(replay.FormatReport(results))
