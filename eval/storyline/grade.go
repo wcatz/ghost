@@ -606,7 +606,9 @@ func writeReportAs(dir, file string, res *Result, model string) (string, error) 
 		return "", fmt.Errorf("create results dir: %w", err)
 	}
 	verdict := "FAIL"
-	if res.Passed() {
+	if res.Disqualified != "" {
+		verdict = "DISQUALIFIED"
+	} else if res.Passed() {
 		verdict = "PASS"
 	}
 	var b strings.Builder
@@ -625,6 +627,9 @@ func writeReportAs(dir, file string, res *Result, model string) (string, error) 
 	}
 	if failed := res.FailedNames(); len(failed) > 0 {
 		fmt.Fprintf(&b, "- failed checks: %s\n", strings.Join(failed, ", "))
+	}
+	if res.Disqualified != "" {
+		fmt.Fprintf(&b, "\n## disqualified\n\n%s\n", res.Disqualified)
 	}
 
 	b.WriteString("\n## checks\n\n")

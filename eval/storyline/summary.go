@@ -7,9 +7,12 @@ import (
 	"strings"
 )
 
+const defaultMinQualified = 0.8
+
 type armTally struct {
 	arm              string
-	runs             int // runs that completed
+	runs             int // runs that qualified and count toward the scores below
+	completed        int // runs that finished, qualified or not
 	errors           int // runs that ended in an error, excluded from every count below
 	noReport         int
 	carried          int
@@ -106,7 +109,27 @@ func (t armTally) blockSizes() string {
 
 func (t armTally) ratio(n int) string { return fmt.Sprintf("%d/%d", n, t.runs) }
 
-func formatSummary(cells []cell, runs int) string {
+func (t armTally) qualifiedRatio() string { return fmt.Sprintf("%d/%d", t.runs, t.completed) }
+
+// armInconclusive is the same test the summary applies when it marks an arm
+// inconclusive, so the exit decision cannot disagree with the table the reader
+// saw. A completed run is one that reached a result, qualified or not; an errored
+// run is reported as a failure in its own right and does not dilute the fraction.
+func armInconclusive(cells []cell, storyKey, arm string, min float64) bool {
+	qualified, completed := 0, 0
+	for _, c := range cells {
+		if c.story.Key != storyKey || c.arm != arm || c.err != nil || c.res == nil {
+			continue
+		}
+		completed++
+		if c.res.Disqualified == "" {
+			qualified++
+		}
+	}
+	return completed > 0 && float64(qualified)/float64(completed) < min
+}
+
+func formatSummary(cells []cell, runs int, minQualified float64) string {
 	var b strings.Builder
 	seen := map[string]bool{}
 	var order []Storyline
@@ -118,10 +141,11 @@ func formatSummary(cells []cell, runs int) string {
 	}
 	for _, story := range order {
 		fmt.Fprintf(&b, "## %s — %s (n=%d per arm)\n\n", story.Key, story.Title, runs)
-		b.WriteString("| arm | runs | answer carries | stale/mistake used | judge yes (advisory) | block delivered | block bytes per session |\n")
-		b.WriteString("|-----|------|----------------|--------------------|----------------------|-----------------|-------------------------|\n")
+		b.WriteString("| arm | runs | qualified | answer carries | stale/mistake used | judge yes (advisory) | block delivered | block bytes per session |\n")
+		b.WriteString("|-----|------|-----------|----------------|--------------------|----------------------|-----------------|-------------------------|\n")
 		for _, arm := range []string{armWithGhost, armFlatNotes, armWithoutGhost} {
 			var results []*Result
+			var disqualified []string
 			errored, noReport := 0, 0
 			for _, c := range cells {
 				if c.story.Key != story.Key || c.arm != arm {
@@ -131,15 +155,21 @@ func formatSummary(cells []cell, runs int) string {
 					errored++
 					continue
 				}
-				results = append(results, c.res)
 				if c.reportErr != nil {
 					noReport++
 				}
+				if c.res.Disqualified != "" {
+					disqualified = append(disqualified, fmt.Sprintf("run %d: %s", c.run, c.res.Disqualified))
+					continue
+				}
+				results = append(results, c.res)
 			}
-			if len(results) == 0 && errored == 0 {
+			completed := len(results) + len(disqualified)
+			if completed == 0 && errored == 0 {
 				continue
 			}
 			t := tally(arm, results, errored, noReport)
+			t.completed = completed
 			carried, avoid, judge, delivered := "n/a", "n/a", "n/a", t.ratio(t.delivered)
 			if t.hasCarries {
 				carried = t.ratio(t.carried)
@@ -163,17 +193,31 @@ func formatSummary(cells []cell, runs int) string {
 			if arm == armFlatNotes {
 				delivered = "n/a (every note)"
 			}
-			runsCol := fmt.Sprintf("%d", t.runs)
+			runsCol := fmt.Sprintf("%d", t.completed)
 			if t.errors > 0 {
 				runsCol += fmt.Sprintf(" (+%d errored)", t.errors)
 			}
 			if t.noReport > 0 {
 				runsCol += fmt.Sprintf(" (%d report not written)", t.noReport)
 			}
-			fmt.Fprintf(&b, "| %s | %s | %s | %s | %s | %s | %s |\n",
-				arm, runsCol, carried, avoid, judge, delivered, t.blockSizes())
+			qualifiedCol := t.qualifiedRatio()
+			if armInconclusive(cells, story.Key, arm, minQualified) {
+				qualifiedCol += " (inconclusive)"
+			}
+			fmt.Fprintf(&b, "| %s | %s | %s | %s | %s | %s | %s | %s |\n",
+				arm, runsCol, qualifiedCol, carried, avoid, judge, delivered, t.blockSizes())
 		}
 		b.WriteString("\n")
+	}
+	var dropped []string
+	for _, c := range cells {
+		if c.res != nil && c.res.Disqualified != "" {
+			dropped = append(dropped, fmt.Sprintf("- %s %s run %d: %s", c.story.Key, c.arm, c.run, c.res.Disqualified))
+		}
+	}
+	if len(dropped) > 0 {
+		b.WriteString("## disqualified runs\n\n")
+		b.WriteString(strings.Join(dropped, "\n") + "\n\n")
 	}
 	return b.String()
 }

@@ -1111,6 +1111,8 @@ reversals and expiry, not scale. Read the "stale/mistake used" column per arc.
 Whether Ghost's selection beats a notes file the host truncates needs an arc with
 hundreds of memories, which none of these is.
 
+**Qualification before grading.** A completed run is not scored until it is shown to have exercised the mechanism its arm is testing. The with-Ghost arm must show the effect of at least one Ghost tool call (a saved raw row, a rendered block, probe rows, an arc phase's output or the end state read from the scratch store), a non-empty session-start block reaching a session, and a result for every stage and every probe the storyline declares; a run that never touched Ghost, was never handed a block, or ended before its probe is dropped with that reason. The two baseline arms run no probes or arc stages by design, so reaching the last stage is their bar — they are not penalised for lacking the thing they measure against. A disqualified run is never graded (no checks, no judge call), is printed as `DISQUALIFIED` in its own report with the reason, and is listed apart from the scores in the summary. The summary's `qualified` column shows qualified/total per arm; an arm whose qualified fraction falls below `-min-qualified` (default 0.8) is marked inconclusive, and neither a disqualified nor an inconclusive run decides the exit code. The probe questions and their returned rows are never inserted into a session's prompt — they are kept only for the grade — so a probe measures the work without steering it.
+
 **Targets, not measurements.** These are the numbers a 10-run table is read
 against; none of them has been measured, no results artifact ships, and nothing
 gates on them:
