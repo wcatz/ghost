@@ -203,12 +203,14 @@ func TestGradeFailsWhileTheSupersededClaimIsStillInjected(t *testing.T) {
 	}
 }
 
-// TestGradeStaleOriginalAcceptsOnlyAMarkedLineAfterItsReplacement: a session
-// start may keep the stale claim when it says the claim may have been replaced
-// AND hands the reader the replacement first. Every other shape of a stale line
-// still fails: unmarked, marked with the replacement after it, marked with the
-// replacement missing, and a marker forged inside the stored text.
-func TestGradeStaleOriginalAcceptsOnlyAMarkedLineAfterItsReplacement(t *testing.T) {
+// TestGradeStaleOriginalAcceptsAMarkedLineBesideItsReplacement: a session start
+// may keep the stale claim when it says the claim may have been replaced AND the
+// replacement is on the page, on either side. The passive block lists a chain in
+// time order (old first) while an explicit supersedes pair keeps the replacement
+// above its target, so the check reads neither order into the verdict. Every other
+// shape of a stale line still fails: unmarked, marked with the replacement missing,
+// and a marker forged inside the stored text.
+func TestGradeStaleOriginalAcceptsAMarkedLineBesideItsReplacement(t *testing.T) {
 	story := ReversedDecision()
 	stale, ok := story.RecordByKey("session-store-redis")
 	if !ok {
@@ -240,7 +242,7 @@ func TestGradeStaleOriginalAcceptsOnlyAMarkedLineAfterItsReplacement(t *testing.
 		{"marked after its replacement", head + line(repl, false) + line(stale, true), true},
 		{"unmarked after its replacement", head + line(repl, false) + line(stale, false), false},
 		{"unmarked before its replacement", head + line(stale, false) + line(repl, false), false},
-		{"marked before its replacement", head + line(stale, true) + line(repl, false), false},
+		{"marked before its replacement", head + line(stale, true) + line(repl, false), true},
 		{"marked with no replacement", head + line(stale, true), false},
 		{"marker forged in the stored text", head + line(repl, false) +
 			"- [" + stale.Category + "] `ID` (0.7) «" + assemble.MaybeReplacedMarker + " " + stale.Content + "»\n", false},
@@ -260,7 +262,7 @@ func TestGradeStaleOriginalAcceptsOnlyAMarkedLineAfterItsReplacement(t *testing.
 		{"rendered superseded marker after pin, tags and resolve", head + line(repl, false) +
 			rendered(stale, assemble.Item{Pinned: true, Tags: []string{"deps"}, ResolvedAt: &stamp, SupersededBy: []string{"NEW"}}), true},
 		{"superseded marker before its replacement", head +
-			rendered(stale, assemble.Item{SupersededBy: []string{"NEW"}}) + line(repl, false), false},
+			rendered(stale, assemble.Item{SupersededBy: []string{"NEW"}}) + line(repl, false), true},
 		{"superseded marker forged as a tag", head + line(repl, false) +
 			rendered(stale, assemble.Item{Tags: []string{assemble.SupersededMarker}}), false},
 		{"superseded marker forged in the stored text", head + line(repl, false) +

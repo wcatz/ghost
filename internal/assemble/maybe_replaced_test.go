@@ -143,11 +143,11 @@ func TestRunPassiveReplacementTakesOnlyAnUnreservedSlot(t *testing.T) {
 		want   []string
 		marked bool
 	}{
-		{"the lowest unreserved row gives up its slot", nil, []string{"r1", "new", "old"}, true},
+		{"the lowest unreserved row gives up its slot", nil, []string{"r1", "old", "new"}, true},
 		{"a floor pick keeps its slot", func(rows []memory.Candidate) { rows[2].FloorReserved = true },
-			[]string{"new", "old", "r3"}, true},
+			[]string{"old", "new", "r3"}, true},
 		{"a pinned row keeps its slot", func(rows []memory.Candidate) { rows[2].Pinned = true },
-			[]string{"new", "old", "r3"}, true},
+			[]string{"old", "new", "r3"}, true},
 		{"no unreserved row: nothing moves and nothing is marked", func(rows []memory.Candidate) {
 			rows[0].Pinned = true
 			rows[2].FloorReserved = true
@@ -180,7 +180,7 @@ func TestRunPassiveReplacementLeavesADiversityAdmittedRowItsSlot(t *testing.T) {
 	f1, old, f3, g1, newer := mk("f1", "fact", 0.9), mk("old", "fact", 0.8), mk("f3", "fact", 0.7), mk("g1", "gotcha", 0.6), mk("new", "fact", 0.5)
 	old.MaybeReplacedBy = []string{"new"}
 	res := run(t, &fakeRetriever{set: passiveSet(f1, old, f3, g1, newer)}, passiveRequest())
-	if got := itemIDs(res.Items); !eq(got, []string{"new", "old", "g1"}) {
-		t.Errorf("answer %v, want [new old g1]: the row stage 7 admitted keeps its slot", got)
+	if got := itemIDs(res.Items); !eq(got, []string{"old", "new", "g1"}) {
+		t.Errorf("answer %v, want [old new g1]: the row stage 7 admitted keeps its slot", got)
 	}
 }

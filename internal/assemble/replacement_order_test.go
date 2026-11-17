@@ -377,8 +377,8 @@ func TestRunPassiveGlobalBucketKeepsBothRowsOfAReplacementPair(t *testing.T) {
 	if oi < 0 || ni < 0 {
 		t.Fatalf("block %v must hold both rows (older %s, newer %s)", itemIDs(res.Items), older, newer)
 	}
-	if ni > oi {
-		t.Errorf("block %v: the replacement %s must come ahead of %s", itemIDs(res.Items), newer, older)
+	if ni < oi {
+		t.Errorf("block %v: the replacement %s must come after %s in time order", itemIDs(res.Items), newer, older)
 	}
 }
 

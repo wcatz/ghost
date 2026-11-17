@@ -457,17 +457,16 @@ func staleAbsentAs(name, where, block string, stale, replacement Record) Check {
 		return Check{Name: name, Passed: true, Detail: fmt.Sprintf("%s is not in %s", stale.Key, where)}
 	}
 	lines := strings.Split(block, "\n")
-	first := -1
+	present := false
 	if replacement.Mark != "" {
-		for i, l := range lines {
+		for _, l := range lines {
 			if strings.Contains(l, replacement.Mark) {
-				first = i
+				present = true
 				break
 			}
 		}
 	}
-	marked := true
-	for i, l := range lines {
+	for _, l := range lines {
 		if !strings.Contains(l, stale.Mark) {
 			continue
 		}
@@ -476,17 +475,18 @@ func staleAbsentAs(name, where, block string, stale, replacement Record) Check {
 				"%s (%s) is superseded by %s and is still in %s with nothing marking it as old",
 				stale.Key, stale.Mark, stale.SupersededBy, where)}
 		}
-		if first < 0 || first >= i {
-			marked = false
-		}
 	}
-	if !marked {
+	// The passive block shows a replacement chain in time order (old first),
+	// while an explicit supersedes pair keeps the superseder above its target.
+	// What matters for this check is that the marked row names a replacement
+	// that is on the page at all, not which side of it the replacement sits on.
+	if !present {
 		return Check{Name: name, Passed: false, Detail: fmt.Sprintf(
-			"%s (%s) is in %s marked as maybe replaced, but its replacement %s (%s) does not appear before it",
+			"%s (%s) is in %s marked as maybe replaced, but its replacement %s (%s) is not on the page",
 			stale.Key, stale.Mark, where, stale.SupersededBy, replacement.Mark)}
 	}
 	return Check{Name: name, Passed: true, Detail: fmt.Sprintf(
-		"%s is in %s marked as maybe replaced, after its replacement %s", stale.Key, where, stale.SupersededBy)}
+		"%s is in %s marked as maybe replaced beside its replacement %s", stale.Key, where, stale.SupersededBy)}
 }
 
 var replacedMarkerLine = regexp.MustCompile("^- \\[[^\\]]*\\] `[^`]*` \\([0-9]+\\.[0-9]")

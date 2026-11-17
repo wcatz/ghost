@@ -14,10 +14,10 @@ const (
 	cacheDecision = "Decision: lookup responses are cached in-process with ristretto instead of Memcached; internal/cache keeps a 64 MB budget per pod, entries still live 300s, and memcached-01 is being shut down."
 )
 
-// TestRunPassiveOrdersARecategorisedReplacementFirstAndMarksTheOlderRow: a
-// replacement filed under another category than the claim it replaces (a decision
-// replacing a fact) was never paired.
-func TestRunPassiveOrdersARecategorisedReplacementFirstAndMarksTheOlderRow(t *testing.T) {
+// TestRunPassiveOrdersARecategorisedReplacementInTimeOrderAndMarksTheOlderRow:
+// a replacement filed under another category than the claim it replaces (a
+// decision replacing a fact), still shown after the fact it replaced.
+func TestRunPassiveOrdersARecategorisedReplacementInTimeOrderAndMarksTheOlderRow(t *testing.T) {
 	r := newReplacementStore(t)
 	older := r.add(memory.Memory{Category: "fact", Content: cacheFact, Importance: 0.8}, 20)
 	newer := r.add(memory.Memory{Category: "decision", Content: cacheDecision, Importance: 0.7}, 24)
@@ -27,8 +27,8 @@ func TestRunPassiveOrdersARecategorisedReplacementFirstAndMarksTheOlderRow(t *te
 	if oi < 0 || ni < 0 {
 		t.Fatalf("answer %v must hold both rows (older %s, newer %s): the older row is marked, not withheld", itemIDs(res.Items), older, newer)
 	}
-	if ni > oi {
-		t.Errorf("answer %v puts the replaced fact %s (index %d) ahead of the decision %s (index %d)", itemIDs(res.Items), older, oi, newer, ni)
+	if ni < oi {
+		t.Errorf("answer %v puts the decision %s (index %d) ahead of the fact %s (index %d) it replaced", itemIDs(res.Items), newer, ni, older, oi)
 	}
 	if old := res.Items[oi]; len(old.MaybeReplacedBy) != 1 || old.MaybeReplacedBy[0] != newer || !strings.Contains(old.Line(), MaybeReplacedMarker) {
 		t.Errorf("older row MaybeReplacedBy = %v, want [%s] and the marker: %s", old.MaybeReplacedBy, newer, old.Line())

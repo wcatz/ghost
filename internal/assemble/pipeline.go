@@ -1142,7 +1142,7 @@ func (p *pipeline) arrangeReplacements() {
 		if s := p.sliceFor(b); s != nil {
 			limit = s.MaxItems
 		}
-		order := p.arrangeBucket(append([]int(nil), idx...), limit)
+		order := p.arrangeBucket(append([]int(nil), idx...), limit, true)
 		for k, pos := range idx {
 			slot[pos] = order[k]
 		}
@@ -1174,7 +1174,7 @@ func (p *pipeline) displayReplacements(res *Result) {
 		order[i] = i
 	}
 	p.movedAhead = map[string]string{}
-	order = p.arrangeBucket(order, 0)
+	order = p.arrangeBucket(order, 0, false)
 	if len(p.movedAhead) == 0 {
 		return
 	}
@@ -1189,7 +1189,7 @@ func (p *pipeline) displayReplacements(res *Result) {
 	res.Bytes = len(res.Response)
 }
 
-func (p *pipeline) arrangeBucket(order []int, limit int) []int {
+func (p *pipeline) arrangeBucket(order []int, limit int, timeOrder bool) []int {
 	pos := func(id string) int {
 		for k, i := range order {
 			if p.rows[i].ID == id {
@@ -1211,6 +1211,61 @@ func (p *pipeline) arrangeBucket(order []int, limit int) []int {
 	budget := len(order) * len(order)
 	for k := 0; k < len(order) && budget > 0; k++ {
 		budget--
+		if timeOrder {
+			// A passive block reads as a timeline: the row a newer note replaced
+			// sits DIRECTLY before it, still marked as maybe replaced. A reader
+			// asked for the value "before this change" then takes the last row of
+			// the chain rather than the one a replacement-first order leads with.
+			older := order[k]
+			if p.rows[older].Pinned || (limit > 0 && k >= limit) {
+				continue
+			}
+			for _, id := range p.rows[older].MaybeReplacedBy {
+				at := pos(id)
+				if at < 0 || at == k+1 {
+					continue // absent, or already adjacent in time order
+				}
+				newer := order[at]
+				if p.rows[newer].Pinned || p.deferred[p.rows[newer].ID].slots > 0 {
+					continue
+				}
+				if at > k {
+					// the replacement sits to the right: pull it in to directly
+					// after its older row, by the same cap rule as the query walk
+					if limit == 0 || at < limit {
+						move(at, k+1)
+					} else {
+						victim := -1
+						for v := limit - 1; v >= 0; v-- {
+							if v != k && !reserved(order[v]) {
+								victim = v
+								break
+							}
+						}
+						if victim < 0 {
+							continue
+						}
+						move(at, k+1) // the window now holds limit+1 rows
+						if victim >= k+1 {
+							victim++
+						}
+						move(victim, limit) // the displaced row heads the rows behind the cap
+					}
+				} else {
+					// the replacement sits to the left (the relevance order put
+					// the newer row first): move the older row to directly before
+					// it, so the pair reads old -> new
+					move(k, at)
+				}
+				placed[newer] = true
+				if p.movedAhead != nil {
+					p.movedAhead[p.rows[older].ID] = p.rows[newer].ID
+				}
+				k--
+				break
+			}
+			continue
+		}
 		older := order[k]
 		if p.rows[older].Pinned || (limit > 0 && k >= limit) {
 			continue

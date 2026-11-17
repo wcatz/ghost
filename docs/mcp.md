@@ -444,12 +444,14 @@ two parallel facts, not a replacement), and nothing relates them yet — no live
 exclude a pair: a cosine `related` edge, which the linking worker writes between exactly
 such rows, does not. That is the state a default install leaves a change of truth in until
 a supersede pass runs. The older row is marked, never withheld. On
-`ghost_project_context`, the session-start block and the project resource the replacement
-is also ordered ahead of it: inside the bucket's item cap it moves up and the rows between
-stay on the page; from behind the cap it may take only the slot of the lowest-ranked row
-inside the cap that nothing reserved (a pinned row, a behavioural-floor pick, a row the
-category share admitted), and with no such row it stays off the page and the older row is
-not marked. A pinned row is never displaced out of the cap and never moved ahead of or behind its
+`ghost_project_context`, the session-start block and the project resource the two rows are
+ordered in time: the older, marked row comes first and the replacement directly after it,
+so the block reads as a timeline and a reader asked for "the value before this change" takes
+the last row of the chain. Inside the bucket's item cap a replacement already there moves
+back and the rows between stay on the page; from behind the cap it may take only the slot of
+the lowest-ranked row inside the cap that nothing reserved (a pinned row, a behavioural-floor
+pick, a row the category share admitted), and with no such row it stays off the page and the
+older row is not marked. A pinned row is never displaced out of the cap and never moved ahead of or behind its
 pair: a pinned older row is marked and keeps its place. On `ghost_memory_search` the
 answer is decided on the relevance order first and reordered for display after: which
 rows are on the page (every stage, the item cap and the response-fit trim, which cuts the
