@@ -1431,7 +1431,7 @@ ghost replay --rank --snapshot /path/to/ghost.db.backup-... --record /path/to/qu
 | Flag | Meaning |
 |---|---|
 | `--snapshot <db>` | The pinned snapshot to replay against. Required. Opened read-only, never migrated or written. |
-| `--baseline <binary>` | A second ghost build to rank the queries through this command's rank mode instead of comparing against the ids the queries recorded when they ran. |
+| `--baseline <binary>` | A second ghost build to rank the queries through this command's rank mode instead of comparing against the ids the queries recorded when they ran. Use it for a true A/B: the recorded ids came from the live build's hybrid search, while this command's current side is keyword-only. |
 | `--limit N` | Max rows the ranking returns per query (default 10). |
 | `--top-k N` | Size of the result window the overlap and membership are measured over (default 5); rank shifts are still read from the full lists. |
 | `--max-queries N` | Replay only the newest N recorded calls (default 0 = all). |
@@ -1440,7 +1440,9 @@ ghost replay --rank --snapshot /path/to/ghost.db.backup-... --record /path/to/qu
 
 The report prints, per recorded query, the top-k overlap and Jaccard, every id that moved rank with its old and new position, the ids that entered or left the window, and — the line a review has to answer — `changed top hit: <old> -> <new>` whenever the first result differs. It ends with a count of queries and changed top hits. A query one build cannot rank is reported as an error for that query and does not stop the rest. Query text is printed through the shared data renderer and ids through the shared token renderer, so neither can forge a line of the report.
 
-Replay is deliberately keyword-only. The snapshot's vectors describe the stored memories, not a fresh query, so producing a query vector would need the embedding endpoint; the gate compares lexical result sets and calls no endpoint. This makes the diff deterministic and local, and it means a vector-only retrieval change needs its own evidence — the built-in `ghost bench` reports — beside the replay diff.
+The default baseline is the recorded result set, so read it with care: those ids were ranked by the build that recorded them, normally with hybrid vector fusion, while this command ranks the current side with keywords alone. A recorded-vs-current diff is therefore only meaningful for keyword-only recordings — on an embedding-enabled install most queries would show a diff no retrieval change caused. Pass `--baseline` to compare two builds through the same rank mode instead; the report prints that caveat when no baseline was given.
+
+Replay is deliberately keyword-only. The snapshot's vectors describe the stored memories, not a fresh query, so producing a query vector would need the embedding endpoint; the gate compares lexical result sets and calls no endpoint. This makes the diff deterministic and local, and it means a vector-only retrieval change needs its own evidence — the built-in `ghost bench` reports — beside the replay diff. A recorded `ghost_search_all` call is replayed as the whole-corpus read it was, not scoped to `_global`: it uses the same keyword-only `SearchHybridAll` path over every project, so a memory in an ordinary project still ranks on both sides.
 
 Search calls are recorded only while `search.record_queries` is on (the default); see [configuration](configuration.md#search-ranking). The audit write refuses a token-shaped query and drops that call, so a query holding a credential never reaches the snapshot or the report.
 
