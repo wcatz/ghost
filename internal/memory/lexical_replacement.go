@@ -74,7 +74,8 @@ func lexicalReplacements(rows []Candidate, edges []LinkEdge, now time.Time) map[
 				older, newer = b, a
 			}
 			swapped := sharesValue(a.values, b.values) && lacksValue(a.values, b.values) && lacksValue(b.values, a.values)
-			if !swapped && !retiresFields(newer.fields, older.fields, older.values) {
+			if !swapped && !retiresFields(newer.fields, older.fields, older.values) &&
+				!retiresClaim(newer.fields, older.values) {
 				continue
 			}
 			if subjectSwapped(a.fields, b.fields) {
@@ -219,6 +220,19 @@ func replacementsWithin(ctx context.Context, db Queryer, rows []Memory, now time
 		return nil, err
 	}
 	return lexicalReplacements(cands, edges, now), nil
+}
+
+// IsReplacement is the pairwise form of the replacement guess, for a caller that
+// already holds one older/newer pair and only needs the lexical judgement. It
+// asks whether newer looks like a replacement of older under the same rule that
+// marks a row on a read: a value swapped or retired in text that resembles the
+// older text, whatever the two categories. It decides nothing — `ghost supersede`
+// uses it to rescue a reworded replacement the cosine floor rejected before the
+// pair goes to the classifier. No live edges are read here: a pair the graph
+// already relates is reconciled by the pass from its own link rows.
+func IsReplacement(older, newer Memory, now time.Time) bool {
+	rows := []Candidate{{Memory: older}, {Memory: newer}}
+	return len(lexicalReplacements(rows, nil, now)[older.ID]) > 0
 }
 
 func replacementPairKeys(repl map[string][]string) map[[2]string]bool {

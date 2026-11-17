@@ -9,11 +9,23 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log/slog"
+	"os"
+	"time"
 
 	"github.com/wcatz/ghost/internal/memory"
 )
 
 const maxNeighbors = 8
+
+// maxTracedRejections bounds the diagnostic list of pairs the scan saw and
+// dropped. A large project offers thousands of below-floor neighbours; keeping
+// them all would grow a result whose only reader prints a handful of lines.
+const maxTracedRejections = 500
+
+// replacementNow is the clock the lexical rescue reads validity against. It is
+// a variable only so a test can pin expiry without sleeping; production never
+// assigns it.
+var replacementNow = time.Now
 
 // Candidate is an ordered pair proposed for classification: Newer is the more
 // recent memory that may supersede Older. The CreatedAt values are the notes'
@@ -76,6 +88,51 @@ type Selection struct {
 	Unscored        int
 	Unoriented      int
 	unorientedPairs map[pairKey]bool
+	// NotProposed is the other half of a miss diagnosis: a pair the scan SAW as
+	// neighbours but left to candidate generation, with the reason. A report that
+	// shows only the pairs that reached the classifier cannot tell "never
+	// proposed" from "proposed and rejected".
+	NotProposed []RejectedPair
+	rejected    map[pairKey]bool
+}
+
+// RejectedPair is a pair the candidate scan saw and did not put to the
+// classifier, and why. IDs rather than content: the trace is a pointer to a row
+// a reader can go and look at, not a second copy of untrusted text in a report.
+type RejectedPair struct {
+	NewerID, OlderID, Reason string
+}
+
+// addNotProposed records one rejected pair under the UNORDERED key. The scan
+// visits both endpoints, so the same pair is seen twice; without this guard it
+// spends two of the bounded trace's entries and leaves one line in each
+// direction. The ids are oriented newer->older by the same rule a candidate
+// uses, so a reader matching the trace against a candidate or an edge reads one
+// direction. A pair tying on both stamps has no orientation; the raw scan order
+// is kept there rather than inventing one from the ids.
+//
+// Rejected pairs are tracked only to serve the optional trace: when tracing is
+// off, or once the bounded trace is full, nothing is retained, so a large scan
+// does not accumulate unbounded dedupe state.
+func (s *Selection) addNotProposed(m, other memory.Memory, reason string) {
+	if os.Getenv("GHOST_SUPERSEDE_TRACE") == "" || len(s.NotProposed) >= maxTracedRejections {
+		return
+	}
+	key := newPairKey(m.ID, other.ID)
+	if s.rejected == nil {
+		s.rejected = make(map[pairKey]bool)
+	}
+	if s.rejected[key] {
+		return
+	}
+	s.rejected[key] = true
+	newer, older, ok := orient(m, other)
+	if !ok {
+		newer, older = m, other
+	}
+	s.NotProposed = append(s.NotProposed, RejectedPair{
+		NewerID: newer.ID, OlderID: older.ID, Reason: reason,
+	})
 }
 
 // SelectCandidates returns the deduped ordered candidate pairs for a project:
@@ -108,7 +165,7 @@ func SelectCandidates(ctx context.Context, store vectorStore, projectID string, 
 			return sel, fmt.Errorf("search vector for %s: %w", memory.RefusalArg("memory_id", m.ID), err)
 		}
 		for _, n := range neighbors {
-			if n.MemoryID == m.ID || n.Score < threshold {
+			if n.MemoryID == m.ID {
 				continue
 			}
 			other, ok := byID[n.MemoryID]
@@ -118,19 +175,43 @@ func SelectCandidates(ctx context.Context, store vectorStore, projectID string, 
 					return sel, fmt.Errorf("load neighbor %s: %w", memory.RefusalArg("memory_id", n.MemoryID), err)
 				}
 				if len(fetched) == 0 {
+					sel.addNotProposed(m, memory.Memory{ID: n.MemoryID}, "the neighbour row no longer exists")
 					continue
 				}
 				other = fetched[0]
 				if other.ProjectID != projectID {
-					continue // e.g. a _global neighbor not in this project's set
+					// e.g. a _global neighbour not in this project's set.
+					sel.addNotProposed(m, other, "the neighbour belongs to another project")
+					continue
 				}
 				byID[other.ID] = other
 			}
 			if memory.RetentionExempt(m) || memory.RetentionExempt(other) {
+				sel.addNotProposed(m, other, "a persistent endpoint is exempt")
 				continue
 			}
 			if memory.ScopesConflict(m.Scope, n.Scope) {
+				sel.addNotProposed(m, other, "the endpoints' scopes conflict")
 				continue
+			}
+			// A replacement the agent reworded around the value — a rename, a
+			// new cache, a regression naming the fix it retires — scores BELOW
+			// the cosine floor, and a different category drifts the wording
+			// further. It is still the pair the arc annotates. Rescue exactly
+			// the neighbours the scan saw and the floor rejected, with the
+			// lexical replacement guess (the one that marks a row on a read):
+			// values swapped or retired, whatever the two categories. The
+			// guess decides nothing — the pair still goes to the classifier —
+			// and bounding it to the scan's neighbours keeps a large project
+			// from paying an all-pairs text comparison. A below-floor pair that
+			// is NOT a replacement leaves no mark in the counts above: it was
+			// never a candidate, and the trace records it as such.
+			if n.Score < threshold {
+				rescueNewer, rescueOlder, okRescue := orient(m, other)
+				if !okRescue || !memory.IsReplacement(rescueOlder, rescueNewer, replacementNow()) {
+					sel.addNotProposed(m, other, "below the cosine floor and no lexical replacement")
+					continue
+				}
 			}
 			key := newPairKey(m.ID, other.ID)
 			if seen[key] {
@@ -144,18 +225,26 @@ func SelectCandidates(ctx context.Context, store vectorStore, projectID string, 
 					sel.unorientedPairs = make(map[pairKey]bool)
 				}
 				sel.unorientedPairs[key] = true
+				sel.addNotProposed(m, other, "both rows share both timestamps")
 				continue
 			}
 			if newer.ID == older.ID {
-				continue // identical ID (a store that minted one id twice)
+				// identical ID (a store that minted one id twice)
+				sel.addNotProposed(m, other, "identical endpoint ids")
+				continue
 			}
 			cands = append(cands, Candidate{
 				NewerID: newer.ID, NewerContent: newer.Content, NewerCreatedAt: newer.CreatedAt,
 				OlderID: older.ID, OlderContent: older.Content, OlderCreatedAt: older.CreatedAt,
+				// The honest cosine is stored as the link strength even when the
+				// lexical guess did the proposing. No reader gates a 'supersedes'
+				// edge on strength: only 'related' links are compared with the
+				// demotion threshold, and the supersede penalty counts live edges.
 				Similarity: n.Score,
 			})
 		}
 	}
+
 	sel.Candidates = cands
 	return sel, nil
 }
@@ -372,8 +461,14 @@ func withdrawSupersedesEdge(ctx context.Context, store vectorStore, c *Classifie
 // Result summarizes a pass.
 type Result struct {
 	Candidates int
-	Confirmed  int // SUPERSEDES verdicts
-	Created    int // supersedes links written (0 in dry-run)
+	// NotProposed is the candidate-generation half of a miss report: pairs the
+	// vector scan saw but did not put to the classifier, and why. The other half
+	// is the Classified slice RunWith returns, which carries the verdict of every
+	// pair that WAS proposed. Together they answer "was the pair never proposed,
+	// or proposed and rejected?" without guessing from the edge graph.
+	NotProposed []RejectedPair
+	Confirmed   int // SUPERSEDES verdicts
+	Created     int // supersedes links written (0 in dry-run)
 	// CausesCreated counts CAUSES VERDICTS, which is not what Created counts:
 	// Created is a WRITE count and this is not, because the 'causes' write is
 	// guarded and can be refused in the same run that reached the verdict (#823
@@ -729,7 +824,10 @@ func RunWith(ctx context.Context, store vectorStore, cls Classifier, projectID s
 		return Result{}, nil, err
 	}
 	fresh := sel.Candidates
-	res := Result{Unscored: sel.Unscored, Unoriented: sel.Unoriented, Consensus: passes}
+	res := Result{
+		Unscored: sel.Unscored, Unoriented: sel.Unoriented, Consensus: passes,
+		NotProposed: sel.NotProposed,
+	}
 
 	liveLinks, err := store.LinksByRelationSource(ctx, projectID, string(RelationSupersedes), "llm")
 	if err != nil {
