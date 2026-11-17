@@ -239,6 +239,14 @@ search:
 
 FTS candidates are not subject to this floor. Raise it only after testing against your corpus with `ghost bench`; a higher value can remove weak semantic matches, while `0.0` preserves the historical behavior of dropping only non-positive cosine scores.
 
+```yaml
+search:
+  min_similarity: 0.0
+  record_queries: true
+```
+
+`search.record_queries` (default `true`) records each real search call — its query text, project, scope and filters, and the ranked memory ids — as one `audit_log` row under action `search`. That is what [`ghost replay`](cli.md#ghost-replay) runs as a retrieval regression gate; without it a change could win on the synthetic benches and still regress on the identifier-heavy, short, project-scoped queries agents actually send. Set it to `false` (or `GHOST_SEARCH_RECORD_QUERIES=false`) to keep no query text at all. A query the token guard recognises is refused at the write boundary and dropped, never stored, while the search itself still succeeds. The table keeps the newest 10,000 search rows and evicts older ones by write order; no other audit action is touched by that cap.
+
 The floor is a cosine, so it is checked at load against `[0, 1]`: a value outside that range, or a non-finite one (`.nan`, `.inf`), is a load error naming the key, whether it came from a file or `GHOST_SEARCH_MIN_SIMILARITY`. The refusal matters more here than for the context floors, because this one is applied *inside* the vector leg: a floor no cosine can clear drops every vector candidate, and hybrid search then answers from the keyword arm alone while still returning an answer, so nothing tells the caller the semantic leg is gone.
 
 Two more ranking signals are fixed rather than configurable, because they describe the rows being ranked instead of a preference:
@@ -587,6 +595,7 @@ The generic transformer replaces underscores with dots. Keys whose actual names 
 | `GHOST_INJECTION_CATEGORY_CAPS` | `injection.category_caps` |
 | `GHOST_INJECTION_SESSION_SCOPE` | `injection.session_scope` |
 | `GHOST_SEARCH_MIN_SIMILARITY` | `search.min_similarity` |
+| `GHOST_SEARCH_RECORD_QUERIES` | `search.record_queries` |
 | `GHOST_CONTEXT_ABSTAIN_COSINE` | `context.abstain_cosine` |
 | `GHOST_CONTEXT_RELEVANCE_CUTOFF` | `context.relevance_cutoff` |
 | `GHOST_CONTEXT_NO_ANSWER_COSINE` | `context.no_answer_cosine` |

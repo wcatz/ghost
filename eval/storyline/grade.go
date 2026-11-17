@@ -540,7 +540,36 @@ func supersedeEdge(res *Result, pair reversal) Check {
 	if found == "" {
 		found = "no edge joins the two records"
 	}
+	// Which stage dropped the pair is a different finding from the absent edge,
+	// and both belong on the same line: "never proposed" sends a reader at
+	// candidate generation, "proposed and rejected" at the classifier.
+	if why := supersedeTraceDetail(res, newer, older); why != "" {
+		found += "; " + why
+	}
 	return Check{Name: name, Passed: false, Detail: found}
+}
+
+func supersedeTraceDetail(res *Result, newer, older string) string {
+	newerPrefix, olderPrefix := newer[:min(8, len(newer))], older[:min(8, len(older))]
+	var notProposed, proposed string
+	for _, t := range res.SupersedeTrace {
+		if !strings.HasPrefix(t.NewerID, newerPrefix) || !strings.HasPrefix(t.OlderID, olderPrefix) {
+			continue
+		}
+		switch t.Status {
+		case "not proposed":
+			notProposed = t.Detail
+		case "proposed":
+			proposed = t.Detail
+		}
+	}
+	if notProposed != "" {
+		return "the candidate scan saw and rejected this pair: " + notProposed
+	}
+	if proposed != "" {
+		return "the pair was proposed and the classifier rejected it: " + proposed
+	}
+	return ""
 }
 
 func olderThan(st State, older, newer string) bool {

@@ -1221,6 +1221,12 @@ lowercase word outside backticks is never a value token), so its session-3
 failures are listed as known with that reason; the other arcs' known failures are
 findings.
 
+## Real-query replay (`ghost replay`)
+
+The benches above grade synthetic queries. `ghost replay` grades the queries agents actually sent: `audit_log` holds one `search` row per call with the query, project, filters and ranked result ids (`search.record_queries`, default on; a token-shaped query is dropped). Against a pinned snapshot it re-runs each recorded query with the current build and either the recorded ids or a baseline ghost build, and reports top-k overlap, rank shifts and changed top hits. A retrieval change ships with that diff and every changed top hit is explained in review.
+
+The ranking is keyword-only and offline — the snapshot's vectors describe stored memories, not a fresh query, so producing a query vector would need the embedding endpoint, and the gate deliberately calls none. The fixed clock makes one build on one snapshot byte-stable. This is why a vector-only change needs its `ghost bench` numbers beside the replay diff: the gate is a regression check on the real lexical query distribution, not a replacement for the graded benches. The default baseline is the recorded result set, which was normally ranked with hybrid fusion, so that particular comparison only means something for keyword-only recordings; pass `--baseline` for a true A/B through one rank mode. Recorded `ghost_search_all` calls are re-run as whole-corpus reads, not scoped to `_global`, so a memory in an ordinary project still ranks. See [the CLI reference](cli.md#ghost-replay) for the flags and the rank-mode contract a baseline binary uses.
+
 ## Reporting rules (all phases)
 
 1. Harness, datasets, and judge prompts live in this repo.

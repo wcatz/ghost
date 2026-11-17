@@ -30,6 +30,59 @@ func retiresFields(newer, olderFields []valueField, olderValues map[string]bool)
 	return false
 }
 
+// retiresClaim is the replacement-guess form of retiresFields. It asks only
+// whether the newer text retires a value token the older text still asserts,
+// without the save path's guard against an older text that itself carries a
+// retirement phrase. That guard stops two "no longer" notes being folded into
+// one another — a WRITE decision the replacement guess never makes — but it
+// also stopped a regression from retiring the fix it names: the fix says the
+// crash "no longer" happens, and the regression says the fix "no longer" holds.
+//
+// The check is a WINDOW around the retirement phrase rather than a whole
+// sentence, for the same reason: a retirement note routinely names an unrelated
+// "no" or "once" in a clause beside the one that retires the value ("a tenant
+// has no usage rows ... the 4f2a9c1 change no longer holds"). A plan or negation
+// word WITHIN the window still blocks the claim, so "no longer needed once SSO
+// ships" stays a plan and never retires anything.
+func retiresClaim(newer []valueField, olderValues map[string]bool) bool {
+	if len(olderValues) == 0 {
+		return false
+	}
+	const clauseWords = 8
+	for i := range newer {
+		n := retirementPhraseAt(newer, i)
+		if n <= 0 {
+			continue
+		}
+		start, end := i-clauseWords, i+n+clauseWords
+		if start < 0 {
+			start = 0
+		}
+		if end > len(newer) {
+			end = len(newer)
+		}
+		shared := false
+		blocked := false
+		for k := start; k < end; k++ {
+			w := strings.ReplaceAll(newer[k].word, "’", "'")
+			if retirementPlanWords[w] || retirementNegations[w] {
+				blocked = true
+				break
+			}
+			if k >= i && k < i+n {
+				continue
+			}
+			if newer[k].value && olderValues[newer[k].word] {
+				shared = true
+			}
+		}
+		if !blocked && shared {
+			return true
+		}
+	}
+	return false
+}
+
 func retiringSentence(s []valueField, olderValues map[string]bool) bool {
 	inPhrase := make([]bool, len(s))
 	found := false

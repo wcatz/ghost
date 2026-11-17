@@ -347,8 +347,8 @@ func TestArcPhasesClassifyThroughTheRunsOwnHarness(t *testing.T) {
 		name string
 		args []string
 	}{
-		{"supersede", arcPhaseArgs("supersede", "northwind-api")},
-		{"resolve", arcPhaseArgs("resolve", "northwind-api")},
+		{"supersede", arcPhaseArgs("supersede", "northwind-api", "opencode")},
+		{"resolve", arcPhaseArgs("resolve", "northwind-api", "opencode")},
 	} {
 		i := slices.Index(tc.args, "--source")
 		if i < 0 {
