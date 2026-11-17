@@ -132,7 +132,7 @@ func TestSummaryAndExitWithTheNotesArm(t *testing.T) {
 	if got := exitFailures([]cell{{story: story, arm: armFlatNotes, run: 1, err: context.Canceled}}); len(got) != 1 {
 		t.Errorf("an errored notes run did not count: %v", got)
 	}
-	out := formatSummary(cells, 1)
+	out := formatSummary(cells, 1, defaultMinQualified)
 	if !strings.Contains(out, "| flat-notes | 1 |") || !strings.Contains(out, "n/a (every note)") {
 		t.Errorf("summary has no notes row:\n%s", out)
 	}

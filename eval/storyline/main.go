@@ -13,20 +13,21 @@ import (
 )
 
 type config struct {
-	storyline  string
-	repoDir    string
-	keep       bool
-	judge      bool
-	without    bool
-	notes      bool
-	runs       int
-	model      string
-	ollamaURL  string
-	drainTO    time.Duration
-	authFile   string
-	resultsDir string
-	timeout    time.Duration
-	fake       bool
+	storyline    string
+	repoDir      string
+	keep         bool
+	judge        bool
+	without      bool
+	notes        bool
+	runs         int
+	model        string
+	ollamaURL    string
+	drainTO      time.Duration
+	authFile     string
+	resultsDir   string
+	timeout      time.Duration
+	fake         bool
+	minQualified float64
 }
 
 func main() {
@@ -45,6 +46,7 @@ func main() {
 	flag.StringVar(&cfg.resultsDir, "results-dir", "eval/storyline/results", "directory for the run report")
 	flag.DurationVar(&cfg.timeout, "timeout", defaultTimeout, "max time for one session or one arc stage")
 	flag.BoolVar(&cfg.fake, "fake-harness", false, "run with no model at all: sessions get a fixed answer, and supersede/resolve reach a deterministic fake opencode whose classifier is an oracle built from the storyline's own annotations; only the block and store lines are graded")
+	flag.Float64Var(&cfg.minQualified, "min-qualified", defaultMinQualified, "minimum fraction of runs per arm that must qualify to count; an arm below it is reported as inconclusive")
 	flag.Parse()
 
 	if err := run(cfg); err != nil {
@@ -79,6 +81,9 @@ type cell struct {
 }
 
 func run(cfg config) error {
+	if cfg.minQualified < 0 || cfg.minQualified > 1 {
+		return fmt.Errorf("-min-qualified must be between 0 and 1, got %v", cfg.minQualified)
+	}
 	stories, err := selectStorylines(cfg.storyline)
 	if err != nil {
 		return err
@@ -158,7 +163,7 @@ func run(cfg config) error {
 		}
 	}
 
-	summary := formatSummary(cells, cfg.runs)
+	summary := formatSummary(cells, cfg.runs, cfg.minQualified)
 	fmt.Print("\n" + summary)
 	path, err := writeSummary(cfg.resultsDir, stories, model, summary)
 	if err != nil {
@@ -240,6 +245,9 @@ func runCell(ctx context.Context, cfg config, sandboxRoot, bin, fakeBin, model s
 }
 
 func printCell(c cell) {
+	if c.res.Disqualified != "" {
+		fmt.Printf("DISQUALIFIED: %s\n", c.res.Disqualified)
+	}
 	for _, ch := range c.res.Checks {
 		fmt.Printf("%s %s — %s\n", ch.verdict(), ch.Name, oneLine(ch.Detail))
 	}
@@ -263,7 +271,7 @@ func exitFailures(cells []cell) []string {
 		switch {
 		case c.err != nil:
 			failed = append(failed, fmt.Sprintf("%s %s run %d errored", c.story.Key, c.arm, c.run))
-		case c.arm == armWithGhost && c.res != nil && !c.res.Passed():
+		case c.arm == armWithGhost && c.res != nil && c.res.Disqualified == "" && !c.res.Passed():
 			failed = append(failed, fmt.Sprintf("%s run %d: %s", c.story.Key, c.run, strings.Join(c.res.FailedNames(), ", ")))
 		}
 	}

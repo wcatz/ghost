@@ -432,12 +432,12 @@ func TestSummaryReportsBothArmsWithBlockSizes(t *testing.T) {
 		{story: story, arm: armWithoutGhost, run: 2, res: mk(good, []int{0, 0, 0})},
 		{story: story, arm: armWithoutGhost, run: 3, err: context.Canceled},
 	}
-	out := formatSummary(cells, 3)
+	out := formatSummary(cells, 3, defaultMinQualified)
 	for _, want := range []string{
 		"## correction-replay",
-		"| with-ghost | 2 | 2/2 | 0/2 |",
+		"| with-ghost | 2 | 2/2 | 2/2 | 0/2 |",
 		"100B, 200-220B, 300B",
-		"| without-ghost | 2 (+1 errored) | 1/2 | 1/2 |",
+		"| without-ghost | 2 (+1 errored) | 2/2 | 1/2 | 1/2 |",
 		"0B, 0B, 0B",
 	} {
 		if !strings.Contains(out, want) {
@@ -490,7 +490,7 @@ func TestUnreadableJudgeVerdictDoesNotDiscardTheRun(t *testing.T) {
 func TestSummaryKeepsARunWhoseReportFailedToWrite(t *testing.T) {
 	story := OpsFact()
 	res := answersResult(story, []string{"", "pg-queue-03.corp.example:6432", "pg-queue-03.corp.example:6432"})
-	out := formatSummary([]cell{{story: story, arm: armWithoutGhost, run: 1, res: res, reportErr: context.DeadlineExceeded}}, 1)
+	out := formatSummary([]cell{{story: story, arm: armWithoutGhost, run: 1, res: res, reportErr: context.DeadlineExceeded}}, 1, defaultMinQualified)
 	if !strings.Contains(out, "| without-ghost | 1 (1 report not written) | 1/1 |") || strings.Contains(out, "errored") {
 		t.Errorf("a graded run was dropped from the summary:\n%s", out)
 	}
@@ -694,7 +694,7 @@ func TestSummaryJudgeColumnExcludesUnreadVerdicts(t *testing.T) {
 		{story: story, arm: armWithGhost, run: 2, res: mk(Check{Name: "judge:unreadable", Advisory: true})},
 		{story: story, arm: armWithGhost, run: 3, res: mk(Check{Name: "judge:error", Advisory: true})},
 	}
-	out := formatSummary(cells, 3)
+	out := formatSummary(cells, 3, defaultMinQualified)
 	if !strings.Contains(out, "1/1 (+2 unread)") {
 		t.Errorf("judge column wrong:\n%s", out)
 	}
