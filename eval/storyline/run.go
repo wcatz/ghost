@@ -40,6 +40,37 @@ type State struct {
 	Stamps map[string]Stamp
 }
 
+// SupersedeTrace is one line of the supersede pass's per-pair diagnosis. It is
+// captured from the pass's own trace output so a failed edge check can say which
+// stage dropped the pair: candidate generation (never proposed) or the classifier
+// (proposed and rejected). The status is the marker after the ids, and detail is
+// the reason or the verdict that followed it.
+type SupersedeTrace struct {
+	NewerID, OlderID, Status, Detail string
+}
+
+// Ids are stored text and need not be hex (an imported artifact's ids are
+// verbatim), so the trace parser takes any non-space token rather than assuming
+// the shape Ghost mints.
+var supersedeTraceLine = regexp.MustCompile(`^\s*TRACE (\S+) -> (\S+) (not proposed|proposed): (.*)$`)
+
+func parseSupersedeTrace(out string) []SupersedeTrace {
+	var trace []SupersedeTrace
+	for _, line := range strings.Split(out, "\n") {
+		m := supersedeTraceLine.FindStringSubmatch(line)
+		if m == nil {
+			continue
+		}
+		status := m[3]
+		detail := m[4]
+		if status == "proposed" {
+			detail = strings.TrimPrefix(detail, "classifier verdict ")
+		}
+		trace = append(trace, SupersedeTrace{NewerID: m[1], OlderID: m[2], Status: status, Detail: detail})
+	}
+	return trace
+}
+
 // Ghost is the ghost surface a storyline run drives. Every method is one real
 // ghost invocation or one read of the run's scratch store, so a test fake
 // implements the whole surface without a binary and without a model.
@@ -70,23 +101,28 @@ type Session struct {
 // Result is a completed run: every session, the arc stages' raw output, the end
 // state, and the graded checks.
 type Result struct {
-	Story        Storyline
-	WorkDir      string
-	Opening      map[string]string
-	OpeningRaw   map[string]string
-	Sessions     []Session
-	Supersede    string
-	Resolve      string
-	FinalBlock   string
-	State        State
-	Checks       []Check
-	SaveOutputs  map[string]string
-	Judged       bool
-	Verdict      string
-	WithoutGhost bool
-	FlatNotes    bool
-	FakeHarness  bool
-	Probes       map[string]string
+	Story          Storyline
+	WorkDir        string
+	Opening        map[string]string
+	OpeningRaw     map[string]string
+	Sessions       []Session
+	Supersede      string
+	Resolve        string
+	FinalBlock     string
+	State          State
+	SupersedeTrace []SupersedeTrace
+	Checks         []Check
+	SaveOutputs    map[string]string
+	Judged         bool
+	Verdict        string
+	WithoutGhost   bool
+	FlatNotes      bool
+	FakeHarness    bool
+	Probes         map[string]string
+	// Disqualified is empty when the run counts toward its arm's scores. A
+	// non-empty value is the reason it measured nothing and was dropped before
+	// grading: the checks and the judge never run for such a result.
+	Disqualified string
 }
 
 // Arm names the arm a result came from, for reports and summaries.
@@ -310,6 +346,10 @@ func (r *Run) Execute(ctx context.Context) (*Result, error) {
 			return nil, err
 		}
 	}
+	if reason := qualify(res); reason != "" {
+		res.Disqualified = reason
+		return res, nil
+	}
 	res.Checks = grade(res)
 	if r.Judge != nil {
 		verdict, err := r.judge(ctx, res)
@@ -344,6 +384,7 @@ func (r *Run) midArcLifecycle(ctx context.Context, res *Result, order []string, 
 	if err != nil {
 		return fmt.Errorf("stage %d lifecycle supersede: %w", i+1, err)
 	}
+	res.SupersedeTrace = append(res.SupersedeTrace, parseSupersedeTrace(sup)...)
 	resOut, err := r.call(ctx, func(c context.Context) (string, error) {
 		return r.Ghost.Resolve(c, r.Story.Project)
 	})
@@ -369,6 +410,7 @@ func (r *Run) arcStages(ctx context.Context, res *Result, order []string) error 
 	if err != nil {
 		return fmt.Errorf("supersede: %w", err)
 	}
+	res.SupersedeTrace = append(res.SupersedeTrace, parseSupersedeTrace(sup)...)
 	if res.Supersede != "" {
 		sup = res.Supersede + "--- after the last stage ---\n" + sup
 	}
@@ -485,15 +527,16 @@ type binaryGhost struct {
 	workDir string
 	dbPath  string
 	ollama  string
+	source  string
 	drainTO time.Duration
 	log     io.Writer
 	mcp     *mcpSession
 }
 
-func newBinaryGhost(bin string, env []string, project, workDir, dbPath, ollama string, drainTO time.Duration, log io.Writer) *binaryGhost {
+func newBinaryGhost(bin string, env []string, project, workDir, dbPath, ollama, source string, drainTO time.Duration, log io.Writer) *binaryGhost {
 	return &binaryGhost{
 		bin: bin, env: env, project: project, workDir: workDir, dbPath: dbPath,
-		ollama: ollama, drainTO: drainTO, log: log,
+		ollama: ollama, source: source, drainTO: drainTO, log: log,
 	}
 }
 
@@ -571,17 +614,28 @@ func (g *binaryGhost) Search(ctx context.Context, project, query string, scope m
 }
 
 func (g *binaryGhost) Supersede(ctx context.Context, project string) (string, error) {
-	out, _, err := runGhost(ctx, g.env, g.bin, arcPhaseArgs("supersede", project)...)
+	// The per-pair trace changes no decision the pass makes; asking for it only
+	// adds lines to the report so a missed edge can be attributed to candidate
+	// generation or to the classifier.
+	env := append(append([]string{}, g.env...), "GHOST_SUPERSEDE_TRACE=1")
+	out, _, err := runGhost(ctx, env, g.bin, arcPhaseArgs("supersede", project, g.source)...)
 	return out, err
 }
 
 func (g *binaryGhost) Resolve(ctx context.Context, project string) (string, error) {
-	out, _, err := runGhost(ctx, g.env, g.bin, arcPhaseArgs("resolve", project)...)
+	out, _, err := runGhost(ctx, g.env, g.bin, arcPhaseArgs("resolve", project, g.source)...)
 	return out, err
 }
 
-func arcPhaseArgs(phase, project string) []string {
-	return []string{phase, project, "--apply", "--source", "opencode"}
+// arcPhaseArgs names the source the run was configured with. The default stays
+// opencode, but a run can pin claude-code: the real-model misses that motivated
+// the per-pair trace were on that source, and a regression must be able to drive
+// the same routing rather than silently grading only opencode.
+func arcPhaseArgs(phase, project, source string) []string {
+	if strings.TrimSpace(source) == "" {
+		source = "opencode"
+	}
+	return []string{phase, project, "--apply", "--source", source}
 }
 
 var savedIDRe = regexp.MustCompile(`(?i)memory saved \(id:\s*([0-9a-fA-F]+)\)`)

@@ -1111,6 +1111,8 @@ reversals and expiry, not scale. Read the "stale/mistake used" column per arc.
 Whether Ghost's selection beats a notes file the host truncates needs an arc with
 hundreds of memories, which none of these is.
 
+**Qualification before grading.** A completed run is not scored until it is shown to have exercised the mechanism its arm is testing. The with-Ghost arm must show the effect of at least one Ghost tool call (a saved raw row, a rendered block, probe rows, an arc phase's output or the end state read from the scratch store), a non-empty session-start block reaching a session, and a result for every stage and every probe the storyline declares; a run that never touched Ghost, was never handed a block, or ended before its probe is dropped with that reason. The two baseline arms run no probes or arc stages by design, so reaching the last stage is their bar — they are not penalised for lacking the thing they measure against. A disqualified run is never graded (no checks, no judge call), is printed as `DISQUALIFIED` in its own report with the reason, and is listed apart from the scores in the summary. The summary's `qualified` column shows qualified/total per arm; an arm whose qualified fraction falls below `-min-qualified` (default 0.8) is marked inconclusive, and neither a disqualified nor an inconclusive run decides the exit code. The probe questions and their returned rows are never inserted into a session's prompt — they are kept only for the grade — so a probe measures the work without steering it.
+
 **Targets, not measurements.** These are the numbers a 10-run table is read
 against; none of them has been measured, no results artifact ships, and nothing
 gates on them:
@@ -1218,6 +1220,12 @@ path and the read side alone left behind:
 lowercase word outside backticks is never a value token), so its session-3
 failures are listed as known with that reason; the other arcs' known failures are
 findings.
+
+## Real-query replay (`ghost replay`)
+
+The benches above grade synthetic queries. `ghost replay` grades the queries agents actually sent: `audit_log` holds one `search` row per call with the query, project, filters and ranked result ids (`search.record_queries`, default on; a token-shaped query is dropped). Against a pinned snapshot it re-runs each recorded query with the current build and either the recorded ids or a baseline ghost build, and reports top-k overlap, rank shifts and changed top hits. A retrieval change ships with that diff and every changed top hit is explained in review.
+
+The ranking is keyword-only and offline — the snapshot's vectors describe stored memories, not a fresh query, so producing a query vector would need the embedding endpoint, and the gate deliberately calls none. The fixed clock makes one build on one snapshot byte-stable. This is why a vector-only change needs its `ghost bench` numbers beside the replay diff: the gate is a regression check on the real lexical query distribution, not a replacement for the graded benches. The default baseline is the recorded result set, which was normally ranked with hybrid fusion, so that particular comparison only means something for keyword-only recordings; pass `--baseline` for a true A/B through one rank mode. Recorded `ghost_search_all` calls are re-run as whole-corpus reads, not scoped to `_global`, so a memory in an ordinary project still ranks. See [the CLI reference](cli.md#ghost-replay) for the flags and the rank-mode contract a baseline binary uses.
 
 ## Reporting rules (all phases)
 

@@ -875,6 +875,14 @@ var writeLockBudgets = map[string]float64{
 	// 150ms and nowhere near the 1250ms this fraction prints. Read the
 	// distribution, not the printed budget, for this row.
 	"record-retrieval": 0.25,
+	// Recording a real search call (#2161) is the other write a search now makes,
+	// through the same beginScopedWrite seam and its own ~150ms busy_timeout, so
+	// it belongs beside record-retrieval rather than in the save family: the
+	// budget printed here is the STORE's, not the bound that governs this write.
+	// The fleet drives ghost_memory_search through the MCP server, so this entry
+	// has the run's own distribution behind it rather than an allowance: measured
+	// p50 0.14ms, p99 0.28ms over 20 samples in the fleet that found this gap.
+	"record-search": 0.25,
 }
 
 // assertWriteLockBudget reports the write-lock distributions the fleet measured,

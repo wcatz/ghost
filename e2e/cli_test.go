@@ -131,6 +131,9 @@ var cliCommands = []cliCommand{
 	{path: "prune", help: "Usage: ghost prune", coveredBy: "TestCLIPruneTiers"},
 	{path: "import", help: "Usage: ghost import", coveredBy: "TestCLIExportImport"},
 	{path: "bench", help: "Usage: ghost bench", coveredBy: "TestCLIBench"},
+	{path: "replay", help: "Usage: ghost replay",
+		helpOnly: "it reads recorded searches from a pinned snapshot and compares two ghost builds; " +
+			"the focused tests in cmd/ghost and internal/replay cover the parsing and the diff"},
 	{path: "upgrade", help: "Usage: ghost upgrade",
 		helpOnly: "it reaches a hardcoded https://api.github.com/repos/wcatz/ghost/releases/latest, " +
 			"which no environment variable redirects, so running it would make a real network call. " +

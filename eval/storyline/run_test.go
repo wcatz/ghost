@@ -347,8 +347,8 @@ func TestArcPhasesClassifyThroughTheRunsOwnHarness(t *testing.T) {
 		name string
 		args []string
 	}{
-		{"supersede", arcPhaseArgs("supersede", "northwind-api")},
-		{"resolve", arcPhaseArgs("resolve", "northwind-api")},
+		{"supersede", arcPhaseArgs("supersede", "northwind-api", "opencode")},
+		{"resolve", arcPhaseArgs("resolve", "northwind-api", "opencode")},
 	} {
 		i := slices.Index(tc.args, "--source")
 		if i < 0 {
@@ -553,5 +553,42 @@ func TestAwaitStageGapSleepsOnlyWhatIsStillOwed(t *testing.T) {
 	start = time.Now()
 	if err := r.awaitStageGap(ctx); err != nil || time.Since(start) > 40*time.Millisecond {
 		t.Errorf("a zero gap slept %s (err %v)", time.Since(start), err)
+	}
+}
+
+// TestProbeOutputIsNotInjectedIntoTheAgentTurn pins the guarantee that a probe
+// grades the work without steering it. The searches run and their rows are kept
+// for the grade, but neither the question nor the rows reach the prompt the
+// agent answers: a probe cannot coach the answer it is meant to measure.
+func TestProbeOutputIsNotInjectedIntoTheAgentTurn(t *testing.T) {
+	story := VersionUpgrade()
+	g := &fakeGhost{}
+	a := &fakeAgent{}
+	res := runFixtureStory(t, story, g, a)
+	if len(res.Probes) == 0 || len(res.Sessions[2].Probes) == 0 {
+		t.Fatalf("probes were not kept for the grade: end=%v stage=%v", res.Probes, res.Sessions[2].Probes)
+	}
+	if !g.callsBefore("search " + story.Probes[0].Query) {
+		t.Fatalf("the story's probe search did not run: %v", g.calls)
+	}
+	if !g.callsBefore("search " + story.Stages[2].Probes[0].Query) {
+		t.Fatalf("the stage's probe search did not run: %v", g.calls)
+	}
+	for i, prompt := range a.prompts {
+		for _, p := range story.Probes {
+			if strings.Contains(prompt, p.Query) {
+				t.Errorf("session %d's prompt carried the probe question %q", i+1, p.Query)
+			}
+		}
+		for _, st := range story.Stages {
+			for _, p := range st.Probes {
+				if strings.Contains(prompt, p.Query) {
+					t.Errorf("session %d's prompt carried the stage probe %q", i+1, p.Query)
+				}
+			}
+		}
+		if strings.Contains(prompt, "`ID") {
+			t.Errorf("session %d's prompt carried a probe's search rows", i+1)
+		}
 	}
 }

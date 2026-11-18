@@ -118,9 +118,11 @@ type ScratchConfig struct {
 	MaxBytes int64 `koanf:"max_bytes"`
 }
 
-// SearchConfig controls hybrid-search ranking behavior.
+// SearchConfig controls hybrid-search ranking behavior and the recording of
+// real search calls for the replay regression gate.
 type SearchConfig struct {
 	MinSimilarity float64 `koanf:"min_similarity"`
+	RecordQueries bool    `koanf:"record_queries"`
 }
 
 // ContextConfig controls how the assembler reports an assembled block's
@@ -272,6 +274,7 @@ var defaults = map[string]interface{}{
 	"injection.behavior_categories":            []string{"gotcha", "convention", "preference", "decision"},
 	"injection.category_caps":                  map[string]interface{}{"gotcha": 4},
 	"search.min_similarity":                    0.0,
+	"search.record_queries":                    true,
 	"context.abstain_cosine":                   float32(0.0),
 	"context.relevance_cutoff":                 DefaultRelevanceCutoff,
 	"context.no_answer_cosine":                 DefaultNoAnswerCosine,
@@ -527,6 +530,7 @@ func defaultConfig() *Config {
 			DemotionThreshold: 0.90,
 		},
 		Injection: DefaultInjectionConfig(),
+		Search:    SearchConfig{RecordQueries: true},
 		Obsidian:  ObsidianConfig{Interval: "30s"},
 		Scratch:   ScratchConfig{MaxBytes: DefaultScratchMaxBytes},
 		Context:   ContextConfig{RelevanceCutoff: DefaultRelevanceCutoff, NoAnswerCosine: DefaultNoAnswerCosine},
@@ -843,6 +847,7 @@ var envOverrides = []envOverride{
 	{"GHOST_OLLAMA_URL", "embedding.ollama_url", stringValue},
 	{"GHOST_ROUTING_DEFAULT_PROJECT", "routing.default_project", stringValue},
 	{"GHOST_SEARCH_MIN_SIMILARITY", "search.min_similarity", floatValue},
+	{"GHOST_SEARCH_RECORD_QUERIES", "search.record_queries", boolValue},
 	{"GHOST_CONTEXT_ABSTAIN_COSINE", "context.abstain_cosine", cosineValue},
 	{"GHOST_CONTEXT_RELEVANCE_CUTOFF", "context.relevance_cutoff", floatValue},
 	{"GHOST_CONTEXT_NO_ANSWER_COSINE", "context.no_answer_cosine", floatValue},

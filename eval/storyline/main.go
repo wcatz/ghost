@@ -7,26 +7,31 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/wcatz/ghost/internal/ai"
 )
 
 type config struct {
-	storyline  string
-	repoDir    string
-	keep       bool
-	judge      bool
-	without    bool
-	notes      bool
-	runs       int
-	model      string
-	ollamaURL  string
-	drainTO    time.Duration
-	authFile   string
-	resultsDir string
-	timeout    time.Duration
-	fake       bool
+	storyline    string
+	repoDir      string
+	keep         bool
+	judge        bool
+	without      bool
+	notes        bool
+	runs         int
+	model        string
+	ollamaURL    string
+	drainTO      time.Duration
+	authFile     string
+	resultsDir   string
+	timeout      time.Duration
+	fake         bool
+	minQualified float64
+	source       string
 }
 
 func main() {
@@ -44,7 +49,9 @@ func main() {
 	flag.StringVar(&cfg.authFile, "opencode-auth-file", "", "optional path to an opencode auth.json copied into the scratch data dir so sandboxed sessions authenticate")
 	flag.StringVar(&cfg.resultsDir, "results-dir", "eval/storyline/results", "directory for the run report")
 	flag.DurationVar(&cfg.timeout, "timeout", defaultTimeout, "max time for one session or one arc stage")
-	flag.BoolVar(&cfg.fake, "fake-harness", false, "run with no model at all: sessions get a fixed answer, and supersede/resolve reach a deterministic fake opencode whose classifier is an oracle built from the storyline's own annotations; only the block and store lines are graded")
+	flag.BoolVar(&cfg.fake, "fake-harness", false, "run with no model at all: sessions get a fixed answer, and supersede/resolve reach a deterministic fake harness whose classifier is an oracle built from the storyline's own annotations; only the block and store lines are graded")
+	flag.StringVar(&cfg.source, "source", "opencode", "CLI source the lifecycle phases classify through (claude-code, opencode, codex or goose); claude-code reproduces the source the annotated-edge misses were observed on")
+	flag.Float64Var(&cfg.minQualified, "min-qualified", defaultMinQualified, "minimum fraction of runs per arm that must qualify to count; an arm below it is reported as inconclusive")
 	flag.Parse()
 
 	if err := run(cfg); err != nil {
@@ -79,6 +86,9 @@ type cell struct {
 }
 
 func run(cfg config) error {
+	if cfg.minQualified < 0 || cfg.minQualified > 1 {
+		return fmt.Errorf("-min-qualified must be between 0 and 1, got %v", cfg.minQualified)
+	}
 	stories, err := selectStorylines(cfg.storyline)
 	if err != nil {
 		return err
@@ -96,6 +106,9 @@ func run(cfg config) error {
 	}
 	if cfg.runs < 1 {
 		return fmt.Errorf("-runs must be at least 1, got %d", cfg.runs)
+	}
+	if !slices.Contains(ai.KnownSources(), cfg.source) {
+		return fmt.Errorf("unknown -source %q (have: %s)", cfg.source, strings.Join(ai.KnownSources(), ", "))
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -158,7 +171,7 @@ func run(cfg config) error {
 		}
 	}
 
-	summary := formatSummary(cells, cfg.runs)
+	summary := formatSummary(cells, cfg.runs, cfg.minQualified)
 	fmt.Print("\n" + summary)
 	path, err := writeSummary(cfg.resultsDir, stories, model, summary)
 	if err != nil {
@@ -169,7 +182,12 @@ func run(cfg config) error {
 		fmt.Printf("scratch kept under: %s\n", sandboxRoot)
 	}
 
-	failed := exitFailures(cells)
+	return exitError(cells, cfg.minQualified)
+}
+
+// exitError is the error run() reports once its cells are finished.
+func exitError(cells []cell, minQualified float64) error {
+	failed := exitFailures(cells, minQualified)
 	if len(failed) > 0 {
 		return fmt.Errorf("%d run(s) failed: %s", len(failed), strings.Join(failed, "; "))
 	}
@@ -209,7 +227,7 @@ func runCell(ctx context.Context, cfg config, sandboxRoot, bin, fakeBin, model s
 	fmt.Printf("scratch: %s\n", scratch)
 
 	ghost := newBinaryGhost(bin, env, story.Project, workDir,
-		filepath.Join(dirs["data"], "ghost", "ghost.db"), cfg.ollamaURL, cfg.drainTO, os.Stderr)
+		filepath.Join(dirs["data"], "ghost", "ghost.db"), cfg.ollamaURL, cfg.source, cfg.drainTO, os.Stderr)
 	if err := ghost.start(ctx); err != nil {
 		return nil, err
 	}
@@ -240,6 +258,9 @@ func runCell(ctx context.Context, cfg config, sandboxRoot, bin, fakeBin, model s
 }
 
 func printCell(c cell) {
+	if c.res.Disqualified != "" {
+		fmt.Printf("DISQUALIFIED: %s\n", c.res.Disqualified)
+	}
 	for _, ch := range c.res.Checks {
 		fmt.Printf("%s %s — %s\n", ch.verdict(), ch.Name, oneLine(ch.Detail))
 	}
@@ -254,16 +275,19 @@ func writeCellReport(dir string, story Storyline, arm string, n int, res *Result
 	return writeReportAs(dir, fmt.Sprintf("%s-%s-run%d.md", story.Key, arm, n), res, model)
 }
 
-func exitFailures(cells []cell) []string {
+func exitFailures(cells []cell, minQualified float64) []string {
 	var failed []string
 	for _, c := range cells {
+		if armInconclusive(cells, c.story.Key, c.arm, minQualified) {
+			continue
+		}
 		if c.reportErr != nil {
 			failed = append(failed, fmt.Sprintf("%s %s run %d: report not written: %v", c.story.Key, c.arm, c.run, c.reportErr))
 		}
 		switch {
 		case c.err != nil:
 			failed = append(failed, fmt.Sprintf("%s %s run %d errored", c.story.Key, c.arm, c.run))
-		case c.arm == armWithGhost && c.res != nil && !c.res.Passed():
+		case c.arm == armWithGhost && c.res != nil && c.res.Disqualified == "" && !c.res.Passed():
 			failed = append(failed, fmt.Sprintf("%s run %d: %s", c.story.Key, c.run, strings.Join(c.res.FailedNames(), ", ")))
 		}
 	}

@@ -546,3 +546,30 @@ func TestTwoSessionIdsThatFoldOntoOneNameKeepSeparateLedgers(t *testing.T) {
 		})
 	}
 }
+
+// orderWriter notes how many retrieval records exist when the hook writes.
+type orderWriter struct {
+	t       *testing.T
+	dbPath  string
+	records []int
+}
+
+func (w *orderWriter) Write(b []byte) (int, error) {
+	w.records = append(w.records, len(recordedCalls(w.t, w.dbPath)))
+	return len(b), nil
+}
+
+func TestTheDeliveryIsPrintedBeforeItsRecordIsWritten(t *testing.T) {
+	f := newMomentFixture(t)
+	w := &orderWriter{t: t, dbPath: f.dbPath}
+	p, _ := json.Marshal(map[string]any{"hook_event_name": "UserPromptSubmit", "session_id": "sess-o", "cwd": f.projDir,
+		"prompt": "why does the quartz_migrate step deadlock on ci"})
+	var errb bytes.Buffer
+	RunHostEvent("message-submit", "claude-code", strings.NewReader(string(p)), w, &errb)
+	if len(w.records) != 1 || w.records[0] != 0 {
+		t.Fatalf("record counts at write time = %v, want one write with 0 records: the record must follow the output", w.records)
+	}
+	if n := len(recordedCalls(t, f.dbPath)); n != 1 {
+		t.Fatalf("%d records after the hook, want 1", n)
+	}
+}
