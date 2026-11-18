@@ -5,12 +5,6 @@ import (
 	"testing"
 )
 
-// builtinSeedText is the frozen shipped rule Ghost writes into the global
-// project. memory keeps its own unexported copy; this one is spelled out here
-// so a change to the shipped text fails these tests instead of silently
-// redefining "correct" alongside the code.
-const builtinSeedText = "NEVER add Co-Authored-By or any AI attribution to commit messages. All commits belong to the user."
-
 // rowLines returns the memory ROW lines of a rendered block — the lines that
 // start with the row bullet. The origin guards below assert through these lines
 // rather than over the whole output on purpose: globalOriginGuidance prints the
