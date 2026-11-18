@@ -58,14 +58,40 @@ type workMomentInput struct {
 }
 
 func runWorkingMoment(p hostevent.Payload, stdout io.Writer) {
+	emit := func(text string, event hostevent.Event) {
+		if text == "" {
+			return
+		}
+		if out, err := json.Marshal(map[string]any{"hookSpecificOutput": map[string]any{
+			"hookEventName":     hookEventNameFor(event),
+			"additionalContext": text,
+		}}); err == nil {
+			_, _ = stdout.Write(append(out, '\n'))
+		}
+	}
+	// A delivery is printed from inside workingMomentText, before the
+	// retrieval record is written, so a held write lock cannot delay it.
+	if text, event := workingMomentText(p, emit); text != "" {
+		emit(text, event)
+	}
+}
+
+func workingMomentText(p hostevent.Payload, emit func(string, hostevent.Event)) (string, hostevent.Event) {
+	event := p.Event()
 	var in workMomentInput
 	if err := json.Unmarshal(p.Raw, &in); err != nil {
-		return
+		return "", event
 	}
 	if in.AgentID != "" {
-		return
+		return "", event
 	}
-	event := p.Event()
+
+	directive := event == hostevent.EventMessageSubmit && isDirectivePrompt(in.Prompt)
+	nudgeSuffix := ""
+	if directive {
+		nudgeSuffix = "\n" + directiveNudge
+	}
+
 	var terms []memory.QueryTerm
 	var label string
 	switch event {
@@ -76,36 +102,46 @@ func runWorkingMoment(p hostevent.Payload, stdout io.Writer) {
 		terms = editTerms(in)
 		label = "edit"
 	default:
-		return
+		return "", event
 	}
-	if len(terms) == 0 {
-		return
+	if len(terms) == 0 && !directive {
+		return "", event
 	}
 	markerPath := momentMarkerPath(in.SessionID)
 	if markerPath == "" {
-		return
+		return "", event
 	}
 	state, err := readMomentState(markerPath)
 	if err != nil {
-		return
+		return "", event
 	}
 	remaining := workMomentBudget - state.spent
 	cap := workMomentBlockBytes
 	if remaining < cap {
 		cap = remaining
 	}
-	if cap < workMomentMinBytes {
-		return
+	memCap := cap
+	if directive {
+		memCap = cap - len(nudgeSuffix)
+	}
+	if memCap < workMomentMinBytes {
+		if !directive {
+			return "", event
+		}
+		// No room for a memory block, but the nudge alone is small: send it
+		// without a block and without a ledger entry, so it is not counted
+		// against the allowance.
+		terms = nil
 	}
 
 	dataDir, err := config.DataDirPath()
 	if err != nil {
-		return
+		return "", event
 	}
 	dbPath := filepath.Join(dataDir, "ghost.db")
 	db, err := memory.OpenReadDB(dbPath)
 	if err != nil {
-		return
+		return "", event
 	}
 	defer db.Close() //nolint:errcheck
 	store := sessionStore(db)
@@ -121,7 +157,16 @@ func runWorkingMoment(p hostevent.Payload, stdout io.Writer) {
 	defer cancel()
 	projectID, _ := resolveSessionProject(ctx, store, cwd)
 	if projectID == "" {
-		return
+		return "", event
+	}
+	// The session, data directory and project all resolved: from here a
+	// directive prompt is nudged even when no memory is delivered.
+	miss := ""
+	if directive {
+		miss = directiveNudge
+	}
+	if len(terms) == 0 {
+		return miss, event
 	}
 
 	cfg, err := config.Load()
@@ -147,7 +192,7 @@ func runWorkingMoment(p hostevent.Payload, stdout io.Writer) {
 	}
 	res, err := assemble.Run(ctx, store, req)
 	if err != nil || len(res.Items) == 0 {
-		return
+		return miss, event
 	}
 
 	var delivered []assemble.Item
@@ -171,13 +216,13 @@ func runWorkingMoment(p hostevent.Payload, stdout io.Writer) {
 			delivered = append(delivered, it)
 		}
 	}
-	text, kept := renderWorkingMoment(label, delivered, cap)
+	text, kept := renderWorkingMoment(label, delivered, memCap)
 	for _, it := range delivered[len(kept):] {
 		withhold(it, reasonWorkingMomentBudget)
 	}
 	delivered = kept
 	if len(delivered) == 0 {
-		return
+		return miss, event
 	}
 
 	token := newMomentToken()
@@ -185,41 +230,32 @@ func runWorkingMoment(p hostevent.Payload, stdout io.Writer) {
 	for i, it := range delivered {
 		ids[i] = it.ID
 	}
-	if err := appendMomentEntry(markerPath, momentEntry{token: token, bytes: len(text), ids: ids}); err != nil {
-		return
+	outText := text + nudgeSuffix
+	if err := appendMomentEntry(markerPath, momentEntry{token: token, bytes: len(outText), ids: ids}); err != nil {
+		return miss, event
 	}
 	after, err := readMomentState(markerPath)
 	if err != nil || !after.valid[token] {
-		return
+		return miss, event
 	}
 
-	out, err := json.Marshal(map[string]any{"hookSpecificOutput": map[string]any{
-		"hookEventName":     hookEventNameFor(event),
-		"additionalContext": text,
-	}})
-	if err != nil {
-		return
-	}
-	if _, err := stdout.Write(append(out, '\n')); err != nil {
-		return
-	}
-
+	emit(outText, event)
 	sink, closeSink := sessionRecordSink(dbPath)
-	defer closeSink()
-	if sink == nil {
-		return
+	if sink != nil {
+		narrowed := res
+		narrowed.Items = delivered
+		tr := assemble.Trace{}
+		if res.Trace != nil {
+			tr = *res.Trace
+		}
+		tr.Decisions = append(append([]assemble.Decision(nil), tr.Decisions...), withheld...)
+		narrowed.Trace = &tr
+		narrowed.Outcome = assemble.OutcomeAnswerable
+		req.Record = sink
+		assemble.RecordResult(ctx, req, narrowed)
 	}
-	narrowed := res
-	narrowed.Items = delivered
-	tr := assemble.Trace{}
-	if res.Trace != nil {
-		tr = *res.Trace
-	}
-	tr.Decisions = append(append([]assemble.Decision(nil), tr.Decisions...), withheld...)
-	narrowed.Trace = &tr
-	narrowed.Outcome = assemble.OutcomeAnswerable
-	req.Record = sink
-	assemble.RecordResult(ctx, req, narrowed)
+	closeSink()
+	return "", event
 }
 
 func hookEventNameFor(e hostevent.Event) string {
