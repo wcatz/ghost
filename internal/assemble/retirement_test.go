@@ -13,10 +13,11 @@ const (
 	sendgridRetired = "SendGrid was removed from parcel-notify: internal/mail is deleted, nothing reads SENDGRID_API_KEY, and order emails are no longer sent at all."
 )
 
-// TestRunPassiveOrdersARetirementFirstAndMarksTheRetiredRow is the session start
-// after a dependency's removal on a default install: the retired claim ranked
-// first (it is the more important row and nothing relates the two) and neither.
-func TestRunPassiveOrdersARetirementFirstAndMarksTheRetiredRow(t *testing.T) {
+// TestRunPassiveOrdersARetirementAfterTheRetiredRow is the session start after a
+// dependency's removal on a default install: the retired claim (the more
+// important row, which nothing relates) is shown first, marked and followed by
+// the note that retires it.
+func TestRunPassiveOrdersARetirementAfterTheRetiredRow(t *testing.T) {
 	r := newReplacementStore(t)
 	older := r.add(dep(sendgridDep, 0.8), 20)
 	newer := r.add(dep(sendgridRetired, 0.7), 24)
@@ -26,8 +27,8 @@ func TestRunPassiveOrdersARetirementFirstAndMarksTheRetiredRow(t *testing.T) {
 	if oi < 0 || ni < 0 {
 		t.Fatalf("answer %v must hold both rows (retired %s, retirement %s): the retired row is marked, not withheld", itemIDs(res.Items), older, newer)
 	}
-	if ni > oi {
-		t.Errorf("answer %v puts the retired claim %s (index %d) ahead of its retirement %s (index %d)", itemIDs(res.Items), older, oi, newer, ni)
+	if ni < oi {
+		t.Errorf("answer %v puts the retirement %s (index %d) ahead of the retired claim %s (index %d) it supersedes", itemIDs(res.Items), newer, ni, older, oi)
 	}
 	old := res.Items[oi]
 	if len(old.MaybeReplacedBy) != 1 || old.MaybeReplacedBy[0] != newer {
