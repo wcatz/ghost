@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"log/slog"
 	"os"
+	"slices"
 	"time"
 
 	"github.com/wcatz/ghost/internal/assemble"
@@ -43,26 +44,75 @@ func sessionGlobalPinnedReserve() map[string]int {
 	return map[string]int{memory.GlobalProjectID: globalsCap}
 }
 
+// sessionRuleReserve and globalsRuleReserve are the slots standing rules own
+// inside assembly selection, so a descriptive fact cannot take a rule's slot.
+// The rest of each cap stays open to facts, which keeps the block bounded.
+const (
+	sessionRuleReserve = sessionMemoriesCap * 2 / 3
+	globalsRuleReserve = globalsCap * 3 / 4
+)
+
+func sessionRuleBehaviorCategories() []string {
+	return []string{"gotcha", "convention", "preference"}
+}
+
+// The session-start slice keeps its own rule categories rather than
+// injection.behavior_categories: the reserve is for standing rules, and
+// decisions are rendered in their own group.
+//
+// sessionProjectFloor honours injection.behavior_floor: 0 turns the bias off,
+// any other value is raised to the rule reserve and held under the slice cap.
+// injection.category_caps still limits each category inside that floor pass.
+func sessionProjectFloor(cfgFloor int) int {
+	if cfgFloor <= 0 {
+		return 0
+	}
+	return min(max(cfgFloor, sessionRuleReserve), sessionMemoriesCap)
+}
+
+// sessionCategoryCaps keeps injection.category_caps for every category except
+// the standing-rule ones. The reserve exists so rules are not crowded out, and
+// the default cap of 4 on gotcha would cut it; the caps still bound a
+// configured non-rule behavior category such as decision.
+func sessionCategoryCaps(caps map[string]int) map[string]int {
+	if len(caps) == 0 {
+		return nil
+	}
+	rule := map[string]bool{}
+	for _, c := range sessionRuleBehaviorCategories() {
+		rule[c] = true
+	}
+	out := make(map[string]int, len(caps))
+	for c, n := range caps {
+		if !rule[c] {
+			out[c] = n
+		}
+	}
+	return out
+}
+
 func sessionPassiveBudget(cfg *config.Config, projectID string) assemble.Budget {
 	inj := cfg.Injection
 
 	slices := make([]assemble.Slice, 0, 2)
 
 	if projectID != "" {
+		floor := sessionProjectFloor(inj.BehaviorFloor)
 		slices = append(slices, assemble.Slice{
 			Bucket: projectID, MaxItems: sessionMemoriesCap,
 			OverFetch: sessionMemoriesCap * 3,
-			Order:     memory.OrderDecay, TwoPass: inj.BehaviorFloor > 0,
-			BehaviorFloor: inj.BehaviorFloor, BehaviorCategories: inj.BehaviorCategories,
-			CategoryWeights: inj.CategoryWeights, CategoryCaps: inj.CategoryCaps,
+			Order:     memory.OrderDecay, TwoPass: floor > 0,
+			BehaviorFloor: floor, BehaviorCategories: sessionRuleBehaviorCategories(),
+			CategoryWeights: inj.CategoryWeights, CategoryCaps: sessionCategoryCaps(inj.CategoryCaps),
 			DemotionThreshold:     cfg.Linking.DemotionThreshold,
 			DemoteOnlyWhenOverCap: true,
 		})
 	}
 	slices = append(slices, assemble.Slice{
 		Bucket: memory.GlobalProjectID, MaxItems: globalsCap,
-		OverFetch:         globalsCap * 2,
-		Order:             memory.OrderPinnedImportanceUpdated,
+		OverFetch: globalsCap * 2,
+		Order:     memory.OrderPinnedImportanceUpdated, TwoPass: true,
+		BehaviorFloor: globalsRuleReserve, BehaviorCategories: sessionRuleBehaviorCategories(),
 		DemotionThreshold: globalsDemotionThreshold,
 		DropDemotedLosers: true,
 	})
@@ -114,7 +164,42 @@ func sessionRowsFrom(items []assemble.Item) (memories, globals []sessionMemory) 
 		row.Content = truncateUTF8(row.Content, sessionDisplayBytes)
 		memories = append(memories, row)
 	}
+	memories = sessionRulesFirst(memories)
+	globals = sessionRulesFirst(globals)
 	return memories, globals
+}
+
+func isSessionRuleCategoryName(cat string) bool {
+	return slices.Contains(sessionRuleBehaviorCategories(), cat)
+}
+
+func isSessionRule(m sessionMemory) bool {
+	return m.Pinned || isSessionRuleCategoryName(m.Category)
+}
+
+func isSessionRuleItem(it assemble.Item) bool {
+	return it.Pinned || isSessionRuleCategoryName(it.Category)
+}
+
+// sessionRulesFirst is a stable partition: pinned rows, then unpinned rows of a
+// rule category, then facts, each group keeping its rank order.
+func sessionRulesFirst(rows []sessionMemory) []sessionMemory {
+	var pinned, rules, facts []sessionMemory
+	for _, m := range rows {
+		switch {
+		case m.Pinned:
+			pinned = append(pinned, m)
+		case isSessionRule(m):
+			rules = append(rules, m)
+		default:
+			facts = append(facts, m)
+		}
+	}
+	out := make([]sessionMemory, 0, len(rows))
+	out = append(out, pinned...)
+	out = append(out, rules...)
+	out = append(out, facts...)
+	return out
 }
 
 func foldCount(t assemble.BucketTally, n, excluded int, capped bool, overFetch int) assemble.BucketTally {

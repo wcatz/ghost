@@ -306,3 +306,12 @@ func TestWorkingMomentEventsAndCapability(t *testing.T) {
 		}
 	}
 }
+
+func TestPreToolUseCapability(t *testing.T) {
+	for _, s := range []Source{SourceClaudeCode, SourceCodex, SourceGoose, SourceOpencode} {
+		c, _ := CapabilityFor(s)
+		if c.PreToolUse != (s == SourceClaudeCode) {
+			t.Errorf("%s PreToolUse = %v", s, c.PreToolUse)
+		}
+	}
+}

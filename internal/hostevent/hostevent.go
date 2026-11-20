@@ -26,6 +26,7 @@ const (
 	EventSessionEnd    Event = "session-end"
 	EventMessageSubmit Event = "message-submit"
 	EventEdit          Event = "edit"
+	EventPreToolUse    Event = "pre-tool-use"
 )
 
 // Source identifies the host adapter that produced the event.
@@ -43,10 +44,13 @@ type Capability struct {
 	BlockStop     bool
 	InjectContext bool
 	WorkingMoment bool
+	// PreToolUse is true for hosts that honor the Claude hookSpecificOutput
+	// reply a pre-tool-use hook writes.
+	PreToolUse bool
 }
 
 var capabilityMatrix = map[Source]Capability{
-	SourceClaudeCode: {BlockStop: true, InjectContext: true, WorkingMoment: true},
+	SourceClaudeCode: {BlockStop: true, InjectContext: true, WorkingMoment: true, PreToolUse: true},
 	SourceCodex:      {BlockStop: true, InjectContext: true},
 	SourceGoose:      {BlockStop: true, InjectContext: false},
 	SourceOpencode:   {BlockStop: false, InjectContext: false},
@@ -96,6 +100,8 @@ func NormalizeEvent(name string) Event {
 		return EventMessageSubmit
 	case "edit", "posttooluse":
 		return EventEdit
+	case "pretooluse", "pretool":
+		return EventPreToolUse
 	default:
 		return ""
 	}

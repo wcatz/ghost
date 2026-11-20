@@ -391,14 +391,14 @@ const goldenBlockAfter = "## Ghost context: goldproj\n" +
 	"- [preference] `pmem13` (0.2) «project memory 13 content for the golden block»\n" +
 	"- [convention] `pmem15` (0.2) «project memory 15 content for the golden block»\n" +
 	"- [gotcha] `pmem07` (0.9 scope{area=payments}) «project memory 07 content for the golden block»\n" +
+	"- [gotcha] `pmem12` (0.3) «project memory 12 content for the golden block»\n" +
+	"- [gotcha] `pmem17` (0.1) «project memory 17 content for the golden block»\n" +
 	"- [fact] `pmem05` (0.6) «project memory 05 content for the golden block»\n" +
 	"- [fact] `pmem10` (0.4) «project memory 10 content for the golden block»\n" +
 	"- [architecture] `pmem04` (0.7) «project memory 04 content for the golden block»\n" +
 	"- [pattern] `pmem06` (0.6) «project memory 06 content for the golden block»\n" +
 	"- [fact] `pmem16` (0.2) «project memory 16 content for the golden block»\n" +
 	"- [decision] `pmem03` (0.8) «project memory 03 content for the golden block»\n" +
-	"- [architecture] `pmem11` (0.3) «project memory 11 content for the golden block»\n" +
-	"- [pattern] `pmem14` (0.2) «project memory 14 content for the golden block»\n" +
 	"\n" +
 	"**Global (applies to all projects):** the user's own saved cross-project preferences.\n" +
 	"(8 shown of 11 total — 3 not shown: 2 ranked out by pinned status, then importance, then most-recently-updated, 1 withheld rather than ranked out; use ghost_search_all for the rest)\n" +
@@ -412,4 +412,5 @@ const goldenBlockAfter = "## Ghost context: goldproj\n" +
 	"- [preference] `gmem08` (0.5) «global memory 08 content for the golden block»\n" +
 	"\n" +
 	"\n" +
-	"Save to Ghost as it happens, not at the end: when the user corrects you or states a rule, when a bug's root cause is found, when a choice is made for a reason, when a tool or dependency behaves unexpectedly. One memory per fact — refine an earlier one with ghost_memory_update rather than saving it again. A memory is a rule, constraint, decision or reason the code does not state; not what the repository says, not the current task's progress, never a key or token value.\n"
+	"Save to Ghost as it happens, not at the end: when the user corrects you or states a rule, when a bug's root cause is found, when a choice is made for a reason, when a tool or dependency behaves unexpectedly. One memory per fact — refine an earlier one with ghost_memory_update rather than saving it again. A memory is a rule, constraint, decision or reason the code does not state; not what the repository says, not the current task's progress, never a key or token value.\n" +
+	""

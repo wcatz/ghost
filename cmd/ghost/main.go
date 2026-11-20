@@ -239,7 +239,7 @@ Commands:
                                                          (auto-detects when --client is omitted)
   mcp status [--client claude|opencode|codex|goose]                Check MCP client integration health
   mcp wiring                    Check client wiring against this binary's embedded sources
-  hook <event> [--source <host>]  Lifecycle hook for MCP clients (session-start, stop, session-end, message-submit, edit)
+  hook <event> [--source <host>]  Lifecycle hook for MCP clients (session-start, stop, session-end, message-submit, edit, pre-tool-use)
   reflect <project> [flags]   Memory consolidation (dry-run by default, --apply to save)
   supersede <project> [flags] Link superseded memories (dry-run by default, --apply to write)
   resolve <project> [flags]   Mark resolved evidence memories (dry-run by default, --apply to write)

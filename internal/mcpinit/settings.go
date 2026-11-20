@@ -402,7 +402,7 @@ func isJSONNull(raw json.RawMessage) bool {
 	return strings.TrimSpace(string(raw)) == "null"
 }
 
-var settingsReadHookEvents = []string{"SessionStart", "Stop", "UserPromptSubmit", "PostToolUse"}
+var settingsReadHookEvents = []string{"SessionStart", "Stop", "UserPromptSubmit", "PostToolUse", "PreToolUse"}
 
 func (s *settingsFile) base() string {
 	return filepath.Base(s.path)
@@ -527,6 +527,8 @@ func (s *settingsFile) holdsOnlyGhostManaged() bool {
 			token = "message-submit"
 		case "PostToolUse":
 			token, matcher = "edit", workMomentMatcher
+		case "PreToolUse":
+			token, matcher = "pre-tool-use", "Bash"
 		default:
 			return false
 		}

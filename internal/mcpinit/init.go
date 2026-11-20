@@ -82,6 +82,9 @@ func Run(w io.Writer, dryRun bool) error {
 	if err := ensureWorkingMomentHooks(w, settingsFile, ghostBin, dryRun); err != nil {
 		return retryHint(err)
 	}
+	if err := ensurePreToolUseHook(w, settingsFile, ghostBin, dryRun); err != nil {
+		return retryHint(err)
+	}
 
 	_, _ = fmt.Fprintln(w, "\n[8/10] Disabling Claude Code built-in memory...")
 	if err := ensureAutoMemoryDisabled(w, settingsFile, dryRun); err != nil {
@@ -1181,6 +1184,31 @@ func ensureWorkingMomentHooks(w io.Writer, sf *settingsFile, ghostBin string, dr
 		default:
 			_, _ = fmt.Fprintf(w, "  ✓ %s hook already configured\n", h.event)
 		}
+	}
+	return nil
+}
+
+func ensurePreToolUseHook(w io.Writer, sf *settingsFile, ghostBin string, dryRun bool) error {
+	hookCmd := shellQuote(ghostBin) + " hook pre-tool-use --source claude-code"
+	action, err := reconcileHookMatcher(sf, "PreToolUse", "Bash", "hook pre-tool-use", hookCmd, hookCmd, runtime.GOOS == "windows")
+	if err != nil {
+		return err
+	}
+	switch action {
+	case hookAdded:
+		if dryRun {
+			_, _ = fmt.Fprintf(w, "  ~ would add PreToolUse hook (Bash): %s\n", hookCmd)
+		} else {
+			_, _ = fmt.Fprintf(w, "  + added PreToolUse hook (Bash): %s\n", hookCmd)
+		}
+	case hookMigrated:
+		if dryRun {
+			_, _ = fmt.Fprintf(w, "  ~ would migrate PreToolUse hook to current invocation: %s\n", hookCmd)
+		} else {
+			_, _ = fmt.Fprintf(w, "  + migrated PreToolUse hook to current invocation: %s\n", hookCmd)
+		}
+	default:
+		_, _ = fmt.Fprintln(w, "  ✓ PreToolUse hook already configured")
 	}
 	return nil
 }

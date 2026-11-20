@@ -1120,3 +1120,34 @@ func TestFindClientBinary_IgnoresSystemDirs(t *testing.T) {
 		t.Fatalf("FindClientBinary = %q, want %q", got, homeStub)
 	}
 }
+
+func TestStatus_ReportsPreToolUseHook(t *testing.T) {
+	statusEnv(t)
+	settingsDir := filepath.Join(os.Getenv("HOME"), ".claude")
+	if err := os.MkdirAll(settingsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(settingsDir, "settings.json")
+	missing := `{"hooks":{"Stop":[{"matcher":"","hooks":[{"type":"command","command":"/opt/ghost/bin/ghost hook stop --source claude-code"}]}]}}`
+	if err := os.WriteFile(path, []byte(missing), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if _, err := Status(&out); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "PreToolUse hook not configured") {
+		t.Errorf("a missing PreToolUse hook must be reported, got:\n%s", out.String())
+	}
+	wired := `{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"/opt/ghost/bin/ghost hook pre-tool-use --source claude-code"}]}]}}`
+	if err := os.WriteFile(path, []byte(wired), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if _, err := Status(&out); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "✓ PreToolUse hook configured") {
+		t.Errorf("a wired PreToolUse hook must be reported, got:\n%s", out.String())
+	}
+}

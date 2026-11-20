@@ -521,9 +521,9 @@ func TestSessionInjectionRespectsNewCap(t *testing.T) {
 // fixture packs 15 'fact' filler rows (importance 0.2, fresh created_at —
 // facts never decay, so score stays 0.2) plus one 'gotcha' row (importance
 // 0.9, created_at ~400 days back — decays to the 0.15 floor, score
-// 0.9*0.15=0.135). Under raw-importance ordering the gotcha (0.9) would rank
-// first; under decayed-score ordering it scores below every fact (0.135 <
-// 0.2) and is the LAST row of the 16, which is what this asserts by position.
+// 0.9*0.15=0.135). Assembly ranks by decayed score, and the session-start
+// block renders standing rules before facts (#1984), so the gotcha appears in
+// the rules group ahead of fact rows.
 //
 // The share changed which row the 15-cap leaves out, and that is its job. The
 // project bucket holds 16 rows under a 15-row cap, so stage 7 divides it: the
@@ -531,8 +531,7 @@ func TestSessionInjectionRespectsNewCap(t *testing.T) {
 // category, and the remaining facts come back — 14 facts plus the gotcha, with
 // one FACT deferred behind the window and cut. A block that is all one thing
 // is what the stage exists to prevent, so the marker that used to be absent
-// is now the one the block gains; the decay ranking is unchanged, and the
-// gotcha still sorts last.
+// is now the one the block gains.
 //
 // EVERY STAMP COMES FROM ONE FIXED INSTANT rather than from the clock, and that
 // is what makes the fixture one answer on every run and every platform. The 15
@@ -637,22 +636,28 @@ func TestSessionInjectionUsesDecayRanking(t *testing.T) {
 	if !strings.Contains(result, "15 shown of 16 total — 1 withheld rather than ranked out") {
 		t.Errorf("expected cap of 15 with 1 not-shown, got:\n%s", result)
 	}
-	// The decay ranking is untouched: the gotcha sorts last in the block, below
-	// every fact, which is the assertion the raw-importance ordering fails.
-	//
-	// Every fact marker rather than one named fact, and that is deliberate.
-	// WHICH fact the 15-cap leaves out is the diversity share's business and a
-	// legitimate answer to a tie, so a test naming the 14th fact would fail on
-	// a selection that is correct and only re-sorted. What must not move is the
-	// gotcha's POSITION against all of them.
+	// The decay ranking is computed by assembly; the session-start block then
+	// renders standing rules before facts (#1984), so a gotcha appears in the
+	// rules group ahead of fact rows even when it has decayed below them.
+	// Within each group the relative assembly order is preserved.
 	gotchaAt := strings.Index(result, "GOTCHAMARKER")
 	if gotchaAt < 0 {
-		t.Fatalf("the gotcha is absent from the block, so no ordering below it can be asserted:\n%s", result)
+		t.Fatalf("the gotcha is absent from the block, so no ordering can be asserted:\n%s", result)
 	}
+	var factPos []int
 	for i := 0; i < 15; i++ {
 		factAt := strings.Index(result, fmt.Sprintf("FACTMARKER%02d", i))
-		if factAt >= 0 && factAt > gotchaAt {
-			t.Errorf("the decayed gotcha must sort last, below every fact: fact%02d at %d, gotcha at %d", i, factAt, gotchaAt)
+		if factAt >= 0 {
+			if factAt < gotchaAt {
+				t.Errorf("rules must sort before facts in the session-start block: fact%02d at %d, gotcha at %d", i, factAt, gotchaAt)
+			}
+			factPos = append(factPos, factAt)
+		}
+	}
+	for i := 1; i < len(factPos); i++ {
+		if factPos[i] < factPos[i-1] {
+			t.Errorf("facts must keep their relative order within the facts group")
+			break
 		}
 	}
 }
