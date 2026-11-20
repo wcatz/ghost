@@ -151,6 +151,8 @@ func TestPluginHookTreesSync(t *testing.T) {
 		// beside an edit's result.
 		"UserPromptSubmit": {"hook", "message-submit", "--source", "claude-code"},
 		"PostToolUse":      {"hook", "edit", "--source", "claude-code"},
+		// Standing rules beside a Bash command, at the moment of action.
+		"PreToolUse": {"hook", "pre-tool-use", "--source", "claude-code"},
 	}
 
 	posixDoc, posixGeneric := readPluginHooks(t, posixRel)
@@ -193,8 +195,11 @@ func TestPluginHookTreesSync(t *testing.T) {
 				continue
 			}
 			wantMatcher := ""
-			if event == "PostToolUse" {
+			switch event {
+			case "PostToolUse":
 				wantMatcher = "Edit|Write|MultiEdit"
+			case "PreToolUse":
+				wantMatcher = "Bash"
 			}
 			if entries[0].Matcher != wantMatcher {
 				t.Errorf("%s %s matcher = %q, want %q", rel, event, entries[0].Matcher, wantMatcher)

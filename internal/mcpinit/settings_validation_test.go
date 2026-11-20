@@ -125,10 +125,10 @@ func TestRunInstallsSettingsItCarriesThrough(t *testing.T) {
 	}{
 		{"empty", `{}`, ""},
 		{"non-read string event", `{"hooks":{"Notification":"x"}}`, "Notification"},
-		{"non-read list-command event", `{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":["echo","hi"]}]}]}}`, "PreToolUse"},
+		{"non-read list-command event", `{"hooks":{"Notification":[{"matcher":"Bash","hooks":[{"type":"command","command":["echo","hi"]}]}]}}`, "Notification"},
 		{"invalid read-event entry beside a non-read oddity",
-			`{"permissions":{"allow":["Bash"]},"hooks":{"UserPromptSubmit":[{"matcher":"","hooks":[{"type":"command","command":"ghost hook message-submit --source claude-code","timeout":30}]}],"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":["echo","hi"]}]}]},"effortLevel":"high"}`,
-			"PreToolUse"},
+			`{"permissions":{"allow":["Bash"]},"hooks":{"UserPromptSubmit":[{"matcher":"","hooks":[{"type":"command","command":"ghost hook message-submit --source claude-code","timeout":30}]}],"Notification":[{"matcher":"Bash","hooks":[{"type":"command","command":["echo","hi"]}]}]},"effortLevel":"high"}`,
+			"Notification"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

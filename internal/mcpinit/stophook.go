@@ -50,6 +50,11 @@ func RunHostEvent(eventArg, sourceArg string, stdin io.Reader, stdout io.Writer,
 			return
 		}
 		runWorkingMoment(payload, stdout)
+	case hostevent.EventPreToolUse:
+		if cap, _ := hostevent.CapabilityFor(payload.HostSource()); !cap.PreToolUse {
+			return
+		}
+		runPreToolUse(payload, stdout)
 	case hostevent.EventStop:
 		runStop(payload, stdout, stderr, true)
 	case hostevent.EventSessionEnd:

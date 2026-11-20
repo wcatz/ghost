@@ -85,7 +85,7 @@ func Status(w io.Writer) (bool, error) {
 			hasStop := contractHookWired(sf, "Stop", "stop", "claude-code", ghostBin)
 			check(hasStop, "Stop hook configured", "Stop hook missing or pre-contract (run ghost mcp init)")
 
-			for _, c := range []struct{ event, token string }{{"UserPromptSubmit", "message-submit"}, {"PostToolUse", "edit"}} {
+			for _, c := range []struct{ event, token string }{{"UserPromptSubmit", "message-submit"}, {"PostToolUse", "edit"}, {"PreToolUse", "pre-tool-use"}} {
 				if contractHookWired(sf, c.event, c.token, "claude-code", ghostBin) {
 					_, _ = fmt.Fprintf(w, "  ✓ %s hook configured (working-moment context)\n", c.event)
 				} else {

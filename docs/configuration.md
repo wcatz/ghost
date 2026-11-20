@@ -307,6 +307,8 @@ injection:
 
 Set `behavior_floor: 0` to disable the category bias and use rank-only selection. `category_weights` can give a category a small ordering boost. `category_caps` prevents one behavioral category from consuming every reserved slot.
 
+The session-start block follows the same knobs with two differences. Its project slice reserves at least two thirds of its slots for standing rules, so `behavior_floor` is raised to that reserve (and `0` still turns the bias off), and `behavior_categories` is not used there: the rule categories are fixed at gotcha, convention and preference, and decisions render in their own group. `category_caps` entries for those three rule categories are not applied at session start, so the default `gotcha: 4` cannot cut the reserve; caps on other categories still apply.
+
 ### `injection.session_scope`
 
 A memory's scope is a set of machine-readable key/value pairs naming where it applies. Every surface renders it as `scope{environment=production}`, and `ghost_memory_search` takes one as an argument. `session_scope` gives the injected block one: the scope this session is working in, so a memory scoped to another environment is not spent on this one's tokens, and the agent is not handed a fact about production while it edits development.
