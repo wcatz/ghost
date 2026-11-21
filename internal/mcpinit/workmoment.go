@@ -86,7 +86,7 @@ func workingMomentText(p hostevent.Payload, emit func(string, hostevent.Event)) 
 		return "", event
 	}
 
-	directive := event == hostevent.EventMessageSubmit && isDirectivePrompt(in.Prompt)
+	directive := event == hostevent.EventMessageSubmit && IsDirectivePrompt(in.Prompt)
 	nudgeSuffix := ""
 	if directive {
 		nudgeSuffix = "\n" + directiveNudge
@@ -329,6 +329,11 @@ var genericWords = map[string]bool{
 	"go": true, "make": true,
 }
 
+// IsGenericWord reports whether w is one of the generic development words the
+// keyword floor never counts as distinctive. Exported so the standing-rule
+// measurement can share this one list instead of a hand-copied second one.
+func IsGenericWord(w string) bool { return genericWords[w] }
+
 func clearsKeywordFloor(it assemble.Item, terms []memory.QueryTerm) bool {
 	distinctive, words := keywordMatch(it, terms)
 	return distinctive || words >= workMomentFloorWords
@@ -348,7 +353,7 @@ func keywordMatch(it assemble.Item, terms []memory.QueryTerm) (distinctive bool,
 			if len(low) >= workMomentMinDistinctive && containsBounded(text, low) {
 				distinctive = true
 			}
-		} else if have[low] && !genericWords[low] && !counted[low] {
+		} else if have[low] && !IsGenericWord(low) && !counted[low] {
 			counted[low] = true
 			words++
 		}

@@ -28,8 +28,8 @@ func TestIsDirectivePrompt(t *testing.T) {
 		"Please fix this. Never edit vendor files.",
 	}
 	for _, c := range trueCases {
-		if !isDirectivePrompt(c) {
-			t.Errorf("isDirectivePrompt(%q) = false, want true", c)
+		if !IsDirectivePrompt(c) {
+			t.Errorf("IsDirectivePrompt(%q) = false, want true", c)
 		}
 	}
 	falseCases := []string{
@@ -44,8 +44,21 @@ func TestIsDirectivePrompt(t *testing.T) {
 		strings.Repeat("a", directiveMaxLen+10),
 	}
 	for _, c := range falseCases {
-		if isDirectivePrompt(c) {
-			t.Errorf("isDirectivePrompt(%q) = true, want false", c)
+		if IsDirectivePrompt(c) {
+			t.Errorf("IsDirectivePrompt(%q) = true, want false", c)
+		}
+	}
+}
+
+func TestIsGenericWordIsTheSharedList(t *testing.T) {
+	for _, w := range []string{"fix", "fixes", "test", "tests", "docs", "error", "go", "make", "file", "files"} {
+		if !IsGenericWord(w) {
+			t.Errorf("IsGenericWord(%q) = false, want true", w)
+		}
+	}
+	for _, w := range []string{"tabs", "indentation", "migration", "quartz_widget"} {
+		if IsGenericWord(w) {
+			t.Errorf("IsGenericWord(%q) = true, want false", w)
 		}
 	}
 }
