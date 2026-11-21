@@ -14,7 +14,10 @@ var (
 	directiveImperativeRE = regexp.MustCompile(`(?i)(?:^|[.!?]\s+)(?:please\s+|you\s+(?:should\s+|must\s+)?|we\s+(?:should\s+|must\s+)?)?(?:never|don't|dont|do not|always|stop|must)\b`)
 )
 
-func isDirectivePrompt(prompt string) bool {
+// IsDirectivePrompt reports whether a user message states a standing rule.
+// It is the one lexical check used by the working-moment hook and by the eval
+// replay that measures how often that check fires on real messages.
+func IsDirectivePrompt(prompt string) bool {
 	s := strings.TrimSpace(prompt)
 	if s == "" {
 		return false
