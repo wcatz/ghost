@@ -75,12 +75,9 @@ const asOfStampLayout = "2006-01-02 15:04:05"
 
 func asOfStamp(t time.Time) string { return t.UTC().Format(asOfStampLayout) }
 
-// asOfScopeClause is the project predicate the read uses, per project mode, and
-// the arguments that go with it. It is the same three-way distinction the
-// retrieval legs make, and it exists as a function because the read applies the
-// predicate to two different tables (memory_history.project_id for the versioned
-// rows, memories.project_id for the unversioned ones) and the two must not be
-// able to disagree about which memories are in scope.
+// asOfScopeClause is the project predicate and its arguments, matching the
+// retrieval legs' three-way distinction. One function applies it to both the
+// history and live tables so they cannot disagree about scope.
 func asOfScopeClause(mode ProjectMode, projectID string) (string, []any) {
 	switch mode {
 	case AllProjects:
@@ -92,11 +89,9 @@ func asOfScopeClause(mode ProjectMode, projectID string) (string, []any) {
 	}
 }
 
-// ReadMemoriesAsOf reads the memory set a project held at t, from any handle —
-// a Store's snapshot transaction, its own handle, or the read-only connection
-// the session hook opens. It is a package function rather than a method for the
-// same reason SupersedePenalties and DemotionPenalties are: two of the three
-// callers hold no Store.
+// ReadMemoriesAsOf reads the set a project held at t from any handle. It is a
+// package function because most callers hold no Store — the same reason the
+// penalty helpers are.
 func ReadMemoriesAsOf(ctx context.Context, q Queryer, mode ProjectMode, projectID string, t time.Time) (*AsOfSet, error) {
 	stamp := asOfStamp(t)
 	clause, clauseArgs := asOfScopeClause(mode, projectID)

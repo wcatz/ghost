@@ -222,14 +222,10 @@ func replacementsWithin(ctx context.Context, db Queryer, rows []Memory, now time
 	return lexicalReplacements(cands, edges, now), nil
 }
 
-// IsReplacement is the pairwise form of the replacement guess, for a caller that
-// already holds one older/newer pair and only needs the lexical judgement. It
-// asks whether newer looks like a replacement of older under the same rule that
-// marks a row on a read: a value swapped or retired in text that resembles the
-// older text, whatever the two categories. It decides nothing — `ghost supersede`
-// uses it to rescue a reworded replacement the cosine floor rejected before the
-// pair goes to the classifier. No live edges are read here: a pair the graph
-// already relates is reconciled by the pass from its own link rows.
+// IsReplacement is the pairwise lexical guess: does newer look like a replacement
+// of older under the same rule that marks a row on a read? It decides nothing —
+// supersede uses it to rescue a reworded pair the cosine floor rejected before
+// classification. No edges are read; the pass reconciles those from its links.
 func IsReplacement(older, newer Memory, now time.Time) bool {
 	rows := []Candidate{{Memory: older}, {Memory: newer}}
 	return len(lexicalReplacements(rows, nil, now)[older.ID]) > 0

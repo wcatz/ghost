@@ -52,12 +52,9 @@ type CandidateRequest struct {
 	AsOf      *time.Time
 	Fetch     Fetch
 	Explain   bool
-	// Passive carries the selection policies for an empty query, one per bucket,
-	// and is populated only for passive retrieval. An empty query with NO policy is
-	// refused (ErrPassiveUnsupported) rather than served as an empty set, which
-	// would read as a store holding nothing; a policy that names no bucket, states
-	// no over-fetch, overstates the ceiling or repeats a bucket is refused for the
-	// same reason in a different shape — see validatePassivePolicies.
+	// Passive carries one selection policy per bucket for an empty query. Such a
+	// query with no policy is refused, not served as an empty set — that would read
+	// as an empty store.
 	Passive []SlicePolicy
 }
 
@@ -86,12 +83,9 @@ type SlicePolicy struct {
 	IncludeGlobal         bool
 	ItemCap               int
 	DemoteOnlyWhenOverCap bool
-	// ExcludeSeen is reserved for the project-context bucket, which is the one
-	// passive policy that must not repeat a row the project bucket already
-	// showed. Nothing reads it yet, deliberately: a field that silently did
-	// nothing would be worse than an absent one, so it is stated as unread until
-	// the surface that needs it lands, and the migration of that surface is
-	// where it gets honoured rather than a silent no-op here.
+	// ExcludeSeen is reserved for the project-context bucket, which must not
+	// repeat a row the project bucket already showed. It is deliberately unread
+	// until that surface moves onto this seam.
 	ExcludeSeen       bool
 	DropDemotedLosers bool
 }
@@ -112,14 +106,10 @@ type DroppedLoser struct {
 // which is the assembler's evidence that it could filter before closing.
 type CandidateSet struct {
 	Rows []Candidate
-	// DroppedLosers are the near-duplicate losers the retriever REMOVED instead
-	// of ranking last (a query window, which collapses its pairs, or a passive
-	// bucket whose policy sets DropDemotedLosers), each with the ids of the rows
-	// it lost to. They are not in Rows, and the assembler cannot rediscover them:
-	// the removal happened over a window whose edges it never saw. Carrying them
-	// is what lets stage 6 put each one in the trace and the retrieval record
-	// with its reason. Empty on every read in which the window held no
-	// near-duplicate edge to act on.
+	// DroppedLosers are near-duplicate losers the retriever removed rather than
+	// ranked last, with the ids they lost to. They are not in Rows and the
+	// assembler cannot rediscover them; carrying them lets stage 6 record each
+	// one in the trace and retrieval record with its reason.
 	DroppedLosers    []DroppedLoser
 	Edges            []LinkEdge
 	EdgesStatus      EdgeStatus
@@ -127,15 +117,10 @@ type CandidateSet struct {
 	Widened          bool
 	Unrecorded       int
 	ValidityExcluded int
-	// PinnedBeyond is, per project (the row's own, so a union bucket's `_global` rows are counted under `_global`), how many eligible pinned rows never
-	// entered the window: the window is a LIMIT, and a bucket holding more pinned
-	// rows than the window has places reads only the first of them. Set only for
-	// a bucket whose whole window is pinned (the only case in which a pinned row
-	// can be past it); absent otherwise. It is what lets the assembler say how many
-	// pinned rows a cap cut when it never saw some of them. The window is the
-	// over-fetch the fetch read and not the selected set: the selected set is the
-	// window plus the replacements of pinned rows, which are fetched past it so
-	// they can hold a slot beside the row they replaced.
+	// PinnedBeyond is, per project, how many eligible pinned rows the LIMIT kept
+	// out: only set when the whole window is pinned. It lets the assembler report
+	// how many pins a cap cut that it never saw. The window is the over-fetch,
+	// not the selected set (which adds pinned rows' replacements, fetched past it).
 	PinnedBeyond map[string]int
 	// WindowExtra is, per passive bucket, how many rows the set carries beyond the
 	// bucket's over-fetch: the replacements of pinned rows, fetched past the LIMIT
@@ -145,45 +130,27 @@ type CandidateSet struct {
 
 	// buys, and with it false these fields are never touched, so the plain
 
-	// Excluded is the pre-scope fused candidate pool the returned set does NOT
-	// carry, in the pool's fused-score order (which Rows is not). It is the
-	// rows scope narrowing removed before window selection, plus the eligible
-	// rows the window and its tail never reached; together with Rows and
-	// FloorDropped it partitions the pool every leg surfaced, so an
-	// explanation can account for every candidate the search saw. A row in it
-	// is explained by the same trace verdict that excluded it: scope_matched
-	// false is the scope complaint, everything else is the result window.
+	// Excluded is the pre-scope fused pool the returned set does not carry, in
+	// fused-score order. With Rows and FloorDropped it partitions every candidate
+	// the legs surfaced, so explain can account for each one; a row is explained
+	// by the same trace verdict that excluded it.
 	Excluded []Memory
-	// FloorDropped is what the vector similarity floor removed from the
-	// VECTOR leg without the keyword leg retrieving the row either — the
-	// candidates the floor cut out of the retrieval entirely, in the raw
-	// vector-leg order the floor saw them. (A dual-leg row the floor cut from
-	// the vector side still reaches fusion on its keyword term and so lives
-	// in Rows or Excluded, with its floor_dropped fact on the trace.) It is
-	// why "your query matched nothing strongly enough" is reported rather
-	// than read as a candidate that never existed. Hydrated, as Rows and
-	// Excluded are, on the same snapshot as the rest of the read.
+	// FloorDropped is what the vector floor cut when no leg retrieved the row at
+	// all — a dual-leg row still reaches fusion on its keyword term. It is why
+	// "nothing matched strongly enough" is reported rather than an empty corpus.
+	// Hydrated on the same snapshot as the rest of the read.
 	FloorDropped []Memory
-	// RankFacts is the ranking path's own per-candidate record, keyed by
-	// memory id, covering every row in Rows, Excluded and FloorDropped. The
-	// explain projection reads every scoring fact from it — leg ranks, the
-	// pre-status fused base, status factor, scope verdict, reservation
-	// exchange, decay, floor and window-scoped penalties — so the numbers it
-	// reports are the numbers that ranked, not a re-computation. A missing
-	// entry is a row the ranking genuinely never scored.
+	// RankFacts is the ranking path's own per-candidate record for every row in
+	// Rows, Excluded and FloorDropped. Explain reads its scoring facts directly so
+	// reported numbers are the ones that ranked, not a re-computation.
 	RankFacts       map[string]*RankFact
 	ExplainKnobs    ExplainKnobs
 	floorDroppedIDs []string
 }
 
-// ExplainKnobs is the resolved fusion configuration one ranking ran under. It is
-// carried on the CandidateSet so the explain projection can name what a score
-// MEANS without re-deriving it: every fused base is the sum, over the legs that
-// retrieved the row, of weight/(RRFK+rank+1), with FTSWeight on the keyword leg
-// and VecWeight on the vector leg, and VectorFloor is the cosine the vector leg
-// was cut on. They are the values the fusion and the floor READ, copied from the
-// parameters the ranking ran with, so a number reported against them is the
-// number that decided.
+// ExplainKnobs are the fusion values one ranking ran under, carried so explain
+// can name what a score means without re-deriving it. They are the values the
+// fusion and floor actually read, not a second copy that can drift.
 type ExplainKnobs struct {
 	RRFK                 int
 	FTSWeight, VecWeight float64
@@ -199,34 +166,22 @@ type Candidate struct {
 	FTSRank, VectorRank int
 	VectorScore         float64
 	FetchedBy           string
-	// SupersededBy is, for a passive row, pinned or not, the ids of the rows in
-	// the same window that supersede it through a live `supersedes` edge, read
-	// with the demotion's own edge rules (supersedePenaltyRows) except that a
-	// keep-forever (retention-exempt) target, which the demotion never sinks, is
-	// named too: a marker withholds nothing. The assembler marks the row on its line
-	// when a named superseder is on the page: a live edge switches the lexical
-	// guess (MaybeReplacedBy) off for its pair, and resolve never retires a
-	// convention or a preference, so this is the only signal the edge leaves. Only
-	// a PINNED, non-exempt row's name moves anything else: a pin guarantees a slot and not a
-	// rank above the row that replaced it, so such a row is ordered directly
-	// behind its superseder and the superseder is reserved too. On a query read
-	// it names the same superseders among the edge scope (querySupersededBy),
-	// for the marker only.
+	// SupersededBy names, for a passive row, the live superseders in its window
+	// under the demotion's edge rules, including a keep-forever target (a marker
+	// withholds nothing). The assembler marks the row when a superseder is on the
+	// page — the only trace a live edge leaves, since it also switches the lexical
+	// guess off. A pinned non-exempt row is placed directly behind its superseder,
+	// which is also reserved a slot.
 	SupersededBy       []string
 	MaybeReplacedBy    []string
 	FloorReserved      bool
 	Base, Decay, Score float64
 	AgeDays            float64
 	KeywordReserved    bool
-	// Unembedded says the vector leg could not have retrieved this row: it
-	// carries no embedding the leg could score — no vector at all, one stamped
-	// with a different identity, or one whose width differs from the query's.
-	// It is false whenever the vector leg is not in play (no embedder, no query
-	// vector, a failed leg), because then no row is judged against that leg. The
-	// leg-consensus stage reads it so a row the vector leg could never see is
-	// not penalised for lacking vector agreement (#1319): a row saved moments
-	// ago has no embedding yet, and its silence must not read as a second leg's
-	// dissent.
+	// Unembedded says the vector leg could not have scored this row (no vector,
+	// or one of another identity or width). Leg consensus reads it so a row the
+	// leg could never see — a just-saved memory, for instance — is not penalised
+	// for lacking vector agreement.
 	Unembedded bool
 	Evidence   EvidenceCounts
 }
@@ -258,13 +213,9 @@ type LegStatus struct {
 // edges) or "err" (the query failed).
 type EdgeStatus struct {
 	Status, Err string
-	// Chunks is how many queries the edge read took. The read is chunked, so a
-	// pair whose endpoints land in different chunks is never read, and a caller
-	// whose window exceeds the chunk therefore gets a partial picture. A whole-set
-	// claim ("no link joins two of these candidates") is only true at one chunk, so
-	// the count travels with the status rather than staying a detail of the loop.
-	// Zero means no query ran, which is the same thing: with fewer than two
-	// candidates no pair can exist.
+	// Chunks is how many queries the edge read took. Endpoints in different chunks
+	// are never compared, so a whole-set "no link" claim holds only for one chunk;
+	// the count travels with the status for that reason. Zero means no query ran.
 	Chunks int
 }
 
@@ -276,10 +227,9 @@ const (
 	edgesNotApplicable = "not_applicable"
 )
 
-// ErrPassiveUnsupported is returned for an empty-query request. Passive
-// retrieval is specification, not absence: the session-start policies land with
-// the migration that moves that surface onto this seam, and until then an
-// honest error beats an empty result set.
+// ErrPassiveUnsupported is returned for an empty-query request with no passive
+// policy. An honest error beats an empty result set, which would read as a store
+// holding nothing.
 var ErrPassiveUnsupported = errors.New("passive retrieval is not served by Candidates yet")
 
 const edgeChunkIDs = 200
@@ -512,12 +462,9 @@ func (s *Store) Candidates(ctx context.Context, req CandidateRequest) (*Candidat
 	return set, nil
 }
 
-// unembeddedAmong returns the candidates that carry no embedding the vector leg
-// could score: no vector at all, one stamped with a different identity, or one
-// whose width differs from the query's. The three cases are the two filters the
-// scan applies, and they are applied in its order — identity first, then width —
-// because a row the leg saw is a row the leg ranked, and everything else is one
-// it could never have considered.
+// unembeddedAmong returns candidates the vector leg could not score: no vector,
+// one of another identity, or one of another width. It applies the scan's two
+// filters in its order, so a row the leg saw is a row the leg ranked.
 func unembeddedAmong(ctx context.Context, db Queryer, candidates []Candidate, identity string, width int) (map[string]bool, error) {
 	out := make(map[string]bool, len(candidates))
 	if len(candidates) == 0 {
@@ -760,9 +707,8 @@ func (s *Store) runCandidateLegs(ctx context.Context, req CandidateRequest, p Se
 	return out, vec, nil
 }
 
-// keywordValidityExcluded counts the rows that matched the query but lie outside
-// their validity window — the rows the keyword leg's SQL predicate removed
-// before its LIMIT (#1053).
+// keywordValidityExcluded counts query matches outside their validity window —
+// the rows the keyword leg's SQL predicate removed before its LIMIT.
 func (s *Store) keywordValidityExcluded(ctx context.Context, req CandidateRequest, project string, allProjects bool) (int, error) {
 	query, args := keywordValidityExcludedStatement(project, sanitizeFTS(req.Query, s.logger), req.Now, allProjects)
 	var n int
@@ -834,12 +780,8 @@ func (s *Store) fillExplain(ctx context.Context, set *CandidateSet, req Candidat
 	return nil
 }
 
-// orderByIDs reorders hydrated rows to match an id list. GetByIDs does not
-// preserve order, and the explain buckets are reported in the order the
-// retrieval saw each row — fused order for the pool, raw leg order for the
-// floor drops — so the two are reconciled here. A row the snapshot no longer
-// holds is absent from the result, exactly as if it had never been a
-// candidate.
+// orderByIDs restores the retrieval's order after GetByIDs, which does not
+// preserve it. A row the snapshot no longer holds is simply absent.
 func orderByIDs(hydrated []Memory, ids []string) []Memory {
 	byID := make(map[string]Memory, len(hydrated))
 	for _, m := range hydrated {

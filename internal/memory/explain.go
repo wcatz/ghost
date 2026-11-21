@@ -2,12 +2,9 @@ package memory
 
 import "fmt"
 
-// ExplainProvenanceOff is the value provenance_weight carries when no
-// provenance multiplier is applied. It is the string "off" rather than a number
-// on purpose: a multiplier of 1.0 is a claim that the ranking considered
-// provenance and decided it did not matter, which is not what happens — nothing
-// reads provenance at all. A reader seeing "off" cannot mistake a missing
-// implementation for a neutral one.
+// ExplainProvenanceOff is provenance_weight's value when no multiplier applies.
+// It is the string "off", not 1.0: a number would claim provenance was considered
+// and found neutral, when in fact nothing reads it at all.
 const ExplainProvenanceOff = "off"
 
 // ExplainRow is one candidate's contribution to a search, with every signal

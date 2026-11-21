@@ -920,7 +920,7 @@ func migrateV19(tx *sql.Tx) error {
 }
 
 // migrateV20 adds the retrieval record: one row per retrieval call, holding what
-// the call retrieved and what it kept (#646).
+// it retrieved and what it kept.
 func migrateV20(tx *sql.Tx) error {
 	if err := refuseForeignRetrievalRecordTable(tx); err != nil {
 		return err
