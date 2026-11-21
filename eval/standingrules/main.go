@@ -49,18 +49,19 @@ type report struct {
 	Flagged     int
 	Repeats     int
 	Missing     int
+	Unknown     int
 	Unmatched   int
 	Undated     int
 	Project     string
 	ListFlagged bool
 	FlaggedRows []flaggedRow
 	MissingRows []missingRow
+	UnknownRows []missingRow
 }
 
 type ruleStore interface {
 	MemoriesAsOfAll(ctx context.Context, t time.Time) (*memory.AsOfSet, error)
 	MemoriesAsOf(ctx context.Context, projectID string, t time.Time) (*memory.AsOfSet, error)
-	GetByIDs(ctx context.Context, ids []string) ([]memory.Memory, error)
 }
 
 var (
@@ -96,21 +97,21 @@ func main() {
 }
 
 func parseArgs(args []string, stderr io.Writer) (logs, storePath, project string, listFlagged bool, err error) {
-	fs := flag.NewFlagSet("evalstandingrules", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	projectFlag := fs.String("project", "", "count rules only in this project id (and _global); empty checks every project")
-	listFlag := fs.Bool("list", false, "print every user message the detector flagged")
-	fs.Usage = func() {
+	flags := flag.NewFlagSet("evalstandingrules", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	projectFlag := flags.String("project", "", "count rules only in this project id (and _global); empty checks every project")
+	listFlag := flags.Bool("list", false, "print every user message the detector flagged")
+	flags.Usage = func() {
 		_, _ = fmt.Fprintln(stderr, "usage: evalstandingrules [-list] [-project id] <session-log-dir> <ghost-store>")
 	}
-	if err := fs.Parse(args); err != nil {
+	if err := flags.Parse(args); err != nil {
 		return "", "", "", false, err
 	}
-	if fs.NArg() != 2 {
-		fs.Usage()
+	if flags.NArg() != 2 {
+		flags.Usage()
 		return "", "", "", false, errors.New("expected a session-log directory and a store path")
 	}
-	return fs.Arg(0), fs.Arg(1), *projectFlag, *listFlag, nil
+	return flags.Arg(0), flags.Arg(1), *projectFlag, *listFlag, nil
 }
 
 func run(logs, storePath, project string, listFlagged bool, out io.Writer) error {
@@ -330,13 +331,12 @@ func ruleInGhost(rule string, contents []string) bool {
 
 // contentsAsOf reads the rule text a store held at an instant. With a project
 // the read is scoped to it (and _global); without one it spans every project,
-// which can mistake an unrelated cross-project memory for the rule. A
-// historical read gives recorded content for versioned rows; a row with no
-// version at that instant is reported only by id (its state was never
-// recorded), so its current text is read to answer "was the rule here yet".
-// Reading the live text cannot invent a memory: a row deleted before the
-// instant has no id in the set, and a versioned row keeps its historical text.
-func contentsAsOf(ctx context.Context, store ruleStore, project string, at time.Time) ([]string, error) {
+// which can mistake an unrelated cross-project memory for the rule. Only a
+// versioned row has text recorded by the instant; a row with no version then is
+// present by id alone and is returned in the unknown count, never filled with
+// its current text — a later edit would otherwise answer a question about the
+// earlier instant. Its count is reported rather than guessed at.
+func contentsAsOf(ctx context.Context, store ruleStore, project string, at time.Time) ([]string, int, error) {
 	var set *memory.AsOfSet
 	var err error
 	if project == "" {
@@ -345,24 +345,13 @@ func contentsAsOf(ctx context.Context, store ruleStore, project string, at time.
 		set, err = store.MemoriesAsOf(ctx, project, at)
 	}
 	if err != nil || set == nil {
-		return nil, err
+		return nil, 0, err
 	}
-	out := make([]string, 0, len(set.Rows)+len(set.Unknown))
+	out := make([]string, 0, len(set.Rows))
 	for _, row := range set.Rows {
 		out = append(out, row.Content)
 	}
-	ids := make([]string, 0, len(set.Unknown))
-	for _, row := range set.Unknown {
-		ids = append(ids, row.ID)
-	}
-	current, err := store.GetByIDs(ctx, ids)
-	if err != nil {
-		return nil, err
-	}
-	for _, row := range current {
-		out = append(out, row.Content)
-	}
-	return out, nil
+	return out, len(set.Unknown), nil
 }
 
 func analyze(turns []userTurn, store ruleStore, project string, listFlagged bool) (report, error) {
@@ -400,15 +389,22 @@ func analyze(turns []userTurn, store ruleStore, project string, listFlagged bool
 			result.Undated++
 			continue
 		}
-		contents, err := contentsAsOf(context.Background(), store, project, turn.at)
+		contents, unknown, err := contentsAsOf(context.Background(), store, project, turn.at)
 		if err != nil {
 			return result, err
 		}
-		if !ruleInGhost(rule.text, contents) {
+		row := missingRow{At: turn.at, Session: turn.session, Repeat: turn.text, Rule: rule.text}
+		switch {
+		case ruleInGhost(rule.text, contents):
+			// A recorded row answers the question; unrelated unrecorded rows
+			// cannot turn a saved rule into an unknown one.
+		case unknown > 0:
+			// The rule may sit in a row whose text was not recorded by then.
+			result.Unknown++
+			result.UnknownRows = append(result.UnknownRows, row)
+		default:
 			result.Missing++
-			result.MissingRows = append(result.MissingRows, missingRow{
-				At: turn.at, Session: turn.session, Repeat: turn.text, Rule: rule.text,
-			})
+			result.MissingRows = append(result.MissingRows, row)
 		}
 	}
 	return result, nil
@@ -456,20 +452,27 @@ func (r report) writeTo(w io.Writer) error {
 		out("Rule presence scope: project %s (and _global)\n", r.Project)
 	}
 	out("  rule absent before repeat: %d\n", r.Missing)
-	out("  rule present before repeat: %d\n", r.Repeats-r.Missing-r.Undated)
+	out("  rule present before repeat: %d\n", r.Repeats-r.Missing-r.Undated-r.Unknown)
+	out("  repeats with rule state unknown at the repeat: %d\n", r.Unknown)
+	out("  (a row with no text recorded by then is not judged present or absent)\n")
 	if r.Unmatched > 0 {
 		out("  repeats with no identifiable earlier rule: %d\n", r.Unmatched)
 	}
 	if r.Undated > 0 {
 		out("  repeats with no timestamp (not checked): %d\n", r.Undated)
 	}
-	if len(r.MissingRows) > 0 {
-		out("\nRepeats with the rule absent before the repeat:\n")
-		for i, row := range r.MissingRows {
+	printRepeatRows := func(heading string, rows []missingRow) {
+		if len(rows) == 0 {
+			return
+		}
+		out("\n%s\n", heading)
+		for i, row := range rows {
 			out("  [%d] at %s session %s\n", i+1, row.At.Format(time.RFC3339), row.Session)
 			out("      repeat: %s\n", oneLine(row.Repeat))
 			out("      rule:   %s\n", oneLine(row.Rule))
 		}
 	}
+	printRepeatRows("Repeats with the rule absent before the repeat:", r.MissingRows)
+	printRepeatRows("Repeats with the rule state unknown at the repeat:", r.UnknownRows)
 	return writeErr
 }

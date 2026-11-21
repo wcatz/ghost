@@ -18,7 +18,6 @@ type fakeAsOfStore struct {
 	unknown        []memory.AsOfRow
 	projectRows    map[string][]memory.AsOfRow
 	projectUnknown map[string][]memory.AsOfRow
-	current        map[string]memory.Memory
 	err            error
 }
 
@@ -37,16 +36,6 @@ func (f fakeAsOfStore) MemoriesAsOf(_ context.Context, projectID string, _ time.
 		Rows:    f.projectRows[projectID],
 		Unknown: f.projectUnknown[projectID],
 	}, nil
-}
-
-func (f fakeAsOfStore) GetByIDs(_ context.Context, ids []string) ([]memory.Memory, error) {
-	var out []memory.Memory
-	for _, id := range ids {
-		if m, ok := f.current[id]; ok {
-			out = append(out, m)
-		}
-	}
-	return out, nil
 }
 
 func memoryRow(content string, resolved bool) memory.AsOfRow {
@@ -169,14 +158,65 @@ func TestRepeatWithoutARecordedRuleIsCounted(t *testing.T) {
 	}
 
 	present, err := analyze(turns, fakeAsOfStore{
-		unknown: []memory.AsOfRow{{Memory: memory.Memory{ID: "m1"}}},
-		current: map[string]memory.Memory{"m1": {Content: "Never use tabs for indentation in this repo"}},
+		rows: []memory.AsOfRow{memoryRow("Never use tabs for indentation in this repo", false)},
 	}, "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if present.Repeats != 1 || present.Missing != 0 {
 		t.Fatalf("stored rule: repeats=%d missing=%d", present.Repeats, present.Missing)
+	}
+}
+
+func TestRecordedRuleWinsOverUnrecordedRows(t *testing.T) {
+	t1 := time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC)
+	t2 := time.Date(2026, 1, 2, 10, 0, 0, 0, time.UTC)
+	turns := []userTurn{
+		{session: "s", at: t1, text: "Never use tabs for indentation in this repo", order: 0},
+		{session: "s", at: t2, text: "I told you never to use tabs for indentation", order: 1},
+	}
+	const saved = "Never use tabs for indentation in this repo"
+	cases := []struct {
+		name        string
+		store       fakeAsOfStore
+		wantMissing int
+		wantUnknown int
+		wantPresent int
+	}{
+		{
+			name: "rule recorded plus an unrelated unrecorded row",
+			store: fakeAsOfStore{
+				rows:    []memory.AsOfRow{memoryRow(saved, false)},
+				unknown: []memory.AsOfRow{{Memory: memory.Memory{ID: "m-unrelated"}}},
+			},
+			wantPresent: 1,
+		},
+		{
+			name: "rule not recorded with an unrecorded row",
+			store: fakeAsOfStore{
+				unknown: []memory.AsOfRow{{Memory: memory.Memory{ID: "m1"}}},
+			},
+			wantUnknown: 1,
+		},
+		{
+			name:        "no recorded or unrecorded rows",
+			store:       fakeAsOfStore{},
+			wantMissing: 1,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := analyze(turns, tc.store, "", false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			present := got.Repeats - got.Missing - got.Undated - got.Unknown
+			if got.Repeats != 1 || got.Missing != tc.wantMissing || got.Unknown != tc.wantUnknown || present != tc.wantPresent {
+				t.Fatalf("repeats=%d missing=%d unknown=%d present=%d, want 1/%d/%d/%d",
+					got.Repeats, got.Missing, got.Unknown, present,
+					tc.wantMissing, tc.wantUnknown, tc.wantPresent)
+			}
+		})
 	}
 }
 
@@ -221,6 +261,8 @@ func TestReportWritesBothMeasures(t *testing.T) {
 		"Rule presence scope: all projects",
 		"sharing two words with the rule",
 		"rule absent before repeat: 1",
+		"rule present before repeat: 1",
+		"repeats with rule state unknown at the repeat: 0",
 		"sess-1",
 		"never use tabs for indentation",
 	} {
@@ -263,6 +305,11 @@ func realStoreFixture(t *testing.T) (logs, dbPath string) {
 		"mrule", "Never use tabs for indentation in this repo"); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := db.Exec(`INSERT INTO memory_history (memory_id, project_id, phase, recorded_at, content, category, importance, source)
+		VALUES ('mrule', 'p1', 'save', '2026-01-01 09:00:00', ?, 'preference', 0.8, 'manual')`,
+		"Never use tabs for indentation in this repo"); err != nil {
+		t.Fatal(err)
+	}
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -287,6 +334,56 @@ func TestRunOnARealStore(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "Rule presence scope: all projects") {
 		t.Fatalf("the unfiltered scope was not disclosed:\n%s", out.String())
+	}
+}
+
+func TestAPostRepeatEditCannotMakeTheRuleReadAsSaved(t *testing.T) {
+	dir := t.TempDir()
+	logs := filepath.Join(dir, "logs")
+	if err := os.Mkdir(logs, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(dir, "ghost.db")
+	db, err := memory.OpenDB(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO projects (id, path, name) VALUES ('p1', ?, 'p1')`, filepath.Join(dir, "p1")); err != nil {
+		t.Fatal(err)
+	}
+	const newText = "Never use tabs for indentation in this repo"
+	if _, err := db.Exec(`INSERT INTO memories (id, project_id, category, content, source, importance, created_at, updated_at)
+		VALUES ('m1', 'p1', 'preference', ?, 'manual', 0.8, '2026-01-01 09:00:00', '2026-01-10 09:00:00')`, newText); err != nil {
+		t.Fatal(err)
+	}
+	// The only version is the edit after the repeat, carrying the edited text.
+	// At the repeat there is no recorded text for this row, only its id.
+	if _, err := db.Exec(`INSERT INTO memory_history (memory_id, project_id, phase, recorded_at, content, category, importance, source)
+		VALUES ('m1', 'p1', 'update', '2026-01-10 09:00:00', ?, 'preference', 0.8, 'manual')`, newText); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	writeLog(t, logs, "s.jsonl",
+		userLine("s", "2026-01-01T10:00:00Z", "Never use tabs for indentation in this repo"),
+		userLine("s", "2026-01-02T10:00:00Z", "I told you never to use tabs for indentation"),
+	)
+	var out strings.Builder
+	if err := run(logs, dbPath, "", false, &out); err != nil {
+		t.Fatal(err)
+	}
+	text := out.String()
+	for _, want := range []string{
+		"rule present before repeat: 0",
+		"rule absent before repeat: 0",
+		"repeats with rule state unknown at the repeat: 1",
+		"Repeats with the rule state unknown at the repeat:",
+		"Never use tabs for indentation in this repo",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("report missing %q:\n%s", want, text)
+		}
 	}
 }
 
@@ -315,8 +412,8 @@ func TestProjectFilterRejectsAnUnrelatedCrossProjectMemory(t *testing.T) {
 	// shares two non-generic words with the rule: tabs and indentation.
 	unrelated := "The tabs and indentation policy for widgets"
 	store := fakeAsOfStore{
-		unknown: []memory.AsOfRow{{Memory: memory.Memory{ID: "m-unrelated"}}},
-		current: map[string]memory.Memory{"m-unrelated": {Content: unrelated}},
+		rows:        []memory.AsOfRow{memoryRow(unrelated, false)},
+		projectRows: map[string][]memory.AsOfRow{"p1": {}},
 	}
 
 	all, err := analyze(turns, store, "", false)
