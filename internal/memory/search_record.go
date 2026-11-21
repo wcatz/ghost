@@ -10,14 +10,10 @@ import (
 	"time"
 )
 
-// SearchRecord is one real search call's query, the scope it ran under and the
-// memory ids it ranked, in rank order. It is written to audit_log under action
-// `search` so a retrieval change can be replayed against the queries agents
-// actually send rather than only against the synthetic benches.
-//
-// The query is caller text. The write boundary refuses a token-shaped query
-// (or scope value) the same way every other store write does; a refused search
-// is dropped, not stored, and the refusal never quotes the text it refused.
+// SearchRecord is one real search call's query, scope and ranked ids, written to
+// audit_log so a retrieval change can be replayed against queries agents actually
+// send. The query is caller text: a token-shaped one is refused and dropped
+// without quoting it, as on every other store write.
 type SearchRecord struct {
 	ProjectID string            `json:"project_id"`
 	Source    string            `json:"source"`

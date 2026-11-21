@@ -117,12 +117,9 @@ type ImportOptions struct {
 	TrustProvenance bool
 }
 
-// DowngradedSource is the source every imported memory is stamped with unless
-// the run was told to trust the artifact's own. `onboarding` is the value
-// internal/claudeimport already uses for memories brought in from outside Ghost
-// at first contact, and it is the only one of the eight that means "this did not
-// originate in a session" without also claiming authorship. It is in the
-// memories table's CHECK already, so downgrading needs no migration.
+// DowngradedSource is the stamp on imported memories unless the artifact is
+// trusted. `onboarding` means "not from a session" without claiming authorship,
+// and is already in the table's CHECK, so downgrading needs no migration.
 const DowngradedSource = "onboarding"
 
 var validMemorySources = map[string]bool{

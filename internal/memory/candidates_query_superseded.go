@@ -5,13 +5,9 @@ import (
 	"sort"
 )
 
-// querySupersededBy names, for each row of a QUERY read, the rows of the same
-// read that supersede it through a live `supersedes` edge, sorted. It is the
-// query read's counterpart of passiveSupersededBy and reads the same rules:
-// supersedePenaltyRows with no persistent-retention exemption, so a live edge
-// only (a withdrawn edge names nothing), an edge between conflicting scopes
-// names nothing, and a keep-forever target is named although the demotion never
-// sinks it.
+// querySupersededBy names a query row's live superseders, sorted. It follows
+// supersedePenaltyRows with no retention exemption: withdrawn edges and
+// conflicting scopes name nothing, and a keep-forever target is still named.
 func (s *Store) querySupersededBy(ctx context.Context, rows []Candidate) map[string][]string {
 	ids := make([]string, len(rows))
 	for i, r := range rows {

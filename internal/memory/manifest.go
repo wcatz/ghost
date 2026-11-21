@@ -95,12 +95,9 @@ func writeBackupManifest(dest string, counts BackupCounts, at time.Time) (string
 	return path, nil
 }
 
-// openManifestFile opens the sidecar for writing, classifying the path first and
-// enforcing the classification in the same step. It is a seam rather than four
-// lines inline so that the O_NOFOLLOW refusal and the message it maps to are
-// reachable from a test: the window the flag closes is a race, and a race is not
-// something a test can win, so the two pieces that close it are pinned here
-// instead and the comment below says which is which.
+// openManifestFile classifies the sidecar path and enforces that classification
+// in one step. It is a seam so the O_NOFOLLOW refusal and its message are testable
+// — the window the flag closes is a race a test cannot win directly.
 func openManifestFile(path string) (*os.File, error) {
 	if info, err := os.Lstat(path); err == nil && !info.Mode().IsRegular() {
 		return nil, fmt.Errorf("refusing to write the manifest to %s, which is not a regular file", path)
@@ -252,13 +249,10 @@ func VerifyBackup(ctx context.Context, path string) (VerifyReport, error) {
 	defer db.Close() //nolint:errcheck
 	rep.add(checkIntegrity(ctx, db, path))
 
-	// The two reads below are independent, and each one's failure is reported
-	// rather than allowed to stop the run. A check that could not run still gets
-	// its row — a report that silently lost the `schema version` and `row counts`
-	// lines would read like a build that only has two checks, and an operator
-	// deciding whether to keep a damaged copy needs to know which questions were
-	// asked. The run still fails, because a file nobody could finish reading
-	// is not a file this build can vouch for.
+	// Each independent read reports its own failure rather than stopping: a
+	// missing line would make the report look like a build with fewer checks,
+	// and the operator needs to know which questions were asked. The run still
+	// fails — a file nobody could finish reading is not one we can vouch for.
 	var readErr error
 	version, err := DBUserVersion(db)
 	if err != nil {

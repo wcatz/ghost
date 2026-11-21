@@ -259,15 +259,10 @@ func StableDemote[T any](items []T, id func(T) string, penalty map[string]int) [
 	return items
 }
 
-// SupersedePenalties returns a penalty count per candidate ID for 'supersedes'
-// edges whose BOTH endpoints are in ids (same window rule as SupersedesWithin):
-// the superseded ID's penalty is incremented once per present superseder, so a
-// memory with no co-present superseder keeps penalty 0. Batched-lookup shape
-// mirrors DemotionPenalties so injection paths (GetTopMemories, the session
-// hook) can share one query with the search path's demoteSuperseded. No
-// locking: same contract as DemotionPenalties — callers holding Store's
-// s.mu.RLock (GetTopMemories) pass its read handle; the hook passes its own
-// read-only handle.
+// SupersedePenalties counts live superseders co-present in ids, once per edge;
+// a row with no co-present superseder keeps penalty 0. Its batched-lookup shape
+// mirrors DemotionPenalties so search and injection paths share one query. Like
+// that helper it takes no lock — callers pass their own read handle.
 func SupersedePenalties(ctx context.Context, db Queryer, ids []string, protected map[string]bool) (map[string]int, error) {
 	penalty, err := supersedeVerdicts(ctx, db, ids, nil, protected)
 	if err != nil {

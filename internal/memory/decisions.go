@@ -418,12 +418,10 @@ func decisionLinksOverflowTx(ctx context.Context, tx *sql.Tx, projectID string, 
 	return links, over, nil
 }
 
-// DecisionLinksOverflow is decisionLinksOverflowTx's rule over source_refs the
-// caller already holds: how many distinct decision links they name between them,
-// and whether those links joined exceed MaxSourceRefLen — the merge the replace
-// drops before it writes. The reflect accounting calls it with the input rows'
-// source_refs, so a dry run lists such a merge as refused instead of as a merge
-// the apply will not write, and the two cannot disagree about the rule.
+// DecisionLinksOverflow reports whether a set of source_refs names more decision
+// links than fit in MaxSourceRefLen — the merge the replace drops. Reflect
+// accounting calls it on the same refs so a dry run lists the refusal the apply
+// would make, by one shared rule.
 func DecisionLinksOverflow(sourceRefs []string) (links int, over bool) {
 	var refs []string
 	for _, ref := range sourceRefs {

@@ -134,12 +134,9 @@ const (
 	maxDistinctiveScanTerms = 4096
 )
 
-// DistinctiveTerms returns the terms of text that can carry a keyword match:
-// stopwords are dropped, duplicates (case-insensitively) collapse to the first
-// occurrence, and at most max terms are kept, identifier-shaped terms first and
-// then content words, each tier in original order. It is the SAME extraction
-// the FTS query uses (ftsQueryTerms), so a caller judging a match and the leg
-// retrieving it cannot disagree about what the query's terms are.
+// DistinctiveTerms returns the terms that can carry a keyword match, bounded and
+// identifier-first. It is the same extraction the FTS query uses, so a caller
+// judging a match cannot disagree with the leg that retrieved it.
 func DistinctiveTerms(text string, max int, logger *slog.Logger) []QueryTerm {
 	if max <= 0 {
 		return nil

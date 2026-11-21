@@ -62,12 +62,9 @@ func asOfBorrowedWindowSentence() string {
 		"the current row, because the history table does not version them."
 }
 
-// AsOfValidityNote is the sentence an as_of LISTING prints: it judged validity
-// at the requested instant, and withheld (and counts) what that excluded. The
-// two surfaces that render one are ghost_project_context's as_of branch and the
-// ghost context --as-of session block, both of which judge through
-// memory.ValidityAt. It leads with the borrow and only then states the verdict,
-// so a reader meets the caveat before the claim it qualifies.
+// AsOfValidityNote is the sentence an as_of listing prints: validity was judged
+// at the requested instant, and what that excluded was withheld and counted. It
+// leads with the borrow so the caveat precedes the claim it qualifies.
 func AsOfValidityNote(at time.Time, withheld int) string {
 	note := asOfBorrowedWindowSentence() + " Validity judged at " + at.UTC().Format(time.RFC3339) +
 		": a memory whose validity window had closed or had not yet opened at that instant is withheld."
@@ -304,15 +301,10 @@ func asOfScoredOrder(hits []asOfHit, scores map[string]float64) []asOfHit {
 	return ordered
 }
 
-// asOfTail is the rows the window cut, in the same order the window came back
-// in, and BOUNDED at the window like hydrateTail's. It exists as a function
-// rather than a sort.SliceStable at the call site because the current path's tail
-// and this one must agree on both the order and the bound: a predicate that
-// reaches past the window is backfilled from it, so two orderings would make the
-// same predicate reach for different rows, and an unbounded tail would walk the
-// whole matching corpus — one hydrated Memory per match — through every
-// assembler stage and the trace's signals, which is the work the current path caps
-// at roughly twice the window.
+// asOfTail is the rows the window cut, in window order and bounded at the window
+// like hydrateTail's. One function keeps the two paths' order and bound in
+// agreement: backfill reaches past the window, so a second ordering would fetch
+// different rows, and an unbounded tail would hydrate the whole matching corpus.
 func asOfTail(ordered []asOfHit, window []Memory, limit int, scores map[string]float64, at time.Time) []Memory {
 	taken := make(map[string]bool, len(window))
 	for _, m := range window {

@@ -15,16 +15,14 @@ const MaxContentLen = 8000
 // label in a listing line, so the cap exists to keep the LINE bounded.
 const MaxTitleLen = 300
 
-// MaxAlternatives is the number of entries a decision's alternatives list is
-// kept to, `ghost_decision_record`'s cap. `ghost_decisions_list` renders the
-// whole list back on one line, so an unbounded list is a row that grows with
-// whatever the artifact carried rather than with the decision (#1226).
+// MaxAlternatives is `ghost_decision_record`'s cap on a decision's alternatives.
+// The list renders back on one line, so without a bound the row grows with the
+// artifact rather than with the decision.
 const MaxAlternatives = 20
 
-// BoundAlternatives is the alternatives list a decision STORES: at most
-// MaxAlternatives entries, in the order they were recorded, each cut at
-// MaxTitleLen. `ghost_decision_record` and the portable import apply exactly
-// these three bounds, through this one function, so the two cannot drift (#1226).
+// BoundAlternatives is the alternatives list a decision stores: at most
+// MaxAlternatives entries in recorded order, each cut at MaxTitleLen. The record
+// tool and the portable import share it so the two cannot drift.
 func BoundAlternatives(alternatives []string) []string {
 	if !AlternativesClamped(alternatives) {
 		return alternatives

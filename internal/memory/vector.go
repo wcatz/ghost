@@ -31,14 +31,11 @@ func (s *Store) StoreEmbedding(ctx context.Context, memoryID string, vec []float
 	return err
 }
 
-// StoreEmbeddingForContent is StoreEmbedding for a vector computed from a text
-// the caller read earlier: it stores the vector only if the memory's content,
-// read inside the same write transaction, is still that text, and reports
-// whether it did. An edit deletes the row's embedding; the vector of the text it
-// replaced must not be written back over that deletion, or the wrong vector
-// stays current and UnembeddedMemoryIDs never selects the row again (#1159). A
-// refused write (or a memory deleted meanwhile) stores nothing and returns
-// (false, nil), leaving the row pending for the next pass.
+// StoreEmbeddingForContent stores a vector only if the memory's content, read
+// in the same write transaction, is still the text it was computed from. An edit
+// deletes the old embedding; writing the stale vector back over that deletion
+// would leave it current and never re-queued. A refused write leaves the row
+// pending for the next pass.
 func (s *Store) StoreEmbeddingForContent(ctx context.Context, memoryID string, vec []float32, model, content string) (bool, error) {
 	return s.storeEmbedding(ctx, memoryID, vec, model, &content)
 }
@@ -97,20 +94,12 @@ func (s *Store) DeleteEmbedding(ctx context.Context, memoryID string) error {
 	return err
 }
 
-// EmbeddingCosines returns the cosine similarity between queryVec and the stored
-// embedding of each requested memory, keyed by memory ID. An ID is simply absent
-// from the result when there is no score to report for it: no stored vector, a
-// width that does not match queryVec, or a row whose recorded identity belongs to
-// another vector space (a model, dimension or task-prefix change — see
-// embedding.VectorIdentity). Inventing a zero for any of those would read as a
-// measured non-match rather than a missing one, and a cross-space cosine is not
-// even that: it is an arbitrary number, which is why usableVectorEntries skips
-// those rows for the vector legs and GetEmbedding returns nil for them. Foreign
-// rows are counted and logged here for the same reason — a reconfiguration is
-// exactly when the operator is watching the log — but only on the first lookup
-// to meet a given retired identity, through the shared warnForeignOnce gate, so
-// this once-per-query call cannot print the same pending re-embed once per
-// query.
+// EmbeddingCosines returns cosines for the requested ids, omitting any with no
+// score: no vector, a width mismatch, or an embedding from another vector space.
+// A zero would read as a measured non-match, and a cross-space cosine is merely
+// arbitrary. Foreign rows are counted and logged once per retired identity, on
+// the shared warnForeignOnce gate, since a reconfiguration is when the operator
+// watches the log.
 func (s *Store) EmbeddingCosines(ctx context.Context, ids []string, queryVec []float32) (map[string]float32, error) {
 	if len(ids) == 0 || len(queryVec) == 0 {
 		return nil, nil
@@ -180,12 +169,10 @@ func (s *Store) EmbeddingCosines(ctx context.Context, ids []string, queryVec []f
 	return cosines, nil
 }
 
-// UnembeddedMemoryIDs returns memory IDs that still need an embedding produced
-// by identity: rows with no vector at all, and rows whose vector was stamped
-// with a different identity — a model, dimension or task-prefix change (see
-// embedding.VectorIdentity for what an identity is). Both are re-embedded by
-// the worker, so a model change retires the old vectors instead of leaving
-// them to be compared with queries embedded in the new space.
+// UnembeddedMemoryIDs returns ids needing an embedding under identity: rows with
+// no vector, or one stamped with another identity (model, dimension or prefix).
+// The worker re-embeds both, so a model change retires old vectors rather than
+// comparing them with queries in the new space.
 func (s *Store) UnembeddedMemoryIDs(ctx context.Context, projectID, identity string, limit int) ([]string, error) {
 	query := `
 		SELECT m.id
@@ -421,16 +408,10 @@ func ContentCarriesDate(content string) bool {
 	return datedFactRE.MatchString(content)
 }
 
-// DecayFactor is the time-decay multiplier for a memory of this category, this
-// tier, this pin state and this age in days. It mirrors DecayRankingSQL
-// (store.go) exactly — a pinned memory never decays (factor 1.0); preference
-// and convention never decay; a fact never decays unless its content carries a
-// calendar date, in which case it decays on the pattern/architecture curve;
-// pattern/architecture decay with tau 45 and a 0.3 floor; all other categories
-// (decision, gotcha, dependency, ...) decay with tau 30 and a 0.15 floor; and a
-// session-tier row carries the bounded tier decay on top of whichever of those
-// applies (see RetentionDecayFactor). The SQL-vs-Go parity test (store_test.go)
-// guards against drift between this and the SQL constant.
+// DecayFactor is the time-decay multiplier for this category, tier, pin state
+// and age in days. It mirrors DecayRankingSQL exactly: pinned never decays;
+// preference and convention never decay; a fact decays only if its content has
+// a calendar date. A SQL-vs-Go parity test guards the two from drifting.
 func DecayFactor(category, content, retention string, pinned bool, ageDays float64) float64 {
 	return decayFactorDated(category, ContentCarriesDate(content), retention, pinned, ageDays)
 }

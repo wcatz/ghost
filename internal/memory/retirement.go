@@ -30,20 +30,11 @@ func retiresFields(newer, olderFields []valueField, olderValues map[string]bool)
 	return false
 }
 
-// retiresClaim is the replacement-guess form of retiresFields. It asks only
-// whether the newer text retires a value token the older text still asserts,
-// without the save path's guard against an older text that itself carries a
-// retirement phrase. That guard stops two "no longer" notes being folded into
-// one another — a WRITE decision the replacement guess never makes — but it
-// also stopped a regression from retiring the fix it names: the fix says the
-// crash "no longer" happens, and the regression says the fix "no longer" holds.
-//
-// The check is a WINDOW around the retirement phrase rather than a whole
-// sentence, for the same reason: a retirement note routinely names an unrelated
-// "no" or "once" in a clause beside the one that retires the value ("a tenant
-// has no usage rows ... the 4f2a9c1 change no longer holds"). A plan or negation
-// word WITHIN the window still blocks the claim, so "no longer needed once SSO
-// ships" stays a plan and never retires anything.
+// retiresClaim is the replacement-guess form of retiresFields: it asks whether
+// newer text retires a value older text still asserts, without the save path's
+// guard that would keep a regression from retiring the fix it names. The check
+// is a window around the phrase, not a whole sentence — a plan or negation word
+// inside that window still blocks the claim.
 func retiresClaim(newer []valueField, olderValues map[string]bool) bool {
 	if len(olderValues) == 0 {
 		return false
