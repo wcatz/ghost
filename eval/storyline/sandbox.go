@@ -111,6 +111,19 @@ func runGhost(ctx context.Context, env []string, bin string, args ...string) (st
 	return out.String(), errb.String(), nil
 }
 
+func runGhostStdin(ctx context.Context, env []string, bin, stdin string, args ...string) (string, string, error) {
+	cmd := exec.CommandContext(ctx, bin, args...)
+	cmd.Env = env
+	cmd.Stdin = strings.NewReader(stdin)
+	var out, errb bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &errb
+	if err := cmd.Run(); err != nil {
+		return out.String(), errb.String(), fmt.Errorf("ghost %s: %w: %s",
+			strings.Join(args, " "), err, strings.TrimSpace(errb.String()))
+	}
+	return out.String(), errb.String(), nil
+}
+
 func buildFakeHarness(ctx context.Context, repoDir, out string) error {
 	cmd := exec.CommandContext(ctx, "go", "build", "-o", out, "./eval/storyline/fakeharness")
 	cmd.Dir = repoDir

@@ -59,6 +59,11 @@ func RunHostEvent(eventArg, sourceArg string, stdin io.Reader, stdout io.Writer,
 		runStop(payload, stdout, stderr, true)
 	case hostevent.EventSessionEnd:
 		runStop(payload, stdout, stderr, false)
+	case hostevent.EventPreCompact:
+		if caps, _ := hostevent.CapabilityFor(payload.HostSource()); !caps.PreCompact {
+			return
+		}
+		runPreCompact(payload, stderr)
 	}
 }
 

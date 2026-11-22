@@ -142,7 +142,7 @@ func TestSessionStartWithholdsGlobalCoveredByHostInstructions(t *testing.T) {
 	covered := func(c memory.Candidate) bool { return coveredByInstructions(c.Content, blocks) }
 	now := time.Now().UTC()
 	_, _, _, globals, _, _, _, _, tally :=
-		loadSessionContextFrom(dbPath, canonical, mustHookConfig(t), func() time.Time { return now }, "", covered)
+		loadSessionContextFrom(dbPath, canonical, mustHookConfig(t), func() time.Time { return now }, "", covered, "")
 	var ids []string
 	for _, g := range globals {
 		ids = append(ids, g.ID)

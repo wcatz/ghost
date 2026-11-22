@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-const schemaVersion = 31
+const schemaVersion = 32
 
 func SchemaVersion() int { return schemaVersion }
 
@@ -68,6 +68,7 @@ var migrations = []func(*sql.Tx) error{
 	migrateV29,
 	migrateV30,
 	migrateV31,
+	migrateV32,
 }
 
 func migrate(db *sql.DB, from int) error {
@@ -1393,6 +1394,31 @@ func migrateV31(tx *sql.Tx) error {
 	for _, s := range stmts {
 		if _, err := tx.Exec(s); err != nil {
 			return fmt.Errorf("%q: %w", s[:min(40, len(s))], err)
+		}
+	}
+	return nil
+}
+
+// migrateV32 adds the session-retention row a pre-compact handoff is stored in.
+// It holds no durable facts and is never exported; it exists only so the next
+// compact session-start can pick up the state this session was in the middle of,
+// and its expiry keeps it from outliving that conversation.
+func migrateV32(tx *sql.Tx) error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS session_handoff (
+			project_id          TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+			session_id          TEXT NOT NULL,
+			transcript_path     TEXT NOT NULL DEFAULT '',
+			transcript_position INTEGER NOT NULL DEFAULT 0,
+			content             TEXT NOT NULL,
+			created_at          TEXT NOT NULL DEFAULT (datetime('now')),
+			expires_at          TEXT NOT NULL,
+			PRIMARY KEY (project_id, session_id)
+		)`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("migrate v32: %w", err)
 		}
 	}
 	return nil
