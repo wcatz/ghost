@@ -24,6 +24,7 @@ const (
 	EventSessionStart  Event = "session-start"
 	EventStop          Event = "stop"
 	EventSessionEnd    Event = "session-end"
+	EventPreCompact    Event = "pre-compact"
 	EventMessageSubmit Event = "message-submit"
 	EventEdit          Event = "edit"
 	EventPreToolUse    Event = "pre-tool-use"
@@ -44,13 +45,14 @@ type Capability struct {
 	BlockStop     bool
 	InjectContext bool
 	WorkingMoment bool
+	PreCompact    bool
 	// PreToolUse is true for hosts that honor the Claude hookSpecificOutput
 	// reply a pre-tool-use hook writes.
 	PreToolUse bool
 }
 
 var capabilityMatrix = map[Source]Capability{
-	SourceClaudeCode: {BlockStop: true, InjectContext: true, WorkingMoment: true, PreToolUse: true},
+	SourceClaudeCode: {BlockStop: true, InjectContext: true, WorkingMoment: true, PreCompact: true, PreToolUse: true},
 	SourceCodex:      {BlockStop: true, InjectContext: true},
 	SourceGoose:      {BlockStop: true, InjectContext: false},
 	SourceOpencode:   {BlockStop: false, InjectContext: false},
@@ -88,7 +90,13 @@ func (p Payload) Event() Event { return NormalizeEvent(p.HookEventName) }
 
 // NormalizeEvent maps accepted event spellings to the canonical form.
 func NormalizeEvent(name string) Event {
-	key := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(name), "-", ""))
+	trimmed := strings.TrimSpace(name)
+	// Only the pre-compact spellings may use "_" or " " as a separator; every
+	// other event keeps the hyphen-only normalisation it always had.
+	if wide := strings.ToLower(strings.NewReplacer("-", "", "_", "", " ", "").Replace(trimmed)); wide == "precompact" || wide == "beforecompact" {
+		return EventPreCompact
+	}
+	key := strings.ToLower(strings.ReplaceAll(trimmed, "-", ""))
 	switch key {
 	case "sessionstart":
 		return EventSessionStart

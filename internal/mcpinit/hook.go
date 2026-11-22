@@ -100,6 +100,8 @@ type sessionStartInput struct {
 	AgentType string `json:"agent_type"`
 }
 
+const compactNotice = "Ghost context was already loaded earlier this session and may have been condensed by compaction. Call ghost_project_context if you need the full detail again."
+
 func runSessionStart(data []byte, host hostevent.Source, stdout io.Writer) {
 	var input sessionStartInput
 	_ = json.Unmarshal(data, &input)
@@ -115,8 +117,7 @@ func runSessionStart(data []byte, host hostevent.Source, stdout io.Writer) {
 
 		return
 	case "compact":
-
-		_, _ = fmt.Fprintln(stdout, "Ghost context was already loaded earlier this session and may have been condensed by compaction. Call ghost_project_context if you need the full detail again.")
+		runCompactSessionStart(input, host, stdout)
 		return
 	}
 
@@ -158,6 +159,60 @@ func runSessionStart(data []byte, host hostevent.Source, stdout io.Writer) {
 		ids = append(ids, m.ID)
 	}
 	recordSessionStartDelivery(input.SessionID, ids, spent+len(block)+1)
+}
+
+// runCompactSessionStart is the session-start a host fires after a compaction.
+// With no handoff on file it keeps the historical short answer: the earlier
+// injection may still be in the condensed history, so re-emitting the whole
+// block was pure cost. With a handoff, the handoff goes FIRST, ahead of the
+// ranked block, and both are fitted to the one session-start byte cap.
+func runCompactSessionStart(input sessionStartInput, host hostevent.Source, stdout io.Writer) {
+	cwd := input.CWD
+	if cwd == "" {
+		cwd, _ = os.Getwd()
+	}
+	if resolved, err := filepath.EvalSymlinks(cwd); err == nil {
+		cwd = resolved
+	}
+
+	dataDir, err := config.DataDir()
+	if err != nil {
+		_, _ = fmt.Fprintln(stdout, compactNotice)
+		return
+	}
+	dbPath := filepath.Join(dataDir, "ghost.db")
+	read, err := memory.OpenReadDB(dbPath)
+	if err != nil {
+		_, _ = fmt.Fprintln(stdout, compactNotice)
+		return
+	}
+	projectID, _ := resolveSessionProject(context.Background(), sessionStore(read), cwd)
+	_ = read.Close()
+	if projectID == "" {
+		_, _ = fmt.Fprintln(stdout, compactNotice)
+		return
+	}
+
+	handoff := boundedHandoff(latestHandoffFor(projectID, input.SessionID, time.Now()), handoffByteCap)
+	if handoff == "" {
+		_, _ = fmt.Fprintln(stdout, compactNotice)
+		return
+	}
+
+	cfg := config.LoadForHook()
+	projectID, project, memories, globals, learned, tasks, decisions, interactionCount, tally := loadSessionContextForWithHandoff(cwd, cfg, input.SessionID, hostInstructionCover(host, cwd), handoff)
+	block := formatSessionContext(projectID, project, nil, memories, learned, tasks, decisions, interactionCount, globals, tally)
+	out := handoff + block
+	_, _ = fmt.Fprint(stdout, out)
+
+	ids := make([]string, 0, len(memories)+len(globals))
+	for _, m := range memories {
+		ids = append(ids, m.ID)
+	}
+	for _, m := range globals {
+		ids = append(ids, m.ID)
+	}
+	recordSessionStartDelivery(input.SessionID, ids, len(out))
 }
 
 func globalOriginGuidance(globals []sessionMemory) string {
@@ -485,7 +540,7 @@ func renderSessionContext(cwd string, asOf *time.Time, host hostevent.Source) st
 // the store at dbPath and the project cwd resolves to, reading at the instant now
 // with the configuration cfg.
 func SessionBlockAt(dbPath, cwd string, cfg *config.Config, now time.Time) string {
-	projectID, project, memories, globals, learned, tasks, decisions, interactionCount, tally := loadSessionContextFrom(dbPath, cwd, cfg, func() time.Time { return now }, "", nil)
+	projectID, project, memories, globals, learned, tasks, decisions, interactionCount, tally := loadSessionContextFrom(dbPath, cwd, cfg, func() time.Time { return now }, "", nil, "")
 
 	if projectID == "" && len(globals) == 0 && tally.globals.WithheldNote() == "" && tally.globals.ByteCut == 0 {
 		return ""
@@ -717,14 +772,31 @@ func loadSessionContext(cwd string, cfg *config.Config) (projectID, project stri
 }
 
 func loadSessionContextFor(cwd string, cfg *config.Config, sessionID string, covered func(memory.Candidate) bool) (projectID, project string, memories, globals []sessionMemory, learned string, tasks [][4]string, decisions [][4]string, interactionCount int, tally sessionTally) {
+	return loadSessionContextForWithHandoff(cwd, cfg, sessionID, covered, "")
+}
+
+// loadSessionContextForWithHandoff is the session loader with the compact
+// handoff's bytes reserved from the block's fit. An empty handoff is the ordinary
+// session-start path and changes no budget.
+func loadSessionContextForWithHandoff(cwd string, cfg *config.Config, sessionID string, covered func(memory.Candidate) bool, handoff string) (projectID, project string, memories, globals []sessionMemory, learned string, tasks [][4]string, decisions [][4]string, interactionCount int, tally sessionTally) {
 	dataDir, err := config.DataDir()
 	if err != nil {
 		return
 	}
-	return loadSessionContextFrom(filepath.Join(dataDir, "ghost.db"), cwd, cfg, time.Now, sessionID, covered)
+	return loadSessionContextFrom(filepath.Join(dataDir, "ghost.db"), cwd, cfg, time.Now, sessionID, covered, handoff)
 }
 
-func loadSessionContextFrom(dbPath, cwd string, cfg *config.Config, clock func() time.Time, sessionID string, covered func(memory.Candidate) bool) (projectID, project string, memories, globals []sessionMemory, learned string, tasks [][4]string, decisions [][4]string, interactionCount int, tally sessionTally) {
+// handoffReserve is the byte budget a compact session-start sets aside for its
+// handoff and the separator before it. An empty handoff is the ordinary
+// session-start path and reserves nothing, so that path keeps the full cap.
+func handoffReserve(h string) int {
+	if h == "" {
+		return 0
+	}
+	return len(h) + 1
+}
+
+func loadSessionContextFrom(dbPath, cwd string, cfg *config.Config, clock func() time.Time, sessionID string, covered func(memory.Candidate) bool, handoff string) (projectID, project string, memories, globals []sessionMemory, learned string, tasks [][4]string, decisions [][4]string, interactionCount int, tally sessionTally) {
 	db, err := memory.OpenReadDB(dbPath)
 	if err != nil {
 		return
@@ -736,7 +808,7 @@ func loadSessionContextFrom(dbPath, cwd string, cfg *config.Config, clock func()
 
 	if projectID == "" {
 
-		_, globals, tally = loadSessionPassive(context.Background(), store, cfg, "", clock(), nil, "", sessionFrame{covered: covered})
+		_, globals, tally = loadSessionPassive(context.Background(), store, cfg, "", clock(), nil, "", sessionFrame{covered: covered, budgetReserve: handoffReserve(handoff)})
 		return
 	}
 
@@ -793,6 +865,7 @@ func loadSessionContextFrom(dbPath, cwd string, cfg *config.Config, clock func()
 	memories, globals, tally = loadSessionPassive(context.Background(), store, cfg, projectID, now, record, sessionID, sessionFrame{
 		covered: covered,
 		project: project, learned: learned, tasks: tasks, decisions: decisions, interactionCount: interactionCount,
+		budgetReserve: handoffReserve(handoff),
 	})
 	closeRecord()
 

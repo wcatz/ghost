@@ -281,7 +281,11 @@ func TestTheSessionStoreCarriesTheRecordToo(t *testing.T) {
 	}
 
 	// The record's own handle, and the guards that keep it from CREATING a store.
-	sink := funcBody(t, src["session_passive.go"], "sessionRecordSink")
+	// The sink must go through openWritableStore, and that opener carries the guards.
+	if sinkBody := funcBody(t, src["session_passive.go"], "sessionRecordSink"); !strings.Contains(sinkBody, "openWritableStore(") {
+		t.Errorf("sessionRecordSink does not open its handle through openWritableStore, so the guards below do not apply to it:\n%s", sinkBody)
+	}
+	sink := funcBody(t, src["session_passive.go"], "openWritableStore")
 	if !strings.Contains(sink, "rwDSN(") {
 		t.Errorf("the session-start record sink does not open the hook's read-write DSN:\n%s", sink)
 	}

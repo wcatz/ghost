@@ -104,7 +104,7 @@ func bandFramings(t *testing.T, dbPath, projectPath string) (block string, noCut
 	cfg := mustHookConfig(t)
 	now := time.Date(2026, 1, 2, 12, 0, 0, 0, time.UTC)
 	projectID, project, memories, globals, learned, tasks, decisions, interactionCount, tally :=
-		loadSessionContextFrom(dbPath, projectPath, cfg, func() time.Time { return now }, "", nil)
+		loadSessionContextFrom(dbPath, projectPath, cfg, func() time.Time { return now }, "", nil, "")
 	block = formatSessionContext(projectID, project, nil, memories, learned, tasks, decisions, interactionCount, globals, tally)
 
 	render := func(tr *assemble.Trace) int {

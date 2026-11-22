@@ -3,10 +3,12 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"os/exec"
 	"regexp"
 	"sort"
@@ -79,6 +81,7 @@ type Ghost interface {
 	Save(ctx context.Context, project string, rec Record) (string, error)
 	SaveRaw(ctx context.Context, project string, rec Record) (string, string, error)
 	Context(ctx context.Context, workDir string, scope map[string]string) (string, error)
+	CompactContext(ctx context.Context, workDir string, scope map[string]string, script string) (string, error)
 	Settle(ctx context.Context) error
 	Drain(ctx context.Context) error
 	Search(ctx context.Context, project, query string, scope map[string]string) (string, error)
@@ -281,6 +284,9 @@ func (r *Run) Execute(ctx context.Context) (*Result, error) {
 		if ghostArm {
 			var err error
 			block, err = r.call(ctx, func(c context.Context) (string, error) {
+				if stage.Compact {
+					return r.Ghost.CompactContext(c, r.WorkDir, stage.SessionScope, stage.CompactScript)
+				}
 				return r.Ghost.Context(c, r.WorkDir, stage.SessionScope)
 			})
 			if err != nil {
@@ -580,6 +586,48 @@ func (g *binaryGhost) Context(ctx context.Context, workDir string, scope map[str
 	}
 	if strings.TrimSpace(errOut) != "" {
 		_, _ = fmt.Fprintf(g.log, "ghost context stderr: %s\n", strings.TrimSpace(errOut))
+	}
+	return out, nil
+}
+
+// CompactContext forces a mid-task compaction the way a host does: the
+// pre-compact hook scans a transcript carrying the stage's task, then a
+// session-start with source=compact injects whatever handoff was recorded ahead
+// of the ranked block. The payloads are real contract-v1 hook payloads, so this
+// drives the shipped hook path rather than a storyline-local imitation.
+func (g *binaryGhost) CompactContext(ctx context.Context, workDir string, scope map[string]string, script string) (string, error) {
+	line, err := json.Marshal(map[string]any{
+		"type":    "user",
+		"message": map[string]any{"content": script},
+	})
+	if err != nil {
+		return "", err
+	}
+	f, err := os.CreateTemp("", "storyline-transcript-*.jsonl")
+	if err != nil {
+		return "", err
+	}
+	path := f.Name()
+	defer func() { _ = os.Remove(path) }()
+	if _, err := f.Write(append(line, '\n')); err != nil {
+		_ = f.Close()
+		return "", err
+	}
+	_ = f.Close()
+
+	pre := fmt.Sprintf(`{"hook_event_name":"PreCompact","session_id":"storyline","cwd":%q,"transcript_path":%q}`, workDir, path)
+	if _, errOut, err := runGhostStdin(ctx, g.env, g.bin, pre, "hook", "pre-compact", "--source", "claude-code"); err != nil {
+		return "", err
+	} else if strings.TrimSpace(errOut) != "" {
+		_, _ = fmt.Fprintf(g.log, "pre-compact hook stderr: %s\n", strings.TrimSpace(errOut))
+	}
+	start := fmt.Sprintf(`{"hook_event_name":"SessionStart","source":"compact","session_id":"storyline","cwd":%q}`, workDir)
+	out, errOut, err := runGhostStdin(ctx, g.env, g.bin, start, "hook", "session-start", "--source", "claude-code")
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(errOut) != "" {
+		_, _ = fmt.Fprintf(g.log, "compact session-start stderr: %s\n", strings.TrimSpace(errOut))
 	}
 	return out, nil
 }

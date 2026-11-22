@@ -80,6 +80,11 @@ type Stage struct {
 	Withheld     []string
 	Lifecycle    bool
 	Probes       []Probe
+	// Compact forces a compaction between this stage's context injection and
+	// the next one: the hook records a handoff from CompactScript, and the next
+	// stage opens with that handoff ahead of the ranked block.
+	Compact       bool
+	CompactScript string
 }
 
 // Storyline is a whole arc. Project is the Ghost project the run works in;
@@ -414,7 +419,7 @@ func storylines() []Storyline {
 		RenamedEndpoint(), RegressedFix(), VersionUpgrade(), ScopedSetting(),
 		RetiredDependency(), RevertedChange(), ProseOnlyChange(),
 		RecategorisedReplacement(), RepeatedTuning(), SupersededConvention(),
-		PinsOverBucket(), DuplicateNeverMerged(), DatedGlobalStatus(),
+		PinsOverBucket(), DuplicateNeverMerged(), DatedGlobalStatus(), CompactionContinuity(),
 	}
 }
 

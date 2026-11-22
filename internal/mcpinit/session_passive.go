@@ -22,6 +22,11 @@ const sessionStartByteCap = 9000
 
 const sessionHostLimit = 10000
 
+// A compact handoff is working state, not the block itself: it gets at most a
+// third of the session-start cap so the ranked block still has room even when
+// the handoff is long. The two together fit the host's output limit.
+const handoffByteCap = sessionStartByteCap / 3
+
 const (
 	sessionLearnedBytes = 1000
 	sessionTitleBytes   = 120
@@ -34,6 +39,10 @@ type sessionFrame struct {
 	decisions        [][4]string
 	interactionCount int
 	covered          func(memory.Candidate) bool
+	// budgetReserve is the byte length of the handoff a compact session-start
+	// puts ahead of this block. The block is fitted to the same cap minus the
+	// handoff, so the two together still fit the host's output limit.
+	budgetReserve int
 }
 
 func sessionGlobalReserve() map[string]int {
@@ -248,7 +257,7 @@ func loadSessionPassive(ctx context.Context, store *memory.Store, cfg *config.Co
 		}
 		return t
 	}
-	budget.MaxBytes = sessionStartByteCap
+	budget.MaxBytes = sessionStartByteCap - frame.budgetReserve
 	budget.KeepPinned = true
 	budget.ReserveByProject = sessionGlobalReserve()
 	budget.ReservePinnedByProject = sessionGlobalPinnedReserve()
@@ -292,19 +301,31 @@ func sessionLog() *slog.Logger {
 	}))
 }
 
-func sessionRecordSink(dbPath string) (assemble.RecordSink, func()) {
+// openWritableStore is the one rw-store opener for hook writes: a missing
+// database is never created by a write meant to describe it, and the data
+// directory's permissions are tightened on both sides of the open. The record
+// sink and the handoff writer both use it rather than repeating that shape.
+func openWritableStore(dbPath string) (*memory.Store, func(), error) {
 	if _, err := os.Stat(dbPath); err != nil {
-		return nil, func() {}
+		return nil, func() {}, err
 	}
 	memory.TightenPermissions(dbPath)
 	db, err := sql.Open("sqlite", rwDSN(dbPath))
 	if err != nil {
-		return nil, func() {}
+		return nil, func() {}, err
 	}
 	return sessionStore(db), func() {
 		_ = db.Close()
 		memory.TightenPermissions(dbPath)
+	}, nil
+}
+
+func sessionRecordSink(dbPath string) (assemble.RecordSink, func()) {
+	s, closeStore, _ := openWritableStore(dbPath)
+	if s == nil {
+		return nil, closeStore
 	}
+	return s, closeStore
 }
 
 func windowExtra(trace *assemble.Trace, bucket string) int {

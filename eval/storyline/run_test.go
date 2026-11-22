@@ -15,9 +15,10 @@ import (
 // can carry one supersedes edge and one resolved row into the end state. No binary,
 // no store, no model.
 type fakeGhost struct {
-	saved []savedRecord
-	calls []string
-	links []Link
+	saved           []savedRecord
+	calls           []string
+	compactDisabled bool
+	links           []Link
 	// edge names a supersedes edge by RECORD KEY and is resolved to ids when the
 	// end state is read. A test cannot write the ids itself — they do not exist
 	// until the run's saves have happened — so an edge expressed as ids would have
@@ -94,6 +95,20 @@ func (f *fakeGhost) Context(_ context.Context, workDir string, _ map[string]stri
 		fmt.Fprintf(&b, "- [%s] «%s»\n", s.rec.Category, s.rec.Content)
 	}
 	return b.String(), nil
+}
+
+// CompactContext is the fake's mid-task handoff. With handoffs enabled the
+// post-compaction injection carries the task as a handoff ahead of the block;
+// with them disabled it is just the block, which is the comparison arm.
+func (f *fakeGhost) CompactContext(ctx context.Context, workDir string, scope map[string]string, script string) (string, error) {
+	block, err := f.Context(ctx, workDir, scope)
+	if err != nil {
+		return "", err
+	}
+	if f.compactDisabled {
+		return block, nil
+	}
+	return "**Handoff from the session before compaction:**\n- Current task: «" + script + "»\n" + block, nil
 }
 
 func (f *fakeGhost) Settle(_ context.Context) error {

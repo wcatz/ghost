@@ -257,6 +257,23 @@ CREATE TABLE IF NOT EXISTS decisions (
 );
 CREATE INDEX IF NOT EXISTS idx_decisions_project ON decisions(project_id, status);
 
+-- A pre-compact handoff is a session-retention row: it carries the short state a
+-- session was in the middle of, a pointer (session id plus transcript position)
+-- back to the raw history, and an expiry so it never outlives the conversation
+-- it describes. It is keyed on (project, session) so a second pre-compact in one
+-- session replaces the first, and cascades with its project like every other
+-- project-owned row.
+CREATE TABLE IF NOT EXISTS session_handoff (
+    project_id          TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    session_id          TEXT NOT NULL,
+    transcript_path     TEXT NOT NULL DEFAULT '',
+    transcript_position INTEGER NOT NULL DEFAULT 0,
+    content             TEXT NOT NULL,
+    created_at          TEXT NOT NULL DEFAULT (datetime('now')),
+    expires_at          TEXT NOT NULL,
+    PRIMARY KEY (project_id, session_id)
+);
+
 CREATE TABLE IF NOT EXISTS memory_snapshots (
     id            TEXT PRIMARY KEY DEFAULT (hex(randomblob(16))),
     snapshot_id   TEXT NOT NULL,
