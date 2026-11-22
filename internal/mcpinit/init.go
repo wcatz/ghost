@@ -1166,14 +1166,14 @@ func ensurePreCompactHook(w io.Writer, sf *settingsFile, ghostBin string, dryRun
 	if err != nil {
 		return err
 	}
-	switch {
-	case action == hookAdded:
+	switch action {
+	case hookAdded:
 		if dryRun {
 			_, _ = fmt.Fprintf(w, "  ~ would add PreCompact hook: %s\n", hookCmd)
 		} else {
 			_, _ = fmt.Fprintf(w, "  + added PreCompact hook: %s\n", hookCmd)
 		}
-	case action == hookMigrated:
+	case hookMigrated:
 		if dryRun {
 			_, _ = fmt.Fprintf(w, "  ~ would migrate PreCompact hook to current invocation: %s\n", hookCmd)
 		} else {

@@ -89,7 +89,7 @@ func TestCompactSessionStartBoundsALargeHandoffInsideTheHostLimit(t *testing.T) 
 	if !strings.Contains(got, "a surviving memory") {
 		t.Errorf("the large handoff crowded out the ranked block:\n%s", got[:min(len(got), 500)])
 	}
-	if strings.Index(got, "## Ghost context") < 0 {
+	if !strings.Contains(got, "## Ghost context") {
 		t.Error("the ranked block's header is missing")
 	}
 	// The handoff is cut to a whole line, so no « data block is left open.
