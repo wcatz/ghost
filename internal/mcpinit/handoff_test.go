@@ -2,6 +2,7 @@ package mcpinit
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -199,5 +200,60 @@ func TestPreCompactNeverStoresATokenFromTheTranscript(t *testing.T) {
 func TestHandoffRenderCapFitsTheStoreCap(t *testing.T) {
 	if memory.MaxHandoffContentBytes < handoffByteCap {
 		t.Errorf("store cap %d is below the %d-byte render cap", memory.MaxHandoffContentBytes, handoffByteCap)
+	}
+}
+
+// TestScanHandoffKeepsTheLatestOpenQuestions pins the rolling window: when a
+// long session asks more than maxHandoffQuestions distinct questions, the
+// handoff carries the most recent ones, not the first five it saw.
+func TestScanHandoffKeepsTheLatestOpenQuestions(t *testing.T) {
+	var b strings.Builder
+	for i := 1; i <= 7; i++ {
+		fmt.Fprintf(&b, "{\"type\":\"user\",\"message\":{\"content\":\"question number %d about subsystem %d?\"}}\n", i, i)
+	}
+	got := scanHandoffTranscript(hostevent.FormatClaudeJSONL, strings.NewReader(b.String()))
+	if len(got.Questions) != maxHandoffQuestions {
+		t.Fatalf("questions = %v, want the latest %d", got.Questions, maxHandoffQuestions)
+	}
+	joined := strings.Join(got.Questions, "\n")
+	for i := 1; i <= 2; i++ {
+		if strings.Contains(joined, fmt.Sprintf("question number %d ", i)) {
+			t.Errorf("the earliest question %d is still listed as open: %v", i, got.Questions)
+		}
+	}
+	for i := 3; i <= 7; i++ {
+		if !strings.Contains(joined, fmt.Sprintf("question number %d ", i)) {
+			t.Errorf("the later question %d is missing: %v", i, got.Questions)
+		}
+	}
+}
+
+// TestScanHandoffDropsAnsweredQuestions pins the other half: a question the
+// assistant later settles is not handed to the next session as open, while a
+// question nothing answers stays.
+func TestScanHandoffDropsAnsweredQuestions(t *testing.T) {
+	const transcript = `{"type":"user","message":{"content":"why does the relay migration fail on staging?"}}
+{"type":"user","message":{"content":"which config key controls the relay timeout?"}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"The relay migration fails on staging because an index is missing."}]}}
+`
+	got := scanHandoffTranscript(hostevent.FormatClaudeJSONL, strings.NewReader(transcript))
+	joined := strings.Join(got.Questions, "\n")
+	if strings.Contains(joined, "relay migration fail") {
+		t.Errorf("an answered question is still listed as open: %v", got.Questions)
+	}
+	if !strings.Contains(joined, "config key controls the relay timeout") {
+		t.Errorf("the unanswered question was dropped: %v", got.Questions)
+	}
+}
+
+// TestScanHandoffKeepsQuestionOpenOnShortPrefixWords pins that short answer
+// words which merely prefix a question token ("in", "un") do not settle it.
+func TestScanHandoffKeepsQuestionOpenOnShortPrefixWords(t *testing.T) {
+	const transcript = `{"type":"user","message":{"content":"why does installing the index fail internally?"}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"The unit tests fail in CI, unrelated."}]}}
+`
+	got := scanHandoffTranscript(hostevent.FormatClaudeJSONL, strings.NewReader(transcript))
+	if len(got.Questions) != 1 {
+		t.Errorf("question settled by short prefix words: %v", got.Questions)
 	}
 }

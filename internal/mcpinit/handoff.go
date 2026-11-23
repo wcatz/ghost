@@ -48,6 +48,7 @@ func scanHandoffTranscript(format string, r io.Reader) handoffScan {
 	}
 	br := bufio.NewReaderSize(r, 4096)
 	seen := make(map[string]bool)
+	var open []openQuestion
 	for {
 		line, oversized, ok := readHandoffLine(br)
 		if !ok {
@@ -63,6 +64,12 @@ func scanHandoffTranscript(format string, r io.Reader) handoffScan {
 		}
 		if !handoffIsUser(obj) {
 			collectHandoffFiles(obj, &out, seen)
+			// A later assistant turn is where an open question gets settled.
+			// Only text that carries every distinctive term of a question is
+			// read as its answer, so a passing mention does not close it.
+			if !handoffHasToolBlock(obj) {
+				open = dropAnsweredQuestions(open, handoffText(obj))
+			}
 			continue
 		}
 		// A tool result or tool use arrives as a user line but is command or
@@ -83,13 +90,120 @@ func scanHandoffTranscript(format string, r io.Reader) handoffScan {
 			out.Task = truncateUTF8(text, maxHandoffTaskBytes)
 		}
 		for _, q := range handoffQuestions(text) {
-			if !seen[q] && len(out.Questions) < maxHandoffQuestions {
-				seen[q] = true
-				out.Questions = append(out.Questions, q)
-			}
+			open = rememberQuestion(open, q)
 		}
 	}
+	for _, q := range open {
+		out.Questions = append(out.Questions, q.text)
+	}
 	return out
+}
+
+// openQuestion is one still-open question the handoff may carry. key folds case
+// and punctuation so a re-asked question supersedes its earlier wording rather
+// than appearing twice; tokens are the distinctive words an answer must carry.
+type openQuestion struct {
+	text   string
+	key    string
+	tokens []string
+}
+
+// rememberQuestion keeps the latest maxHandoffQuestions unique open questions.
+// A question asked again moves to the back with its newest wording, so the
+// window holds what the session is still working on rather than what it asked
+// first.
+func rememberQuestion(open []openQuestion, text string) []openQuestion {
+	q := openQuestion{text: text, key: handoffQuestionKey(text), tokens: handoffDistinctiveTokens(text)}
+	for i, existing := range open {
+		if existing.key == q.key {
+			open = append(open[:i], open[i+1:]...)
+			break
+		}
+	}
+	open = append(open, q)
+	if len(open) > maxHandoffQuestions {
+		open = open[len(open)-maxHandoffQuestions:]
+	}
+	return open
+}
+
+// maxHandoffAnswerBytes bounds the part of one turn scanned for answers.
+const maxHandoffAnswerBytes = 8 << 10
+
+// handoffWords splits text into lowercase a-z0-9 words.
+func handoffWords(text string) []string {
+	return strings.FieldsFunc(strings.ToLower(text), func(r rune) bool {
+		return !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9')
+	})
+}
+
+// handoffQuestionKey folds a question to the identity a repeat is judged by.
+func handoffQuestionKey(text string) string {
+	return strings.Join(handoffWords(text), " ")
+}
+
+// handoffQuestionStopWords are the words every question carries, so their
+// presence in an answer would prove nothing.
+var handoffQuestionStopWords = map[string]bool{
+	"what": true, "when": true, "where": true, "which": true, "whose": true,
+	"why": true, "how": true, "should": true, "could": true, "would": true,
+	"does": true, "did": true, "this": true, "that": true, "these": true,
+	"those": true, "there": true, "their": true, "about": true, "with": true,
+	"from": true, "have": true, "will": true, "your": true, "ours": true,
+	"need": true, "want": true, "into": true,
+}
+
+// handoffDistinctiveTokens is the set of words an answer has to carry before a
+// question is treated as settled. A question with fewer than two is left open:
+// "what port?" has no term an answer could not mention in passing.
+func handoffDistinctiveTokens(text string) []string {
+	var out []string
+	seen := make(map[string]bool)
+	for _, w := range handoffWords(text) {
+		if len(w) < 4 || handoffQuestionStopWords[w] || seen[w] {
+			continue
+		}
+		seen[w] = true
+		out = append(out, w)
+	}
+	return out
+}
+
+// dropAnsweredQuestions removes every open question whose distinctive tokens all
+// appear in a later turn. Matching is word-prefix based so "fail" and "fails"
+// agree, while "port" does not match "support".
+func dropAnsweredQuestions(open []openQuestion, text string) []openQuestion {
+	if text == "" || len(open) == 0 {
+		return open
+	}
+	if len(text) > maxHandoffAnswerBytes {
+		text = text[:maxHandoffAnswerBytes]
+	}
+	words := handoffWords(text)
+	kept := open[:0]
+	for _, q := range open {
+		if len(q.tokens) >= 2 && allTokensPresent(q.tokens, words) {
+			continue
+		}
+		kept = append(kept, q)
+	}
+	return kept
+}
+
+func allTokensPresent(tokens, words []string) bool {
+	for _, token := range tokens {
+		present := false
+		for _, w := range words {
+			if strings.HasPrefix(w, token) {
+				present = true
+				break
+			}
+		}
+		if !present {
+			return false
+		}
+	}
+	return true
 }
 
 // readHandoffLine returns the next line without its newline. A line longer
