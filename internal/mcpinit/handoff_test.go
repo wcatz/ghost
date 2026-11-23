@@ -257,3 +257,27 @@ func TestScanHandoffKeepsQuestionOpenOnShortPrefixWords(t *testing.T) {
 		t.Errorf("question settled by short prefix words: %v", got.Questions)
 	}
 }
+
+// TestScanHandoffKeepsQuestionOpenWithoutARealAnswer pins that an assistant turn
+// which only restates, echoes or asks about a question does not close it, while
+// a turn that states the answer still does.
+func TestScanHandoffKeepsQuestionOpenWithoutARealAnswer(t *testing.T) {
+	const question = `{"type":"user","message":{"content":"why does the relay migration fail on staging?"}}` + "\n"
+	turn := func(text string) string {
+		return `{"type":"assistant","message":{"content":[{"type":"text","text":"` + text + `"}]}}` + "\n"
+	}
+	for name, text := range map[string]string{
+		"restatement":  "I'll investigate why the relay migration fails on staging.",
+		"clarifying":   "Do you mean the relay migration that fails on staging?",
+		"echo and ack": "Why does the relay migration fail on staging? I'll investigate.",
+	} {
+		got := scanHandoffTranscript(hostevent.FormatClaudeJSONL, strings.NewReader(question+turn(text)))
+		if len(got.Questions) != 1 {
+			t.Errorf("%s closed the question: %v", name, got.Questions)
+		}
+	}
+	got := scanHandoffTranscript(hostevent.FormatClaudeJSONL, strings.NewReader(question+turn("The relay migration fails on staging because an index is missing.")))
+	if len(got.Questions) != 0 {
+		t.Errorf("a real answer left the question open: %v", got.Questions)
+	}
+}

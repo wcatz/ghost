@@ -67,7 +67,7 @@ func scanHandoffTranscript(format string, r io.Reader) handoffScan {
 			// A later assistant turn is where an open question gets settled.
 			// Only text that carries every distinctive term of a question is
 			// read as its answer, so a passing mention does not close it.
-			if !handoffHasToolBlock(obj) {
+			if handoffRoleIs(obj, "assistant") && !handoffHasToolBlock(obj) {
 				open = dropAnsweredQuestions(open, handoffText(obj))
 			}
 			continue
@@ -179,7 +179,7 @@ func dropAnsweredQuestions(open []openQuestion, text string) []openQuestion {
 	if len(text) > maxHandoffAnswerBytes {
 		text = text[:maxHandoffAnswerBytes]
 	}
-	words := handoffWords(text)
+	words := handoffWords(handoffAnswerProse(text))
 	kept := open[:0]
 	for _, q := range open {
 		if len(q.tokens) >= 2 && allTokensPresent(q.tokens, words) {
@@ -188,6 +188,40 @@ func dropAnsweredQuestions(open []openQuestion, text string) []openQuestion {
 		kept = append(kept, q)
 	}
 	return kept
+}
+
+// handoffIntentMarkers mark a sentence that promises work or asks for a
+// clarification instead of stating a result.
+var handoffIntentMarkers = []string{
+	"i'll ", "i will ", "i'm going to ", "let me ", "let's ", "looking into",
+	"investigat", "i need to ", "do you mean",
+}
+
+// handoffAnswerProse keeps the sentences of a turn that could state an answer.
+// A question, or a sentence that only acknowledges the work, echoes a
+// question's words without settling it.
+func handoffAnswerProse(text string) string {
+	var kept []string
+	for _, line := range strings.Split(text, "\n") {
+		for _, s := range strings.SplitAfter(line, ".") {
+			// Everything up to the last "?" in a fragment is a question.
+			if i := strings.LastIndex(s, "?"); i >= 0 {
+				s = s[i+1:]
+			}
+			lower := strings.ToLower(s)
+			intent := false
+			for _, m := range handoffIntentMarkers {
+				if strings.Contains(lower, m) {
+					intent = true
+					break
+				}
+			}
+			if !intent {
+				kept = append(kept, s)
+			}
+		}
+	}
+	return strings.Join(kept, " ")
 }
 
 func allTokensPresent(tokens, words []string) bool {
@@ -254,20 +288,22 @@ func handoffHasToolBlock(obj map[string]any) bool {
 	return false
 }
 
-func handoffIsUser(obj map[string]any) bool {
-	if v, ok := obj["type"].(string); ok && strings.EqualFold(v, "user") {
+func handoffIsUser(obj map[string]any) bool { return handoffRoleIs(obj, "user") }
+
+func handoffRoleIs(obj map[string]any, role string) bool {
+	if v, ok := obj["type"].(string); ok && strings.EqualFold(v, role) {
 		return true
 	}
-	if v, ok := obj["role"].(string); ok && strings.EqualFold(v, "user") {
+	if v, ok := obj["role"].(string); ok && strings.EqualFold(v, role) {
 		return true
 	}
 	if msg, ok := obj["message"].(map[string]any); ok {
-		if v, ok := msg["role"].(string); ok && strings.EqualFold(v, "user") {
+		if v, ok := msg["role"].(string); ok && strings.EqualFold(v, role) {
 			return true
 		}
 	}
 	if info, ok := obj["info"].(map[string]any); ok {
-		if v, ok := info["role"].(string); ok && strings.EqualFold(v, "user") {
+		if v, ok := info["role"].(string); ok && strings.EqualFold(v, role) {
 			return true
 		}
 	}
