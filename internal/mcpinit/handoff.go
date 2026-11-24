@@ -48,6 +48,7 @@ func scanHandoffTranscript(format string, r io.Reader) handoffScan {
 	}
 	br := bufio.NewReaderSize(r, 4096)
 	seen := make(map[string]bool)
+	var open []openQuestion
 	for {
 		line, oversized, ok := readHandoffLine(br)
 		if !ok {
@@ -63,6 +64,12 @@ func scanHandoffTranscript(format string, r io.Reader) handoffScan {
 		}
 		if !handoffIsUser(obj) {
 			collectHandoffFiles(obj, &out, seen)
+			// A later assistant turn is where an open question gets settled.
+			// Only text that carries every distinctive term of a question is
+			// read as its answer, so a passing mention does not close it.
+			if handoffRoleIs(obj, "assistant") && !handoffHasToolBlock(obj) {
+				open = dropAnsweredQuestions(open, handoffText(obj))
+			}
 			continue
 		}
 		// A tool result or tool use arrives as a user line but is command or
@@ -83,13 +90,221 @@ func scanHandoffTranscript(format string, r io.Reader) handoffScan {
 			out.Task = truncateUTF8(text, maxHandoffTaskBytes)
 		}
 		for _, q := range handoffQuestions(text) {
-			if !seen[q] && len(out.Questions) < maxHandoffQuestions {
-				seen[q] = true
-				out.Questions = append(out.Questions, q)
-			}
+			open = rememberQuestion(open, q)
 		}
 	}
+	for _, q := range open {
+		out.Questions = append(out.Questions, q.text)
+	}
 	return out
+}
+
+// openQuestion is one still-open question the handoff may carry. key folds case
+// and punctuation so a re-asked question supersedes its earlier wording rather
+// than appearing twice; tokens are the distinctive words an answer must carry.
+type openQuestion struct {
+	text   string
+	key    string
+	tokens []string
+}
+
+// rememberQuestion keeps the latest maxHandoffQuestions unique open questions.
+// A question asked again moves to the back with its newest wording, so the
+// window holds what the session is still working on rather than what it asked
+// first.
+func rememberQuestion(open []openQuestion, text string) []openQuestion {
+	q := openQuestion{text: text, key: handoffQuestionKey(text), tokens: handoffDistinctiveTokens(text)}
+	for i, existing := range open {
+		if existing.key == q.key {
+			open = append(open[:i], open[i+1:]...)
+			break
+		}
+	}
+	open = append(open, q)
+	if len(open) > maxHandoffQuestions {
+		open = open[len(open)-maxHandoffQuestions:]
+	}
+	return open
+}
+
+// maxHandoffAnswerBytes bounds the part of one turn scanned for answers.
+const maxHandoffAnswerBytes = 8 << 10
+
+// handoffWords splits text into lowercase a-z0-9 words.
+func handoffWords(text string) []string {
+	return strings.FieldsFunc(strings.ToLower(text), func(r rune) bool {
+		return (r < 'a' || r > 'z') && (r < '0' || r > '9')
+	})
+}
+
+// handoffQuestionKey folds a question to the identity a repeat is judged by.
+func handoffQuestionKey(text string) string {
+	return strings.Join(handoffWords(text), " ")
+}
+
+// handoffQuestionStopWords are the words every question carries, so their
+// presence in an answer would prove nothing.
+var handoffQuestionStopWords = map[string]bool{
+	"what": true, "when": true, "where": true, "which": true, "whose": true,
+	"why": true, "how": true, "should": true, "could": true, "would": true,
+	"does": true, "did": true, "this": true, "that": true, "these": true,
+	"those": true, "there": true, "their": true, "about": true, "with": true,
+	"from": true, "have": true, "will": true, "your": true, "ours": true,
+	"need": true, "want": true, "into": true,
+}
+
+// handoffDistinctiveTokens is the set of words an answer has to carry before a
+// question is treated as settled. A question with fewer than two is left open:
+// "what port?" has no term an answer could not mention in passing.
+func handoffDistinctiveTokens(text string) []string {
+	var out []string
+	seen := make(map[string]bool)
+	for _, w := range handoffWords(text) {
+		if len(w) < 4 || handoffQuestionStopWords[w] || seen[w] {
+			continue
+		}
+		seen[w] = true
+		out = append(out, w)
+	}
+	return out
+}
+
+// dropAnsweredQuestions removes every open question whose distinctive tokens all
+// appear in a later turn. Matching is word-prefix based so "fail" and "fails"
+// agree, while "port" does not match "support".
+func dropAnsweredQuestions(open []openQuestion, text string) []openQuestion {
+	if text == "" || len(open) == 0 {
+		return open
+	}
+	if len(text) > maxHandoffAnswerBytes {
+		text = text[:maxHandoffAnswerBytes]
+	}
+	words := handoffWords(handoffAnswerProse(text))
+	kept := open[:0]
+	for _, q := range open {
+		if len(q.tokens) >= 2 && allTokensPresent(q.tokens, words) {
+			continue
+		}
+		kept = append(kept, q)
+	}
+	return kept
+}
+
+// handoffIntentMarkers mark a sentence that promises work or asks for a
+// clarification instead of stating a result.
+var handoffIntentMarkers = []string{
+	"i'll ", "i will ", "i'm going to ", "let me ", "let's ", "looking into",
+	"investigat", "i need to ", "do you mean",
+}
+
+// handoffAnswerProse keeps the sentences of a turn that could state an answer.
+// A pure question, or a sentence that only acknowledges the work, echoes a
+// question's words without settling it. A question is a question because it
+// ASKS, not because of the word it opens with, so a clarification phrased
+// around a statement ("The relay that fails — is that the one?") is still not an
+// answer. When the same turn also states something, the question text comes
+// back: a restated question next to its answer carries the answer's subject even
+// when the answer sentence does not. The statement/restatement pair may span
+// lines, which is why "stated" is tracked over the whole turn. A statement that
+// ends in a tag question ("…, isn't it?") is still a statement.
+func handoffAnswerProse(text string) string {
+	var kept []string
+	var questions []string
+	stated := false
+	for _, line := range strings.Split(text, "\n") {
+		for rest := line; rest != ""; {
+			end := handoffSentenceEnd(rest)
+			s := rest[:end+1]
+			rest = rest[end+1:]
+			words := handoffWords(s)
+			if len(words) == 0 {
+				continue
+			}
+			// Host-rendered text may use a curly apostrophe ("I’ll").
+			lower := strings.ReplaceAll(strings.ToLower(s), "’", "'")
+			intent := false
+			for _, m := range handoffIntentMarkers {
+				if strings.Contains(lower, m) {
+					intent = true
+					break
+				}
+			}
+			if intent {
+				continue
+			}
+			if handoffIsPureQuestion(s) {
+				questions = append(questions, s)
+				continue
+			}
+			stated = true
+			kept = append(kept, s)
+		}
+	}
+	if stated {
+		kept = append(kept, questions...)
+	}
+	return strings.Join(kept, " ")
+}
+
+// handoffTagStarts are the stems a tag question's tail opens with. A question
+// does not have to open with a question word — "The relay that fails, right?" is
+// a statement plus a checked tail — so the only question exempted from closing a
+// handoff is one that genuinely asks.
+var handoffTagStarts = map[string]bool{
+	"isn": true, "aren": true, "wasn": true, "weren": true, "don": true,
+	"doesn": true, "didn": true, "won": true, "wouldn": true, "couldn": true,
+	"shouldn": true, "right": true, "correct": true, "yes": true, "no": true,
+	"ok": true, "okay": true, "huh": true, "eh": true, "true": true,
+}
+
+// handoffIsPureQuestion reports whether a sentence asks rather than states. A
+// sentence ending in '?' is a question unless its tail is a short tag after a
+// comma ("…, isn't it?"), which is the spoken form of a statement.
+func handoffIsPureQuestion(s string) bool {
+	t := strings.TrimSpace(s)
+	if !strings.HasSuffix(t, "?") {
+		return false
+	}
+	if i := strings.LastIndex(t, ","); i >= 0 {
+		tail := strings.TrimSpace(strings.TrimSuffix(t[i+1:], "?"))
+		words := handoffWords(tail)
+		if len(words) > 0 && len(words) <= 4 && handoffTagStarts[words[0]] {
+			return false
+		}
+	}
+	return true
+}
+
+// handoffSentenceEnd returns the index of the byte that ends the first
+// sentence of s: a ".", "?" or "!" followed by whitespace or the end of the
+// text. A dot inside "main.go", "v1.2" or "e.g." does not end a sentence. With
+// no terminator the whole of s is one sentence.
+func handoffSentenceEnd(s string) int {
+	for i := 0; i < len(s); i++ {
+		if strings.IndexByte(".?!", s[i]) < 0 {
+			continue
+		}
+		if i+1 == len(s) || s[i+1] == ' ' || s[i+1] == '\t' {
+			return i
+		}
+	}
+	return len(s) - 1
+}
+
+func allTokensPresent(tokens, words []string) bool {
+	for _, token := range tokens {
+		present := false
+		for _, w := range words {
+			if strings.HasPrefix(w, token) {
+				present = true
+				break
+			}
+		}
+		if !present {
+			return false
+		}
+	}
+	return true
 }
 
 // readHandoffLine returns the next line without its newline. A line longer
@@ -140,20 +355,22 @@ func handoffHasToolBlock(obj map[string]any) bool {
 	return false
 }
 
-func handoffIsUser(obj map[string]any) bool {
-	if v, ok := obj["type"].(string); ok && strings.EqualFold(v, "user") {
+func handoffIsUser(obj map[string]any) bool { return handoffRoleIs(obj, "user") }
+
+func handoffRoleIs(obj map[string]any, role string) bool {
+	if v, ok := obj["type"].(string); ok && strings.EqualFold(v, role) {
 		return true
 	}
-	if v, ok := obj["role"].(string); ok && strings.EqualFold(v, "user") {
+	if v, ok := obj["role"].(string); ok && strings.EqualFold(v, role) {
 		return true
 	}
 	if msg, ok := obj["message"].(map[string]any); ok {
-		if v, ok := msg["role"].(string); ok && strings.EqualFold(v, "user") {
+		if v, ok := msg["role"].(string); ok && strings.EqualFold(v, role) {
 			return true
 		}
 	}
 	if info, ok := obj["info"].(map[string]any); ok {
-		if v, ok := info["role"].(string); ok && strings.EqualFold(v, "user") {
+		if v, ok := info["role"].(string); ok && strings.EqualFold(v, role) {
 			return true
 		}
 	}

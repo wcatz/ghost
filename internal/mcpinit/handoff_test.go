@@ -2,6 +2,7 @@ package mcpinit
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -199,5 +200,145 @@ func TestPreCompactNeverStoresATokenFromTheTranscript(t *testing.T) {
 func TestHandoffRenderCapFitsTheStoreCap(t *testing.T) {
 	if memory.MaxHandoffContentBytes < handoffByteCap {
 		t.Errorf("store cap %d is below the %d-byte render cap", memory.MaxHandoffContentBytes, handoffByteCap)
+	}
+}
+
+// TestScanHandoffKeepsTheLatestOpenQuestions pins the rolling window: when a
+// long session asks more than maxHandoffQuestions distinct questions, the
+// handoff carries the most recent ones, not the first five it saw.
+func TestScanHandoffKeepsTheLatestOpenQuestions(t *testing.T) {
+	var b strings.Builder
+	for i := 1; i <= 7; i++ {
+		fmt.Fprintf(&b, "{\"type\":\"user\",\"message\":{\"content\":\"question number %d about subsystem %d?\"}}\n", i, i)
+	}
+	got := scanHandoffTranscript(hostevent.FormatClaudeJSONL, strings.NewReader(b.String()))
+	if len(got.Questions) != maxHandoffQuestions {
+		t.Fatalf("questions = %v, want the latest %d", got.Questions, maxHandoffQuestions)
+	}
+	joined := strings.Join(got.Questions, "\n")
+	for i := 1; i <= 2; i++ {
+		if strings.Contains(joined, fmt.Sprintf("question number %d ", i)) {
+			t.Errorf("the earliest question %d is still listed as open: %v", i, got.Questions)
+		}
+	}
+	for i := 3; i <= 7; i++ {
+		if !strings.Contains(joined, fmt.Sprintf("question number %d ", i)) {
+			t.Errorf("the later question %d is missing: %v", i, got.Questions)
+		}
+	}
+}
+
+// TestScanHandoffDropsAnsweredQuestions pins the other half: a question the
+// assistant later settles is not handed to the next session as open, while a
+// question nothing answers stays.
+func TestScanHandoffDropsAnsweredQuestions(t *testing.T) {
+	const transcript = `{"type":"user","message":{"content":"why does the relay migration fail on staging?"}}
+{"type":"user","message":{"content":"which config key controls the relay timeout?"}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"The relay migration fails on staging because an index is missing."}]}}
+`
+	got := scanHandoffTranscript(hostevent.FormatClaudeJSONL, strings.NewReader(transcript))
+	joined := strings.Join(got.Questions, "\n")
+	if strings.Contains(joined, "relay migration fail") {
+		t.Errorf("an answered question is still listed as open: %v", got.Questions)
+	}
+	if !strings.Contains(joined, "config key controls the relay timeout") {
+		t.Errorf("the unanswered question was dropped: %v", got.Questions)
+	}
+}
+
+// TestScanHandoffKeepsQuestionOpenOnShortPrefixWords pins that short answer
+// words which merely prefix a question token ("in", "un") do not settle it.
+func TestScanHandoffKeepsQuestionOpenOnShortPrefixWords(t *testing.T) {
+	const transcript = `{"type":"user","message":{"content":"why does installing the index fail internally?"}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"The unit tests fail in CI, unrelated."}]}}
+`
+	got := scanHandoffTranscript(hostevent.FormatClaudeJSONL, strings.NewReader(transcript))
+	if len(got.Questions) != 1 {
+		t.Errorf("question settled by short prefix words: %v", got.Questions)
+	}
+}
+
+// TestScanHandoffPrefixRuleNeedsEveryToken fails if the prefix rule is
+// loosened: an answer with a short word that prefixes a question token ("in"
+// for "internally") and every other distinctive token but one leaves the
+// question open, and the same answer with the missing token closes it.
+func TestScanHandoffPrefixRuleNeedsEveryToken(t *testing.T) {
+	const question = `{"type":"user","message":{"content":"why does installing the index fail internally?"}}` + "\n"
+	turn := func(text string) string {
+		return `{"type":"assistant","message":{"content":[{"type":"text","text":"` + text + `"}]}}` + "\n"
+	}
+	got := scanHandoffTranscript(hostevent.FormatClaudeJSONL, strings.NewReader(question+turn("Installing the index fails in CI.")))
+	if len(got.Questions) != 1 {
+		t.Errorf("one missing token still closed the question: %v", got.Questions)
+	}
+	got = scanHandoffTranscript(hostevent.FormatClaudeJSONL, strings.NewReader(question+turn("Installing the index fails internally.")))
+	if len(got.Questions) != 0 {
+		t.Errorf("every token present left the question open: %v", got.Questions)
+	}
+}
+
+// TestScanHandoffDotsInsideWordsDoNotSplitAnAnswer pins that a dot followed by
+// a non-space character (file names, versions, "e.g.") does not end a sentence.
+func TestScanHandoffDotsInsideWordsDoNotSplitAnAnswer(t *testing.T) {
+	const question = `{"type":"user","message":{"content":"why does the relay migration fail on staging?"}}` + "\n"
+	turn := func(text string) string {
+		return `{"type":"assistant","message":{"content":[{"type":"text","text":"` + text + `"}]}}` + "\n"
+	}
+	for name, text := range map[string]string{
+		"file name": "The relay migration in main.go fails on staging because an index is missing.",
+		"e.g.":      "The relay migration fails, e.g. on staging, because an index is missing.",
+		"version":   "The relay migration fails on staging since v1.2 because an index is missing.",
+	} {
+		got := scanHandoffTranscript(hostevent.FormatClaudeJSONL, strings.NewReader(question+turn(text)))
+		if len(got.Questions) != 0 {
+			t.Errorf("%s left the question open: %v", name, got.Questions)
+		}
+	}
+}
+
+// TestScanHandoffKeepsQuestionOpenWithoutARealAnswer pins that an assistant turn
+// which only restates, echoes or asks about a question does not close it, while
+// a turn that states the answer still does.
+func TestScanHandoffKeepsQuestionOpenWithoutARealAnswer(t *testing.T) {
+	const question = `{"type":"user","message":{"content":"why does the relay migration fail on staging?"}}` + "\n"
+	turn := func(text string) string {
+		return `{"type":"assistant","message":{"content":[{"type":"text","text":"` + text + `"}]}}` + "\n"
+	}
+	for name, text := range map[string]string{
+		"restatement": "I'll investigate why the relay migration fails on staging.",
+		"clarifying":  "Do you mean the relay migration that fails on staging?",
+		// A question is a question because it asks, not because of the word it
+		// opens with: this one carries every distinctive term and still settles
+		// nothing.
+		"clarifying without a question word": "The relay migration that fails on staging — is that the one you mean?",
+		"curly apostrophe":                   "I’ll check why the relay migration fails on staging.",
+		"echo and ack":                       "Why does the relay migration fail on staging? I'll investigate.",
+	} {
+		got := scanHandoffTranscript(hostevent.FormatClaudeJSONL, strings.NewReader(question+turn(text)))
+		if len(got.Questions) != 1 {
+			t.Errorf("%s closed the question: %v", name, got.Questions)
+		}
+	}
+	for name, text := range map[string]string{
+		"plain answer":           "The relay migration fails on staging because an index is missing.",
+		"restate then answer":    "Why does the relay migration fail on staging? Because an index is missing.",
+		"answer as tag question": "The relay migration fails on staging because an index is missing, isn't it?",
+		"ack then answer":        "I'll check! The relay migration fails on staging because an index is missing.",
+		// The restated question and its answer are separate sentences, so the
+		// answer sentence alone does not carry the question's terms; the turn as
+		// a whole does.
+		"restated on one line answered on the next": "Why does the relay migration fail on staging?\\nBecause an index is missing.",
+	} {
+		got := scanHandoffTranscript(hostevent.FormatClaudeJSONL, strings.NewReader(question+turn(text)))
+		if len(got.Questions) != 0 {
+			t.Errorf("%s left the question open: %v", name, got.Questions)
+		}
+	}
+	// Only an assistant turn settles a question, so a user line that repeats it
+	// changes nothing.
+	userRestates := question + `{"type":"user","message":{"content":"the relay migration fails on staging, remember?"}}` + "\n"
+	got := scanHandoffTranscript(hostevent.FormatClaudeJSONL, strings.NewReader(userRestates))
+	if !strings.Contains(strings.Join(got.Questions, "\n"), "why does the relay migration fail on staging?") {
+		t.Errorf("a user restatement closed the question: %v", got.Questions)
 	}
 }
