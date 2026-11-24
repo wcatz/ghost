@@ -198,17 +198,30 @@ var handoffIntentMarkers = []string{
 }
 
 // handoffAnswerProse keeps the sentences of a turn that could state an answer.
-// A question, or a sentence that only acknowledges the work, echoes a
-// question's words without settling it.
+// A pure question, or a sentence that only acknowledges the work, echoes a
+// question's words without settling it. A question is a question because it
+// ASKS, not because of the word it opens with, so a clarification phrased
+// around a statement ("The relay that fails — is that the one?") is still not an
+// answer. When the same turn also states something, the question text comes
+// back: a restated question next to its answer carries the answer's subject even
+// when the answer sentence does not. The statement/restatement pair may span
+// lines, which is why "stated" is tracked over the whole turn. A statement that
+// ends in a tag question ("…, isn't it?") is still a statement.
 func handoffAnswerProse(text string) string {
 	var kept []string
+	var questions []string
+	stated := false
 	for _, line := range strings.Split(text, "\n") {
-		for _, s := range strings.SplitAfter(line, ".") {
-			// Everything up to the last "?" in a fragment is a question.
-			if i := strings.LastIndex(s, "?"); i >= 0 {
-				s = s[i+1:]
+		for rest := line; rest != ""; {
+			end := handoffSentenceEnd(rest)
+			s := rest[:end+1]
+			rest = rest[end+1:]
+			words := handoffWords(s)
+			if len(words) == 0 {
+				continue
 			}
-			lower := strings.ToLower(s)
+			// Host-rendered text may use a curly apostrophe ("I’ll").
+			lower := strings.ReplaceAll(strings.ToLower(s), "’", "'")
 			intent := false
 			for _, m := range handoffIntentMarkers {
 				if strings.Contains(lower, m) {
@@ -216,12 +229,66 @@ func handoffAnswerProse(text string) string {
 					break
 				}
 			}
-			if !intent {
-				kept = append(kept, s)
+			if intent {
+				continue
 			}
+			if handoffIsPureQuestion(s) {
+				questions = append(questions, s)
+				continue
+			}
+			stated = true
+			kept = append(kept, s)
 		}
 	}
+	if stated {
+		kept = append(kept, questions...)
+	}
 	return strings.Join(kept, " ")
+}
+
+// handoffTagStarts are the stems a tag question's tail opens with. A question
+// does not have to open with a question word — "The relay that fails, right?" is
+// a statement plus a checked tail — so the only question exempted from closing a
+// handoff is one that genuinely asks.
+var handoffTagStarts = map[string]bool{
+	"isn": true, "aren": true, "wasn": true, "weren": true, "don": true,
+	"doesn": true, "didn": true, "won": true, "wouldn": true, "couldn": true,
+	"shouldn": true, "right": true, "correct": true, "yes": true, "no": true,
+	"ok": true, "okay": true, "huh": true, "eh": true, "true": true,
+}
+
+// handoffIsPureQuestion reports whether a sentence asks rather than states. A
+// sentence ending in '?' is a question unless its tail is a short tag after a
+// comma ("…, isn't it?"), which is the spoken form of a statement.
+func handoffIsPureQuestion(s string) bool {
+	t := strings.TrimSpace(s)
+	if !strings.HasSuffix(t, "?") {
+		return false
+	}
+	if i := strings.LastIndex(t, ","); i >= 0 {
+		tail := strings.TrimSpace(strings.TrimSuffix(t[i+1:], "?"))
+		words := handoffWords(tail)
+		if len(words) > 0 && len(words) <= 4 && handoffTagStarts[words[0]] {
+			return false
+		}
+	}
+	return true
+}
+
+// handoffSentenceEnd returns the index of the byte that ends the first
+// sentence of s: a ".", "?" or "!" followed by whitespace or the end of the
+// text. A dot inside "main.go", "v1.2" or "e.g." does not end a sentence. With
+// no terminator the whole of s is one sentence.
+func handoffSentenceEnd(s string) int {
+	for i := 0; i < len(s); i++ {
+		if strings.IndexByte(".?!", s[i]) < 0 {
+			continue
+		}
+		if i+1 == len(s) || s[i+1] == ' ' || s[i+1] == '\t' {
+			return i
+		}
+	}
+	return len(s) - 1
 }
 
 func allTokensPresent(tokens, words []string) bool {
