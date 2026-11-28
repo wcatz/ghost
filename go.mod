@@ -3,7 +3,7 @@ module github.com/wcatz/ghost
 go 1.27.4
 
 require (
-	github.com/klauspost/compress v1.20.3
+	github.com/klauspost/compress v1.20.5
 	github.com/knadh/koanf/parsers/yaml v1.1.1
 	github.com/knadh/koanf/providers/confmap v1.0.1
 	github.com/knadh/koanf/v2 v2.4.1
